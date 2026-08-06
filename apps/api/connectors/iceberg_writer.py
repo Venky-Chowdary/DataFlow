@@ -30,6 +30,7 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     reject_on_strict_policy,
+    resolve_conflict_targets,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -880,6 +881,22 @@ def _write_mapped_rows_pyiceberg(
     target_schema = ".".join(namespace + (table,))
 
     target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    if conflict_columns:
+        try:
+            conflict_columns = resolve_conflict_targets(
+                conflict_columns, target_cols, strict=True
+            )
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=endpoint.get("table", ""),
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                driver="iceberg",
+            )
     dest_types = {
         target_cols[i]: (
             mappings[i].get("target_type")
@@ -1380,6 +1397,22 @@ def _write_mapped_rows_filesystem(
     meta_dir.mkdir(parents=True, exist_ok=True)
 
     target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    if conflict_columns:
+        try:
+            conflict_columns = resolve_conflict_targets(
+                conflict_columns, target_cols, strict=True
+            )
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=str(table_dir),
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                driver="iceberg",
+            )
     dest_types = {
         target_cols[i]: (
             mappings[i].get("target_type")

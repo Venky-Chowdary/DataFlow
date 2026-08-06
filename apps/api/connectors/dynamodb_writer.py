@@ -95,8 +95,13 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
             return value
         if isinstance(value, str):
             try:
-                return json.loads(value, parse_float=Decimal, parse_constant=lambda v: None)
-            except json.JSONDecodeError:
+                def _reject(name: str) -> None:
+                    raise ValueError(f"non-finite JSON constant: {name}")
+
+                return json.loads(
+                    value, parse_float=Decimal, parse_constant=_reject
+                )
+            except (json.JSONDecodeError, ValueError):
                 return value
         return value
     if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:

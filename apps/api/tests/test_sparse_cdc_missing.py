@@ -773,3 +773,119 @@ def test_mongo_sparse_upsert_preserves_df_missing_through_decimal_coercion():
     assert "amt" not in update["$set"]
     assert DF_MISSING_SENTINEL not in update["$set"].values()
     assert all(not hasattr(v, "to_decimal") for v in update["$set"].values())
+
+def test_mapped_source_casefold_and_missing_refuse_null_invent():
+    """Header case drift resolves; truly missing mapped source quarantines."""
+    mapped, _errors, details = build_mapped_rows_with_details(
+        headers=["ID", "Note"],
+        data_rows=[["1", "hello"]],
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+        ],
+        target_cols=["id", "note"],
+        column_types={"id": "string", "note": "string"},
+        error_policy="quarantine",
+    )
+    assert mapped == [("1", "hello")]
+    assert details == []
+
+    mapped2, errors2, details2 = build_mapped_rows_with_details(
+        headers=["id"],
+        data_rows=[["1"]],
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+        ],
+        target_cols=["id", "note"],
+        column_types={"id": "string", "note": "string"},
+        error_policy="quarantine",
+    )
+    assert mapped2 == []
+    assert details2 or errors2
+    blob = " ".join(errors2) + " ".join(str(d) for d in details2)
+    assert "not found" in blob.lower() or "refuse" in blob.lower()
+
+
+def test_quarantine_unfit_json_rejects_nan():
+    from connectors.writer_common import quarantine_unfit_json
+
+    details: list[dict] = []
+    out = quarantine_unfit_json(
+        mapped_rows=[('1', '{"x": NaN}')],
+        target_cols=["id", "payload"],
+        target_types=["string", "JSON"],
+        rejected_details=details,
+        policy="fail",
+        dialect_label="test",
+    )
+    assert out == []
+    assert details
+    assert any("non-finite" in str(d.get("reason", "")).lower() or "json" in str(d.get("reason", "")).lower() for d in details)
+
+
+def test_run_sparse_cdc_upsert_casefold_conflict():
+    from connectors.writer_common import run_sparse_cdc_upsert
+
+    updated: list[tuple] = []
+
+    def fetch(pk_vals):
+        assert pk_vals == ["1"]
+        return ("1", "old", "keep")
+
+    def update(non_pk, pk_vals):
+        updated.append((non_pk, pk_vals))
+        return 1
+
+    def insert(_present):
+        raise AssertionError("should update existing")
+
+    written, skipped, checksum = run_sparse_cdc_upsert(
+        target_cols=["id", "note", "extra"],
+        conflict_columns=["ID"],
+        sparse_rows=[("1", "new", DF_MISSING_SENTINEL)],
+        fetch_existing_row=fetch,
+        update_non_pk=update,
+        insert_present=insert,
+    )
+    assert written == 1 and skipped == 0
+    assert updated[0][0] == {"note": "new"}
+    assert checksum[0] == ("1", "new", "keep")
+
+
+def test_elasticsearch_composite_doc_id_fail_closed():
+    from connectors.elasticsearch_writer import _resolve_doc_id
+
+    full = _resolve_doc_id(
+        {"tenant_id": "t1", "order_id": "o9"},
+        conflict_columns=["tenant_id", "order_id"],
+        target_cols=["tenant_id", "order_id", "amt"],
+    )
+    assert full == "t1|o9"
+
+    # Casefold conflict names against document keys
+    cased = _resolve_doc_id(
+        {"Tenant_Id": "t1", "Order_Id": "o9"},
+        conflict_columns=["tenant_id", "order_id"],
+        target_cols=["Tenant_Id", "Order_Id"],
+    )
+    assert cased == "t1|o9"
+
+    # Partial composite must not shrink to single-key identity
+    partial = _resolve_doc_id(
+        {"tenant_id": "t1"},
+        conflict_columns=["tenant_id", "order_id"],
+        target_cols=["tenant_id", "order_id"],
+    )
+    assert partial is None
+
+
+def test_dedupe_rows_refuses_partial_composite_pk():
+    from connectors.writer_common import dedupe_rows
+
+    rows = [("a", "1", "x"), ("a", "2", "y")]
+    try:
+        dedupe_rows(rows, ["id", "missing"], ["id", "sku", "v"])
+        raise AssertionError("expected strict unresolved raise")
+    except ValueError as exc:
+        assert "unresolved" in str(exc).lower()

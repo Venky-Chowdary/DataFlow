@@ -89,24 +89,33 @@ def _resolve_doc_id(
     """
     if "_id" in source and source.get("_id") is not None and str(source.get("_id")).strip() != "":
         return str(source["_id"])
-    keys = [c for c in conflict_columns if c and c in source]
-    if not keys:
-        for alias in ("id", "ID", "Id", "pk", "PK"):
-            if alias in source and source.get(alias) is not None and str(source.get(alias)).strip() != "":
-                return str(source[alias])
-        for col in target_cols:
-            if col.lower() in {"id", "pk", "doc_id", "document_id"} and col in source:
-                val = source.get(col)
-                if val is not None and str(val).strip() != "":
-                    return str(val)
-        return None
-    parts: list[str] = []
-    for col in keys:
-        val = source.get(col)
-        if val is None or str(val).strip() == "":
+    configured = [c for c in conflict_columns if c]
+    if configured:
+        # Fail closed on partial composite identity: every configured PK part must
+        # resolve into the document. Shrinking to present keys alone would collide
+        # distinct composite rows onto the same partial _id.
+        from connectors.writer_common import resolve_conflict_targets
+
+        try:
+            keys = resolve_conflict_targets(configured, list(source.keys()), strict=True)
+        except ValueError:
             return None
-        parts.append(str(val))
-    return "|".join(parts) if len(parts) > 1 else parts[0]
+        parts: list[str] = []
+        for col in keys:
+            val = source.get(col)
+            if val is None or str(val).strip() == "":
+                return None
+            parts.append(str(val).strip())
+        return "|".join(parts) if len(parts) > 1 else parts[0]
+    for alias in ("id", "ID", "Id", "pk", "PK"):
+        if alias in source and source.get(alias) is not None and str(source.get(alias)).strip() != "":
+            return str(source[alias])
+    for col in target_cols:
+        if col.lower() in {"id", "pk", "doc_id", "document_id"} and col in source:
+            val = source.get(col)
+            if val is not None and str(val).strip() != "":
+                return str(val)
+    return None
 
 
 def write_mapped_rows(

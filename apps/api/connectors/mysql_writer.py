@@ -50,6 +50,7 @@ from connectors.writer_common import (
     quarantine_unfit_temporals,
     quarantine_unfit_years,
     quote_sql_identifier,
+    resolve_conflict_targets,
     resolve_target_columns,
     row_checksum,
     reject_on_strict_policy,
@@ -157,9 +158,9 @@ def _mysql_apply_sparse_upsert(
     sparse_rows: list[tuple],
 ) -> tuple[int, int, list[tuple]]:
     """Per-row upsert that omits DF_MISSING columns (never SET col=NULL for absent)."""
-    from connectors.writer_common import run_sparse_cdc_upsert
+    from connectors.writer_common import resolve_conflict_targets, run_sparse_cdc_upsert
 
-    conflict = [c for c in conflict_columns if c in target_cols]
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("sparse MySQL upsert requires conflict_columns")
     select_sql = ", ".join(quote_sql_identifier(c, "`") for c in target_cols)
@@ -310,6 +311,22 @@ def write_mapped_rows(
             checksum="", chunks_completed=0,
             error="All mapped columns are GENERATED ALWAYS — nothing to insert",
         )
+
+    if conflict_columns:
+        try:
+            conflict_columns = resolve_conflict_targets(
+                conflict_columns, target_cols, strict=True
+            )
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=database,
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+            )
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
     target_types = [mysql_type(t) for t in logical_types]

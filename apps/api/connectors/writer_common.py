@@ -512,12 +512,17 @@ def dedupe_rows(
     conflict_columns: list[str],
     target_cols: list[str],
 ) -> list[tuple]:
-    """Keep the last occurrence of each conflict key, preserving tuple order."""
+    """Keep the last occurrence of each conflict key, preserving tuple order.
+
+    Conflict names are resolved case-insensitively (strict). Partial composite
+    PKs raise — never silently dedupe on a weaker key and drop sibling rows.
+    """
     if not conflict_columns or not rows:
         return rows
-    indices = [target_cols.index(c) for c in conflict_columns if c in target_cols]
-    if not indices:
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
+    if not conflict:
         return rows
+    indices = [target_cols.index(c) for c in conflict]
     seen: dict[tuple, tuple] = {}
     for row in rows:
         key = tuple(row[i] for i in indices)
@@ -830,9 +835,10 @@ def dedupe_rows_by_pk_and_lsn(
         return rows
     if lsn_column not in target_cols:
         return dedupe_rows(rows, conflict_columns, target_cols)
-    indices = [target_cols.index(c) for c in conflict_columns if c in target_cols]
-    if not indices:
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
+    if not conflict:
         return rows
+    indices = [target_cols.index(c) for c in conflict]
     lsn_idx = target_cols.index(lsn_column)
     best: dict[tuple, tuple] = {}
     for row in rows:
@@ -1479,6 +1485,8 @@ def build_mapped_rows_with_details(
     # Honor Map STRUCT policy (JSON blob vs flatten top-level keys) before bind.
     headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
     source_indices = {h: i for i, h in enumerate(headers)}
+    # Case-insensitive fallback — Map/header drift must not invent NULL wipes.
+    source_indices_ci = {str(h).lower(): i for i, h in enumerate(headers)}
     sanitized_target_cols = [sanitize_identifier(c, preserve_case=preserve_case) for c in target_cols]
     target_index = {c: i for i, c in enumerate(sanitized_target_cols)}
     errors: list[str] = []
@@ -1510,8 +1518,11 @@ def build_mapped_rows_with_details(
             column_types=column_types,
             dest_types=dest_types or column_types,
         )
+        src_idx = source_indices.get(src)
+        if src_idx is None:
+            src_idx = source_indices_ci.get(str(src).lower())
         mapping_infos.append((
-            source_indices.get(src),
+            src_idx,
             target_index.get(tgt, -1),
             transform,
             src,
@@ -1538,18 +1549,27 @@ def build_mapped_rows_with_details(
         # quarantine | skip_row | stop_column | coerce_null
         row_action = "ok"
         for source_idx, target_idx, transform, src_name, tgt_name, mapping in mapping_infos:
-            val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
-            # Preserve sparse-CDC missing before transforms (omit-from-SET, never NULL wipe).
-            if is_missing_sentinel(val):
-                if target_idx >= 0:
-                    out[target_idx] = DF_MISSING_SENTINEL
-                continue
-            converted, err = apply_transform(val, transform)
+            # Mapped source missing from headers after casefold — refuse NULL invent
+            # (would wipe a good destination column on upsert).
+            if source_idx is None and src_name:
+                converted, err = None, (
+                    f"mapped source column {src_name!r} not found in batch headers "
+                    f"{list(headers)!r} — refuse silent NULL invent"
+                )
+                val = None
+            else:
+                val = raw[source_idx] if source_idx is not None and source_idx < len(raw) else None
+                # Preserve sparse-CDC missing before transforms (omit-from-SET, never NULL wipe).
+                if is_missing_sentinel(val):
+                    if target_idx >= 0:
+                        out[target_idx] = DF_MISSING_SENTINEL
+                    continue
+                converted, err = apply_transform(val, transform)
             cell_policy = policy
             exec_pol: str | None = None
             risk_id: str | None = None
             retry_attempted = False
-            if err:
+            if err and source_idx is not None:
                 cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
                     mapping, policy
                 )
@@ -1561,6 +1581,12 @@ def build_mapped_rows_with_details(
                         cell_policy = "ok"
                     else:
                         cell_policy = "fail"
+            elif err and source_idx is None:
+                # Unresolvable Map source — always quarantine/fail, not Risk invent.
+                cell_policy = "fail" if policy == "fail" else "quarantine"
+                exec_pol = None
+                risk_id = None
+                retry_attempted = False
             if err:
                 row_has_error = True
                 if exec_pol is None:
@@ -3296,7 +3322,10 @@ def quarantine_unfit_json(
             if not looks_structured:
                 continue
             try:
-                json.loads(text)
+                def _reject(name: str) -> None:
+                    raise ValueError(f"non-finite JSON constant: {name}")
+
+                json.loads(text, parse_constant=_reject)
                 continue
             except Exception:
                 pass
@@ -3308,8 +3337,9 @@ def quarantine_unfit_json(
                     "target": target_cols[col_idx],
                     "value": cell_to_string(value)[:120],
                     "reason": (
-                        f"{label} JSON: malformed document payload — quarantined "
-                        "(would silently store as a JSON string, not an object)"
+                        f"{label} JSON: malformed or non-finite document payload — "
+                        "quarantined (NaN/Infinity must not become null; invalid "
+                        "JSON must not store as a bare string)"
                     ),
                     "policy": "write_quarantine",
                     "chars": [],
@@ -3766,7 +3796,9 @@ def run_sparse_cdc_upsert(
     from services.cdc_effectively_once import should_apply_pk_row
     from services.value_serializer import is_missing_sentinel
 
-    conflict = [c for c in conflict_columns if c in target_cols]
+    # Strict casefold resolve — never shrink a composite PK to whatever happens
+    # to match case-sensitively (wrong-row MERGE / INSERT fallback).
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("sparse CDC upsert requires conflict_columns")
     written = 0

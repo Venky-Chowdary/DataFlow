@@ -30,6 +30,7 @@ from connectors.writer_common import (
     filter_stale_lsn_rows,
     gate8_writer_meta,
     quote_sql_identifier,
+    resolve_conflict_targets,
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
@@ -135,11 +136,12 @@ def _sqlite_apply_sparse_upsert(
         DF_LSN_COL,
         assert_sparse_upsert_has_pk,
         materialize_sparse_row_for_checksum,
+        resolve_conflict_targets,
         sparse_present_bindings,
     )
     from services.cdc_effectively_once import should_apply_pk_row
 
-    conflict = [c for c in conflict_columns if c in target_cols]
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("sparse SQLite upsert requires conflict_columns")
     table_q = quote_sql_identifier(table_name)
@@ -363,6 +365,22 @@ def write_mapped_rows(
             chunks_completed=0,
             error="No column mappings",
         )
+
+    if conflict_columns:
+        try:
+            conflict_columns = resolve_conflict_targets(
+                conflict_columns, target_cols, strict=True
+            )
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "main",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+            )
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
     table_quoted = quote_sql_identifier(table_name)

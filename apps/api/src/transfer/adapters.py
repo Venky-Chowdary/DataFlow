@@ -2230,10 +2230,13 @@ def write_destination_file(
             ctype = normalize_inferred(types.get(col, "string")).lower()
             if ctype in {"json", "array", "object", "struct"}:
                 try:
+                    def _reject(name: str) -> None:
+                        raise ValueError(f"non-finite JSON constant: {name}")
+
                     return json.loads(
-                        text, parse_float=Decimal, parse_constant=lambda v: None
+                        text, parse_float=Decimal, parse_constant=_reject
                     )
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, ValueError):
                     return value
             if ctype in {
                 "text",
@@ -2247,10 +2250,13 @@ def write_destination_file(
             }:
                 return value
             try:
+                def _reject(name: str) -> None:
+                    raise ValueError(f"non-finite JSON constant: {name}")
+
                 return json.loads(
-                    text, parse_float=Decimal, parse_constant=lambda v: None
+                    text, parse_float=Decimal, parse_constant=_reject
                 )
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ValueError):
                 return value
         return value
 

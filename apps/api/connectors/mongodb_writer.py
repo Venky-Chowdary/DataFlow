@@ -357,8 +357,11 @@ def write_mapped_rows(
                     return value
                 if isinstance(value, str):
                     try:
-                        return json.loads(value, parse_constant=lambda v: None)
-                    except (json.JSONDecodeError, TypeError):
+                        def _reject(name: str) -> None:
+                            raise ValueError(f"non-finite JSON constant: {name}")
+
+                        return json.loads(value, parse_constant=_reject)
+                    except (json.JSONDecodeError, TypeError, ValueError):
                         return value
                 return value
             if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:

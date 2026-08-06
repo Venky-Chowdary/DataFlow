@@ -113,6 +113,7 @@ from connectors.writer_common import (
     quarantine_unfit_temporals,
     quarantine_unfit_years,
     quote_sql_identifier,
+    resolve_conflict_targets,
     resolve_target_columns,
     row_checksum,
     materialize_missing_as_null_for_dense_write,
@@ -1515,7 +1516,19 @@ def _build_table_for_write(
     """
     metadata = sa.MetaData()
     dialect_name = engine.dialect.name if engine.dialect else ""
-    conflict_cols = [c for c in (conflict_columns or []) if c in columns]
+    from connectors.writer_common import resolve_conflict_targets
+
+    try:
+        conflict_cols = resolve_conflict_targets(
+            conflict_columns, columns, strict=True
+        )
+    except ValueError as exc:
+        # Never CREATE a table with a silently degraded / empty PK when the
+        # operator configured conflict columns — clients cannot trust that schema.
+        raise ValueError(
+            f"Cannot CREATE TABLE: conflict/PK columns do not resolve "
+            f"against the planned schema ({exc})."
+        ) from exc
     pk_set = set()
     if conflict_cols:
         pk_set = set(conflict_cols)
@@ -2471,7 +2484,7 @@ def _generic_apply_sparse_upsert(
     from connectors.writer_common import run_sparse_cdc_upsert
     from services.value_serializer import is_missing_sentinel
 
-    conflict = [c for c in conflict_columns if c in target_cols]
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("sparse SQLAlchemy upsert requires conflict_columns")
 
@@ -3659,7 +3672,14 @@ def _upsert_batch(
 
     Returns the number of destination rows actually written in this batch.
     """
-    conflict_cols = [c for c in conflict_columns if c in target_cols]
+    from connectors.writer_common import resolve_conflict_targets
+
+    try:
+        conflict_cols = resolve_conflict_targets(
+            conflict_columns, target_cols, strict=True
+        )
+    except ValueError:
+        raise
     if not conflict_cols:
         result = conn.execute(table_obj.insert(), batch)
         return max(0, getattr(result, "rowcount", None) or 0) or len(batch)
@@ -4096,6 +4116,23 @@ def write_mapped_rows(
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True
     )
+    if conflict_columns:
+        try:
+            from connectors.writer_common import resolve_conflict_targets
+
+            conflict_columns = resolve_conflict_targets(
+                conflict_columns, target_cols, strict=True
+            )
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema_name or "",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+            )
     from services.type_system import is_generated_always_column
 
     # Omit GENERATED ALWAYS from INSERT projection; keep mappings parallel.
