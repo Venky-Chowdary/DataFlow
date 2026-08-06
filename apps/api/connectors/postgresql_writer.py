@@ -149,6 +149,23 @@ def uses_pg_on_conflict_upsert(engine: str) -> bool:
     return (engine or "postgresql").lower() not in {"redshift", "amazon_redshift", "redshift_serverless"}
 
 
+def _assert_redshift_conflict_keys_present(
+    batch: list[tuple] | list[list],
+    target_cols: list[str],
+    conflict_cols: list[str],
+) -> None:
+    """Refuse null/empty upsert keys — NULL-safe MERGE/DELETE would mass-touch rows."""
+    idxs = [target_cols.index(c) for c in conflict_cols]
+    for row in batch:
+        for col, idx in zip(conflict_cols, idxs):
+            val = row[idx] if idx < len(row) else None
+            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+                raise ValueError(
+                    f"Redshift upsert refused null/empty conflict key {col!r} — "
+                    "NULL-safe MERGE/DELETE would mass-touch destination rows"
+                )
+
+
 def _redshift_delete_by_keys(
     cursor: Any,
     sql_mod: Any,
@@ -169,6 +186,10 @@ def _redshift_delete_by_keys(
     if not batch or not conflict_cols:
         return list(batch)
 
+    # Fail closed before MERGE or delete — null keys must not fall through as
+    # "MERGE unavailable" and retry mass-touch paths.
+    _assert_redshift_conflict_keys_present(batch, target_cols, conflict_cols)
+
     try:
         return _redshift_merge_upsert(
             cursor,
@@ -179,6 +200,8 @@ def _redshift_delete_by_keys(
             conflict_cols=conflict_cols,
             batch=batch,
         )
+    except ValueError:
+        raise
     except Exception as exc:
         logger.warning(
             "Redshift MERGE unavailable (%s); falling back to delete+insert",
@@ -197,6 +220,8 @@ def _redshift_delete_by_keys(
             conflict_cols=conflict_cols,
             batch=batch,
         )
+    except ValueError:
+        raise
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
