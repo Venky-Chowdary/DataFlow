@@ -689,6 +689,7 @@ def test_document_nested_decimal_bare_wave16():
         document_domain_would_collapse,
         is_lossy_coercion,
         is_nested_shape_collapse,
+        is_precision_collapse_coercion,
     )
 
     assert document_domain_would_collapse("JSON", "STRING") is True
@@ -701,8 +702,22 @@ def test_document_nested_decimal_bare_wave16():
     assert is_lossy_coercion("MAP", "MAP<STRING,INT>") is True
     assert is_lossy_coercion("MAP<STRING,INT>", "MAP") is True
 
+    # Unknown/MySQL dest: bare DECIMAL invents platform default — collapse.
     assert decimal_params_would_narrow("DECIMAL(38,10)", "DECIMAL") is True
+    assert decimal_params_would_narrow(
+        "DECIMAL(38,10)", "DECIMAL", dest_db="mysql"
+    ) is True
     assert is_lossy_coercion("DECIMAL(10,2)", "NUMERIC") is True
+    # PostgreSQL bare NUMERIC/DECIMAL is unconstrained — proven (p,s) widens.
+    assert decimal_params_would_narrow(
+        "DECIMAL(38,15)", "DECIMAL", dest_db="postgresql"
+    ) is False
+    assert is_lossy_coercion(
+        "DECIMAL(38,15)", "DECIMAL", dest_db="postgresql"
+    ) is False
+    assert is_precision_collapse_coercion(
+        "DECIMAL(38,15)", "NUMERIC", dest_db="postgresql"
+    ) is False
 
 
 def test_year_invent_geometry_pad_nested_wave15():

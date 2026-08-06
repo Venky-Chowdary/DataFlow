@@ -93,10 +93,11 @@ def invents_unproven_capacity(
         parse_numeric_precision_scale,
     )
 
-    if decimal_params_would_narrow(source_type, target_type):
+    if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
         sp, ss = parse_numeric_precision_scale(source_type)
         tp, ts = parse_numeric_precision_scale(target_type)
         # Bare → parametric or proven → bare: invent / invent-default.
+        # Postgres bare NUMERIC is unbounded — not an invent (helper already False).
         if (sp is None and ss is None and (tp is not None or ts is not None)) or (
             tp is None and ts is None and (sp is not None or ss is not None)
         ):

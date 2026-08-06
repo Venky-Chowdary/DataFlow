@@ -1438,12 +1438,33 @@ def parse_array_element(inferred: str | None) -> str | None:
     return None
 
 
-def decimal_params_would_narrow(source_type: str, target_type: str) -> bool:
+def bare_decimal_is_unbounded(*, dest_db: str = "") -> bool:
+    """True when dialect bare DECIMAL/NUMERIC/NUMBER is unconstrained.
+
+    PostgreSQL: ``NUMERIC`` / ``DECIMAL`` without (p,s) stores arbitrary precision
+    (implementation limits). MySQL bare DECIMAL invents ``DECIMAL(10,0)``;
+    Snowflake bare NUMBER invents ``NUMBER(38,0)``; SQL Server bare DECIMAL
+    invents ``DECIMAL(18,0)``. Unknown dest stays conservative (not unbounded).
+    """
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    return db == "postgresql"
+
+
+def decimal_params_would_narrow(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when DECIMAL(p,s) → DECIMAL(p',s') shrinks scale or integer-digit capacity.
 
-    Mirrors warehouse rules (BigQuery NUMERIC rounding / Fivetran precision caps):
+    Mirrors warehouse rules (BigQuery NUMERIC rounding / precision caps):
     head samples can look clean while body rows truncate. Same-family logical
     ``decimal→decimal`` must not soft-pass when params narrow.
+
+    Dialect note: Postgres bare ``DECIMAL``/``NUMERIC`` is unbounded — proven
+    ``DECIMAL(38,15) → DECIMAL`` is a widen, not a collapse. MySQL/Snowflake/
+    SQL Server bare stamps invent a default (p,s) and remain collapse.
     """
     if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
         return False
@@ -1457,8 +1478,10 @@ def decimal_params_would_narrow(source_type: str, target_type: str) -> bool:
             return True
         return False
     if tp is None and ts is None:
-        # Proven (p,s) → bare DECIMAL invents platform default (often MySQL
-        # DECIMAL(10,0) / engine-specific) — Accept risk, never silent green.
+        # Proven (p,s) → bare DECIMAL: Postgres unconstrained NUMERIC is a widen;
+        # other engines invent platform defaults (MySQL 10,0 / SF 38,0 / MSSQL 18,0).
+        if bare_decimal_is_unbounded(dest_db=dest_db):
+            return False
         return True
     if ss is not None and ts is not None and ts < ss:
         return True
@@ -1752,7 +1775,7 @@ def nested_array_elements_incompatible(source_type: str, target_type: str, *, de
         return True
     if is_nested_shape_collapse(src_el, tgt_el, dest_db=dest_db):
         return True
-    if decimal_params_would_narrow(src_el, tgt_el):
+    if decimal_params_would_narrow(src_el, tgt_el, dest_db=dest_db):
         return True
     s_l, t_l = normalize_logical_type(src_el), normalize_logical_type(tgt_el)
     if s_l == t_l:
@@ -1802,7 +1825,7 @@ def is_nested_shape_collapse(source_type: str, target_type: str, *, dest_db: str
                 return True
             if is_precision_collapse_coercion(skv[1], tkv[1], dest_db=dest_db):
                 return True
-            if decimal_params_would_narrow(skv[1], tkv[1]):
+            if decimal_params_would_narrow(skv[1], tkv[1], dest_db=dest_db):
                 return True
             s_l, t_l = normalize_logical_type(skv[1]), normalize_logical_type(tkv[1])
             # Same nested SSOT as STRUCT/ARRAY — INT→STRING rewrites value DDL.
@@ -7668,7 +7691,7 @@ def is_precision_collapse_coercion(
         return True
     if smalldatetime_domain_would_invent(source_type, target_type):
         return True
-    if decimal_params_would_narrow(source_type, target_type):
+    if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if string_width_would_narrow(source_type, target_type):
         return True
@@ -8050,26 +8073,26 @@ def assess_create_new_type_risk(
 
 
 def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
-    """True when converting source→target may lose precision, fail silently, or
+    """True when converting sourceâ†’target may lose precision, fail silently, or
     change the semantic meaning of a value.
 
     The allow-list below captures the widening / reversible conversions that the
     transform engine can perform without losing the original value:
 
-      * any value → string/text/json/array (structural serialization)
-      * integer → decimal/string/text/json (integer→float is lossy — IEEE mantissa)
-      * decimal → string/text/json (decimal→float is lossy)
-      * float → string/text/json (float→decimal and float→integer are lossy)
-      * boolean → string/text/json/integer/decimal/float
-      * date → datetime/string/text/json
-      * datetime/time → string/text/json
-      * json/array → string/text/json/array
-      * string/text/uuid/json/array → binary (base64 reversible)
-      * binary → string/text/json (base64 reversible)
+      * any value â†’ string/text/json/array (structural serialization)
+      * integer â†’ decimal/string/text/json (integerâ†’float is lossy â€” IEEE mantissa)
+      * decimal â†’ string/text/json (decimalâ†’float is lossy)
+      * float â†’ string/text/json (floatâ†’decimal and floatâ†’integer are lossy)
+      * boolean â†’ string/text/json/integer/decimal/float
+      * date â†’ datetime/string/text/json
+      * datetime/time â†’ string/text/json
+      * json/array â†’ string/text/json/array
+      * string/text/uuid/json/array â†’ binary (base64 reversible)
+      * binary â†’ string/text/json (base64 reversible)
 
     Everything else is considered lossy and should be surfaced in preflight.
 
-    Note ``uuid`` → string/text/json is value-preserving but is still reported
+    Note ``uuid`` -> string/text/json is value-preserving but is still reported
     lossy: :func:`uuid_would_collapse` treats the lost UUID *domain constraint*
     as an operator-visible collapse rather than silent green.
     """
@@ -8095,7 +8118,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
             return True
         if smalldatetime_domain_would_invent(source_type, target_type):
             return True
-        if decimal_params_would_narrow(source_type, target_type):
+        if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if string_width_would_narrow(source_type, target_type):
             return True
@@ -8187,32 +8210,32 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
             return True
         return False
 
-    # MySQL SET → TEXT[] is the intentional multi-value sink (not string→array invent).
+    # MySQL SET â†’ TEXT[] is the intentional multi-value sink (not stringâ†’array invent).
     if set_to_array_polarity_preserved(source_type, target_type):
         return False
-    # BIT(n) → VARCHAR(n) create-new is 0/1 digit text — not opaque BYTEA packing.
+    # BIT(n) â†’ VARCHAR(n) create-new is 0/1 digit text â€” not opaque BYTEA packing.
     if is_bitstring_carrier(source_type) and tgt in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False
-    # ObjectId → VARCHAR(24)/BINARY(12)/STRING(24) is the industry create-new wire.
+    # ObjectId â†’ VARCHAR(24)/BINARY(12)/STRING(24) is the industry create-new wire.
     if (
         normalize_logical_type(source_type) == LOGICAL_OBJECTID
         and specialty_wire_preserves_value("OBJECTID", target_type)
     ):
         return False
-    # VECTOR(n) → ARRAY<FLOAT> lakehouse create-new wire — not embedding invent.
+    # VECTOR(n) â†’ ARRAY<FLOAT> lakehouse create-new wire â€” not embedding invent.
     if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
         return False
-    # JSON → dialect-native document wire (CLOB/NVARCHAR(MAX)/JSONB/…) — not lossy.
+    # JSON â†’ dialect-native document wire (CLOB/NVARCHAR(MAX)/JSONB/â€¦) â€” not lossy.
     if src == LOGICAL_JSON and is_dialect_native_document_wire(
         target_type, dest_db=dest_db
     ):
         return False
-    # Dialect-aware collapse SSOT — same rules as G3/probe (never MySQL-default FSP
-    # when dest_db is postgresql/redshift, never false-collapse JSON→JSONB).
+    # Dialect-aware collapse SSOT â€” same rules as G3/probe (never MySQL-default FSP
+    # when dest_db is postgresql/redshift, never false-collapse JSONâ†’JSONB).
     if is_precision_collapse_coercion(source_type, target_type, dest_db=dest_db):
         return True
-    # Fielded STRUCT/MAP → opaque JSON/VARIANT is intentional on many warehouses
-    # (Airbyte V2) but is still a field-DDL collapse — treat as lossy so G3 surfaces it.
+    # Fielded STRUCT/MAP â†’ opaque JSON/VARIANT is intentional on many warehouses
+    # (Airbyte V2) but is still a field-DDL collapse â€” treat as lossy so G3 surfaces it.
     if is_nested_document_collapse(source_type, target_type):
         return True
     if timezone_aware_would_collapse_to_string(source_type, target_type):
@@ -8313,7 +8336,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         return True
     if document_domain_would_invent(source_type, target_type):
         return True
-    # ARRAY→ARRAY is in the safe allow-list below only when element types widen.
+    # ARRAYâ†’ARRAY is in the safe allow-list below only when element types widen.
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY and is_nested_shape_collapse(
         source_type, target_type, dest_db=dest_db
     ):
@@ -8327,15 +8350,15 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         # text / structural containers are universal sinks
         (LOGICAL_STRING, LOGICAL_TEXT),
         (LOGICAL_TEXT, LOGICAL_STRING),
-        # Open string → JSON invents document domain — not allow-listed.
-        # JSON/VARIANT/SUPER → open string drops document domain — not allow-listed.
+        # Open string â†’ JSON invents document domain â€” not allow-listed.
+        # JSON/VARIANT/SUPER â†’ open string drops document domain â€” not allow-listed.
         (LOGICAL_JSON, LOGICAL_JSON),
-        # ARRAY→JSON/text is document collapse (lossy) — not allow-listed.
-        # JSON→ARRAY invents array domain from a document — not allow-listed.
+        # ARRAYâ†’JSON/text is document collapse (lossy) â€” not allow-listed.
+        # JSONâ†’ARRAY invents array domain from a document â€” not allow-listed.
         (LOGICAL_ARRAY, LOGICAL_ARRAY),
         # numeric widening and text renderings
         (LOGICAL_INTEGER, LOGICAL_DECIMAL),
-        # integer→float is LOSSY for large ints (IEEE mantissa) — not allow-listed
+        # integerâ†’float is LOSSY for large ints (IEEE mantissa) â€” not allow-listed
         (LOGICAL_INTEGER, LOGICAL_STRING),
         (LOGICAL_INTEGER, LOGICAL_TEXT),
         (LOGICAL_INTEGER, LOGICAL_JSON),
@@ -8345,7 +8368,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         (LOGICAL_FLOAT, LOGICAL_STRING),
         (LOGICAL_FLOAT, LOGICAL_TEXT),
         (LOGICAL_FLOAT, LOGICAL_JSON),
-        # float→decimal is LOSSY (IEEE → fixed-point) — not in this allow-list
+        # floatâ†’decimal is LOSSY (IEEE â†’ fixed-point) â€” not in this allow-list
         # boolean renderings and scalar widenings
         (LOGICAL_BOOLEAN, LOGICAL_STRING),
         (LOGICAL_BOOLEAN, LOGICAL_TEXT),
@@ -8353,7 +8376,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         (LOGICAL_BOOLEAN, LOGICAL_INTEGER),
         (LOGICAL_BOOLEAN, LOGICAL_DECIMAL),
         (LOGICAL_BOOLEAN, LOGICAL_FLOAT),
-        # date→datetime NTZ widening only; DATE→TIMESTAMPTZ invents midnight TZ.
+        # dateâ†’datetime NTZ widening only; DATEâ†’TIMESTAMPTZ invents midnight TZ.
         (LOGICAL_DATE, LOGICAL_DATETIME),
         (LOGICAL_DATE, LOGICAL_STRING),
         (LOGICAL_DATE, LOGICAL_TEXT),
@@ -8368,14 +8391,14 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         (LOGICAL_UUID, LOGICAL_STRING),
         (LOGICAL_UUID, LOGICAL_TEXT),
         (LOGICAL_UUID, LOGICAL_JSON),
-        # VECTOR→ARRAY drops embedding domain — not allow-listed.
-        # STRUCT/MAP → text/JSON is nested document collapse (handled above).
+        # VECTORâ†’ARRAY drops embedding domain â€” not allow-listed.
+        # STRUCT/MAP â†’ text/JSON is nested document collapse (handled above).
         (LOGICAL_STRUCT, LOGICAL_STRUCT),
         (LOGICAL_MAP, LOGICAL_MAP),
     }
 
     if (src, tgt) in safe:
-        # DATE→TIMESTAMPTZ / DATETIMEOFFSET invents an instant — not a free widen.
+        # DATEâ†’TIMESTAMPTZ / DATETIMEOFFSET invents an instant â€” not a free widen.
         if date_to_tz_aware_invent(source_type, target_type):
             return True
         if case_fold_polarity_invent(source_type, target_type):
@@ -8392,7 +8415,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
             return True
         if fixed_width_pad_polarity_loss(source_type, target_type, dest_db=dest_db):
             return True
-        # INTEGER→VARCHAR(1) / JSON→CHAR(10) — bounded sink truncates.
+        # INTEGERâ†’VARCHAR(1) / JSONâ†’CHAR(10) â€” bounded sink truncates.
         if bounded_string_sink_would_truncate(source_type, target_type):
             return True
         return False

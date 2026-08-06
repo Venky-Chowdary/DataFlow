@@ -1789,7 +1789,7 @@ def run_file_preflight(
             pass
 
     # Schema drift is its own rule — never masquerade as Target DDL.
-    # Airbyte rule: hard-breaking ALWAYS pauses (even under propagate_*).
+    # Datawrap rule: hard-breaking ALWAYS pauses (even under propagate_*).
     # Propagate auto-applies additive; manual_review keeps existing mappings.
     evolution = drift.get("schema_evolution") or {}
     action = evolution.get("action")
@@ -1825,7 +1825,7 @@ def run_file_preflight(
             if hard and isinstance(hard[0], dict) and hard[0].get("kind"):
                 drift_msg = (
                     f"Breaking schema change: {hard[0].get('kind')} "
-                    "— sync paused for review (Airbyte-class fail-closed)"
+                    "— sync paused for review (Datawrap fail-closed)"
                 )
             elif drift.get("issues"):
                 drift_msg = str(drift["issues"][0])
