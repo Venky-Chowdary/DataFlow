@@ -4212,11 +4212,11 @@ def overlay_physical_bind_types(
 
     Empty ``\"\"`` must refuse at bind against physical DATE/INT/BOOL/NUMBER —
     never survive as VARCHAR and invent NULL on upsert wipe (MySQL/Snowflake
-    parity). Temporal physical types always win; numeric/bool promote only when
-    the Map carrier is string-like.
+    parity). Temporal physical types always win; numeric/bool/specialty promote
+    only when the Map carrier is string-like.
     """
     from connectors.sql_temporal import is_temporal_ddl, sql_base_type
-    from services.type_system import normalize_logical_type
+    from services.type_system import normalize_logical_type, specialty_carrier_base
 
     if not physical:
         return list(target_types)
@@ -4234,6 +4234,11 @@ def overlay_physical_bind_types(
         "FLOAT",
         "FLOAT4",
         "FLOAT8",
+        "FLOAT16",
+        "FLOAT32",
+        "FLOAT64",
+        "HALF",
+        "HALFFLOAT",
         "DOUBLE",
         "REAL",
         "BOOLEAN",
@@ -4267,7 +4272,9 @@ def overlay_physical_bind_types(
         map_logical = normalize_logical_type(out[i] if i < len(out) else "")
         if is_temporal_ddl(phys_base) or phys_base in temporal_extra:
             out[i] = phys
-        elif map_logical in {"string", "text", "varchar", ""} and phys_base in typed_bases:
+        elif map_logical in {"string", "text", "varchar", ""} and (
+            phys_base in typed_bases or specialty_carrier_base(phys)
+        ):
             out[i] = phys
     return out
 

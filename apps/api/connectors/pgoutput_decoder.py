@@ -177,7 +177,9 @@ class PgOutputDecoder:
             col = columns[i] if i < len(columns) else f"col_{i}"
             kind = buf.read_bytes(1)
             if kind == b"n":
-                out[col] = ""
+                from services.value_serializer import SQL_NULL_SENTINEL
+
+                out[col] = SQL_NULL_SENTINEL
             elif kind == b"u":
                 # unchanged toast — keep sentinel so merge can fill from old
                 if toast_sentinel:

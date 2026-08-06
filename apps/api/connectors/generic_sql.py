@@ -901,7 +901,13 @@ class _DuckDBJSON(sa.JSON):
         return lambda value: value
 
 
-def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> Any:
+def _sa_type_for_logical(
+    logical: str,
+    dialect_name: str,
+    db_type: str = "",
+    *,
+    nullable: bool = True,
+) -> Any:
     """Map a Datawrap logical type to a SQLAlchemy type that compiles for the engine.
 
     Accepts carriers like ``DECIMAL(12,4)`` / ``NUMERIC(38,10)`` — bare
@@ -934,7 +940,10 @@ def _sa_type_for_logical(logical: str, dialect_name: str, db_type: str = "") -> 
     t = normalize_logical_type(raw)
 
     def _maybe_nullable(sa_type: Any) -> Any:
-        if dialect_name == "clickhouse" and ChNullable is not None:
+        # ClickHouse: only Nullable(T) when the column is nullable. PK / ORDER BY
+        # identity cols must stay bare Int64/DateTime — wrapping everything made
+        # empty→NULL legal at DDL and weakened ReplacingMergeTree contracts.
+        if dialect_name == "clickhouse" and ChNullable is not None and nullable:
             return ChNullable(sa_type)
         return sa_type
 
@@ -1229,6 +1238,10 @@ def _to_sa_value(
             "GUID",
             "ROWVERSION",
             "HIERARCHYID",
+            "GEOGRAPHY",
+            "GEOMETRY",
+            "SDO_GEOMETRY",
+            "INTERVAL",
             "FLOAT",
             "FLOAT4",
             "FLOAT8",
@@ -1563,7 +1576,9 @@ def _build_table_for_write(
         cols.append(
             sa.Column(
                 col,
-                _sa_type_for_logical(logical, dialect_name, db_type),
+                _sa_type_for_logical(
+                    logical, dialect_name, db_type, nullable=not is_pk
+                ),
                 primary_key=is_pk,
                 nullable=not is_pk,
                 autoincrement=autoincrement,
@@ -4200,21 +4215,8 @@ def write_mapped_rows(
             derived = materialize_dest_ddl(dest_db, source_type)
         else:
             derived = source_type
-        # DuckDB only: if preflight is skipped and the source DECIMAL has no
-        # declared precision/scale (typical for CSV / file inference), fall
-        # back to DOUBLE. This avoids inventing a scale that pads values like
-        # 3.14 with trailing zeros, while preserving explicit database decimals.
-        if (
-            dest_db == "duckdb"
-            and _kwargs.get("skip_preflight")
-            and not mappings[i].get("user_override")
-            and normalize_logical_type(derived) == "decimal"
-            and not explicit
-        ):
-            p, s = parse_numeric_precision_scale(source_type)
-            if p is None and s is None:
-                derived = "DOUBLE"
-                mappings[i] = {**mappings[i], "target_type": "DOUBLE"}
+        # Bare DECIMAL/NUMERIC keep DECIMAL(38,15) via materialize_dest_ddl —
+        # never invent DOUBLE under skip_preflight (IEEE fidelity cliff).
         target_column_types[col] = derived
 
     # Map≡ALTER: source DDL may propose a wider type; explicit Map stamps are a

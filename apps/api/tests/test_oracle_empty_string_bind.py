@@ -512,3 +512,57 @@ def test_oracle_dense_upsert_empty_promotes_to_sparse_sentinel():
     )
     assert is_missing_sentinel(promoted[1])
     assert promoted[0] == 1 and promoted[2] == "keep"
+
+
+def test_overlay_promotes_specialty_inet_from_map_varchar():
+    from connectors.writer_common import overlay_physical_bind_types
+
+    out = overlay_physical_bind_types(
+        ["addr", "note"],
+        ["VARCHAR", "TEXT"],
+        {"addr": "INET", "note": "TEXT"},
+    )
+    assert "INET" in out[0].upper()
+    assert "TEXT" in out[1].upper() or out[1].upper() == "TEXT"
+
+
+def test_clickhouse_pk_type_not_wrapped_nullable():
+    from connectors.generic_sql import _sa_type_for_logical
+
+    pk_t = _sa_type_for_logical("integer", "clickhouse", "clickhouse", nullable=False)
+    null_t = _sa_type_for_logical("integer", "clickhouse", "clickhouse", nullable=True)
+    pk_name = type(pk_t).__name__
+    null_name = type(null_t).__name__
+    # Non-null PK / ORDER BY identity must stay bare (not Nullable).
+    assert "Nullable" not in pk_name
+    # When clickhouse_sqlalchemy is installed, nullable cols wrap; otherwise both
+    # are plain Integer — either is honest (no invent of always-Nullable).
+    if null_name != pk_name:
+        assert "Nullable" in null_name
+
+
+def test_cdc_mysql_serialize_preserves_sql_null():
+    from connectors.mysql_change_stream import _serialize
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    assert _serialize(None) == SQL_NULL_SENTINEL
+
+
+def test_dynamo_key_s_refuses_null_empty():
+    import pytest
+    from connectors.dynamodb_writer import _coerce_dynamo_cell
+
+    with pytest.raises(ValueError, match="refuse silent empty-string invent"):
+        _coerce_dynamo_cell(None, col="pk", logical_type="string", key_types={"pk": "S"})
+    with pytest.raises(ValueError, match="refuse silent empty-string invent"):
+        _coerce_dynamo_cell("", col="pk", logical_type="string", key_types={"pk": "S"})
+
+
+def test_cdc_row_key_rejects_sql_null_sentinel():
+    from services.cdc_identity import is_present_cdc_row_key
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    assert is_present_cdc_row_key("abc")
+    assert not is_present_cdc_row_key("")
+    assert not is_present_cdc_row_key(None)
+    assert not is_present_cdc_row_key(SQL_NULL_SENTINEL)

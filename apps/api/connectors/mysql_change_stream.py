@@ -27,7 +27,7 @@ from services.cdc_schema_history import (
 )
 
 from connectors.mysql_conn import get_connection
-from connectors.mysql_reader import _cell, read_table_batch
+from connectors.mysql_reader import read_table_batch
 from connectors.sql_identifiers import quote_table_ref
 
 _DDL_RE = re.compile(
@@ -39,11 +39,13 @@ _logger = logging.getLogger(__name__)
 
 
 def _serialize(value: Any) -> str:
+    from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+
     if value is None:
-        return ""
+        return SQL_NULL_SENTINEL
     if isinstance(value, datetime):
         return value.isoformat()
-    return _cell(value)
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 class MySqlChangeStreamCdc:

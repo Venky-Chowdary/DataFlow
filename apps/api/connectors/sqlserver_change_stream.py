@@ -168,7 +168,16 @@ class SqlServerChangeTrackingCdc:
             return False
 
     def _row_to_record(self, cols: list[str], row: tuple) -> dict[str, str]:
-        return {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
+        from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+
+        return {
+            cols[i]: (
+                SQL_NULL_SENTINEL
+                if row[i] is None
+                else cell_to_string(row[i], preserve_sql_null=True)
+            )
+            for i in range(len(cols))
+        }
 
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Full table dump + CT version handoff (Airbyte initial sync)."""
@@ -266,7 +275,9 @@ class SqlServerChangeTrackingCdc:
                         key = "" if pk_val is None else str(pk_val)
                         op_u = (op or "").upper()
                         if op_u == "D":
-                            if key:
+                            from services.cdc_identity import is_present_cdc_row_key
+
+                            if is_present_cdc_row_key(key):
                                 deletes.append(key)
                         elif op_u == "I":
                             inserts.append({pk: key})

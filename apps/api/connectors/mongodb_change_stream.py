@@ -237,12 +237,14 @@ class MongodbChangeStreamCdc:
             self._lease.release()
 
     def _pk_value(self, doc: dict[str, Any]) -> str:
-        from services.value_serializer import cell_to_string
+        from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
 
         value = doc.get(self.primary_key)
         if value is None and "documentKey" in doc:
             value = doc["documentKey"].get(self.primary_key)
-        return cell_to_string(value, preserve_sql_null=True) if value is not None else ""
+        if value is None:
+            return SQL_NULL_SENTINEL
+        return cell_to_string(value, preserve_sql_null=True)
 
     def _full_doc(self, change: dict[str, Any]) -> dict[str, Any] | None:
         return change.get("fullDocument") or change.get("documentKey")
@@ -308,8 +310,10 @@ class MongodbChangeStreamCdc:
                     elif op in ("update", "replace") and doc:
                         events.append({"op": "u", "row": _doc_to_record(doc, self.columns)})
                     elif op == "delete":
+                        from services.cdc_identity import is_present_cdc_row_key
+
                         pk = self._pk_value(change)
-                        if pk:
+                        if is_present_cdc_row_key(pk):
                             events.append({"op": "d", "pk": pk, "row": {self.primary_key: pk}})
         except Exception:
             return events
@@ -367,8 +371,10 @@ class MongodbChangeStreamCdc:
                     else:
                         updates.append(record)
                 elif op == "delete":
+                    from services.cdc_identity import is_present_cdc_row_key
+
                     pk = self._pk_value(change)
-                    if pk:
+                    if is_present_cdc_row_key(pk):
                         deletes.append(pk)
                 elif op == "invalidate":
                     break

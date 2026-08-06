@@ -50,6 +50,27 @@ def require_cdc_primary_key(
     return key
 
 
+def is_present_cdc_row_key(value: Any) -> bool:
+    """True when a CDC row key can be used for delete/upsert identity.
+
+    ``SQL_NULL_SENTINEL`` / ``DF_MISSING`` / blank must not pass truthiness checks
+    — they are not valid HASH/PK identity (would invent ``__DF_SQL_NULL__`` keys).
+    """
+    if value is None:
+        return False
+    from services.value_serializer import (
+        SQL_NULL_SENTINEL,
+        is_missing_sentinel,
+    )
+
+    if is_missing_sentinel(value):
+        return False
+    text = str(value).strip()
+    if not text or text == SQL_NULL_SENTINEL:
+        return False
+    return True
+
+
 def require_cdc_primary_keys_map(
     tables: list[str],
     *,
