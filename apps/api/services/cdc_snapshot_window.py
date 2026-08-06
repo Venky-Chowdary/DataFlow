@@ -129,11 +129,15 @@ class WindowRow:
 @dataclass
 class SnapshotWindow:
     window_id: str
-    primary_key: str | list[str] = "id"
+    primary_key: str | list[str] = ""  # required — refuse inventing default "id"
     open: bool = False
     buffer: dict[str, WindowRow] = field(default_factory=dict)
     stream_overrides: int = 0
     snapshot_rows: int = 0
+
+    def __post_init__(self) -> None:
+        # Validate immediately so empty/default never invents wrong-row identity.
+        _pk_columns(self.primary_key)
 
     def open_window(self) -> None:
         self.open = True

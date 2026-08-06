@@ -430,7 +430,38 @@ def write_mapped_rows(
 
         record_id = None
         if mode in upsert_modes:
-            candidates = list(conflict_columns or ["id"])
+            candidates = [c for c in (conflict_columns or []) if c]
+            if not candidates:
+                msg = (
+                    f"row {i}: Notion upsert requires conflict_columns/primary_key — "
+                    "refuse inventing default 'id'"
+                )
+                detail = {
+                    "row": i,
+                    "column": "",
+                    "target": table_name,
+                    "value": "",
+                    "reason": msg,
+                    "policy": policy,
+                    "values": dict(row_dict),
+                }
+                all_rejected.append(detail)
+                warnings.append(msg)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=table_name,
+                        target_schema=database_id,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=msg,
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings[:20],
+                        driver="notion",
+                    )
+                continue
             for c in candidates:
                 val = row_dict.get(c)
                 if val:
@@ -582,7 +613,7 @@ def write_mapped_rows(
             )
             detail = {
                 "row": i,
-                "column": str((conflict_columns or ["id"])[0]),
+                "column": str((conflict_columns or [""])[0] if conflict_columns else ""),
                 "target": table_name,
                 "value": "",
                 "reason": msg,

@@ -268,8 +268,10 @@ def write_mapped_rows(
             if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
                 try:
                     return float(value)
-                except (ValueError, TypeError):
-                    return value
+                except (ValueError, TypeError) as exc:
+                    raise ValueError(
+                        f"MongoDB FLOAT refused {value!r} (refuse silent string invent)"
+                    ) from exc
             if transform in {"decimal", "currency", "percentage"} or upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
                 return Decimal128(str(value))
             if transform == "integer" or upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
@@ -296,13 +298,19 @@ def write_mapped_rows(
                 elif isinstance(value, str):
                     try:
                         iv = int(value)
-                    except (ValueError, TypeError):
-                        return value
+                    except (ValueError, TypeError) as exc:
+                        raise ValueError(
+                            f"MongoDB INTEGER refused {value!r} "
+                            "(refuse silent string invent)"
+                        ) from exc
                 else:
                     try:
                         iv = int(value)
-                    except (ValueError, TypeError):
-                        return value
+                    except (ValueError, TypeError) as exc:
+                        raise ValueError(
+                            f"MongoDB INTEGER refused {value!r} "
+                            "(refuse silent pass-through invent)"
+                        ) from exc
                 # BSON supports signed 64-bit ints; fall back to Decimal128 or
                 # string when a value overflows.
                 if iv > 2**63 - 1 or iv < -(2**63):
@@ -312,12 +320,15 @@ def write_mapped_rows(
                         return str(iv)
                 return iv
             if transform == "boolean" or upper in {"BOOLEAN", "BOOL"}:
-                text = str(value).strip().lower()
-                if text in {"true", "t", "yes", "y", "1"}:
-                    return True
-                if text in {"false", "f", "no", "n", "0"}:
-                    return False
-                return value
+                from connectors.sql_bind import coerce_boolean_wire
+
+                coerced = coerce_boolean_wire(value, as_int=False)
+                if not isinstance(coerced, bool):
+                    raise ValueError(
+                        f"MongoDB BOOLEAN refused {value!r} "
+                        "(refuse invent via pass-through)"
+                    )
+                return coerced
             if upper == "DATE" and transform != "datetime":
                 from connectors.sql_temporal import coerce_sql_temporal
                 from datetime import timezone as _tz

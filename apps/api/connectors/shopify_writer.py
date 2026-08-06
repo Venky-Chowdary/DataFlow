@@ -235,30 +235,86 @@ def write_mapped_rows(
         if mode in upsert_modes:
             from services.value_serializer import is_missing_sentinel
 
-            candidates = list(conflict_columns or ["id"])
-            for c in candidates:
+            candidates = [c for c in (conflict_columns or []) if c]
+            if not candidates:
+                detail = {
+                    "row": i + 1,
+                    "column": "",
+                    "target": obj,
+                    "value": "",
+                    "reason": (
+                        "Shopify upsert requires conflict_columns/primary_key — "
+                        "refuse inventing default 'id'"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                }
+                all_rejected.append(detail)
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="shopify",
+                    )
+                continue
+            # Shopify Admin REST only updates by resource ``id`` — never take a
+            # secondary conflict column (sku/handle/tenant) as the URL identity
+            # when ``id`` is empty (would PUT against the wrong resource).
+            id_cols = [c for c in candidates if (c or "").lower() == "id"]
+            if not id_cols:
+                detail = {
+                    "row": i + 1,
+                    "column": str(candidates[0]),
+                    "target": obj,
+                    "value": "",
+                    "reason": (
+                        "Shopify upsert requires conflict column 'id' — "
+                        "refuse create invent from non-id keys "
+                        "(would duplicate under at-least-once retry)"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                }
+                all_rejected.append(detail)
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="shopify",
+                    )
+                continue
+            for c in id_cols:
                 val = row_dict.get(c)
                 if val is None or is_missing_sentinel(val):
                     continue
                 if val:
                     record_id = str(val).strip() or None
                     break
-            # Shopify Admin REST only updates by numeric/string id — never invent
-            # create when conflict is missing or a non-id external key.
-            non_id_conflict = bool(candidates) and (candidates[0] or "").lower() not in (
-                "id",
-            )
-            if non_id_conflict or not record_id:
+            if not record_id:
                 detail = {
                     "row": i + 1,
-                    "column": str(candidates[0] if candidates else "id"),
+                    "column": str(id_cols[0]),
                     "target": obj,
-                    "value": str(record_id or ""),
+                    "value": "",
                     "reason": (
-                        "Shopify upsert missing supported id — refuse create invent "
-                        "(non-id conflict or empty id would duplicate under retry)"
-                        if non_id_conflict or not record_id
-                        else "Shopify upsert identity missing"
+                        "Shopify upsert missing id value — refuse create invent "
+                        "(would duplicate under at-least-once retry)"
                     ),
                     "policy": "write_fail" if policy == "fail" else "write_quarantine",
                 }

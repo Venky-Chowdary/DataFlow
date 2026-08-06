@@ -350,7 +350,36 @@ def write_mapped_rows(
         if mode in upsert_modes:
             from services.value_serializer import is_missing_sentinel
 
-            candidates = list(conflict_columns or ["id"])
+            candidates = [c for c in (conflict_columns or []) if c]
+            if not candidates:
+                detail = {
+                    "row": i + 1,
+                    "column": "",
+                    "target": obj,
+                    "value": "",
+                    "reason": (
+                        "Zendesk upsert requires conflict_columns/primary_key — "
+                        "refuse inventing default 'id'"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                }
+                all_rejected.append(detail)
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="zendesk",
+                    )
+                continue
             for c in candidates:
                 val = row_dict.get(c)
                 if val is None or is_missing_sentinel(val):
@@ -362,7 +391,7 @@ def write_mapped_rows(
             if not record_id or not record_id.isdigit():
                 detail = {
                     "row": i + 1,
-                    "column": str(candidates[0] if candidates else "id"),
+                    "column": str(candidates[0] if candidates else ""),
                     "target": obj,
                     "value": str(record_id or ""),
                     "reason": (
