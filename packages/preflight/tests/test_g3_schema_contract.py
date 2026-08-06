@@ -597,6 +597,42 @@ def test_g3_not_null_contract_blocks_when_samples_contain_nulls():
     assert any("not null" in i.lower() for i in (result.details or {}).get("issues", []))
 
 
+def test_g3_not_null_blocks_stop_column_null_invent_policy():
+    """STOP_COLUMN / coerce cannot invent NULL into a NOT NULL destination."""
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="file",
+            connected=True,
+            parseable=True,
+            columns=[ColumnSchema(name="email", inferred_type="VARCHAR", nullable=True)],
+            row_count_estimate=10,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[
+                ColumnSchema(name="email", inferred_type="VARCHAR", nullable=False)
+            ],
+        ),
+        mappings=[ColumnMapping(source="email", target="email", confidence=0.95)],
+    )
+    _clear_with_contract(
+        plan.mappings[0],
+        source_type="VARCHAR",
+        destination_type="VARCHAR",
+        execution_policy="STOP_COLUMN",
+        reason="omit bad email cells",
+    )
+    result = gate_g3_schema_contract(
+        PreflightContext(plan=plan, sample_rows=[{"email": "a@b.com"}])
+    )
+    assert result.status.value == "block", result.message
+    details = (result.details or {}).get("issues_detail") or []
+    assert any(d.get("null_invent_policy_blocked") for d in details)
+
+
 def test_g3_empty_dest_without_stamp_blocks():
     """Never PASS schema contract when dest has zero columns and no target_type."""
     plan = TransferPlan(

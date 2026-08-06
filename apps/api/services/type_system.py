@@ -3167,7 +3167,11 @@ def _integer_ddl_for_dest(db: str, inferred: str | None) -> str | None:
 
 
 def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
-    """Emit bounded CHAR/VARCHAR(n) / STRING(n) when source width is known."""
+    """Emit bounded CHAR/VARCHAR(n) / STRING(n) when source width is known.
+
+    When source width exceeds dialect VARCHAR capacity, prefer unbounded
+    TEXT/CLOB/MAX carriers — never silent ``min(width, cap)`` clamp (truncate).
+    """
     width = parse_string_carrier_width(inferred)
     if width is None:
         return None
@@ -3181,6 +3185,22 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         or re.search(r"\bNATIONAL\s+CHARACTER\b", upper)
         or re.search(r"\bNATIONAL\s+CHAR\b", upper)
     )
+    # Over-cap create-new: unbounded text beats silent width clamp.
+    if not fixed and width > cap:
+        if db in {"mysql", "mariadb"}:
+            return "LONGTEXT"
+        if db == "oracle":
+            return "NCLOB" if national else "CLOB"
+        if db == "sqlserver":
+            return "NVARCHAR(MAX)" if national else "VARCHAR(MAX)"
+        if db in {"postgresql", "redshift"}:
+            return "TEXT"
+        if db == "snowflake":
+            return "VARCHAR(16777216)"
+        if db == "bigquery":
+            return "STRING"
+        if db == "databricks":
+            return "STRING"
     if db == "bigquery":
         return f"STRING({min(width, cap)})"
     if db == "snowflake":

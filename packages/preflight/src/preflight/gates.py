@@ -1053,6 +1053,30 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             continue
         source_col = next((c for c in ctx.plan.source.columns if c.name == m.source), None)
         src_nullable = True if source_col is None else bool(source_col.nullable)
+        # STOP_COLUMN / CAST+COERCE invent NULL into the primary table — refuse on
+        # NOT NULL destinations even when samples look clean (Validate≠write gap).
+        if _risk_cleared(m) and _continue_policy_disposition(m) == "null_cell":
+            label = (
+                f"NOT NULL contract: {m.source} → {m.target} "
+                f"({target.inferred_type}) rejects NULL invent — "
+                "STOP_COLUMN / coerce continue-policy cannot bind NULL into a "
+                "required column; remap, use QUARANTINE_ROW, or widen nullability"
+            )
+            issues.append(label)
+            issues_detail.append({
+                "source": m.source,
+                "target": m.target,
+                "source_type": source_col.inferred_type if source_col else "",
+                "target_type": target.inferred_type,
+                "severity": "block",
+                "not_null_contract": True,
+                "null_invent_policy_blocked": True,
+                "suggested_fix": (
+                    "Use QUARANTINE_ROW / SKIP_ROW, or remap so the destination "
+                    "column is nullable / has a DEFAULT"
+                ),
+            })
+            continue
         null_samples = 0
         for row in sample_rows[:200]:
             if not isinstance(row, dict):
@@ -1856,6 +1880,11 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         for m in ctx.plan.mappings
         if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC
     ]
+    dest_by_name = {
+        str(c.name or "").lower(): c
+        for c in (getattr(ctx.plan.destination, "target_columns", None) or [])
+        if getattr(c, "name", None)
+    }
 
     def _serialize_for_write(value: Any) -> str | None:
         # Match readers/writers: lists/dicts become compact JSON, not Python repr.
@@ -1889,10 +1918,22 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             if err:
                 line = f"row {row_idx} {m.source}→{m.target}: {err}"
                 # Continue-policy Risk Contract matches write disposition:
-                # quarantine/skip → omit row; STOP_COLUMN/coerce → NULL cell.
+                # quarantine/skip → omit row; STOP_COLUMN/coerce → NULL cell
+                # (blocked when destination is NOT NULL — same as G3).
                 if _risk_cleared(m):
                     disposition = _continue_policy_disposition(m)
-                    if disposition == "null_cell":
+                    dest_col = dest_by_name.get(str(m.target or "").lower()) if dest_by_name else None
+                    if (
+                        disposition == "null_cell"
+                        and dest_col is not None
+                        and not bool(getattr(dest_col, "nullable", True))
+                    ):
+                        transform_errors.append(
+                            line
+                            + " — NOT NULL destination refuses STOP_COLUMN/coerce NULL invent"
+                        )
+                        mapped[m.target] = None
+                    elif disposition == "null_cell":
                         contracted_null_cells.append(line)
                         mapped[m.target] = None
                     else:

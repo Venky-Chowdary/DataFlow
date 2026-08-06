@@ -209,3 +209,32 @@ def test_stop_column_rejected_counts_as_coerced_null_rows():
     assert _coerced_null_row_count(details, "quarantine") == 2  # rows 1 and 3
     # Job coerce_null must not count quarantine holdouts as NULL invents.
     assert _coerced_null_row_count(details, "coerce_null") == 2
+
+
+def test_file_export_reconcile_is_unproven_not_green():
+    from src.transfer.models import EndpointConfig
+    from src.transfer.reconcile_step import run_reconciliation
+
+    result = run_reconciliation(
+        endpoint=EndpointConfig(kind="file_export", format="csv"),
+        records=[{"id": "1"}],
+        columns=["id"],
+        rows_written=1,
+        writer_checksum="abc123checksum",
+        dest_summary={"rows_written": 1, "checksum": "abc123checksum"},
+    )
+    # Operational pass — do not fail the job — but never claim migration proven.
+    assert result.get("passed") is True
+    assert result.get("unproven") is True
+    assert result.get("migration_proven") is False
+    assert result.get("skipped_readback") is True
+
+
+def test_create_new_over_cap_prefers_unbounded_text():
+    from services.type_system import _string_ddl_for_dest
+
+    assert _string_ddl_for_dest("mysql", "VARCHAR(20000)") == "LONGTEXT"
+    assert _string_ddl_for_dest("oracle", "VARCHAR(5000)") == "CLOB"
+    assert _string_ddl_for_dest("sqlserver", "VARCHAR(5000)") == "VARCHAR(MAX)"
+    # Under cap still emits bounded VARCHAR.
+    assert _string_ddl_for_dest("mysql", "VARCHAR(100)").startswith("VARCHAR")

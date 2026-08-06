@@ -195,14 +195,30 @@ def run_reconciliation(
     expected_written = max(source_rows - dropped_rows - rows_skipped, 0)
 
     if endpoint.kind != "database":
+        # Object/file exports have no destination cell read-back. Writer checksum
+        # proves bytes landed, not per-cell fidelity. Operational write may pass;
+        # never stamp migration_proven / cell-fidelity Gate-8 green.
+        checksum = str(writer_checksum or dest_summary.get("checksum") or "").strip()
         return _finalize_reconcile({
             "passed": True,
-            "message": "File export — reconciliation skipped",
+            "unproven": True,
+            "skipped_readback": True,
+            "migration_proven": False,
+            "message": (
+                "File/object export wrote successfully — Gate-8 cell fidelity "
+                "unproven (no destination read-back). "
+                + (
+                    f"Writer checksum present ({checksum[:16]}…) — count/bytes only."
+                    if checksum
+                    else "No writer checksum; treat as operational pass only."
+                )
+            ),
             "source_rows": source_rows,
             "target_rows": rows_written,
             "rejected_rows": rejected_rows,
             "coerced_null_rows": coerced_null_rows,
             "rows_skipped": rows_skipped,
+            "checksum": checksum,
         })
 
     from .connector_capabilities import resolve_driver_type

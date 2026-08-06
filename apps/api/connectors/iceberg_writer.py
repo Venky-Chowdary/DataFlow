@@ -511,7 +511,10 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
         # Keep empty string for string carriers — never invent NULL from "".
         if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
             return ""
-        return None
+        raise ValueError(
+            f"empty string cannot coerce to {arrow_type} — "
+            "refuse silent NULL invent (quarantine or remap upstream)"
+        )
     if pa.types.is_decimal(arrow_type):
         try:
             if isinstance(value, Decimal):
@@ -912,6 +915,22 @@ def _write_mapped_rows_pyiceberg(
         )
 
     if not mapped_rows:
+        _empty_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+        if _empty_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=_empty_abort,
+                rejected_details=rejected_details,
+                rejected_rows=_rejected_row_count(
+                    data_rows, mapped_rows, rejected_details, policy
+                ),
+                driver="iceberg",
+            )
         return WriteResult(
             ok=True,
             rows_written=0,
@@ -1027,6 +1046,20 @@ def _write_mapped_rows_pyiceberg(
                 driver="iceberg",
             )
         if not mapped_rows:
+            _empty_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+            if _empty_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_empty_abort,
+                    rejected_details=rejected_details,
+                    warnings=type_locked_warnings[:20],
+                    driver="iceberg",
+                )
             return WriteResult(
                 ok=True,
                 rows_written=0,
@@ -1200,6 +1233,24 @@ def _write_mapped_rows_pyiceberg(
 
     if on_checkpoint:
         on_checkpoint(rows_written, rows_written, 1)
+
+    _final_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=rows_written,
+            table_name=table,
+            target_schema=target_schema,
+            checksum=checksum,
+            chunks_completed=1,
+            error=_final_abort,
+            rejected_details=rejected_details,
+            rejected_rows=_rejected_row_count(
+                data_rows, mapped_rows, rejected_details, policy
+            ),
+            warnings=type_locked_warnings[:20],
+            driver="iceberg",
+        )
 
     return WriteResult(
         ok=True,
@@ -1483,6 +1534,24 @@ def _write_mapped_rows_filesystem(
 
     if on_checkpoint:
         on_checkpoint(n_written, n_written, 1)
+
+    _final_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=n_written,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum=checksum,
+            chunks_completed=1,
+            error=_final_abort,
+            rejected_details=rejected_details,
+            rejected_rows=_rejected_row_count(
+                data_rows, mapped_rows, rejected_details, policy
+            ),
+            warnings=(list(evolve_notes) + list(file_warnings))[:20],
+            driver="iceberg",
+        )
 
     return WriteResult(
         ok=True,
