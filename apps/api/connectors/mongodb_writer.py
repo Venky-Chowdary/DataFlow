@@ -226,8 +226,8 @@ def write_mapped_rows(
         )
         rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
         # FAIL_JOB / strict abort after matrix — matrix may add abort-class rejects.
-        _map_abort = reject_on_strict_policy(policy, rejected_details, "MongoDB")
-        if _map_abort or (transform_errors and policy == "fail"):
+        _map_abort = reject_on_strict_policy(policy, rejected_details, "MongoDB", transform_errors)
+        if _map_abort:
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -456,7 +456,10 @@ def write_mapped_rows(
                 continue
             typed_rows.append(tuple(cells))
 
-        if rejected_details and policy == "fail":
+        _bson_abort = reject_on_strict_policy(
+            policy, rejected_details, "MongoDB", transform_errors=None
+        )
+        if _bson_abort:
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -464,10 +467,7 @@ def write_mapped_rows(
                 target_schema=db_name,
                 checksum="",
                 chunks_completed=0,
-                error=(
-                    "BSON coercion rejected "
-                    f"{len(rejected_details)} value(s); no rows written under fail policy"
-                ),
+                error=_bson_abort,
                 rejected_rows=_rejected_row_count(
                     data_rows, typed_rows, rejected_details, policy
                 ),
@@ -658,7 +658,9 @@ def write_mapped_rows(
                 on_checkpoint(chunk_idx + 1, chunks, written + skipped_total)
 
         # Re-check FAIL_JOB / strict after mid-write incomplete-PK quarantine.
-        _final_abort = reject_on_strict_policy(policy, rejected_details, "MongoDB")
+        _final_abort = reject_on_strict_policy(
+            policy, rejected_details, "MongoDB", transform_errors
+        )
         if _final_abort:
             return WriteResult(
                 ok=False,

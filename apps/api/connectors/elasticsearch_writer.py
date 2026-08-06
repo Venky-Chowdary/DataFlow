@@ -193,8 +193,8 @@ def write_mapped_rows(
         dialect_label="Elasticsearch",
         mappings=list(mappings or []) or None,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "Elasticsearch")
-    if _map_abort or (errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "Elasticsearch", errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,

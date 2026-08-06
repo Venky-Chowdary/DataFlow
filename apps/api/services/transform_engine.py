@@ -1002,29 +1002,49 @@ def infer_transform_for_mapping(
         return "none"
 
     # Semantic column names drive the transform for generic string targets.
-    # For string/unknown targets, preserve currency/percentage as text to avoid
-    # data loss (e.g. '$100' should not be silently stripped to 100).
-    if semantic in {"currency", "percentage"}:
+    # For string/unknown targets, preserve currency/percentage/email/url/phone
+    # as text to avoid data loss / false quarantine (e.g. empty image→url on
+    # TEXT, '$100' stripped to 100). Typed sinks still get semantic casts below.
+    if semantic in {
+        "currency",
+        "percentage",
+        "phone",
+        "email",
+        "url",
+        "iban",
+        "postal",
+        "base64",
+    }:
+        if tgt in {"string", "text", "unknown"} or not tgt:
+            return "none"
+        if semantic == "phone":
+            return "phone"
+        if semantic == "email":
+            return "email"
+        if semantic == "url":
+            return "url"
+        if semantic == "iban":
+            return "iban"
+        if semantic == "postal":
+            return "postal"
+        if semantic == "base64":
+            return "base64"
+        # currency / percentage on numeric tgt already handled above when tgt set
         return "none"
-    if semantic == "phone":
-        return "phone"
-    if semantic == "email":
-        return "email"
-    if semantic == "url":
-        return "url"
-    if semantic == "iban":
-        return "iban"
-    if semantic == "postal":
-        return "postal"
-    if semantic == "base64":
-        return "base64"
     if semantic == "timestamp":
         return "datetime"
 
     src_col = source_col.upper()
-    if "amount" in tgt_name or "total" in tgt_name or "weight" in tgt_name or src_col in {
-        "AMT", "PAY_AMT", "PAYMENT_AMT", "VALUE",
-    }:
+    # Name-heuristic decimal only when the destination is numeric — never invent
+    # a cast that strips currency markers into a VARCHAR/TEXT sink.
+    if tgt not in {"string", "text", "unknown", None} and (
+        "amount" in tgt_name
+        or "total" in tgt_name
+        or "weight" in tgt_name
+        or src_col in {
+            "AMT", "PAY_AMT", "PAYMENT_AMT", "VALUE",
+        }
+    ):
         return "decimal"
     src_lower = source_col.lower()
     # Only apply date transforms when the SOURCE looks temporal — never because

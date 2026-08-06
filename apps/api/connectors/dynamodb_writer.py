@@ -256,8 +256,8 @@ def write_mapped_rows(
         dialect_label="DynamoDB",
         mappings=mappings,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "DynamoDB")
-    if _map_abort or (errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "DynamoDB", errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,

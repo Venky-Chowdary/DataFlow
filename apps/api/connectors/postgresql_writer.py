@@ -1056,8 +1056,8 @@ def write_mapped_rows(
         data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
     )
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'PostgreSQL')
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'PostgreSQL', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,

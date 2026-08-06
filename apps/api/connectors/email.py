@@ -273,8 +273,8 @@ def write_mapped_rows(
         dialect_label="Email",
         mappings=mappings,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "Email")
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "Email", transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -282,7 +282,7 @@ def write_mapped_rows(
             target_schema=cfg.host,
             checksum="",
             chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort,
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
         )

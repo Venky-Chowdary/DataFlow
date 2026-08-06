@@ -958,8 +958,8 @@ def _write_mapped_rows_pyiceberg(
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg')
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -1474,8 +1474,8 @@ def _write_mapped_rows_filesystem(
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg')
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False, rows_written=0, table_name=table, target_schema=str(table_dir),
             checksum="", chunks_completed=0,

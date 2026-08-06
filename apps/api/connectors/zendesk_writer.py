@@ -315,8 +315,8 @@ def write_mapped_rows(
         dialect_label="Zendesk",
         mappings=mappings,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Zendesk')
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Zendesk', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,

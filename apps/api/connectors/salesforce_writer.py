@@ -505,8 +505,8 @@ def write_mapped_rows(
         rejected_details,
         policy,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Salesforce')
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Salesforce', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,

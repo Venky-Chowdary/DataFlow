@@ -401,8 +401,8 @@ def write_mapped_rows(
         rejected_details,
         policy,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'HubSpot')
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'HubSpot', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,

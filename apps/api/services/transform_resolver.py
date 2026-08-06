@@ -134,6 +134,21 @@ def resolve_transform(
     if raw and _type_compatible_transform(target_type, raw):
         return str(raw)
 
+    # Operator-stamped transform with Risk Contract / Map override must win even
+    # when create-new still carries a TEXT/VARCHAR stamp. Re-inferring away
+    # ``integer`` / ``url`` undoes CAST_AND_CONTINUE / SKIP_ROW / QUARANTINE_ROW
+    # (amt TEXT→integer contracted cast, image→url mutate).
+    if raw and str(raw).strip().lower() not in {"", "none", "null", "identity"}:
+        if (
+            mapping.get("user_override")
+            or mapping.get("userOverride")
+            or mapping.get("risk_contract")
+            or mapping.get("riskContract")
+            or mapping.get("risk_acknowledged")
+            or mapping.get("riskAcknowledged")
+        ):
+            return str(raw)
+
     return infer_transform_for_mapping(
         mapping["source"],
         mapping["target"],

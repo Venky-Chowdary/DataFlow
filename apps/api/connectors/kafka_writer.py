@@ -228,8 +228,8 @@ def write_mapped_rows(
         dialect_label="Kafka",
         mappings=mappings,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Kafka')
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Kafka', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False, rows_written=0, table_name=topic, target_schema="",
             checksum="", chunks_completed=0,

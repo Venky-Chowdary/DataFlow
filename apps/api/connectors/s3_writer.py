@@ -165,8 +165,8 @@ def write_mapped_rows(
     )
     from connectors.writer_common import reject_on_strict_policy
 
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "S3")
-    if _map_abort or (errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "S3", errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,

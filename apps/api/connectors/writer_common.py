@@ -1286,16 +1286,22 @@ def reject_on_strict_policy(
     policy: str | None,
     rejected_details: list[dict[str, Any]] | None,
     label: str,
+    transform_errors: list[str] | None = None,
 ) -> str | None:
     """Return an error message when the write must refuse a partial primary write.
 
     Module 1b: Migration Risk Contract FAIL_JOB aborts even when the job-level
     error_policy is ``quarantine``. Continue-policy contract failures
     (CAST_AND_CONTINUE / QUARANTINE_ROW) may hold out rows without aborting.
+
+    ``transform_errors`` is the writer audit list. Strict mode previously aborted
+    on ``transform_errors and policy==fail`` *after* continue-contract holdouts
+    were applied — inventing a full-job failure while quarantine already held
+    empty url/email cells (MySQL→Postgres image→TEXT). Continue-only details
+    must clear both paths.
     """
     details = list(rejected_details or [])
-    if not details:
-        return None
+    errs = [str(e) for e in (transform_errors or []) if e]
 
     # In-tree SSOT — never soft-import and demote FAIL_JOB / continue contracts.
     from services.migration_risk_contract import (
@@ -1327,15 +1333,19 @@ def reject_on_strict_policy(
             f"Migration Risk Contract abort policy blocks partial write{scope_note}"
         )
 
-    if rejected_details_are_continue_contract_only(details):
-        # Operator contracted continue + quarantine — do not abort the batch.
+    if details and rejected_details_are_continue_contract_only(details):
+        # Operator contracted continue + quarantine — do not abort the batch,
+        # even when transform_errors still list the held-out cells for audit.
         return None
 
     if transform_error_policy(policy) == "fail":
-        return (
-            f"{label} rejected {len(details)} row(s); "
-            "strict error policy blocks partial write"
-        )
+        if details:
+            return (
+                f"{label} rejected {len(details)} row(s); "
+                "strict error policy blocks partial write"
+            )
+        if errs:
+            return f"Transform errors: {'; '.join(errs[:3])}"
     return None
 
 

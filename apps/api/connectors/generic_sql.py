@@ -4276,8 +4276,8 @@ def write_mapped_rows(
     # Dense INSERT/MERGE: absent schemaless fields → SQL NULL (sparse keeps sentinel).
     mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'SQL')
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'SQL', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,

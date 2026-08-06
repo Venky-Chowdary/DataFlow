@@ -116,8 +116,8 @@ def write_mapped_rows(
         mappings=mappings,
     )
     # FAIL_JOB / strict abort after matrix — never write when matrix added abort-class rejects.
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "SFTP")
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "SFTP", transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,

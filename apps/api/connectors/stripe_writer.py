@@ -156,8 +156,8 @@ def write_mapped_rows(
         dialect_label="Stripe",
         mappings=mappings,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Stripe')
-    if _map_abort or (transform_errors and policy == "fail"):
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Stripe', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,
