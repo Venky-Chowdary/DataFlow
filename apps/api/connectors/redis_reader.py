@@ -229,10 +229,24 @@ def read_keys_batch(
                         fieldnames.append(key)
             headers = union_attribute_keys(["redis_key", "redis_type"], fieldnames)
             flat_rows: list[list[str]] = []
+            from services.value_serializer import (
+                DF_MISSING_SENTINEL,
+                SQL_NULL_SENTINEL,
+                cell_to_string,
+            )
+
             for row, obj in zip(rows, object_values):
-                flat_rows.append(
-                    [row[0], row[2]] + [cell_to_string(obj.get(field, "")) for field in fieldnames]
-                )
+                cells: list[str] = [row[0], row[2]]
+                for field in fieldnames:
+                    if field not in obj:
+                        cells.append(DF_MISSING_SENTINEL)
+                    elif obj[field] is None:
+                        cells.append(SQL_NULL_SENTINEL)
+                    else:
+                        cells.append(
+                            cell_to_string(obj[field], preserve_sql_null=True)
+                        )
+                flat_rows.append(cells)
             rows = flat_rows
         else:
             headers = identity_headers

@@ -344,7 +344,9 @@ def read_table_batch(
         row: list[str] = []
         for h in headers:
             if h not in rec:
-                row.append("")
+                from services.value_serializer import DF_MISSING_SENTINEL
+
+                row.append(DF_MISSING_SENTINEL)
             else:
                 row.append(_cell(rec[h]))
         rows.append(row)

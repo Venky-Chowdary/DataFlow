@@ -354,10 +354,10 @@ def write_mapped_rows(
                 break
             i = target_cols.index(key_col)
             value = row[i] if i < len(row) else None
-            if (
-                value is None
-                or is_missing_sentinel(value)
-                or (attr_type == "S" and str(value).strip() == "")
+            from services.cdc_identity import is_present_cdc_row_key
+
+            if not is_present_cdc_row_key(value) or (
+                attr_type == "S" and isinstance(value, str) and value.strip() == ""
             ):
                 key_ok = False
                 detail = {

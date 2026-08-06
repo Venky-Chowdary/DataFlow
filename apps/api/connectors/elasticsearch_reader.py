@@ -38,7 +38,7 @@ def _client(cfg: dict[str, Any]):
 
 
 def _cell(value: Any) -> str:
-    return cell_to_string(value)
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 def read_index_batch(
@@ -100,7 +100,17 @@ def read_index_batch(
                     seen.add(k)
                     page_keys.append(k)
         headers = union_attribute_keys(columns, page_keys) if columns else page_keys
-        rows = [[_cell(r.get(h)) for h in headers] for r in records]
+        from services.value_serializer import DF_MISSING_SENTINEL
+
+        rows = []
+        for r in records:
+            row: list[str] = []
+            for h in headers:
+                if h not in r:
+                    row.append(DF_MISSING_SENTINEL)
+                else:
+                    row.append(_cell(r[h]))
+            rows.append(row)
         next_after = hits[-1].get("sort") if hits else None
         batch = ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
         return batch, next_after

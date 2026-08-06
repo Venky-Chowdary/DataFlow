@@ -640,3 +640,50 @@ def test_specialty_matrix_allows_sql_null_on_inet():
     )
     assert out == [("1", SQL_NULL_SENTINEL)]
     assert not details
+
+
+def test_specialty_matrix_quarantines_empty_hstore():
+    from connectors.writer_common import quarantine_unfit_specialty_types
+
+    details: list[dict] = []
+    # Classic hstore literal requires quoted keys/values ("k"=>"v").
+    out = quarantine_unfit_specialty_types(
+        [("1", ""), ("2", '"a"=>"1"')],
+        ["id", "tags"],
+        ["INTEGER", "HSTORE"],
+        details,
+        "quarantine",
+    )
+    assert len(out) == 1
+    assert out[0][0] == "2"
+    assert details
+
+
+def test_redis_normalize_refuses_empty_float():
+    import pytest
+    from connectors.redis_writer import _normalize_redis_typed_doc
+
+    with pytest.raises(ValueError, match="empty string cannot coerce to float"):
+        _normalize_redis_typed_doc(
+            {"amt": ""}, ["amt"], ["FLOAT"]
+        )
+
+
+def test_redis_doc_keeps_explicit_sql_null_omits_missing():
+    """Sparse omit vs SQL NULL wipe — Bugbot invent cliff on Redis JSON SET."""
+    from connectors.redis_writer import _redis_row_to_doc
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
+
+    doc = _redis_row_to_doc(
+        ["id", "amt", "note"],
+        ("1", SQL_NULL_SENTINEL, DF_MISSING_SENTINEL),
+    )
+    assert doc == {"id": "1", "amt": None}
+    assert "note" not in doc
+
+
+def test_iceberg_stringify_preserves_sql_null():
+    from connectors.iceberg_reader import _stringify
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    assert _stringify(None) == SQL_NULL_SENTINEL

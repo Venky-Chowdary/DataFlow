@@ -3777,8 +3777,8 @@ def _specialty_column_kind(type_str: str) -> str | None:
         return "geography"
     if re.search(r"\bINTERVAL\b", upper):
         return "interval"
-    # Network / text specialty — bind refuse must be mirrored in the matrix so
-    # object-store / SaaS paths never green empty INET then crash mid-batch.
+    # Network / text / geometric specialty — bind refuse must be mirrored in the
+    # matrix so object-store / SaaS paths never green empty HSTORE then crash.
     spec = specialty_carrier_base(type_str)
     if spec in {"INET", "IPV4", "IPV6", "IP"}:
         return "inet"
@@ -3790,6 +3790,9 @@ def _specialty_column_kind(type_str: str) -> str | None:
         return "xml"
     if spec == "LTREE":
         return "ltree"
+    if spec:
+        # HSTORE / TSVECTOR / POINT / BOX / RANGE / OID / PG_LSN / …
+        return "bind"
     return None
 
 
@@ -3905,6 +3908,14 @@ def quarantine_unfit_specialty_types(
                         coerce_xml_wire(cells[col_idx])
                     else:
                         coerce_ltree_wire(cells[col_idx])
+                except ValueError as exc:
+                    ok = False
+                    reason = str(exc)[:300]
+            elif kind == "bind":
+                from connectors.sql_bind import normalize_sql_bind_value
+
+                try:
+                    normalize_sql_bind_value(cells[col_idx], typ, engine="")
                 except ValueError as exc:
                     ok = False
                     reason = str(exc)[:300]

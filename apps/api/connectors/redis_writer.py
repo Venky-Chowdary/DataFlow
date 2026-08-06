@@ -36,15 +36,19 @@ def _normalize_redis_typed_doc(
     target_cols: list[str],
     logical_types: list[str],
 ) -> dict[str, Any]:
-    """Fail-closed UUID/BINARY/BOOL normalize before JSON SET.
+    """Fail-closed typed normalize before JSON SET.
 
-    Invalid base64 / UUID raise so the writer quarantines — never invent bytes.
+    Invalid UUID/BINARY/BOOL/FLOAT/DECIMAL/INT raise so the writer quarantines —
+    never invent bytes, 0.0, or empty-string numerics.
     """
     import base64
 
     from connectors.sql_bind import (
         coerce_binary_wire,
         coerce_boolean_wire,
+        coerce_decimal_wire,
+        coerce_float_wire,
+        coerce_integer_wire,
         coerce_uuid_wire,
     )
 
@@ -66,7 +70,64 @@ def _normalize_redis_typed_doc(
                     "(refuse invent via bool())"
                 )
             out[col] = coerced
+        elif upper in {
+            "FLOAT",
+            "FLOAT16",
+            "FLOAT32",
+            "FLOAT64",
+            "DOUBLE",
+            "REAL",
+            "HALF",
+            "HALFFLOAT",
+        }:
+            out[col] = coerce_float_wire(out[col], ddl_type=upper or "FLOAT")
+        elif upper in {
+            "DECIMAL",
+            "NUMERIC",
+            "NUMBER",
+            "BIGNUMERIC",
+            "MONEY",
+            "SMALLMONEY",
+        } or upper.startswith(("DECIMAL(", "NUMERIC(", "NUMBER(")):
+            out[col] = coerce_decimal_wire(out[col], ddl_type=upper or "DECIMAL")
+        elif upper in {
+            "INTEGER",
+            "INT",
+            "BIGINT",
+            "SMALLINT",
+            "TINYINT",
+            "MEDIUMINT",
+            "LONG",
+            "SERIAL",
+            "BIGSERIAL",
+            "INT2",
+            "INT4",
+            "INT8",
+        }:
+            out[col] = coerce_integer_wire(out[col], ddl_type=upper or "INTEGER")
     return out
+
+
+def _redis_row_to_doc(
+    target_cols: list[str],
+    row: tuple | list,
+) -> dict[str, Any]:
+    """Build Redis JSON doc with null-polarity honesty.
+
+    * ``DF_MISSING`` / STOP_COLUMN → omit key (sparse merge keeps prior JSON)
+    * ``None`` / ``SQL_NULL_SENTINEL`` → JSON ``null`` (explicit wipe)
+    """
+    from services.value_serializer import SQL_NULL_SENTINEL, is_missing_sentinel
+
+    doc: dict[str, Any] = {}
+    for c, v in zip(target_cols, row):
+        if is_missing_sentinel(v):
+            continue
+        if v is None or v == SQL_NULL_SENTINEL:
+            doc[c] = None
+        else:
+            doc[c] = v
+    return doc
 
 
 # Thin aliases — tests/engine may import these names from the writer module.
@@ -96,7 +157,9 @@ def _resolve_redis_key_id(
     parts: list[str] = []
     for col in cols:
         val = doc.get(col)
-        if val is None or str(val).strip() == "":
+        from services.cdc_identity import is_present_cdc_row_key
+
+        if not is_present_cdc_row_key(val):
             return None, col
         parts.append(str(val))
     return "|".join(parts), cols[0]
@@ -241,15 +304,8 @@ def write_mapped_rows(
         written = 0
         seen_keys: dict[str, int] = {}
         for i, row in enumerate(mapped_rows):
-            from services.value_serializer import is_missing_sentinel
-
-            # STOP_COLUMN / coerce_null omit — never JSON-SET the sentinel string.
-            # Dense upsert: also omit None so prior JSON fields are not wiped to null.
-            doc = {
-                c: v
-                for c, v in zip(target_cols, row)
-                if not is_missing_sentinel(v) and v is not None
-            }
+            # DF_MISSING omit vs explicit SQL NULL → JSON null (no stale merge invent).
+            doc = _redis_row_to_doc(target_cols, row)
             try:
                 doc = _normalize_redis_typed_doc(doc, target_cols, logical_types)
             except (ValueError, TypeError) as cell_exc:

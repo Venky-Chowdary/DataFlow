@@ -1152,8 +1152,8 @@ def _write_mapped_rows_pyiceberg(
         # running per-PK map (dense replace / sparse overlay) with should_apply.
         from connectors.writer_common import (
             DF_LSN_COL,
-            assert_dense_upsert_keys_present,
             assert_sparse_upsert_has_pk,
+            partition_dense_upsert_rows,
             row_has_missing_sentinel,
             sparse_present_bindings,
         )
@@ -1174,32 +1174,16 @@ def _write_mapped_rows_pyiceberg(
                     driver="iceberg",
                     rejected_details=rejected_details,
                 )
-            # Dense empty/null PK would mass-merge onto "" keys — quarantine first.
-            # Sparse rows (DF_MISSING) are checked in the fold via assert_sparse.
-            # Preserve arrival order (same-PK fold depends on it).
-            dense_ok: list[bool] = []
-            for row_idx, raw in enumerate(mapped_rows):
-                if row_has_missing_sentinel(_row_tuple(target_cols, raw)):
-                    dense_ok.append(True)  # sparse handled later
-                    continue
-                try:
-                    assert_dense_upsert_keys_present(
-                        [raw], pk_cols, target_cols=target_cols
-                    )
-                    dense_ok.append(True)
-                except ValueError as row_exc:
-                    dense_ok.append(False)
-                    rejected_details.append(
-                        {
-                            "row": row_idx + 1,
-                            "column": "*",
-                            "value": "",
-                            "reason": str(row_exc)[:300],
-                            "policy": policy,
-                        }
-                    )
-            if not all(dense_ok):
-                mapped_rows = [r for r, ok in zip(mapped_rows, dense_ok) if ok]
+            # Shared dense empty-PK quarantine (SQL_NULL / blank / DF_MISSING keys).
+            before_pk = len(mapped_rows)
+            mapped_rows = partition_dense_upsert_rows(
+                mapped_rows,
+                pk_cols,
+                target_cols=target_cols,
+                rejected_details=rejected_details,
+                policy=policy,
+            )
+            if len(mapped_rows) < before_pk:
                 _pk_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
                 if _pk_abort:
                     return WriteResult(
