@@ -404,6 +404,7 @@ def test_sample_compare_skips_columns_absent_from_readback():
 
 
 def test_mysql_boolean_false_binds_as_zero():
+    import pytest
     from connectors.mysql_writer import _to_mysql_value
 
     assert _to_mysql_value(False, "BOOLEAN") == 0
@@ -412,6 +413,7 @@ def test_mysql_boolean_false_binds_as_zero():
     assert _to_mysql_value("false", "BOOLEAN") == 0
     assert _to_mysql_value("true", "TINYINT") == 1
     assert _to_mysql_value("0", "BOOLEAN") == 0
-    assert _to_mysql_value("", "JSON") is None
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        _to_mysql_value("", "JSON")
     assert _to_mysql_value({"a": 1}, "JSON") == '{"a":1}'
     assert _to_mysql_value("not-json", "JSON") == '"not-json"'

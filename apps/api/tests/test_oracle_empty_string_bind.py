@@ -34,6 +34,10 @@ def test_numeric_bind_refuses_empty_null_invent():
         coerce_decimal_wire,
         coerce_float_wire,
         coerce_integer_wire,
+        coerce_json_wire,
+        coerce_citext_wire,
+        coerce_year_wire,
+        coerce_inet_wire,
     )
 
     for ddl in ("INTEGER", "INT", "BIGINT", "SMALLINT"):
@@ -55,6 +59,15 @@ def test_numeric_bind_refuses_empty_null_invent():
             normalize_sql_bind_value("", ddl, engine="mysql")
         with pytest.raises(ValueError, match="refuse silent NULL invent"):
             coerce_decimal_wire("", ddl_type=ddl)
+
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        coerce_json_wire("")
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        coerce_year_wire("")
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        coerce_inet_wire("")
+    # CITEXT keeps empty string (VARCHAR-class).
+    assert coerce_citext_wire("") == ""
 
 
 def test_bind_sql_mapped_rows_quarantines_empty_integer():

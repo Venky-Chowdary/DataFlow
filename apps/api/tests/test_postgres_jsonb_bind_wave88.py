@@ -79,8 +79,11 @@ def test_json_text_input_is_not_double_encoded():
     assert json.loads(bound) == {"a": 1}, f"double-encoded: {bound!r}"
 
 
-def test_empty_becomes_null_and_scalars_stay_loadable():
-    assert normalize_sql_bind_value("", "JSONB", engine="postgresql") is None
+def test_empty_json_refuses_null_invent_and_scalars_stay_loadable():
+    import pytest
+
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        normalize_sql_bind_value("", "JSONB", engine="postgresql")
     assert normalize_sql_bind_value(None, "JSONB", engine="postgresql") is None
     # A bare scalar is losslessly wrapped so it can still land in a JSON column.
     assert json.loads(normalize_sql_bind_value("hi", "JSONB", engine="postgresql")) == "hi"

@@ -376,7 +376,23 @@ def analyze_coercion(
                 # Numeric / money destinations: empty is not a natural NULL — write
                 # bind refuses silent invent. Count as coercion failure so Validate
                 # matches write (VARCHAR Map + INT physical is the classic cliff).
-                if tgt_logical in {"integer", "float", "decimal", "number", "money"}:
+                if tgt_logical in {
+                    "integer",
+                    "float",
+                    "decimal",
+                    "number",
+                    "money",
+                    "uuid",
+                    "boolean",
+                    "json",
+                    "array",
+                    "struct",
+                    "map",
+                    "date",
+                    "datetime",
+                    "time",
+                    "timestamp",
+                }:
                     failed += 1
                     if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
                         sample_failures.append({

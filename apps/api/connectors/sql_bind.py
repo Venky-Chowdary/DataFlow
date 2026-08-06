@@ -49,7 +49,10 @@ def coerce_inet_wire(value: Any) -> Any:
         )
     text = str(value).strip()
     if not text:
-        return None
+        raise ValueError(
+            "empty string cannot coerce to INET — "
+            "refuse silent NULL invent (quarantine or remap upstream)"
+        )
     try:
         if "/" in text:
             return ip_interface(text)
@@ -82,7 +85,10 @@ def coerce_cidr_wire(value: Any) -> Any:
         )
     text = str(value).strip()
     if not text:
-        return None
+        raise ValueError(
+            "empty string cannot coerce to CIDR — "
+            "refuse silent NULL invent (quarantine or remap upstream)"
+        )
     try:
         return ip_network(text, strict=True)
     except ValueError as exc:
@@ -436,7 +442,8 @@ def coerce_citext_wire(value: Any) -> Any:
             "citext wire cannot bind number — refuse invent into CITEXT"
         )
     text = str(value)
-    return text if text else None
+    # CITEXT stores '' — never invent NULL (VARCHAR-class carrier).
+    return text
 
 
 def coerce_ltree_wire(value: Any) -> Any:
@@ -1319,10 +1326,15 @@ def coerce_year_wire(value: Any) -> int | None:
     if is_missing_sentinel(value):
         return value
     if isinstance(value, str) and not value.strip():
-        return None
+        raise ValueError(
+            "empty string cannot coerce to YEAR — "
+            "refuse silent NULL invent (quarantine or remap upstream)"
+        )
     n = expand_mysql_year(value)
     if n is None:
-        return None
+        raise ValueError(
+            f"cannot coerce {value!r} to YEAR — refuse silent NULL invent"
+        )
     if not (n == 0 or 1901 <= n <= 2155):
         raise ValueError(
             f"YEAR {n} outside 0 or 1901–2155 — refuse invent (MySQL would store 0000)"
@@ -1587,7 +1599,7 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
 
 
 def coerce_json_wire(value: Any, *, as_text: bool = True) -> Any:
-    """Normalize JSON/JSONB bind. Empty → NULL; invalid scalars wrapped as JSON text."""
+    """Normalize JSON/JSONB bind. Empty refuses NULL invent; invalid scalars wrap as JSON text."""
     if value is None:
         return None
     from services.value_serializer import json_default
@@ -1602,7 +1614,12 @@ def coerce_json_wire(value: Any, *, as_text: bool = True) -> Any:
         return json.dumps(value, allow_nan=False) if as_text else value
     text = str(value).strip()
     if not text:
-        return None
+        # Never invent SQL NULL from "" on upsert wipe (MySQL 3140 avoidance is
+        # quarantine/remap — not silent clear of a present JSON document).
+        raise ValueError(
+            "empty string cannot coerce to JSON — "
+            "refuse silent NULL invent (quarantine or remap upstream)"
+        )
     try:
         parsed = json.loads(text)
     except Exception:

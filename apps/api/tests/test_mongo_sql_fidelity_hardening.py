@@ -13,7 +13,8 @@ def test_mysql_bool_and_json_wire_from_mongo_strings():
     assert _to_mysql_value("false", "BOOLEAN") == 0
     assert _to_mysql_value("true", "TINYINT") == 1
     assert _to_mysql_value({"email": True}, "JSON") == '{"email":true}'
-    assert _to_mysql_value("", "JSON") is None
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        _to_mysql_value("", "JSON")
 
 
 def test_struct_flatten_uses_json_default_not_repr():

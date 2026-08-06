@@ -1274,9 +1274,7 @@ def _to_sa_value(
     if t in (LOGICAL_JSON, LOGICAL_ARRAY):
         from connectors.sql_bind import coerce_json_wire
 
-        # Empty JSON wire → SQL NULL (MySQL 3140 / JSONB empty-string class).
-        if isinstance(value, str) and not value.strip():
-            return None
+        # Empty JSON wire raises — quarantine upstream (never invent SQL NULL wipe).
         as_text = _is_string_type(sa_type)
         bound = coerce_json_wire(value, as_text=as_text)
         if as_text:
