@@ -1048,7 +1048,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     # typed columns that refuse NULL must not receive nullable sources / empty samples.
     sample_rows = list(getattr(ctx, "sample_rows", None) or [])
     for m in ctx.plan.mappings:
-        target = dest_by_name.get(m.target.lower())
+        if _is_intentional_omit_mapping(m) or not m.target:
+            continue
+        target = dest_by_name.get(str(m.target).lower())
         if not target or target.nullable:
             continue
         source_col = next((c for c in ctx.plan.source.columns if c.name == m.source), None)
@@ -1496,7 +1498,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             )
         except Exception:
             for m in ctx.plan.mappings:
-                if m.target.lower() == "_id":
+                if m.target and str(m.target).lower() == "_id":
                     pk_src, pk_tgt = m.source, m.target
                     break
         if pk_tgt:
@@ -1640,7 +1642,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     except Exception:
         pk_src, pk_tgt = None, None
         for m in ctx.plan.mappings:
-            if m.target.lower() in {"id", "_id"}:
+            if m.target and str(m.target).lower() in {"id", "_id"}:
                 pk_src, pk_tgt = m.source, m.target
                 break
 
@@ -1993,7 +1995,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             )
         except Exception:
             for m in ctx.plan.mappings:
-                if m.target.lower() in {"id", "_id"}:
+                if m.target and str(m.target).lower() in {"id", "_id"}:
                     pk_target = m.target
                     break
 

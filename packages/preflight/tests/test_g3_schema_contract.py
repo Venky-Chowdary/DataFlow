@@ -633,6 +633,45 @@ def test_g3_not_null_blocks_stop_column_null_invent_policy():
     assert any(d.get("null_invent_policy_blocked") for d in details)
 
 
+def test_g3_none_target_omit_does_not_500():
+    """Intentional omit / None target must not AttributeError on NOT NULL loop."""
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="file",
+            connected=True,
+            parseable=True,
+            columns=[
+                ColumnSchema(name="keep", inferred_type="VARCHAR"),
+                ColumnSchema(name="drop", inferred_type="VARCHAR"),
+            ],
+            row_count_estimate=10,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[
+                ColumnSchema(name="keep", inferred_type="VARCHAR", nullable=False),
+            ],
+        ),
+        mappings=[
+            ColumnMapping(source="keep", target="keep", confidence=0.95),
+            ColumnMapping(
+                source="drop",
+                target=None,
+                confidence=0.0,
+                transform="omit",
+            ),
+        ],
+    )
+    result = gate_g3_schema_contract(
+        PreflightContext(plan=plan, sample_rows=[{"keep": "x", "drop": "y"}])
+    )
+    # Must not raise — status may pass or block on other grounds.
+    assert result.status.value in {"pass", "block", "warn"}
+
+
 def test_g3_empty_dest_without_stamp_blocks():
     """Never PASS schema contract when dest has zero columns and no target_type."""
     plan = TransferPlan(
