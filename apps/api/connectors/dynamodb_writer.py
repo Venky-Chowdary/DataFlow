@@ -273,6 +273,8 @@ def write_mapped_rows(
     written = 0
     batch_size = 25
     # Filter out rows with incomplete Dynamo key components before BatchWrite.
+    from services.value_serializer import is_missing_sentinel
+
     valid_rows: list[list[Any]] = []
     for row_idx, row in enumerate(mapped_rows):
         key_ok = True
@@ -307,7 +309,11 @@ def write_mapped_rows(
                 break
             i = target_cols.index(key_col)
             value = row[i] if i < len(row) else None
-            if value is None or (attr_type == "S" and str(value).strip() == ""):
+            if (
+                value is None
+                or is_missing_sentinel(value)
+                or (attr_type == "S" and str(value).strip() == "")
+            ):
                 key_ok = False
                 detail = {
                     "row": row_idx + 1,
@@ -340,7 +346,6 @@ def write_mapped_rows(
 
     chunks = max(1, (len(valid_rows) + batch_size - 1) // batch_size) if valid_rows else 1
     from connectors.writer_common import row_has_missing_sentinel
-    from services.value_serializer import is_missing_sentinel
 
     try:
         for chunk_idx in range(0 if not valid_rows else chunks):
@@ -348,6 +353,7 @@ def write_mapped_rows(
                 break
             slice_rows = valid_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
             request_items = []
+            chunk_written = 0
             for row in slice_rows:
                 sparse = row_has_missing_sentinel(row)
                 item: dict[str, Any] = {}
@@ -366,16 +372,33 @@ def write_mapped_rows(
                     # STOP_COLUMN must UpdateItem SET present attrs only.
                     key_attrs = {k: item[k] for k in key_types if k in item}
                     if len(key_attrs) != len(key_types):
+                        # Defense-in-depth: key preflight should have held these out.
+                        rejected_details.append(
+                            {
+                                "row": "",
+                                "column": ",".join(key_types),
+                                "target": table,
+                                "value": "",
+                                "reason": (
+                                    "DynamoDB sparse UpdateItem skipped — incomplete "
+                                    "HASH/RANGE key after DF_MISSING omit"
+                                ),
+                                "policy": "write_quarantine",
+                                "chars": [],
+                            }
+                        )
                         continue
                     set_attrs = {k: v for k, v in item.items() if k not in key_types}
                     _sparse_update_item(
                         client, table, key_attrs=key_attrs, set_attrs=set_attrs
                     )
+                    chunk_written += 1
                 else:
                     request_items.append({"PutRequest": {"Item": item}})
+                    chunk_written += 1
             if request_items:
                 _batch_write_with_retry(client, table, request_items)
-            written += len(slice_rows)
+            written += chunk_written
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written)
 

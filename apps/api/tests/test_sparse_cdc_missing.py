@@ -536,6 +536,49 @@ def test_dynamo_sparse_uses_update_item_not_put():
     assert DF_MISSING_SENTINEL not in str(kwargs)
 
 
+def test_dynamo_rejects_df_missing_on_key_attribute():
+    """HASH/RANGE identity cannot be DF_MISSING — quarantine, never silent skip."""
+    from unittest.mock import MagicMock, patch
+
+    from connectors.dynamodb_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+        }
+    }
+    with patch("connectors.dynamodb_writer.boto3_client", return_value=client):
+        with patch("connectors.dynamodb_writer._ensure_table"):
+            result = write_mapped_rows(
+                host="localhost",
+                port=8000,
+                database="t",
+                username="",
+                password="",
+                schema="",
+                connection_string="",
+                ssl=False,
+                table_name="t",
+                headers=["id", "note"],
+                data_rows=[[DF_MISSING_SENTINEL, "note"]],
+                mappings=[
+                    {"source": "id", "target": "id"},
+                    {"source": "note", "target": "note"},
+                ],
+                column_types={"id": "string", "note": "string"},
+                create_table=False,
+                conflict_columns=["id"],
+                error_policy="quarantine",
+            )
+    assert result.ok is True or result.rows_written == 0
+    assert result.rows_written == 0
+    assert not client.update_item.called
+    assert not client.batch_write_item.called
+    assert any("key attribute" in str(d.get("reason") or "").lower() for d in (result.rejected_details or []))
+
+
 def test_sample_compare_skips_df_missing_omit_columns():
     """Omit-from-SET columns must not fingerprint as NULL (false-green wipe risk)."""
     from services.reconciliation import sample_compare_rows
