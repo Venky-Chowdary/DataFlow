@@ -58,6 +58,7 @@ from connectors.writer_common import (
     quarantine_unfit_strings,
     quarantine_unfit_temporals,
     quarantine_unfit_years,
+    bind_sql_mapped_rows_with_quarantine,
     resolve_conflict_targets,
     resolve_target_columns,
     row_checksum,
@@ -1013,9 +1014,8 @@ def write_mapped_rows(
     # ISO-8601 / CSV timestamps → Python datetime so COPY/INSERT never send raw "…Z".
     # Boolean/JSON wire: Mongo cell_to_string ("true"/"false", JSON text, "") must
     # match MySQL's shared sql_bind path — never leave string bools for BOOLEAN.
-    from connectors.sql_bind import normalize_sql_bind_value
+    # Empty INT/FLOAT/DECIMAL must quarantine (never invent SQL NULL on upsert wipe).
     from services.type_system import parse_enum_or_set_ordered_members
-    from services.value_serializer import is_missing_sentinel
 
     # Wave 64: normalize every column through SSOT — ENUM/SET use logical
     # carriers (domain + SET→list for TEXT[]), other columns use target DDL.
@@ -1032,21 +1032,27 @@ def write_mapped_rows(
             return logical
         return target or logical
 
-    def _coerce_bind_row(row: tuple) -> tuple:
-        row_list = list(row)
-        for idx in range(len(row_list)):
-            if is_missing_sentinel(row_list[idx]):
-                continue
-            ddl = _bind_ddl(idx)
-            if not ddl:
-                continue
-            row_list[idx] = normalize_sql_bind_value(
-                row_list[idx], ddl, engine="postgresql"
-            )
-        return tuple(row_list)
-
-    mapped_rows = [_coerce_bind_row(row) for row in mapped_rows]
-    sparse_rows = [_coerce_bind_row(row) for row in sparse_rows]
+    bind_types = [_bind_ddl(i) for i in range(len(target_cols))]
+    mapped_rows = bind_sql_mapped_rows_with_quarantine(
+        mapped_rows,
+        target_cols,
+        bind_types,
+        rejected_details,
+        policy,
+        engine="postgresql",
+        dialect_label="PostgreSQL",
+        mappings=mappings,
+    )
+    sparse_rows = bind_sql_mapped_rows_with_quarantine(
+        sparse_rows,
+        target_cols,
+        bind_types,
+        rejected_details,
+        policy,
+        engine="postgresql",
+        dialect_label="PostgreSQL",
+        mappings=mappings,
+    )
     # Dense INSERT/COPY: absent schemaless fields → SQL NULL (sparse keeps sentinel).
     from connectors.writer_common import materialize_missing_as_null_for_dense_write
 

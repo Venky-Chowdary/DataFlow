@@ -245,7 +245,7 @@ def test_unverified_risk_contract_fails_closed_not_job_policy() -> None:
             {
                 "source": "age",
                 "target": "age",
-                "transform": "to_integer",
+                "transform": "integer",
                 "risk_contract": {
                     "risk_id": "mrc-tampered",
                     "column": "age",

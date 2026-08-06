@@ -373,6 +373,22 @@ def analyze_coercion(
                 continue
             cell = cell_to_string(raw_cell)
             if cell.strip() in {"", DF_MISSING_SENTINEL, SQL_NULL_SENTINEL, "__df_ddb_null__"}:
+                # Numeric / money destinations: empty is not a natural NULL — write
+                # bind refuses silent invent. Count as coercion failure so Validate
+                # matches write (VARCHAR Map + INT physical is the classic cliff).
+                if tgt_logical in {"integer", "float", "decimal", "number", "money"}:
+                    failed += 1
+                    if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                        sample_failures.append({
+                            "row": idx,
+                            "value": cell[:120],
+                            "reason": (
+                                f"Empty value cannot coerce to {tgt_logical} — "
+                                "refuse silent NULL invent (quarantine or remap)"
+                            ),
+                        })
+                        raw_failure_values.append(cell[:120])
+                    continue
                 nulls += 1
                 observed_values.append(cell)
                 continue

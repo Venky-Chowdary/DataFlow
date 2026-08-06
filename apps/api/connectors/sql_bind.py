@@ -1425,7 +1425,12 @@ def coerce_integer_wire(
     if isinstance(value, str):
         token = value.strip()
         if not token:
-            return None
+            # Iceberg parity — never invent SQL NULL from "" on upsert wipe paths.
+            # Quarantine / Risk Contract CAST_AND_CONTINUE is the only NULL invent.
+            raise ValueError(
+                f"empty string cannot coerce to integer for {ddl_type or upper} — "
+                "refuse silent NULL invent (quarantine or remap upstream)"
+            )
         low = token.lower()
         # Digits 0/1 are valid integers — only refuse wordy bool tokens.
         if low in (_TRUE_TOKENS | _FALSE_TOKENS) - {"0", "1"}:
@@ -1561,7 +1566,10 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
     if isinstance(value, str):
         token = value.strip()
         if not token:
-            return None
+            raise ValueError(
+                f"empty string cannot coerce to float for {ddl_type or 'FLOAT'} — "
+                "refuse silent NULL invent (quarantine or remap upstream)"
+            )
         low = token.lower()
         if low in (_TRUE_TOKENS | _FALSE_TOKENS) - {"0", "1"}:
             raise ValueError(
@@ -1999,7 +2007,10 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "") -> Any:
         elif isinstance(value, str):
             text = value.strip()
             if not text:
-                return None
+                raise ValueError(
+                    f"empty string cannot coerce to decimal for {ddl_type or 'DECIMAL'} — "
+                    "refuse silent NULL invent (quarantine or remap upstream)"
+                )
             d = Decimal(text)
         else:
             raise ValueError(
@@ -2008,6 +2019,10 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "") -> Any:
         if not d.is_finite():
             raise ValueError("decimal wire refuses non-finite Decimal")
     except (InvalidOperation, Overflow, ValueError) as exc:
+        msg = str(exc)
+        # Preserve honest empty / bool / NaN refusals — do not wrap into generic parse.
+        if "refuse" in msg.lower() or "empty string cannot coerce" in msg.lower():
+            raise
         raise ValueError(
             f"decimal wire parse failed — refuse invent into {ddl_type or 'DECIMAL'}"
         ) from exc

@@ -49,6 +49,7 @@ from connectors.writer_common import (
     quarantine_unfit_strings,
     quarantine_unfit_temporals,
     quarantine_unfit_years,
+    bind_sql_mapped_rows_with_quarantine,
     quote_sql_identifier,
     resolve_conflict_targets,
     resolve_target_columns,
@@ -602,16 +603,60 @@ def write_mapped_rows(
             reflection_cache.invalidate_by_identity(_identity, "", table_name)
 
         # Bind using physical types so ISO Z never hits a DATETIME column as TEXT.
+        # Empty → INT/FLOAT/DECIMAL must quarantine — never invent SQL NULL on upsert.
         physical = _fetch_mysql_column_types(cursor, table_name, identity=_identity)
         target_types = _apply_physical_temporal_types(target_cols, target_types, physical)
+        from connectors.sql_temporal import sql_base_type
+        from services.type_system import normalize_logical_type
+
+        # When Map stamped VARCHAR but physical is numeric, bind must see physical DDL
+        # or empty strings invent NULL (destination wipe). Do not clobber ENUM/SET.
+        for i, col in enumerate(target_cols):
+            phys = physical.get(col) or physical.get(col.lower()) or physical.get(col.upper())
+            if not phys:
+                continue
+            map_logical = normalize_logical_type(target_types[i] if i < len(target_types) else "")
+            phys_base = sql_base_type(phys)
+            if map_logical in {"string", "text", "varchar", ""} and phys_base in {
+                "TINYINT",
+                "SMALLINT",
+                "MEDIUMINT",
+                "INT",
+                "INTEGER",
+                "BIGINT",
+                "FLOAT",
+                "DOUBLE",
+                "REAL",
+                "DECIMAL",
+                "NUMERIC",
+                "DEC",
+                "FIXED",
+            }:
+                target_types[i] = phys
         from connectors.writer_common import materialize_missing_as_null_for_dense_write
 
-        converted_rows = materialize_missing_as_null_for_dense_write(
-            [
-                tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
-                for row in mapped_rows
-            ]
+        bound = bind_sql_mapped_rows_with_quarantine(
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            engine="mysql",
+            dialect_label="MySQL",
+            mappings=mappings,
         )
+        converted_rows = materialize_missing_as_null_for_dense_write(bound)
+        if sparse_rows:
+            sparse_rows[:] = bind_sql_mapped_rows_with_quarantine(
+                sparse_rows,
+                target_cols,
+                target_types,
+                rejected_details,
+                policy,
+                engine="mysql",
+                dialect_label="MySQL",
+                mappings=mappings,
+            )
         conn.commit()
 
     try:
@@ -649,13 +694,36 @@ def write_mapped_rows(
             if not converted_rows and mapped_rows:
                 from connectors.writer_common import materialize_missing_as_null_for_dense_write
 
-                converted_rows = materialize_missing_as_null_for_dense_write(
-                    [
-                        tuple(
-                            _to_mysql_value(v, target_types[i]) for i, v in enumerate(row)
-                        )
-                        for row in mapped_rows
-                    ]
+                bound = bind_sql_mapped_rows_with_quarantine(
+                    mapped_rows,
+                    target_cols,
+                    target_types,
+                    rejected_details,
+                    policy,
+                    engine="mysql",
+                    dialect_label="MySQL",
+                    mappings=mappings,
+                )
+                converted_rows = materialize_missing_as_null_for_dense_write(bound)
+
+            _bind_abort = reject_on_strict_policy(
+                policy, rejected_details, "MySQL", transform_errors
+            )
+            if _bind_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=database,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_bind_abort,
+                    rejected_rows=_rejected_row_count(
+                        data_rows, converted_rows or mapped_rows, rejected_details, policy,
+                        sparse_rows=sparse_rows,
+                    ),
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
                 )
 
             rows_skipped = 0

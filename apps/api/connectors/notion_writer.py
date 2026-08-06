@@ -252,11 +252,18 @@ def _as_property_value(
                 "(refuse silent NULL invent)"
             ) from exc
     if notion_type == "url":
-        return {"url": text or None}
+        # Omit empty — never emit {"url": null} (destination wipe on upsert).
+        if text == "":
+            return None
+        return {"url": text}
     if notion_type == "email":
-        return {"email": text or None}
+        if text == "":
+            return None
+        return {"email": text}
     if notion_type == "phone_number":
-        return {"phone_number": text or None}
+        if text == "":
+            return None
+        return {"phone_number": text}
     if notion_type == "checkbox":
         from connectors.sql_bind import coerce_boolean_wire
 
@@ -268,9 +275,13 @@ def _as_property_value(
             )
         return {"checkbox": coerced}
     if notion_type == "select":
-        return {"select": {"name": text} if text else None}
+        if text == "":
+            return None
+        return {"select": {"name": text}}
     if notion_type == "status":
-        return {"status": {"name": text} if text else None}
+        if text == "":
+            return None
+        return {"status": {"name": text}}
     if notion_type == "multi_select":
         # Accept CSV or semicolon (warehouse SET / HubSpot-class multi-select).
         import re as _re
@@ -282,9 +293,10 @@ def _as_property_value(
         ]
         return {"multi_select": names}
     if notion_type == "date":
-        if text:
-            return {"date": {"start": text}}
-        return {"date": None}
+        if not text:
+            # Omit empty — never {"date": null} wipe.
+            return None
+        return {"date": {"start": text}}
     if notion_type == "relation":
         ids = [_page_id(v) for v in text.split(",") if v.strip()]
         return {"relation": [{"id": i} for i in ids if i]}

@@ -2895,7 +2895,9 @@ def fits_integer(value: Any, type_str: str) -> bool:
         try:
             text = str(value).strip()
             if not text:
-                return True
+                # Empty ≠ natural NULL on INTEGER — bind must not invent NULL;
+                # quarantine_unfit_integers / bind quarantine hold the row out.
+                return False
             n = int(Decimal(text))
         except (InvalidOperation, ValueError, TypeError, OverflowError):
             # Non-numeric — leave for type coercion / other quarantine paths.
@@ -2970,6 +2972,80 @@ def quarantine_unfit_integers(
             else:
                 hold_out = True
                 break
+        if hold_out:
+            continue
+        out.append(tuple(cells))
+    return out
+
+
+def bind_sql_mapped_rows_with_quarantine(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    engine: str,
+    dialect_label: str = "SQL",
+    mappings: list[dict[str, Any]] | None = None,
+) -> list[tuple]:
+    """Bind cells via ``normalize_sql_bind_value``; quarantine refusals (no crash invent).
+
+    Physical DDL can be INT/FLOAT/DECIMAL after Map stamped VARCHAR — empty ``\"\"``
+    must not become SQL NULL on upsert (destination wipe). Raise from sql_bind is
+    held out / STOP_COLUMN under quarantine|fail; ``coerce_null`` (gated) keeps NULL.
+    """
+    from connectors.sql_bind import normalize_sql_bind_value
+    from services.value_serializer import (
+        DF_MISSING_SENTINEL,
+        cell_to_string,
+        is_missing_sentinel,
+    )
+
+    if not mapped_rows:
+        return mapped_rows
+
+    out: list[tuple] = []
+    for row_idx, row in enumerate(mapped_rows):
+        cells = list(row)
+        hold_out = False
+        for idx in range(len(cells)):
+            val = cells[idx]
+            if val is None or is_missing_sentinel(val):
+                continue
+            ddl = target_types[idx] if idx < len(target_types) else ""
+            if not ddl:
+                continue
+            try:
+                cells[idx] = normalize_sql_bind_value(val, ddl, engine=engine)
+            except ValueError as exc:
+                sample = cell_to_string(val)[:120]
+                col = target_cols[idx] if idx < len(target_cols) else f"col_{idx}"
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": row_idx + 1,
+                        "column": col,
+                        "target": col,
+                        "value": sample,
+                        "reason": (
+                            f"{dialect_label} bind refused {sample!r} for {ddl}: {exc} "
+                            "— quarantined (refuse silent NULL invent)"
+                        ),
+                        "policy": (
+                            "coerce_null" if policy == "coerce_null" else "write_quarantine"
+                        ),
+                        "chars": [],
+                    },
+                    mapped_row=cells,
+                    target_cols=target_cols,
+                    mappings=mappings,
+                )
+                if policy == "coerce_null":
+                    cells[idx] = DF_MISSING_SENTINEL
+                else:
+                    hold_out = True
+                    break
         if hold_out:
             continue
         out.append(tuple(cells))

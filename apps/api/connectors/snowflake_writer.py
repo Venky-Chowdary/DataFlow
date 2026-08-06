@@ -270,7 +270,12 @@ def _format_write_error(exc: BaseException) -> str:
 
 def _bind_rows_for_snowflake(
     mapped_rows: list[tuple],
+    target_cols: list[str],
     target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    mappings: list[dict[str, Any]] | None = None,
 ) -> list[tuple]:
     """Normalize every cell with shared sql_bind before COPY / INSERT / MERGE.
 
@@ -279,22 +284,24 @@ def _bind_rows_for_snowflake(
 
     Dense load only — callers must route sparse CDC rows to omit-from-SET upsert.
     ``DF_MISSING`` becomes SQL NULL so BOOL/NUMBER never see the sentinel string.
+    Empty NUMBER/FLOAT must quarantine — never invent SQL NULL on upsert wipe.
     """
-    from connectors.sql_bind import normalize_sql_bind_value
-    from connectors.writer_common import materialize_missing_as_null_for_dense_write
+    from connectors.writer_common import (
+        bind_sql_mapped_rows_with_quarantine,
+        materialize_missing_as_null_for_dense_write,
+    )
 
     mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
-    bound: list[tuple] = []
-    for row in mapped_rows:
-        converted: list[Any] = []
-        for v, t in zip(row, target_types):
-            ddl = (t or "VARCHAR").strip() or "VARCHAR"
-            converted.append(normalize_sql_bind_value(v, ddl, engine="snowflake"))
-        # Preserve trailing columns if types list is shorter (defensive).
-        if len(row) > len(target_types):
-            converted.extend(row[len(target_types) :])
-        bound.append(tuple(converted))
-    return bound
+    return bind_sql_mapped_rows_with_quarantine(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        engine="snowflake",
+        dialect_label="Snowflake",
+        mappings=mappings,
+    )
 
 
 def _write_temp_csv(
@@ -503,13 +510,24 @@ def _load_rows_into_table(
     *,
     prefer_copy: bool,
     conn: Any,
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
+    mappings: list[dict[str, Any]] | None = None,
 ) -> str:
     """Load rows into ``table_name`` via COPY INTO when possible; else INSERT.
 
     Returns the load method used: ``copy_into`` or ``insert``.
     """
     # Bind once for all load paths (COPY, plain INSERT, JSON INSERT).
-    mapped_rows = _bind_rows_for_snowflake(mapped_rows, target_types)
+    details = rejected_details if rejected_details is not None else []
+    mapped_rows = _bind_rows_for_snowflake(
+        mapped_rows,
+        target_cols,
+        target_types,
+        details,
+        policy,
+        mappings=mappings,
+    )
     total = len(mapped_rows)
     use_copy = (
         prefer_copy and total >= COPY_THRESHOLD and not _is_fakesnow_connection(conn)
@@ -558,6 +576,9 @@ def _merge_batch_via_temp(
     *,
     prefer_copy: bool,
     conn: Any,
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
+    mappings: list[dict[str, Any]] | None = None,
 ) -> int:
     """Stage the batch into a temp table, then run a single MERGE into the target."""
     if not mapped_rows:
@@ -579,6 +600,9 @@ def _merge_batch_via_temp(
             mapped_rows,
             prefer_copy=prefer_copy,
             conn=conn,
+            rejected_details=rejected_details,
+            policy=policy,
+            mappings=mappings,
         )
         on_clause = null_safe_merge_on(
             conflict,
@@ -1174,6 +1198,9 @@ def write_mapped_rows(
                     conflict,
                     prefer_copy=True,
                     conn=conn,
+                    rejected_details=rejected_details,
+                    policy=policy,
+                    mappings=mappings,
                 )
                 if on_checkpoint:
                     on_checkpoint(1, 1, written)
@@ -1188,6 +1215,9 @@ def write_mapped_rows(
                     mapped_rows,
                     prefer_copy=True,
                     conn=conn,
+                    rejected_details=rejected_details,
+                    policy=policy,
+                    mappings=mappings,
                 )
                 written = total
                 if on_checkpoint:

@@ -37,9 +37,10 @@ def test_coerce_decimal_refuse_bool_nan_empty():
 
     with pytest.raises(ValueError, match="refuse invent"):
         coerce_decimal_wire(True)
-    with pytest.raises(ValueError, match="NaN|non-finite|parse failed"):
+    with pytest.raises(ValueError, match="NaN|non-finite|parse failed|refuse"):
         coerce_decimal_wire(float("nan"))
-    assert coerce_decimal_wire("  ") is None
+    with pytest.raises(ValueError, match="refuse silent NULL invent|empty string cannot coerce"):
+        coerce_decimal_wire("  ")
     assert coerce_decimal_wire(None) is None
 
 

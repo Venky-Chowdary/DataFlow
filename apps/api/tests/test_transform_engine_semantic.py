@@ -69,7 +69,9 @@ def test_apply_transform_postal():
 
 
 def test_infer_transform_chooses_phone_for_string_target():
-    assert infer_transform_for_mapping("phone_number", "phone_number", "VARCHAR", "VARCHAR") == "phone"
+    # TEXT/VARCHAR sinks must not invent phone/url/email pipelines — remap or
+    # explicit Map stamp only (parity with image→TEXT empty-url honesty).
+    assert infer_transform_for_mapping("phone_number", "phone_number", "VARCHAR", "VARCHAR") == "none"
 
 
 def test_infer_transform_preserves_currency_for_string_target():

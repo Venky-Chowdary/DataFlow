@@ -160,3 +160,21 @@ def test_notion_writer_skips_read_only_property():
 
     assert result.ok
     assert "read-only" in " ".join(result.warnings).lower()
+
+
+def test_notion_empty_url_email_phone_date_omit_not_null_wipe():
+    """Empty url/email/phone/select/status/date must omit — never JSON null wipe."""
+    from connectors.notion_writer import _as_property_value
+
+    warnings: list[str] = []
+    assert _as_property_value("", "url", "Link", warnings, 1) is None
+    assert _as_property_value("", "email", "Email", warnings, 1) is None
+    assert _as_property_value("", "phone_number", "Phone", warnings, 1) is None
+    assert _as_property_value("", "select", "Status", warnings, 1) is None
+    assert _as_property_value("", "status", "Status", warnings, 1) is None
+    assert _as_property_value("", "date", "When", warnings, 1) is None
+    assert _as_property_value("", "number", "Price", warnings, 1) is None
+    # Non-empty still binds.
+    assert _as_property_value("https://x.test", "url", "Link", warnings, 1) == {
+        "url": "https://x.test"
+    }

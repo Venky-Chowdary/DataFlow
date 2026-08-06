@@ -4312,32 +4312,120 @@ def write_mapped_rows(
     }
 
     converted_rows: list[dict] = []
-    for row in mapped_rows:
-        converted_rows.append(
-            {
-                target_cols[i]: _to_sa_value(
+    for row_idx, row in enumerate(mapped_rows):
+        cells: dict[str, Any] = {}
+        hold_out = False
+        for i in range(len(target_cols)):
+            col = target_cols[i]
+            try:
+                cells[col] = _to_sa_value(
                     row[i],
-                    target_column_types.get(target_cols[i], "string"),
-                    sa_col_types.get(target_cols[i]),
+                    target_column_types.get(col, "string"),
+                    sa_col_types.get(col),
                     dialect_name,
                     cfg.get("type", ""),
                 )
-                for i in range(len(target_cols))
-            }
-        )
+            except ValueError as exc:
+                from connectors.writer_common import append_write_quarantine_detail
+                from services.value_serializer import cell_to_string
+
+                sample = cell_to_string(row[i])[:120]
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": row_idx + 1,
+                        "column": col,
+                        "target": col,
+                        "value": sample,
+                        "reason": (
+                            f"generic SQL bind refused {sample!r}: {exc} "
+                            "— quarantined (refuse silent NULL invent)"
+                        ),
+                        "policy": (
+                            "coerce_null" if policy == "coerce_null" else "write_quarantine"
+                        ),
+                        "chars": [],
+                    },
+                    mapped_row=row,
+                    target_cols=target_cols,
+                    mappings=mappings,
+                )
+                if policy == "coerce_null":
+                    cells[col] = None
+                else:
+                    hold_out = True
+                    break
+        if hold_out:
+            continue
+        converted_rows.append(cells)
     sparse_converted: list[dict] = []
-    for row in sparse_rows:
-        sparse_converted.append(
-            {
-                target_cols[i]: _to_sa_value(
+    for row_idx, row in enumerate(sparse_rows):
+        cells = {}
+        hold_out = False
+        for i in range(len(target_cols)):
+            col = target_cols[i]
+            try:
+                cells[col] = _to_sa_value(
                     row[i],
-                    target_column_types.get(target_cols[i], "string"),
-                    sa_col_types.get(target_cols[i]),
+                    target_column_types.get(col, "string"),
+                    sa_col_types.get(col),
                     dialect_name,
                     cfg.get("type", ""),
                 )
-                for i in range(len(target_cols))
-            }
+            except ValueError as exc:
+                from connectors.writer_common import append_write_quarantine_detail
+                from services.value_serializer import cell_to_string
+
+                sample = cell_to_string(row[i])[:120]
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": row_idx + 1,
+                        "column": col,
+                        "target": col,
+                        "value": sample,
+                        "reason": (
+                            f"generic SQL bind refused {sample!r}: {exc} "
+                            "— quarantined (refuse silent NULL invent)"
+                        ),
+                        "policy": (
+                            "coerce_null" if policy == "coerce_null" else "write_quarantine"
+                        ),
+                        "chars": [],
+                    },
+                    mapped_row=row,
+                    target_cols=target_cols,
+                    mappings=mappings,
+                )
+                if policy == "coerce_null":
+                    from services.value_serializer import DF_MISSING_SENTINEL
+
+                    # Sparse CDC: omit from SET — never invent col=NULL wipe.
+                    cells[col] = DF_MISSING_SENTINEL
+                else:
+                    hold_out = True
+                    break
+        if hold_out:
+            continue
+        sparse_converted.append(cells)
+
+    _bind_abort = reject_on_strict_policy(
+        policy, rejected_details, "SQL", transform_errors
+    )
+    if _bind_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or database,
+            checksum="",
+            chunks_completed=0,
+            error=_bind_abort,
+            rejected_rows=_rejected_row_count(
+                data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+            ),
+            rejected_details=rejected_details,
+            warnings=transform_errors,
         )
 
     written = 0

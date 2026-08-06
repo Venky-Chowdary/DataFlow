@@ -25,3 +25,51 @@ def test_postgres_bind_keeps_empty_string():
 
 def test_oracle_bind_nonempty_passthrough():
     assert normalize_sql_bind_value("hi", "VARCHAR2(10)", engine="oracle") == "hi"
+
+
+def test_numeric_bind_refuses_empty_null_invent():
+    """INT/FLOAT/DECIMAL empty must raise — never invent SQL NULL (upsert wipe)."""
+    import pytest
+    from connectors.sql_bind import (
+        coerce_decimal_wire,
+        coerce_float_wire,
+        coerce_integer_wire,
+    )
+
+    for ddl in ("INTEGER", "INT", "BIGINT", "SMALLINT"):
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            normalize_sql_bind_value("", ddl, engine="postgresql")
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            normalize_sql_bind_value("  ", ddl, engine="mysql")
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            coerce_integer_wire("", ddl_type=ddl)
+
+    for ddl in ("FLOAT", "DOUBLE", "REAL", "DOUBLE PRECISION"):
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            normalize_sql_bind_value("", ddl, engine="postgresql")
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            coerce_float_wire("", ddl_type=ddl)
+
+    for ddl in ("DECIMAL", "DECIMAL(10,2)", "NUMERIC(8,2)"):
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            normalize_sql_bind_value("", ddl, engine="mysql")
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            coerce_decimal_wire("", ddl_type=ddl)
+
+
+def test_bind_sql_mapped_rows_quarantines_empty_integer():
+    from connectors.writer_common import bind_sql_mapped_rows_with_quarantine
+
+    details: list[dict] = []
+    out = bind_sql_mapped_rows_with_quarantine(
+        [("", "ok"), ("30", "ok")],
+        ["age", "name"],
+        ["INTEGER", "VARCHAR"],
+        details,
+        "quarantine",
+        engine="postgresql",
+        dialect_label="PostgreSQL",
+    )
+    assert out == [(30, "ok")]
+    assert details
+    assert any("refuse silent NULL invent" in str(d.get("reason") or "") for d in details)
