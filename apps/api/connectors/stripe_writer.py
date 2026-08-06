@@ -197,6 +197,8 @@ def write_mapped_rows(
         )
 
         if mode in upsert_modes and not record_id:
+            from connectors.writer_common import quarantine_cell_wire
+
             detail = {
                 "row": i + 1,
                 "column": "id",
@@ -205,7 +207,10 @@ def write_mapped_rows(
                     "refuse inventing default id / create invent "
                     "(would duplicate customers/objects on retry)"
                 ),
-                "values": {k: str(v)[:80] for k, v in list(payload.items())[:8]},
+                "values": {
+                    k: quarantine_cell_wire(v)[:80]
+                    for k, v in list(payload.items())[:8]
+                },
                 "policy": "write_fail" if policy == "fail" else "write_quarantine",
             }
             all_rejected.append(detail)

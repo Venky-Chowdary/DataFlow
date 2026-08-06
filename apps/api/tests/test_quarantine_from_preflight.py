@@ -200,3 +200,32 @@ def test_objectid_lossy_string_fills_column_and_dedupes_integrity():
     assert rows[0]["target"] == "user_id"
     assert "specialty polarity" in rows[0]["reason"].lower()
     assert rows[0]["suggested_transform"] is None
+
+
+def test_preflight_quarantine_preserves_sql_null_not_empty():
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    pf = {
+        "passed": False,
+        "gates": [
+            {
+                "id": "g5_dry_run",
+                "status": "block",
+                "details": {
+                    "encoding_issues": [
+                        {
+                            "column": "note",
+                            "row": 1,
+                            "message": "null sample integrity",
+                            "sample": None,
+                        }
+                    ],
+                },
+            }
+        ],
+        "blockers": [],
+    }
+    rows = quarantine_rows_from_preflight(pf)
+    assert rows
+    assert rows[0]["value"] == SQL_NULL_SENTINEL
+    assert rows[0]["values"]["note"] == SQL_NULL_SENTINEL

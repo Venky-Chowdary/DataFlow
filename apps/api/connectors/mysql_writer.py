@@ -621,6 +621,7 @@ def write_mapped_rows(
             table_existed=table_existed,
             physical=physical,
             dialect_label="MySQL",
+            target_cols=target_cols,
         )
         if overlay_err:
             raise RuntimeError(overlay_err)

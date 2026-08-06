@@ -384,7 +384,6 @@ def analyze_coercion(
         }
         use_specialty_wire = bool(
             specialty_base
-            and specialty_base not in {"CITEXT", "TSVECTOR"}
             and dest_l
             in {
                 "mysql",

@@ -289,7 +289,7 @@ def test_resolve_target_columns_new_table_honors_explicit_boolean_despite_enums(
 
 
 def test_resolve_target_columns_existing_table_keeps_proposed_when_no_widen_flag():
-    """When table_exists is not False, do not force widen (existing dest types win via dest_types)."""
+    """When table_exists and no live dest_types, Map stamp stays (no invent widen)."""
     mappings = [{"source": "status", "target": "status", "target_type": "BOOLEAN"}]
     cols, types = resolve_target_columns(
         mappings,
@@ -298,6 +298,17 @@ def test_resolve_target_columns_existing_table_keeps_proposed_when_no_widen_flag
         table_exists=True,
     )
     assert dict(zip(cols, types))["status"] == "BOOLEAN"
+
+
+def test_resolve_target_columns_existing_live_beats_map_stamp():
+    mappings = [{"source": "status", "target": "status", "target_type": "BOOLEAN"}]
+    cols, types = resolve_target_columns(
+        mappings,
+        {"status": "VARCHAR"},
+        dest_types={"status": "VARCHAR"},
+        table_exists=True,
+    )
+    assert dict(zip(cols, types))["status"] == "VARCHAR"
 
 
 def test_coercion_marks_existing_boolean_status_as_destination_exists():

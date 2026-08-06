@@ -418,6 +418,39 @@ def test_require_physical_types_fails_closed_for_existing():
         table_existed=True, physical={}, dialect_label="Snowflake"
     )
     assert err and "refuse silent Map VARCHAR bind" in err
+    partial = require_physical_types_for_existing_table(
+        table_existed=True,
+        physical={"id": "INT"},
+        target_cols=["id", "created"],
+        dialect_label="PostgreSQL",
+    )
+    assert partial and "created" in partial
+
+
+def test_resolve_target_columns_existing_prefers_live_dest_types():
+    """Existing table + live dest_types must beat Map stamp (Validate live-first)."""
+    from connectors.writer_common import resolve_target_columns
+
+    cols, types = resolve_target_columns(
+        [{"source": "status", "target": "status", "target_type": "BOOLEAN"}],
+        {"status": "VARCHAR"},
+        dest_types={"status": "VARCHAR"},
+        table_exists=True,
+    )
+    assert dict(zip(cols, types))["status"] == "VARCHAR"
+
+
+def test_overlay_typed_physical_beats_map_decimal_over_int():
+    from connectors.writer_common import overlay_physical_bind_types
+
+    out = overlay_physical_bind_types(
+        ["age", "flag", "amt"],
+        ["DECIMAL(10,2)", "INTEGER", "VARCHAR"],
+        {"age": "INTEGER", "flag": "BOOLEAN", "amt": "MONEY"},
+    )
+    assert "INT" in out[0].upper()
+    assert "BOOL" in out[1].upper() or "BIT" in out[1].upper()
+    assert "MONEY" in out[2].upper()
 
 
 def test_clickhouse_hydrate_unknown_pk_quarantines():

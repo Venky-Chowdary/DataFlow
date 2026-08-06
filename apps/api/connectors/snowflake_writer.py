@@ -1265,6 +1265,7 @@ def write_mapped_rows(
                     table_existed=table_existed,
                     physical=physical,
                     dialect_label="Snowflake",
+                    target_cols=target_cols,
                 )
                 if overlay_err:
                     return WriteResult(
@@ -1355,6 +1356,7 @@ def write_mapped_rows(
                     table_existed=table_existed,
                     physical=physical,
                     dialect_label="Snowflake",
+                    target_cols=target_cols,
                 )
                 if overlay_err:
                     return WriteResult(

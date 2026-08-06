@@ -191,7 +191,12 @@ def append_write_quarantine_detail(
     d = dict(detail)
     # Normalize the fault-cell sample so replay overwrite cannot re-invent "".
     d["value"] = quarantine_cell_wire(d.get("value"))
-    if not (isinstance(d.get("values"), dict) and d["values"]):
+    if isinstance(d.get("values"), dict) and d["values"]:
+        # SaaS writers pre-stamp payloads — re-wire so None≠"" / "None" invent.
+        d["values"] = {
+            str(k): quarantine_cell_wire(v) for k, v in d["values"].items()
+        }
+    else:
         d["values"] = mapped_row_quarantine_values(mapped_row, target_cols)
     if not (isinstance(d.get("source_values"), dict) and d["source_values"]):
         maps = mappings if mappings is not None else _active_quarantine_mappings.get()
@@ -199,6 +204,10 @@ def append_write_quarantine_detail(
             src = project_quarantine_source_values(d["values"], maps)
             if src:
                 d["source_values"] = src
+    elif isinstance(d.get("source_values"), dict):
+        d["source_values"] = {
+            str(k): quarantine_cell_wire(v) for k, v in d["source_values"].items()
+        }
     try:
         from services.quarantine_row_contract import normalize_quarantine_row
 
@@ -2093,11 +2102,11 @@ def resolve_target_columns(
 ) -> tuple[list[str], list[str]]:
     """Return target column names and their intended logical target types.
 
-    Prefers an explicit ``target_type`` on each mapping, then ``dest_types``,
-    then the source logical type, and finally ``VARCHAR``.
+    Prefers live ``dest_types`` on existing tables (table_exists is not False),
+    then explicit Map ``target_type``, then source logical type, then ``VARCHAR``.
 
-    Explicit Map ``target_type`` is always preserved (Map≡CREATE) — unfit values
-    quarantine on write instead of rewriting approved DDL.
+    Create-new (``table_exists is False``): Map ``target_type`` is preserved
+    (Map≡CREATE) — unfit values quarantine on write instead of rewriting DDL.
 
     Enterprise GA: create-new without an explicit Map ``target_type`` must **not**
     invent BOOLEAN/INTEGER/DECIMAL from head samples. Keep the source/carrier
@@ -2108,6 +2117,7 @@ def resolve_target_columns(
     target_cols: list[str] = []
     target_types: list[str] = []
     samples = sample_values_by_source or {}
+    live = dest_types or {}
     for m in mappings:
         try:
             from services.mapping_constraints import is_intentional_omit
@@ -2121,11 +2131,22 @@ def resolve_target_columns(
         if tgt not in target_cols:
             target_cols.append(tgt)
             explicit_target = bool(m.get("target_type"))
-            proposed = (
-                m.get("target_type")
-                or (dest_types or {}).get(tgt)
-                or column_types.get(m["source"], "VARCHAR")
+            live_hit = (
+                live.get(tgt)
+                or live.get(str(tgt).lower())
+                or live.get(str(tgt).upper())
             )
+            # Existing table: live DDL beats Map stamp (same honesty as
+            # resolve_mapping_dest_types / Validate live-first). Create-new and
+            # missing live keep Map≡CREATE / source proposal.
+            if table_exists is not False and live_hit:
+                proposed = live_hit
+            else:
+                proposed = (
+                    m.get("target_type")
+                    or live_hit
+                    or column_types.get(m["source"], "VARCHAR")
+                )
             src = str(m.get("source") or "")
             src_type = column_types.get(src) or m.get("source_type")
             if table_exists is False:
@@ -4295,11 +4316,11 @@ def overlay_physical_bind_types(
     never survive as VARCHAR and invent NULL on upsert wipe (MySQL/Snowflake
     parity). Temporal physical types always win. Specialty physical (HSTORE,
     OID, POINT, INET, …) always wins — Map JSON/INTEGER/GEOGRAPHY must not
-    invent wrong bind polarity over live specialty. Numeric/bool/JSON promote
-    only when the Map carrier is string-like.
+    invent wrong bind polarity over live specialty. Typed physical (INT/BOOL/
+    DECIMAL/JSON/…) always wins over Map stamps on existing tables.
     """
     from connectors.sql_temporal import is_temporal_ddl, sql_base_type
-    from services.type_system import normalize_logical_type, specialty_carrier_base
+    from services.type_system import specialty_carrier_base
 
     if not physical:
         return list(target_types)
@@ -4331,6 +4352,10 @@ def overlay_physical_bind_types(
         "JSONB",
         "UUID",
         "UNIQUEIDENTIFIER",
+        "MONEY",
+        "SMALLMONEY",
+        "CURRENCY",
+        "BIGNUMERIC",
     }
     temporal_extra = {
         "DATE",
@@ -4352,13 +4377,14 @@ def overlay_physical_bind_types(
         if not phys:
             continue
         phys_base = sql_base_type(phys)
-        map_logical = normalize_logical_type(out[i] if i < len(out) else "")
         if is_temporal_ddl(phys_base) or phys_base in temporal_extra:
             out[i] = phys
         elif specialty_carrier_base(phys):
             # Live HSTORE/OID/POINT/INET/… beat Map JSON/INTEGER/GEOGRAPHY stamps.
             out[i] = phys
-        elif map_logical in {"string", "text", "varchar", ""} and phys_base in typed_bases:
+        elif phys_base in typed_bases:
+            # Live typed physical beats Map DECIMAL≠INT / BOOL≠INT invent,
+            # and Map VARCHAR → DATE/INT/BOOL (empty→NULL refuse path).
             out[i] = phys
     return out
 
@@ -4483,19 +4509,40 @@ def require_physical_types_for_existing_table(
     table_existed: bool,
     physical: dict[str, str] | None,
     dialect_label: str = "destination",
+    target_cols: list[str] | None = None,
 ) -> str | None:
-    """Error message when an existing table yields empty physical DDL introspect.
+    """Error when an existing table yields empty or incomplete physical DDL.
 
     Map VARCHAR bind without live types invents NULL on typed sinks — refuse.
+    Partial introspect (some cols missing) leaves Map stamps on those cols —
+    refuse so overlay cannot soft-green empties into live DATE/INT.
     New / create-new tables may pass empty physical (Map stamps are physical).
     """
     if not table_existed:
         return None
-    if physical:
-        return None
     label = (dialect_label or "destination").strip() or "destination"
-    return (
-        f"{label} physical DDL introspection returned empty for an existing "
-        "table — refuse silent Map VARCHAR bind (empty→NULL invent risk). "
-        "Re-check grants / information_schema visibility and retry."
-    )
+    if not physical:
+        return (
+            f"{label} physical DDL introspection returned empty for an existing "
+            "table — refuse silent Map VARCHAR bind (empty→NULL invent risk). "
+            "Re-check grants / information_schema visibility and retry."
+        )
+    if target_cols:
+        missing = [
+            c
+            for c in target_cols
+            if not (
+                physical.get(c)
+                or physical.get(str(c).lower())
+                or physical.get(str(c).upper())
+            )
+        ]
+        if missing:
+            sample = ", ".join(missing[:12])
+            more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+            return (
+                f"{label} physical DDL missing for mapped column(s) "
+                f"{sample}{more} — refuse silent Map stamp bind on an existing "
+                "table (empty→NULL invent risk). Re-introspect or remap."
+            )
+    return None

@@ -1397,6 +1397,7 @@ def write_mapped_rows(
                 table_existed=table_existed,
                 physical=physical,
                 dialect_label="PostgreSQL" if port != 5439 else "Redshift",
+                target_cols=target_cols,
             )
             if overlay_err:
                 return WriteResult(

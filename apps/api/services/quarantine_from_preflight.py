@@ -135,6 +135,8 @@ def _pair_key(issue: dict[str, Any]) -> tuple[str, str, str]:
 
 def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Return rejected_details-shaped rows for Inspect Quarantine."""
+    from connectors.writer_common import quarantine_cell_wire
+
     issues = _collect_issue_lists(preflight)
     rows: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -181,11 +183,12 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
                 suggested_transform = "strip_controls"
             else:
                 suggested_transform = None
+        wired = quarantine_cell_wire(value)
         detail: dict[str, Any] = {
             "row": row_i,
             "column": column or None,
             "target": target or column or None,
-            "value": "" if value is None else str(value)[:500],
+            "value": wired[:500],
             "reason": reason[:500],
             "policy": "preflight_quarantine",
             "chars": issue.get("chars"),
@@ -195,8 +198,8 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
             "source_type": issue.get("source_type"),
             "target_type": issue.get("target_type"),
         }
-        if column and value is not None:
-            detail["values"] = {column: str(value)[:500]}
+        if column:
+            detail["values"] = {column: wired}
         rows.append(detail)
         if len(rows) >= 200:
             break
