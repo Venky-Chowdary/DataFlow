@@ -1855,7 +1855,10 @@ def coerce_array_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> An
     if isinstance(value, str):
         text = value.strip()
         if not text:
-            return None
+            raise ValueError(
+                "empty string cannot coerce to ARRAY — "
+                "refuse silent NULL invent (quarantine or remap upstream)"
+            )
         if text.startswith("[") and text.endswith("]"):
             try:
                 parsed = json.loads(text)
@@ -1908,7 +1911,10 @@ def coerce_struct_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> A
     if isinstance(value, str):
         text = value.strip()
         if not text:
-            return None
+            raise ValueError(
+                "empty string cannot coerce to STRUCT — "
+                "refuse silent NULL invent (quarantine or remap upstream)"
+            )
         if text.startswith("{") and text.endswith("}"):
             try:
                 parsed = json.loads(text)
@@ -1966,7 +1972,10 @@ def coerce_map_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> Any:
     if isinstance(value, str):
         text = value.strip()
         if not text:
-            return None
+            raise ValueError(
+                "empty string cannot coerce to MAP — "
+                "refuse silent NULL invent (quarantine or remap upstream)"
+            )
         if text.startswith("{") and text.endswith("}"):
             try:
                 parsed = json.loads(text)

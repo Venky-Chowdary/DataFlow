@@ -66,6 +66,13 @@ def test_numeric_bind_refuses_empty_null_invent():
         coerce_year_wire("")
     with pytest.raises(ValueError, match="refuse silent NULL invent"):
         coerce_inet_wire("")
+    for coerce, label in (
+        (lambda: normalize_sql_bind_value("", "TEXT[]", engine="postgresql"), "ARRAY"),
+        (lambda: normalize_sql_bind_value("", "STRUCT<a:INT>", engine="bigquery"), "STRUCT"),
+        (lambda: normalize_sql_bind_value("", "MAP<STRING,STRING>", engine="spark"), "MAP"),
+    ):
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            coerce()
     # CITEXT keeps empty string (VARCHAR-class).
     assert coerce_citext_wire("") == ""
 
