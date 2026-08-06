@@ -7922,21 +7922,21 @@ def assess_create_new_type_risk(
     if is_precision_collapse_coercion(src, tgt, dest_db=db):
         risks.append({
             "kind": "precision_collapse",
-            "severity": "warn",
+            "severity": "block",
             "message": (
                 f"Create-new {src} → {tgt} collapses precision"
                 + (f" on {db}" if db else "")
-                + ". Review before execute."
+                + ". Remap or Accept · Risk Contract before Execute."
             ),
         })
     elif is_lossy_coercion(src, tgt, dest_db=db):
         risks.append({
             "kind": "lossy_coercion",
-            "severity": "warn",
+            "severity": "block",
             "message": (
                 f"Create-new {src} → {tgt} may lose information"
                 + (f" on {db}" if db else "")
-                + "."
+                + ". Remap or Accept · Risk Contract before Execute."
             ),
         })
 
@@ -7950,20 +7950,30 @@ def assess_create_new_type_risk(
         "redshift": 65535,
         "mysql": 16383,  # utf8mb4 InnoDB row practical ceiling for VARCHAR
     }.get(db)
-    if dialect_cap and (src_w or 0) > dialect_cap and (not tgt_w or tgt_w >= dialect_cap):
+    # Unbounded TEXT/CLOB/MAX is the honest create-new escape — no width-cap chip.
+    tgt_unlimited = is_unlimited_string_carrier(tgt)
+    if (
+        dialect_cap
+        and (src_w or 0) > dialect_cap
+        and not tgt_unlimited
+        and (tgt_w is not None and tgt_w <= dialect_cap)
+    ):
         risks.append({
             "kind": "varchar_width_cap",
-            "severity": "warn",
+            "severity": "block",
             "message": (
-                f"Source width {src_w} exceeds {db} VARCHAR capacity (~{dialect_cap}). "
-                "Create-new may truncate unless you use CLOB/TEXT."
+                f"Source width {src_w} exceeds {db} VARCHAR capacity (~{dialect_cap}) "
+                f"and create-new stamped bounded {tgt}. Use CLOB/TEXT/MAX or Accept · Risk Contract."
             ),
         })
     if src_w and tgt_w and tgt_w < src_w:
         risks.append({
             "kind": "varchar_narrow",
-            "severity": "warn",
-            "message": f"Create-new narrows VARCHAR({src_w}) → VARCHAR({tgt_w}).",
+            "severity": "block",
+            "message": (
+                f"Create-new narrows VARCHAR({src_w}) → VARCHAR({tgt_w}). "
+                "Widen DDL or Accept · Risk Contract before Execute."
+            ),
         })
 
     if is_timezone_polarity_loss(src, tgt, dest_db=db) or time_timezone_polarity_loss(src, tgt):

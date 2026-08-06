@@ -296,8 +296,12 @@ def prepare_scd2_mapped_rows(
     policy blocks a partial history write.
     """
     from connectors.writer_common import (
+        apply_write_quarantine_matrix,
         build_mapped_rows_with_details,
+        materialize_missing_as_null_for_dense_write,
         reject_on_strict_policy,
+        sanitize_identifier,
+        transform_error_policy,
         transform_error_policy_for_validation_mode,
     )
     from src.transfer.adapters import records_to_matrix
@@ -313,7 +317,19 @@ def prepare_scd2_mapped_rows(
     target_cols = _target_columns(columns, mappings)
     effective_mappings = mappings or [{"source": c, "target": c} for c in columns]
     dest_types = {c: (schema or {}).get(c, "string") for c in target_cols}
+    # Prefer Map target_type stamps when present (DECIMAL(p,s) / VARCHAR(n)).
+    # Stamp under sanitized target names — same key space as target_cols / quarantine.
+    for m in effective_mappings:
+        tgt_raw = str(m.get("target") or "").strip()
+        stamped = str(m.get("target_type") or m.get("dest_type") or "").strip()
+        if not tgt_raw or not stamped:
+            continue
+        tgt = sanitize_identifier(tgt_raw, preserve_case=True)
+        dest_types[tgt] = stamped
+        if tgt_raw != tgt:
+            dest_types.pop(tgt_raw, None)
     error_policy = transform_error_policy_for_validation_mode(validation_mode)
+    dest_kind = resolve_driver_type(getattr(endpoint, "format", "") or "")
 
     _, data_rows = records_to_matrix(records, columns)
     mapped_tuples, transform_errors, rejected_details = build_mapped_rows_with_details(
@@ -325,9 +341,25 @@ def prepare_scd2_mapped_rows(
         dest_types=dest_types,
         error_policy=error_policy,
         preserve_case=True,
-        dest_kind=resolve_driver_type(getattr(endpoint, "format", "") or ""),
+        dest_kind=dest_kind,
         destination_pk_columns=list(pk_columns),
     )
+    # Same write-quarantine matrix as typed SQL writers — SCD2 history must not
+    # absorb VARCHAR/DECIMAL/temporal overflow that preflight samples missed.
+    target_types = [str(dest_types.get(c) or "") for c in target_cols]
+    if mapped_tuples and any(t.strip() for t in target_types):
+        policy = transform_error_policy(error_policy)
+        mapped_tuples = apply_write_quarantine_matrix(
+            mapped_tuples,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=(dest_kind or "SCD2").strip() or "SCD2",
+            mappings=list(effective_mappings) or None,
+        )
+    # Dense history INSERT — STOP_COLUMN DF_MISSING → NULL (never leak sentinel).
+    mapped_tuples = materialize_missing_as_null_for_dense_write(mapped_tuples)
     abort = reject_on_strict_policy(error_policy, rejected_details, "SCD2")
     if abort:
         return {

@@ -78,7 +78,8 @@ def test_uuid_create_new_string_sink_stamps_domain_risk():
     from services.type_system import assess_create_new_type_risk, create_new_mapping_target_type
 
     stamp = create_new_mapping_target_type("UUID", "bigquery")
-    assert stamp == "STRING"
+    # Width-preserving STRING(36) or bare STRING — both are string sinks.
+    assert stamp.upper().startswith("STRING")
     kinds = {r["kind"] for r in assess_create_new_type_risk("UUID", stamp, destination_db_type="bigquery")}
     assert "uuid_domain" in kinds or "precision_collapse" in kinds or "lossy_coercion" in kinds
 

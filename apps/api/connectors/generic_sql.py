@@ -4026,6 +4026,29 @@ def write_mapped_rows(
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
 
+    # SQL Server writes must fail closed on ANSI_WARNINGS — engine connect soft-applies
+    # for introspect; re-assert require=True on the write connection.
+    dest_for_guards = str(cfg.get("type") or type or "").lower()
+    if dest_for_guards in {
+        "mssql",
+        "sql_server",
+        "sqlserver",
+        "microsoft_sql_server",
+        "azure_sql_database",
+        "amazon_rds_sql_server",
+        "google_cloud_sql_sql_server",
+        "synapse_analytics",
+        "azure_synapse_dedicated",
+        "azure_synapse_serverless",
+    }:
+        from connectors.write_resilience import apply_mssql_session_guards
+
+        with engine.connect() as _guard_conn:
+            apply_mssql_session_guards(
+                getattr(_guard_conn, "connection", None) or _guard_conn,
+                require_ansi_warnings=True,
+            )
+
     # Durable chunk ledger: without it, a transient failure after chunk k
     # committed makes the outer retry re-run this write from chunk 0 and
     # duplicate every already-landed row. Only meaningful when the caller

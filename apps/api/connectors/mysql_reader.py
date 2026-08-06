@@ -109,6 +109,7 @@ def read_table_batch(
             password=password,
             connection_string=connection_string,
             ssl=ssl,
+            purpose="read",
         )
     try:
         with conn.cursor() as cur:
@@ -181,6 +182,7 @@ def read_table_cursor_batch(
         password=password,
         connection_string=connection_string,
         ssl=ssl,
+        purpose="read",
     )
     try:
         with conn.cursor() as cur:

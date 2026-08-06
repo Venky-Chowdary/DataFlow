@@ -105,5 +105,12 @@ def get_connection(
 
     from connectors.write_resilience import apply_mysql_session_guards
 
-    apply_mysql_session_guards(conn, lock_wait_seconds=lock_wait_s)
+    # Fail-closed STRICT only on write/DDL purposes. Read/introspect/probe soft-log
+    # when managed MySQL forbids sql_mode changes (still prefer STRICT when allowed).
+    require_strict = purpose_l in {"write", "bulk", "ddl", "setup", "drop"}
+    apply_mysql_session_guards(
+        conn,
+        lock_wait_seconds=lock_wait_s,
+        require_strict_sql_mode=require_strict,
+    )
     return conn

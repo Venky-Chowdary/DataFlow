@@ -28,6 +28,7 @@ def test_mysql(
             password=password,
             connection_string=connection_string,
             ssl=ssl,
+            purpose="probe",
         )
         with conn.cursor() as cur:
             db_name = (database or "").strip()

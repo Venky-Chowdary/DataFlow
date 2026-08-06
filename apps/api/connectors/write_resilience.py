@@ -193,6 +193,7 @@ def apply_mysql_session_guards(
     conn: Any,
     *,
     lock_wait_seconds: int = 120,
+    require_strict_sql_mode: bool = True,
 ) -> None:
     """Raise MySQL session I/O / wait timeouts and enable fail-closed sql_mode.
 
@@ -204,6 +205,8 @@ def apply_mysql_session_guards(
 
     STRICT_TRANS_TABLES (+ related modes) prevent silent truncation / invalid-date
     coercion that would otherwise look like a successful write with data loss.
+    When ``require_strict_sql_mode`` is True (default), failure to enable STRICT
+    modes raises — never continue a transfer that can silently truncate.
     """
     lock_s = max(5, min(int(lock_wait_seconds or 120), 600))
     try:
@@ -214,8 +217,14 @@ def apply_mysql_session_guards(
             cur.execute("SET SESSION net_write_timeout = 600")
             cur.execute(f"SET SESSION lock_wait_timeout = {lock_s}")
             cur.execute(f"SET SESSION innodb_lock_wait_timeout = {lock_s}")
-            _ensure_mysql_strict_sql_mode(cur)
+            _ensure_mysql_strict_sql_mode(cur, require=require_strict_sql_mode)
+    except RuntimeError:
+        raise
     except Exception as exc:
+        if require_strict_sql_mode:
+            raise RuntimeError(
+                f"MySQL session guards failed — refuse write without STRICT sql_mode: {exc}"
+            ) from exc
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
@@ -229,13 +238,17 @@ _MYSQL_STRICT_MODES = (
 )
 
 
-def _ensure_mysql_strict_sql_mode(cur: Any) -> None:
+def _ensure_mysql_strict_sql_mode(cur: Any, *, require: bool = True) -> None:
     """Append fail-closed sql_mode flags without wiping existing session modes."""
     try:
         cur.execute("SELECT @@SESSION.sql_mode")
         row = cur.fetchone()
         current = (row[0] if row else "") or ""
     except Exception as exc:
+        if require:
+            raise RuntimeError(
+                f"Could not read MySQL sql_mode — refuse write without STRICT proof: {exc}"
+            ) from exc
         logger.warning("Could not read MySQL sql_mode: %s", exc, exc_info=exc)
         return
     parts = [p.strip().upper() for p in str(current).split(",") if p.strip()]
@@ -251,6 +264,11 @@ def _ensure_mysql_strict_sql_mode(cur: Any) -> None:
     try:
         cur.execute("SET SESSION sql_mode = %s", (new_mode,))
     except Exception as exc:
+        if require:
+            raise RuntimeError(
+                f"Could not enable MySQL STRICT sql_mode ({new_mode}) — "
+                f"refuse silent truncation path: {exc}"
+            ) from exc
         logger.warning(
             "Could not enable MySQL STRICT sql_mode (%s): %s",
             new_mode,
@@ -259,13 +277,18 @@ def _ensure_mysql_strict_sql_mode(cur: Any) -> None:
         )
 
 
-def apply_mssql_session_guards(conn: Any) -> None:
+def apply_mssql_session_guards(
+    conn: Any,
+    *,
+    require_ansi_warnings: bool = False,
+) -> None:
     """Fail-closed SQL Server session: reject silent string truncation.
 
     With ``ANSI_WARNINGS OFF`` (common default on some drivers), oversized
     VARCHAR/NVARCHAR inserts truncate quietly. Force warnings ON so the
     engine errors; write-path ``quarantine_unfit_strings`` is the primary
     hold-out, this is defense-in-depth.
+    When ``require_ansi_warnings`` is True (default), failure raises.
     """
     try:
         cur = getattr(conn, "cursor", None)
@@ -289,7 +312,18 @@ def apply_mssql_session_guards(conn: Any) -> None:
                 conn.execute(sa.text("SET CONCAT_NULL_YIELDS_NULL ON"))
             except Exception:
                 pass
+            return
+        if require_ansi_warnings:
+            raise RuntimeError(
+                "SQL Server session guards could not obtain a cursor/execute handle"
+            )
+    except RuntimeError:
+        raise
     except Exception as exc:
+        if require_ansi_warnings:
+            raise RuntimeError(
+                f"SQL Server ANSI_WARNINGS guards failed — refuse silent truncate: {exc}"
+            ) from exc
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 

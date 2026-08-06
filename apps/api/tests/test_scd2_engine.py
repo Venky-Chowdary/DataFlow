@@ -278,6 +278,86 @@ def test_scd2_fail_job_contract_aborts_before_merge():
             pass
 
 
+def test_scd2_write_quarantine_matrix_blocks_decimal_overflow_under_strict():
+    """SCD2 must run the same write-quarantine matrix as SQL writers before history merge."""
+    from src.services.scd2_engine import prepare_scd2_mapped_rows
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        prepared = prepare_scd2_mapped_rows(
+            endpoint,
+            [
+                {"id": "1", "name": "A", "price": "12.34"},
+                {"id": "2", "name": "B", "price": "999999999.99"},
+            ],
+            columns=["id", "name", "price"],
+            schema={"id": "string", "name": "string", "price": "DECIMAL(5,2)"},
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "name", "target": "name"},
+                {
+                    "source": "price",
+                    "target": "price",
+                    "transform": "none",
+                    "target_type": "DECIMAL(5,2)",
+                },
+            ],
+            conflict_columns=["id"],
+            validation_mode="strict",
+        )
+        assert prepared.get("ok") is False, prepared
+        assert prepared.get("error")
+        assert int(prepared.get("rejected_rows") or 0) >= 1
+        assert any(
+            "decimal" in str(d.get("reason") or "").lower()
+            or "overflow" in str(d.get("reason") or "").lower()
+            or "fit" in str(d.get("reason") or "").lower()
+            for d in (prepared.get("rejected_details") or [])
+        )
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
+
+
+def test_scd2_sanitized_target_stamp_still_quarantines_overflow():
+    """Map target_type stamps must align with sanitized target_cols (hyphen→underscore)."""
+    from src.services.scd2_engine import prepare_scd2_mapped_rows
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        prepared = prepare_scd2_mapped_rows(
+            endpoint,
+            [
+                {"id": "1", "unit-price": "12.34"},
+                {"id": "2", "unit-price": "999999999.99"},
+            ],
+            columns=["id", "unit-price"],
+            schema={"id": "string", "unit-price": "DECIMAL(5,2)"},
+            mappings=[
+                {"source": "id", "target": "id"},
+                {
+                    "source": "unit-price",
+                    "target": "unit-price",
+                    "transform": "none",
+                    "target_type": "DECIMAL(5,2)",
+                },
+            ],
+            conflict_columns=["id"],
+            validation_mode="strict",
+        )
+        assert prepared.get("ok") is False, prepared
+        assert int(prepared.get("rejected_rows") or 0) >= 1
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
+
+
 def test_scd2_empty_pk_quarantined_not_silent():
     """Blank primary keys must surface in rejected_details — never vanish."""
     fd, db_path = tempfile.mkstemp(suffix=".db")
