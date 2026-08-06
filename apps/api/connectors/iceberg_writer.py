@@ -546,16 +546,23 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
                     "without truncation"
                 )
             return int(value)
-        return int(value)
+        try:
+            return int(value)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"cannot coerce {value!r} to INTEGER without invent"
+            ) from exc
     if pa.types.is_boolean(arrow_type):
+        from connectors.sql_bind import coerce_boolean_wire
+
         if isinstance(value, bool):
             return value
-        text = str(value).strip().lower()
-        if text in {"1", "true", "t", "yes", "y"}:
-            return True
-        if text in {"0", "false", "f", "no", "n"}:
-            return False
-        raise ValueError(f"cannot cast {value!r} to boolean")
+        coerced = coerce_boolean_wire(value, as_int=False)
+        if not isinstance(coerced, bool):
+            raise ValueError(
+                f"cannot cast {value!r} to boolean — refuse invent"
+            )
+        return coerced
     if pa.types.is_timestamp(arrow_type):
         tz = getattr(arrow_type, "tz", None)
         if isinstance(value, datetime):

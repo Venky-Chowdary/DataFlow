@@ -51,6 +51,7 @@ pytesseract>=0.3.10
 # Security
 cryptography>=42.0.0
 bcrypt>=4.1.0
+defusedxml>=0.7.1  # XXE-safe XML parse for coerce_xml_wire
 python3-saml>=1.16.0,<1.17.0
 xmlsec>=1.3.9,<2.0.0
 

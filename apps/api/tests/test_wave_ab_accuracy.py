@@ -264,9 +264,9 @@ def test_stripe_total_rows_none():
 def test_integer_bind_refuses_non_integral_float():
     from connectors.generic_sql import _to_sa_value
 
-    with pytest.raises(ValueError, match="non-integral"):
+    with pytest.raises(ValueError, match="non-integral|fractional|refuse invent"):
         _to_sa_value(3.7, "integer")
-    with pytest.raises(ValueError, match="non-integral"):
+    with pytest.raises(ValueError, match="non-integral|fractional|refuse invent"):
         _to_sa_value(Decimal("3.7"), "integer")
     assert _to_sa_value(3.0, "integer") == 3
     assert _to_sa_value(42, "integer") == 42

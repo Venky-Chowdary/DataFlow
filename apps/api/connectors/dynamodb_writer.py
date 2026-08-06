@@ -101,9 +101,15 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
                 return json.loads(
                     value, parse_float=Decimal, parse_constant=_reject
                 )
-            except (json.JSONDecodeError, ValueError):
-                return value
-        return value
+            except (json.JSONDecodeError, ValueError) as exc:
+                raise ValueError(
+                    f"DynamoDB JSON refused {value!r} "
+                    "(refuse silent string invent)"
+                ) from exc
+        raise ValueError(
+            f"DynamoDB JSON refused {value!r} "
+            "(refuse silent pass-through invent)"
+        )
     if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
         if isinstance(value, bytes):
             return value
@@ -137,8 +143,11 @@ def _coerce_dynamo_cell(
     if attr_type == "N":
         try:
             return Decimal(value) if value is not None else None
-        except Exception:
-            return value
+        except Exception as exc:
+            raise ValueError(
+                f"DynamoDB key type N refused {value!r} "
+                "(refuse silent pass-through invent)"
+            ) from exc
     if attr_type == "B":
         from connectors.sql_bind import coerce_binary_wire
 

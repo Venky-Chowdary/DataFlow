@@ -1298,7 +1298,19 @@ def _to_sa_value(
             "mariadb",
             "tidb",
         }
-        return coerce_boolean_wire(value, as_int=as_int)
+        coerced = coerce_boolean_wire(value, as_int=as_int)
+        if as_int:
+            if coerced is not None and coerced not in (0, 1):
+                raise ValueError(
+                    f"generic SQL BOOLEAN refused {value!r} "
+                    "(refuse invent via pass-through)"
+                )
+        elif coerced is not None and not isinstance(coerced, bool):
+            raise ValueError(
+                f"generic SQL BOOLEAN refused {value!r} "
+                "(refuse invent via pass-through)"
+            )
+        return coerced
 
     if t == LOGICAL_BINARY:
         from connectors.sql_bind import coerce_binary_wire
@@ -1391,30 +1403,15 @@ def _to_sa_value(
         return coerce_decimal_wire(value, ddl_type=str(sa_type or "DECIMAL"))
 
     if t == LOGICAL_INTEGER:
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, float):
-            if not value.is_integer():
-                raise ValueError(
-                    f"cannot coerce non-integral float {value!r} to INTEGER "
-                    "without truncation"
-                )
-            return int(value)
-        if isinstance(value, Decimal):
-            if value != value.to_integral_value():
-                raise ValueError(
-                    f"cannot coerce non-integral decimal {value!r} to INTEGER "
-                    "without truncation"
-                )
-            return int(value)
-        if isinstance(value, str):
-            try:
-                return int(value)
-            except (ValueError, TypeError):
-                return value
-        return value
+        from connectors.sql_bind import coerce_integer_wire
+
+        # Never pass through unparseable strings — that invents VARCHAR in an
+        # INTEGER bind under dialects that coerce silently.
+        return coerce_integer_wire(
+            value,
+            ddl_type=str(sa_type or logical or "INTEGER"),
+            engine=str(db_type or dialect_name or ""),
+        )
 
     # uuid, string/text are already bound-friendly
     return value

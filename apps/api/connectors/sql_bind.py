@@ -397,13 +397,15 @@ def coerce_xml_wire(value: Any) -> Any:
             "xml wire is not well-formed markup — refuse invent into XML"
         )
     try:
-        import xml.etree.ElementTree as ET
+        from defusedxml import ElementTree as ET
 
         try:
-            ET.fromstring(text)
+            ET.fromstring(text)  # nosec B314 — defusedxml, not stdlib ElementTree
         except ET.ParseError:
             # Content fragment (multiple top-level nodes) — PG xmloption=content.
-            ET.fromstring(f"<df_xml_root>{text}</df_xml_root>")
+            ET.fromstring(  # nosec B314 — defusedxml, not stdlib ElementTree
+                f"<df_xml_root>{text}</df_xml_root>"
+            )
     except Exception as exc:
         raise ValueError(
             "xml wire failed parse — refuse invent into XML"
@@ -1453,7 +1455,10 @@ def coerce_integer_wire(
             raise ValueError(
                 f"refuse invent integer from {value!r} for {ddl_type or upper}"
             ) from exc
-    return value
+    raise ValueError(
+        f"refuse invent integer from {type(value).__name__} {value!r} "
+        f"for {ddl_type or upper}"
+    )
 
 
 def coerce_sql_variant_wire(value: Any, *, as_json_envelope: bool = False) -> Any:
