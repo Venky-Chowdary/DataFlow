@@ -373,21 +373,30 @@ def write_mapped_rows(
             # performUpsert with empty merge value invents creates — quarantine.
             kept: list[dict[str, Any]] = []
             dropped = 0
+            from connectors.writer_common import append_write_quarantine_detail
+
             for j, row in enumerate(batch_dicts):
                 merge_val = row.get(merge_field)
                 if merge_val is None or str(merge_val).strip() == "":
                     dropped += 1
-                    all_rejected.append({
-                        "row": i + j + 1,
-                        "column": merge_field,
-                        "target": table,
-                        "value": "",
-                        "reason": (
-                            f"Airtable upsert missing merge field {merge_field!r} — "
-                            "quarantined (refuse create invent on empty merge key)"
-                        ),
-                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
-                    })
+                    src_row = batch[j] if j < len(batch) else row
+                    append_write_quarantine_detail(
+                        all_rejected,
+                        {
+                            "row": i + j + 1,
+                            "column": merge_field,
+                            "target": table,
+                            "value": "",
+                            "reason": (
+                                f"Airtable upsert missing merge field {merge_field!r} — "
+                                "quarantined (refuse create invent on empty merge key)"
+                            ),
+                            "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                            "values": row,
+                        },
+                        mapped_row=src_row,
+                        target_cols=target_cols,
+                    )
                     continue
                 kept.append(row)
             if dropped and policy == "fail":
@@ -414,21 +423,30 @@ def write_mapped_rows(
         )
         if update and not merge_field:
             # Surface per-row id-less drops that PATCH filtering omitted.
+            from connectors.writer_common import append_write_quarantine_detail
+
             missing_ids = []
             for j, row in enumerate(batch_dicts):
                 if not (row.get("id") or row.get("Id")):
                     missing_ids.append(j)
-                    all_rejected.append({
-                        "row": i + j + 1,
-                        "column": "id",
-                        "target": table,
-                        "value": "",
-                        "reason": (
-                            "Airtable upsert/update missing record id — quarantined "
-                            "(refuse create invent / silent skip)"
-                        ),
-                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
-                    })
+                    src_row = batch[j] if j < len(batch) else row
+                    append_write_quarantine_detail(
+                        all_rejected,
+                        {
+                            "row": i + j + 1,
+                            "column": "id",
+                            "target": table,
+                            "value": "",
+                            "reason": (
+                                "Airtable upsert/update missing record id — quarantined "
+                                "(refuse create invent / silent skip)"
+                            ),
+                            "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                            "values": row,
+                        },
+                        mapped_row=src_row,
+                        target_cols=target_cols,
+                    )
             if missing_ids and policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -443,6 +461,8 @@ def write_mapped_rows(
                     driver="airtable",
                 )
         if not payload["records"]:
+            from connectors.writer_common import append_write_quarantine_detail
+
             for j, row in enumerate(batch_dicts):
                 # Avoid duplicate quarantine when already recorded above.
                 if update and not merge_field and not (row.get("id") or row.get("Id")):
@@ -451,17 +471,24 @@ def write_mapped_rows(
                     merge_val = row.get(merge_field)
                     if merge_val is None or str(merge_val).strip() == "":
                         continue
-                all_rejected.append({
-                    "row": i + j + 1,
-                    "column": merge_field or "id",
-                    "target": table,
-                    "value": "",
-                    "reason": (
-                        "Airtable batch produced zero records — update mode "
-                        "requires an id (or merge field); refuse silent skip"
-                    ),
-                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
-                })
+                src_row = batch[j] if j < len(batch) else row
+                append_write_quarantine_detail(
+                    all_rejected,
+                    {
+                        "row": i + j + 1,
+                        "column": merge_field or "id",
+                        "target": table,
+                        "value": "",
+                        "reason": (
+                            "Airtable batch produced zero records — update mode "
+                            "requires an id (or merge field); refuse silent skip"
+                        ),
+                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                        "values": row,
+                    },
+                    mapped_row=src_row,
+                    target_cols=target_cols,
+                )
             if policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -511,16 +538,33 @@ def write_mapped_rows(
                     warnings=warnings,
                     driver="airtable",
                 )
-            detail = {
-                "row": i,
-                "column": "",
-                "target": table,
-                "value": str(batch),
-                "reason": humanize_http_error(exc, "airtable"),
-                "policy": policy,
-                "values": payload,
-            }
-            all_rejected.append(detail)
+            from connectors.writer_common import append_write_quarantine_detail
+
+            reason = humanize_http_error(exc, "airtable")
+            # Quarantine each mapped batch row — empty mapped_row would stamp
+            # every column DF_MISSING and poison replay.
+            for j, src_row in enumerate(batch):
+                payload_rec: dict[str, Any] = {}
+                if isinstance(payload, dict):
+                    recs = payload.get("records") or []
+                    if j < len(recs) and isinstance(recs[j], dict):
+                        payload_rec = dict(recs[j].get("fields") or recs[j])
+                append_write_quarantine_detail(
+                    all_rejected,
+                    {
+                        "row": i + j + 1,
+                        "column": "",
+                        "target": table,
+                        "value": "",
+                        "reason": reason,
+                        "policy": policy,
+                        "values": payload_rec or (
+                            batch_dicts[j] if j < len(batch_dicts) else {}
+                        ),
+                    },
+                    mapped_row=src_row,
+                    target_cols=target_cols,
+                )
             if policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -529,13 +573,13 @@ def write_mapped_rows(
                     target_schema=base_id,
                     checksum=digest.hexdigest()[:32],
                     chunks_completed=chunks,
-                    error=f"Airtable write failed for batch starting at row {i}: {detail['reason']}",
+                    error=f"Airtable write failed for batch starting at row {i}: {reason}",
                     rejected_details=all_rejected,
                     rejected_rows=len(all_rejected),
                     warnings=warnings,
                     driver="airtable",
                 )
-            warnings.append(f"batch {i}: {detail['reason']}")
+            warnings.append(f"batch {i}: {reason}")
 
         chunks += 1
         if on_checkpoint:

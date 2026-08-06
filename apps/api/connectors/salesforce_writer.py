@@ -542,7 +542,14 @@ def write_mapped_rows(
     digest = hashlib.sha256()
     written_ids: list[str] = []
 
-    def _submit(records: list[dict[str, Any]], *, method: str, endpoint: str, row_base: int) -> None:
+    def _submit(
+        records: list[dict[str, Any]],
+        *,
+        method: str,
+        endpoint: str,
+        row_base: int,
+        mapped_batch: list[Any] | None = None,
+    ) -> None:
         nonlocal written, chunks
         if not records:
             return
@@ -573,11 +580,31 @@ def write_mapped_rows(
             else:
                 errs = item.get("errors") or [{"message": "unknown Salesforce error"}]
                 msg = errs[0].get("message", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
-                rejected_details.append({
-                    "row_index": row_base + idx,
-                    "reason": msg,
-                    "values": records[idx] if idx < len(records) else {},
-                })
+                from connectors.writer_common import append_write_quarantine_detail
+
+                rec = records[idx] if idx < len(records) else {}
+                # Original mapped row preserves DF_MISSING / NULL; CRM rec omits them.
+                src_mapped: Any
+                if mapped_batch is not None and idx < len(mapped_batch):
+                    src_mapped = mapped_batch[idx]
+                else:
+                    src_mapped = tuple(
+                        rec.get(c) if isinstance(rec, dict) else None for c in target_cols
+                    )
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": row_base + idx + 1,
+                        "column": "",
+                        "target": sobject,
+                        "value": "",
+                        "reason": msg,
+                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                        "values": rec if isinstance(rec, dict) else {},
+                    },
+                    mapped_row=src_mapped,
+                    target_cols=target_cols,
+                )
         batch_failures = sum(
             1 for item in results
             if isinstance(item, dict) and not item.get("success")
@@ -595,11 +622,16 @@ def write_mapped_rows(
         for i in range(0, len(mapped_rows), chunk):
             batch = mapped_rows[i : i + chunk]
             records = []
+            mapped_batch: list[Any] = []
             for row in batch:
                 if isinstance(row, dict):
                     pairs = row.items()
+                    mapped_src = tuple((row or {}).get(c) for c in target_cols)
                 else:
                     pairs = zip(target_cols, row)
+                    mapped_src = row if isinstance(row, (tuple, list)) else tuple(
+                        row[j] if j < len(row) else None for j in range(len(target_cols))
+                    )
                 from connectors.writer_common import omit_missing_fields
 
                 # STOP_COLUMN / coerce_null → DF_MISSING must omit, never leak
@@ -607,6 +639,7 @@ def write_mapped_rows(
                 rec = omit_missing_fields(pairs)
                 rec.pop("attributes", None)
                 records.append(rec)
+                mapped_batch.append(mapped_src)
             if not records:
                 continue
 
@@ -615,32 +648,70 @@ def write_mapped_rows(
                     f"{url_base}/services/data/{API_VERSION}/composite/sobjects/"
                     f"{sobject}/{ext_field}"
                 )
-                _submit(records, method="PATCH", endpoint=endpoint, row_base=i)
+                _submit(
+                    records,
+                    method="PATCH",
+                    endpoint=endpoint,
+                    row_base=i,
+                    mapped_batch=mapped_batch,
+                )
             elif write_mode in {"upsert", "update"} and ext_field == "Id":
                 # Id present → PATCH update; Id missing → quarantine (never POST
                 # invent duplicates under at-least-once retry — HubSpot/Stripe class).
                 collections = f"{url_base}/services/data/{API_VERSION}/composite/sobjects"
-                with_id = [r for r in records if r.get("Id")]
-                without_id = [r for r in records if not r.get("Id")]
+                with_id: list[dict[str, Any]] = []
+                with_id_mapped: list[Any] = []
+                without_id: list[tuple[int, dict[str, Any], Any]] = []
+                for idx, rec in enumerate(records):
+                    if rec.get("Id"):
+                        with_id.append(rec)
+                        with_id_mapped.append(mapped_batch[idx])
+                    else:
+                        without_id.append((idx, rec, mapped_batch[idx]))
                 if with_id:
-                    _submit(with_id, method="PATCH", endpoint=collections, row_base=i)
+                    _submit(
+                        with_id,
+                        method="PATCH",
+                        endpoint=collections,
+                        row_base=i,
+                        mapped_batch=with_id_mapped,
+                    )
                 if without_id:
-                    for idx, rec in enumerate(without_id):
-                        rejected_details.append({
-                            "row_index": i + idx,
-                            "reason": (
-                                "Salesforce upsert/update requires Id — quarantined "
-                                "(refuse POST invent duplicates)"
-                            ),
-                            "values": rec,
-                        })
+                    from connectors.writer_common import append_write_quarantine_detail
+
+                    for idx, rec, src_mapped in without_id:
+                        append_write_quarantine_detail(
+                            rejected_details,
+                            {
+                                "row": i + idx + 1,
+                                "column": "Id",
+                                "target": "Id",
+                                "value": None,
+                                "reason": (
+                                    "Salesforce upsert/update requires Id — quarantined "
+                                    "(refuse POST invent duplicates)"
+                                ),
+                                "policy": (
+                                    "write_fail" if policy == "fail" else "write_quarantine"
+                                ),
+                                "values": rec,
+                            },
+                            mapped_row=src_mapped,
+                            target_cols=target_cols,
+                        )
                     if policy == "fail":
                         raise RuntimeError(
                             f"Salesforce upsert/update missing Id on {len(without_id)} record(s)"
                         )
             else:
                 endpoint = f"{url_base}/services/data/{API_VERSION}/composite/sobjects"
-                _submit(records, method="POST", endpoint=endpoint, row_base=i)
+                _submit(
+                    records,
+                    method="POST",
+                    endpoint=endpoint,
+                    row_base=i,
+                    mapped_batch=mapped_batch,
+                )
     except Exception as exc:
         return WriteResult(
             ok=False,

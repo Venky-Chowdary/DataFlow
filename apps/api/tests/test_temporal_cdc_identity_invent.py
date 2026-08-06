@@ -86,13 +86,16 @@ def test_es_redis_boolean_refuse_bool_invent():
     assert _to_es_value("true", "BOOLEAN") is True
     with pytest.raises(ValueError, match="BOOLEAN refused"):
         _to_es_value("maybe", "BOOLEAN")
-    with pytest.raises(ValueError, match="BOOLEAN refused"):
+    with pytest.raises(ValueError, match="BOOLEAN refused|null invent|empty string"):
         _to_es_value("", "BOOLEAN")
 
-    assert _normalize_redis_typed_doc({"f": "no"}, ["f"], ["BOOLEAN"]) == {"f": False}
+    assert _normalize_redis_typed_doc({"f": "false"}, ["f"], ["BOOLEAN"]) == {"f": False}
+    # Informal yes/no must not invent boolean truth (SSOT with sql_bind / Map remap).
+    with pytest.raises(ValueError, match="BOOLEAN refused"):
+        _normalize_redis_typed_doc({"f": "no"}, ["f"], ["BOOLEAN"])
     with pytest.raises(ValueError, match="BOOLEAN refused"):
         _normalize_redis_typed_doc({"f": "maybe"}, ["f"], ["BOOLEAN"])
-    with pytest.raises(ValueError, match="BOOLEAN refused"):
+    with pytest.raises(ValueError, match="BOOLEAN refused|null invent|empty string"):
         _normalize_redis_typed_doc({"f": ""}, ["f"], ["BOOLEAN"])
 
 

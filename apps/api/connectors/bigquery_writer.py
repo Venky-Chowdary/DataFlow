@@ -199,10 +199,12 @@ def resolve_bigquery_decimal_target_types(
             name = getattr(field, "name", None)
             if name:
                 by_name[str(name)] = field
+                by_name[str(name).lower()] = field
+                by_name[str(name).upper()] = field
 
     out: list[str] = []
     for col, logical in zip(target_cols, logical_types):
-        field = by_name.get(col)
+        field = by_name.get(col) or by_name.get(str(col).lower()) or by_name.get(str(col).upper())
         if field is not None:
             ftype = str(getattr(field, "field_type", "") or "").upper()
             if ftype in {"NUMERIC", "BIGNUMERIC", "DECIMAL"}:
@@ -630,6 +632,75 @@ def write_mapped_rows(
                 table.schema = list(table.schema) + new_fields
                 client.update_table(table, ["schema"])
 
+        # Existing table: load physical schema BEFORE map/transform so live types
+        # beat Map stamps (BOOLEAN→STRING invent cliff).
+        physical_schema = None
+        if not create_table:
+            from connectors.writer_common import require_physical_types_for_existing_table
+
+            try:
+                physical_schema = list(client.get_table(table_id).schema)
+            except Exception as schema_exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery physical schema introspection failed for existing "
+                        f"table {table_id!r} — refuse silent Map VARCHAR bind "
+                        f"(empty→NULL invent risk): {schema_exc}"
+                    ),
+                )
+            if not physical_schema:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery physical schema empty for existing table {table_id!r} — "
+                        "refuse silent Map VARCHAR bind (empty→NULL invent risk). "
+                        "Re-check dataset/table permissions and retry."
+                    ),
+                )
+            physical_map = {
+                str(getattr(f, "name", "") or ""): str(
+                    getattr(f, "field_type", "") or "STRING"
+                )
+                for f in physical_schema
+                if getattr(f, "name", None)
+            }
+            for name, ftype in list(physical_map.items()):
+                physical_map.setdefault(name.lower(), ftype)
+                physical_map.setdefault(name.upper(), ftype)
+            overlay_err = require_physical_types_for_existing_table(
+                table_existed=True,
+                physical=physical_map,
+                dialect_label="BigQuery",
+                target_cols=target_cols,
+            )
+            if overlay_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=overlay_err,
+                )
+            live_types = resolve_bigquery_decimal_target_types(
+                target_cols, logical_types, physical_schema
+            )
+            dest_types = {
+                target_cols[i]: live_types[i] for i in range(len(target_cols))
+            }
+
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
             headers=headers,
             data_rows=data_rows,
@@ -643,45 +714,11 @@ def write_mapped_rows(
             destination_column_nullability=dest_nullability,
         )
         # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
-        # Known-existing table + failed/empty schema introspect → fail closed
-        # (Map VARCHAR bind invents NULL on DATE/INT/BOOL sinks).
-        physical_schema = None
-        try:
-            physical_schema = list(client.get_table(table_id).schema)
-        except Exception as schema_exc:
-            if not create_table:
-                return WriteResult(
-                    ok=False,
-                    rows_written=0,
-                    table_name=table_name,
-                    target_schema=dataset_id,
-                    checksum="",
-                    chunks_completed=0,
-                    error=(
-                        f"BigQuery physical schema introspection failed for existing "
-                        f"table {table_id!r} — refuse silent Map VARCHAR bind "
-                        f"(empty→NULL invent risk): {schema_exc}"
-                    ),
-                    rejected_details=rejected_details,
-                    warnings=transform_errors,
-                )
-            physical_schema = None
-        if not physical_schema and not create_table:
-            return WriteResult(
-                ok=False,
-                rows_written=0,
-                table_name=table_name,
-                target_schema=dataset_id,
-                checksum="",
-                chunks_completed=0,
-                error=(
-                    f"BigQuery physical schema empty for existing table {table_id!r} — "
-                    "refuse silent Map VARCHAR bind (empty→NULL invent risk). "
-                    "Re-check dataset/table permissions and retry."
-                ),
-                rejected_details=rejected_details,
-                warnings=transform_errors,
-            )
+        if physical_schema is None and create_table:
+            try:
+                physical_schema = list(client.get_table(table_id).schema)
+            except Exception:
+                physical_schema = None
         decimal_target_types = resolve_bigquery_decimal_target_types(
             target_cols, logical_types, physical_schema
         )

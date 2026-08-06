@@ -127,9 +127,23 @@ def resolve_transform(
             return "none"
 
     source_type = normalize_logical_type(column_types.get(mapping["source"], "VARCHAR"))
-    target_type = normalize_logical_type(
-        mapping.get("target_type") or dest_types.get(mapping["target"]) or column_types.get(mapping["target"]) or "VARCHAR",
+    # Live destination types beat Map target_type stamps (same honesty as
+    # resolve_target_columns / resolve_mapping_dest_types on existing tables).
+    # Map BOOLEAN over live VARCHAR must not invent cast_boolean before bind.
+    tgt_name = str(mapping.get("target") or "")
+    live_hit = (
+        dest_types.get(tgt_name)
+        or dest_types.get(tgt_name.lower())
+        or dest_types.get(tgt_name.upper())
     )
+    if live_hit:
+        target_type = normalize_logical_type(live_hit)
+    else:
+        target_type = normalize_logical_type(
+            mapping.get("target_type")
+            or column_types.get(mapping["target"])
+            or "VARCHAR",
+        )
 
     if raw and _type_compatible_transform(target_type, raw):
         return str(raw)

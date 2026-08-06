@@ -17,8 +17,10 @@ def test_sqlite_boolean_false_string_is_zero_not_true():
     from connectors.sqlite_writer import _to_sqlite_value
 
     assert _to_sqlite_value("false", "BOOLEAN") == 0
-    assert _to_sqlite_value("no", "BOOLEAN") == 0
     assert _to_sqlite_value("true", "BOOLEAN") == 1
+    # Informal yes/no/on/off must quarantine — never invent 0/1 (SSOT with sql_bind).
+    with pytest.raises(ValueError, match="unrecognized|BOOLEAN"):
+        _to_sqlite_value("no", "BOOLEAN")
     with pytest.raises(ValueError, match="unrecognized|BOOLEAN"):
         _to_sqlite_value("maybe", "BOOLEAN")
 

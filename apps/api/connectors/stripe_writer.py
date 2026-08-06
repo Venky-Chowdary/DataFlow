@@ -197,7 +197,7 @@ def write_mapped_rows(
         )
 
         if mode in upsert_modes and not record_id:
-            from connectors.writer_common import quarantine_cell_wire
+            from connectors.writer_common import append_write_quarantine_detail
 
             detail = {
                 "row": i + 1,
@@ -207,13 +207,15 @@ def write_mapped_rows(
                     "refuse inventing default id / create invent "
                     "(would duplicate customers/objects on retry)"
                 ),
-                "values": {
-                    k: quarantine_cell_wire(v)[:80]
-                    for k, v in list(payload.items())[:8]
-                },
+                "values": row_dict,
                 "policy": "write_fail" if policy == "fail" else "write_quarantine",
             }
-            all_rejected.append(detail)
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
             if policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -272,12 +274,19 @@ def write_mapped_rows(
                 "row": i,
                 "column": "",
                 "target": obj,
-                "value": str(record_id or row_dict),
+                "value": record_id,
                 "reason": humanize_http_error(exc, "stripe"),
                 "policy": policy,
                 "values": row_dict,
             }
-            all_rejected.append(detail)
+            from connectors.writer_common import append_write_quarantine_detail
+
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
             if policy == "fail":
                 return WriteResult(
                     ok=False,

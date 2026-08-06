@@ -478,11 +478,17 @@ def write_mapped_rows(
         for i in range(0, len(mapped_rows), chunk):
             batch = mapped_rows[i : i + chunk]
             inputs = []
+            # Parallel original mapped rows — CRM props omit DF_MISSING/None.
+            input_mapped_rows: list[Any] = []
             for row in batch:
                 if isinstance(row, dict):
                     pairs = row.items()
+                    mapped_src = tuple((row or {}).get(c) for c in target_cols)
                 else:
                     pairs = zip(target_cols, row)
+                    mapped_src = row if isinstance(row, (tuple, list)) else tuple(
+                        row[j] if j < len(row) else None for j in range(len(target_cols))
+                    )
                 props = {
                     k: str(v)
                     for k, v in pairs
@@ -494,20 +500,35 @@ def write_mapped_rows(
                 # Never invent identity from a different property while idProperty
                 # stays configured (wrong-object upsert / create).
                 if not id_val:
-                    detail = {
-                        "row_index": i + len(inputs),
-                        "reason": f"Missing idProperty '{id_property}' for HubSpot upsert",
-                        "values": props,
-                    }
-                    rejected_details.append(detail)
+                    from connectors.writer_common import append_write_quarantine_detail
+
+                    append_write_quarantine_detail(
+                        rejected_details,
+                        {
+                            "row": i + len(inputs) + 1,
+                            "column": id_property,
+                            "target": id_property,
+                            "value": None,
+                            "reason": (
+                                f"Missing idProperty '{id_property}' for HubSpot upsert"
+                            ),
+                            "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                            "values": props,
+                        },
+                        mapped_row=mapped_src,
+                        target_cols=target_cols,
+                    )
                     if policy == "fail":
-                        raise RuntimeError(detail["reason"])
+                        raise RuntimeError(
+                            f"Missing idProperty '{id_property}' for HubSpot upsert"
+                        )
                     continue
                 inputs.append({
                     "idProperty": id_property,
                     "id": str(id_val),
                     "properties": props,
                 })
+                input_mapped_rows.append(mapped_src)
             if not inputs:
                 continue
 
@@ -537,12 +558,45 @@ def write_mapped_rows(
                 digest.update(rid.encode())
                 if rid:
                     written_ids.append(rid)
-            for err in errors:
-                rejected_details.append({
-                    "row_index": i,
-                    "reason": str(err.get("message") or err),
-                    "values": err.get("context") or {},
-                })
+            for err_i, err in enumerate(errors):
+                from connectors.writer_common import append_write_quarantine_detail
+
+                ctx = err.get("context") if isinstance(err.get("context"), dict) else {}
+                # Prefer the submitted input row — HubSpot context is metadata, not props.
+                src_props: dict[str, Any] = {}
+                matched_idx: int | None = None
+                err_ids = {
+                    str(x) for x in (ctx.get("ids") or []) if x is not None
+                }
+                if err_ids:
+                    for inp_i, inp in enumerate(inputs):
+                        if str(inp.get("id") or "") in err_ids:
+                            matched_idx = inp_i
+                            break
+                if matched_idx is None and err_i < len(inputs):
+                    matched_idx = err_i
+                matched_inp = inputs[matched_idx] if matched_idx is not None else None
+                if matched_inp is not None:
+                    src_props = dict(matched_inp.get("properties") or {})
+                    src_props[id_property] = matched_inp.get("id")
+                # Original mapped batch row — preserves DF_MISSING / NULL polarity.
+                mapped_src: Any = tuple()
+                if matched_idx is not None and matched_idx < len(input_mapped_rows):
+                    mapped_src = input_mapped_rows[matched_idx]
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": i + err_i + 1,
+                        "column": "",
+                        "target": obj,
+                        "value": "",
+                        "reason": str(err.get("message") or err),
+                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                        "values": src_props,
+                    },
+                    mapped_row=mapped_src,
+                    target_cols=target_cols,
+                )
             if errors and policy == "fail":
                 raise RuntimeError(
                     f"HubSpot rejected {len(errors)} record(s); "

@@ -457,7 +457,14 @@ def write_mapped_rows(
                     "policy": policy,
                     "values": dict(row_dict),
                 }
-                all_rejected.append(detail)
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
                 warnings.append(msg)
                 if policy == "fail":
                     return WriteResult(
@@ -492,14 +499,22 @@ def write_mapped_rows(
                     "database — quarantined (refuse silent skip)"
                 )
                 warnings.append(msg)
-                all_rejected.append({
-                    "row": i,
-                    "column": col,
-                    "target": col,
-                    "value": str(val)[:120] if val is not None else "",
-                    "reason": msg,
-                    "policy": policy,
-                })
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    {
+                        "row": i,
+                        "column": col,
+                        "target": col,
+                        "value": val,
+                        "reason": msg,
+                        "policy": policy,
+                        "values": dict(row_dict),
+                    },
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
                 if policy == "fail":
                     return WriteResult(
                         ok=False,
@@ -521,14 +536,22 @@ def write_mapped_rows(
                     "— quarantined (refuse silent skip)"
                 )
                 warnings.append(msg)
-                all_rejected.append({
-                    "row": i,
-                    "column": col,
-                    "target": col,
-                    "value": str(val)[:120] if val is not None else "",
-                    "reason": msg,
-                    "policy": policy,
-                })
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    {
+                        "row": i,
+                        "column": col,
+                        "target": col,
+                        "value": val,
+                        "reason": msg,
+                        "policy": policy,
+                        "values": dict(row_dict),
+                    },
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
                 if policy == "fail":
                     return WriteResult(
                         ok=False,
@@ -552,12 +575,19 @@ def write_mapped_rows(
                     "row": i,
                     "column": col,
                     "target": col,
-                    "value": str(val)[:120] if val is not None else "",
+                    "value": val,
                     "reason": msg,
                     "policy": policy,
                     "values": dict(row_dict),
                 }
-                all_rejected.append(detail)
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
                 warnings.append(msg)
                 if policy == "fail":
                     return WriteResult(
@@ -596,7 +626,14 @@ def write_mapped_rows(
                     "policy": policy,
                     "values": dict(row_dict),
                 }
-                all_rejected.append(detail)
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
                 warnings.append(msg)
                 if policy == "fail":
                     return WriteResult(
@@ -632,7 +669,14 @@ def write_mapped_rows(
                 "policy": policy,
                 "values": dict(row_dict),
             }
-            all_rejected.append(detail)
+            from connectors.writer_common import append_write_quarantine_detail
+
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
             warnings.append(msg)
             if policy == "fail":
                 return WriteResult(
@@ -692,12 +736,19 @@ def write_mapped_rows(
                 "row": i,
                 "column": "",
                 "target": table_name,
-                "value": str(record_id or row_dict),
+                "value": record_id,
                 "reason": humanize_http_error(exc, "notion"),
                 "policy": policy,
-                "values": payload,
+                "values": payload if isinstance(payload, dict) else dict(row_dict),
             }
-            all_rejected.append(detail)
+            from connectors.writer_common import append_write_quarantine_detail
+
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
             if policy == "fail":
                 return WriteResult(
                     ok=False,

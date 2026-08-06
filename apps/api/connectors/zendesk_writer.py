@@ -352,6 +352,8 @@ def write_mapped_rows(
 
             candidates = [c for c in (conflict_columns or []) if c]
             if not candidates:
+                from connectors.writer_common import append_write_quarantine_detail
+
                 detail = {
                     "row": i + 1,
                     "column": "",
@@ -362,8 +364,14 @@ def write_mapped_rows(
                         "refuse inventing default 'id'"
                     ),
                     "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "values": row_dict,
                 }
-                all_rejected.append(detail)
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
                 warnings.append(detail["reason"])
                 if policy == "fail":
                     return WriteResult(
@@ -384,6 +392,8 @@ def write_mapped_rows(
             # secondary conflict column when ``id`` is empty.
             id_cols = [c for c in candidates if (c or "").lower() == "id"]
             if not id_cols:
+                from connectors.writer_common import append_write_quarantine_detail
+
                 detail = {
                     "row": i + 1,
                     "column": str(candidates[0]),
@@ -395,8 +405,14 @@ def write_mapped_rows(
                         "(would duplicate under at-least-once retry)"
                     ),
                     "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "values": row_dict,
                 }
-                all_rejected.append(detail)
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
                 warnings.append(detail["reason"])
                 if policy == "fail":
                     return WriteResult(
@@ -422,6 +438,8 @@ def write_mapped_rows(
                     break
             # Zendesk updates require a numeric object id — never invent create.
             if not record_id or not record_id.isdigit():
+                from connectors.writer_common import append_write_quarantine_detail
+
                 detail = {
                     "row": i + 1,
                     "column": str(id_cols[0]),
@@ -432,8 +450,14 @@ def write_mapped_rows(
                         "(would duplicate tickets/users under at-least-once retry)"
                     ),
                     "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "values": row_dict,
                 }
-                all_rejected.append(detail)
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
                 warnings.append(detail["reason"])
                 if policy == "fail":
                     return WriteResult(
@@ -501,12 +525,19 @@ def write_mapped_rows(
                 "row": i,
                 "column": "",
                 "target": obj,
-                "value": str(record_id or row_dict),
+                "value": record_id,
                 "reason": humanize_http_error(exc, "zendesk"),
                 "policy": policy,
                 "values": payload,
             }
-            all_rejected.append(detail)
+            from connectors.writer_common import append_write_quarantine_detail
+
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
             if policy == "fail":
                 return WriteResult(
                     ok=False,

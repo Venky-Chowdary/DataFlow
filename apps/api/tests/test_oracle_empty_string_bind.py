@@ -405,6 +405,26 @@ def test_partition_dense_upsert_rows_quarantines_empty_pk():
     assert any("null/empty conflict key" in str(d.get("reason") or "") for d in details)
 
 
+def test_pg_write_mapped_rows_bind_helper_not_unbound_local():
+    """Regression: late ``from writer_common import bind_sql_…`` inside
+    ``write_mapped_rows`` made the name local for the whole function, so the
+    early Map-stamp bind raised UnboundLocalError (MySQL→Postgres client fail).
+    """
+    from connectors.postgresql_writer import write_mapped_rows
+
+    assert "bind_sql_mapped_rows_with_quarantine" not in write_mapped_rows.__code__.co_varnames
+
+
+def test_saas_quarantine_values_preserves_sql_null():
+    from connectors.writer_common import saas_quarantine_values
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    out = saas_quarantine_values({"id": "1", "note": None, "flag": ""})
+    assert out["id"] == "1"
+    assert out["note"] == SQL_NULL_SENTINEL
+    assert out["flag"] == ""
+
+
 def test_require_physical_types_fails_closed_for_existing():
     from connectors.writer_common import require_physical_types_for_existing_table
 

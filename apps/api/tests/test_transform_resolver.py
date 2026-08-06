@@ -27,6 +27,21 @@ def test_infer_when_no_transform():
     assert t in {"decimal", "none"}
 
 
+def test_resolve_transform_live_dest_beats_map_boolean_stamp():
+    """Map BOOLEAN over live VARCHAR must not invent cast_boolean."""
+    t = resolve_transform(
+        {
+            "source": "status",
+            "target": "status",
+            "target_type": "BOOLEAN",
+            "transform": "none",
+        },
+        column_types={"status": "VARCHAR"},
+        dest_types={"status": "VARCHAR"},
+    )
+    assert t == "none"
+
+
 def test_attach_transforms_to_all_mappings():
     out = attach_transforms_to_mappings(
         [{"source": "id", "target": "id", "confidence": 0.95}],

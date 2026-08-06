@@ -171,6 +171,13 @@ def project_quarantine_source_values(
     return out
 
 
+def saas_quarantine_values(payload: dict[str, Any] | None) -> dict[str, str]:
+    """Wire a CRM/SaaS payload dict for quarantine replay (NULL polarity honest)."""
+    return {
+        str(k): quarantine_cell_wire(v) for k, v in (payload or {}).items()
+    }
+
+
 def append_write_quarantine_detail(
     rejected_details: list[dict[str, Any]],
     detail: dict[str, Any],
@@ -191,13 +198,14 @@ def append_write_quarantine_detail(
     d = dict(detail)
     # Normalize the fault-cell sample so replay overwrite cannot re-invent "".
     d["value"] = quarantine_cell_wire(d.get("value"))
+    # Full mapped-row image first (SQL NULL polarity), then overlay any CRM
+    # payload keys — HubSpot/SF omit None from props so bag-only would drop NULLs.
+    base_values = mapped_row_quarantine_values(mapped_row, target_cols)
     if isinstance(d.get("values"), dict) and d["values"]:
-        # SaaS writers pre-stamp payloads — re-wire so None≠"" / "None" invent.
-        d["values"] = {
-            str(k): quarantine_cell_wire(v) for k, v in d["values"].items()
-        }
+        wired = {str(k): quarantine_cell_wire(v) for k, v in d["values"].items()}
+        d["values"] = {**base_values, **wired}
     else:
-        d["values"] = mapped_row_quarantine_values(mapped_row, target_cols)
+        d["values"] = base_values
     if not (isinstance(d.get("source_values"), dict) and d["source_values"]):
         maps = mappings if mappings is not None else _active_quarantine_mappings.get()
         if maps:

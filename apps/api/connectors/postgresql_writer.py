@@ -59,6 +59,8 @@ from connectors.writer_common import (
     quarantine_unfit_temporals,
     quarantine_unfit_years,
     bind_sql_mapped_rows_with_quarantine,
+    overlay_physical_bind_types,
+    require_physical_types_for_existing_table,
     resolve_conflict_targets,
     resolve_target_columns,
     row_checksum,
@@ -1386,12 +1388,9 @@ def write_mapped_rows(
 
             # Map VARCHAR + live DATE/INT must refuse empty at bind — overlay
             # physical DDL then re-quarantine (early bind used Map stamps only).
-            from connectors.writer_common import (
-                bind_sql_mapped_rows_with_quarantine,
-                overlay_physical_bind_types,
-                require_physical_types_for_existing_table,
-            )
-
+            # Do NOT re-import bind_sql_mapped_rows_with_quarantine here — a late
+            # local import makes the name UnboundLocal for the whole function and
+            # breaks the early Map-stamp bind (MySQL→Postgres client failure).
             physical = _fetch_pg_column_types(cur, schema, table_name)
             overlay_err = require_physical_types_for_existing_table(
                 table_existed=table_existed,
