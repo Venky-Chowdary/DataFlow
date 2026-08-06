@@ -87,7 +87,13 @@ def coerce_hubspot_datetime_wire(value: Any) -> str | None:
         return str(n)
     text = str(value).strip()
     if not text:
-        return None
+        # Omit empty CRM datetime — never invent JSON/API null wipe on upsert.
+        # Callers must not write None into property payload; raise so quarantine/
+        # omit path owns the cell (parity with Notion empty url).
+        raise ValueError(
+            "empty HubSpot datetime — refuse silent NULL invent "
+            "(quarantine or omit property upstream)"
+        )
     if text.isdigit():
         return coerce_hubspot_datetime_wire(int(text))
     from connectors.sql_temporal import coerce_sql_temporal

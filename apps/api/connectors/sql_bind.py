@@ -20,6 +20,20 @@ _TRUE_TOKENS = frozenset({"true", "t", "1", "yes", "y"})
 _FALSE_TOKENS = frozenset({"false", "f", "0", "no", "n"})
 
 
+def _refuse_empty_specialty(text: str, label: str) -> str:
+    """Fail-closed empty wire for typed specialty DDL (never invent SQL NULL).
+
+    Explicit ``None`` / DF_MISSING stay caller-owned. Empty ``\"\"`` on upsert
+    would wipe a present destination cell — quarantine or remap instead.
+    """
+    if not text:
+        raise ValueError(
+            f"empty string cannot coerce to {label} — "
+            "refuse silent NULL invent (quarantine or remap upstream)"
+        )
+    return text
+
+
 def coerce_inet_wire(value: Any) -> Any:
     """Normalize PostgreSQL ``INET`` wire (host or host/prefix).
 
@@ -131,8 +145,7 @@ def coerce_macaddr_wire(value: Any, *, eui64: bool = False) -> Any:
             raise ValueError("macaddr wire bytes length invalid — refuse invent")
         return ":".join(f"{b:02x}" for b in raw)
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'MACADDR')
     if not _MAC_RE.match(text):
         raise ValueError(
             "macaddr wire is not a valid MAC address — refuse invent into MACADDR"
@@ -176,8 +189,7 @@ def coerce_hstore_wire(value: Any) -> Any:
             f"hstore wire cannot bind {type(value).__name__} — refuse invent into HSTORE"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'HSTORE')
     # Already JSON object?
     if text.startswith("{") and text.endswith("}"):
         try:
@@ -332,8 +344,7 @@ def coerce_range_wire(value: Any, *, multi: bool = False) -> Any:
             "range wire cannot bind list — use multirange or refuse invent"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'RANGE')
     if multi:
         if not _is_multirange_literal(text):
             raise ValueError(
@@ -361,8 +372,7 @@ def coerce_jsonpath_wire(value: Any) -> str | None:
             f"jsonpath wire cannot bind {type(value).__name__} — refuse invent into JSONPATH"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'JSONPATH')
     return text
 
 
@@ -396,8 +406,7 @@ def coerce_xml_wire(value: Any) -> Any:
             f"xml wire cannot bind {type(value).__name__} — refuse invent into XML"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'XML')
     if not (text.startswith("<") and ">" in text):
         raise ValueError(
             "xml wire is not well-formed markup — refuse invent into XML"
@@ -464,14 +473,12 @@ def coerce_ltree_wire(value: Any) -> Any:
             f"ltree wire cannot bind {type(value).__name__} — refuse invent into LTREE"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'LTREE')
     if "/" in text:
         from services.type_system import hierarchyid_to_ltree_path
 
         text = hierarchyid_to_ltree_path(text)
-        if not text:
-            return None
+        text = _refuse_empty_specialty(text, 'LTREE')
     labels = text.split(".")
     if not labels or any(not lab for lab in labels):
         raise ValueError("ltree path has empty label — refuse invent into LTREE")
@@ -509,11 +516,10 @@ def coerce_hierarchyid_wire(value: Any, *, as_ltree: bool = False) -> Any:
             "(/1/2/) — refuse invent"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'HIERARCHYID')
     if as_ltree:
         out = hierarchyid_to_ltree_path(text)
-        return out if out else None
+        return _refuse_empty_specialty(out, 'HIERARCHYID')
     # Canonical slash form for SQL Server HIERARCHYID / NVARCHAR sinks.
     if text == "/":
         return "/"
@@ -562,7 +568,7 @@ def coerce_tsvector_wire(value: Any) -> Any:
             parts.append(item.strip())
         return " ".join(parts)
     text = str(value).strip()
-    return text if text else None
+    return text  # empty tsvector is valid — never invent NULL
 
 
 def coerce_point_wire(value: Any) -> Any:
@@ -608,8 +614,7 @@ def coerce_point_wire(value: Any) -> Any:
             ) from exc
         return f"({x},{y})"
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'POINT')
     m = re.match(
         r"^\(?\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*,\s*"
         r"([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*\)?$",
@@ -661,8 +666,7 @@ def coerce_box_wire(value: Any) -> Any:
         p2 = coerce_point_wire(value[1])
         return f"({p1},{p2})"
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'BOX')
     # Extract four floats in order.
     nums = re.findall(
         r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?",
@@ -724,8 +728,7 @@ def coerce_circle_wire(value: Any) -> Any:
             raise ValueError("circle radius cannot be negative — refuse invent")
         return f"<{pt},{r}>"
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'CIRCLE')
     nums = re.findall(
         r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?",
         text,
@@ -782,8 +785,7 @@ def coerce_lseg_wire(value: Any) -> Any:
         p2 = coerce_point_wire(value[1])
         return f"[{p1},{p2}]"
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'LSEG')
     pairs = _extract_coord_pairs(text)
     if len(pairs) != 2:
         raise ValueError("lseg wire needs two points — refuse invent into LSEG")
@@ -837,8 +839,7 @@ def coerce_line_wire(value: Any) -> Any:
             return f"({lit[1:-1]})"  # ((x1,y1),(x2,y2))
         raise ValueError("line sequence must be 2 points or 3 coeffs — refuse invent")
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'LINE')
     if text.startswith("{") and text.endswith("}"):
         nums = re.findall(
             r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?",
@@ -886,8 +887,7 @@ def coerce_path_wire(value: Any, *, closed: bool | None = None) -> Any:
         is_closed = True if closed is None else closed
     else:
         text = str(value).strip()
-        if not text:
-            return None
+        text = _refuse_empty_specialty(text, 'PATH')
         if is_closed is None:
             is_closed = not (text.startswith("[") and text.endswith("]"))
         pairs = _extract_coord_pairs(text)
@@ -926,8 +926,7 @@ def coerce_polygon_wire(value: Any) -> Any:
         points = [coerce_point_wire(p) for p in value]
         return "(" + ",".join(points) + ")"
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'POLYGON')
     pairs = _extract_coord_pairs(text)
     if len(pairs) < 3:
         raise ValueError(
@@ -966,8 +965,7 @@ def coerce_pg_lsn_wire(value: Any) -> str | None:
             f"pg_lsn cannot bind {type(value).__name__} — refuse invent"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'PG_LSN')
     if "/" not in text:
         # Decimal uint64 string (some CDC serializers).
         if text.isdigit():
@@ -1014,8 +1012,7 @@ def coerce_oid_wire(value: Any) -> int | None:
             f"oid cannot bind {type(value).__name__} — refuse invent"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'OID')
     if not text.isdigit():
         raise ValueError("oid wire must be unsigned decimal — refuse invent")
     n = int(text)
@@ -1061,8 +1058,7 @@ def coerce_tid_wire(value: Any) -> str | None:
             f"tid cannot bind {type(value).__name__} — refuse invent"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'TID')
     m = re.fullmatch(
         r"\(\s*(\d+)\s*,\s*(\d+)\s*\)",
         text,
@@ -1097,8 +1093,7 @@ def coerce_xid_wire(value: Any, *, width64: bool = False) -> int | None:
             f"{label} cannot bind {type(value).__name__} — refuse invent"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'XID')
     if not text.isdigit():
         raise ValueError(f"{label} wire must be unsigned decimal — refuse invent")
     n = int(text)
@@ -1147,8 +1142,7 @@ def coerce_txid_snapshot_wire(value: Any) -> str | None:
             f"txid_snapshot cannot bind {type(value).__name__} — refuse invent"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'TXID_SNAPSHOT')
     parts = text.split(":")
     if len(parts) != 3:
         raise ValueError(
@@ -1536,8 +1530,7 @@ def coerce_rowid_wire(value: Any) -> str | None:
             f"ROWID cannot bind {type(value).__name__} — refuse invent"
         )
     text = str(value).strip()
-    if not text:
-        return None
+    text = _refuse_empty_specialty(text, 'ROWID')
     # Oracle extended ROWID is typically 18 chars; UROWID may be longer.
     if len(text) > 4000:
         raise ValueError("ROWID exceeds max length — refuse invent")
@@ -1765,8 +1758,7 @@ def coerce_bitstring_wire(
         bits = "".join(f"{b:08b}" for b in bytes(value))
     else:
         text = str(value).strip()
-        if not text:
-            return None
+        text = _refuse_empty_specialty(text, 'BIT')
         if (text.startswith("B'") or text.startswith("b'")) and text.endswith("'"):
             text = text[2:-1]
         elif text.upper().startswith("0B"):

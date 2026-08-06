@@ -76,6 +76,36 @@ def test_numeric_bind_refuses_empty_null_invent():
     # CITEXT keeps empty string (VARCHAR-class).
     assert coerce_citext_wire("") == ""
 
+    from connectors.sql_bind import (
+        coerce_macaddr_wire,
+        coerce_hstore_wire,
+        coerce_tsvector_wire,
+        coerce_pg_lsn_wire,
+        coerce_oid_wire,
+        coerce_point_wire,
+        coerce_bitstring_wire,
+    )
+
+    for fn, _label in (
+        (coerce_macaddr_wire, "MACADDR"),
+        (coerce_hstore_wire, "HSTORE"),
+        (coerce_pg_lsn_wire, "PG_LSN"),
+        (coerce_oid_wire, "OID"),
+        (coerce_point_wire, "POINT"),
+        (coerce_bitstring_wire, "BIT"),
+    ):
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            fn("")
+    assert coerce_tsvector_wire("") == ""
+
+    from connectors.hubspot_writer import coerce_hubspot_datetime_wire
+    from connectors.salesforce_writer import coerce_salesforce_id_wire
+
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        coerce_hubspot_datetime_wire("")
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        coerce_salesforce_id_wire("")
+
 
 def test_bind_sql_mapped_rows_quarantines_empty_integer():
     from connectors.writer_common import bind_sql_mapped_rows_with_quarantine

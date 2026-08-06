@@ -62,7 +62,10 @@ def coerce_salesforce_id_wire(value: Any) -> str | None:
         )
     text = str(value).strip()
     if not text:
-        return None
+        raise ValueError(
+            "empty Salesforce Id — refuse silent NULL invent "
+            "(quarantine or omit lookup upstream)"
+        )
     if len(text) == 18:
         # Validate checksum matches 15-char body when body is well-formed.
         body = text[:15]
