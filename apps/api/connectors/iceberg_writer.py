@@ -242,8 +242,9 @@ def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
         "string": "string",
         "long": "BIGINT",
         "int": "INT",
-        "double": "float",
-        "float": "float",
+        # Iceberg double is float64 — never collapse to float32 via "float".
+        "double": "DOUBLE",
+        "float": "FLOAT",
         "boolean": "boolean",
         "date": "date",
         "timestamptz": "timestamptz",
@@ -387,15 +388,28 @@ def _merge_upsert_rows(
     from connectors.writer_common import compare_lsn
     from services.value_serializer import is_missing_sentinel
 
+    from connectors.writer_common import _is_nullish_conflict_key
+
     def _key(row: dict[str, Any]) -> tuple:
-        return tuple(str(row.get(c, "")) for c in pk_cols)
+        # Never stringify None → "None" (collides with literal / invents PK).
+        out: list[str] = []
+        for c in pk_cols:
+            val = row.get(c)
+            if _is_nullish_conflict_key(val):
+                out.append("")
+            else:
+                out.append(str(val))
+        return tuple(out)
 
     def _present(row: dict[str, Any]) -> dict[str, Any]:
         return {k: v for k, v in row.items() if not is_missing_sentinel(v)}
 
     best: dict[tuple, dict[str, Any]] = {}
     for row in existing:
-        best[_key(row)] = dict(row)
+        key = _key(row)
+        if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
+            continue
+        best[key] = dict(row)
     for row in incoming:
         clean = _present(row)
         # Sparse/empty PK must quarantine upstream — refuse invent duplicates here.
@@ -406,6 +420,12 @@ def _merge_upsert_rows(
                 assert_sparse_upsert_has_pk(clean, pk_cols)
         except ValueError:
             raise
+        if any(_is_nullish_conflict_key(clean.get(c)) for c in pk_cols):
+            raise ValueError(
+                "Iceberg dense upsert has null/empty primary-key column(s) "
+                f"{[c for c in pk_cols if _is_nullish_conflict_key(clean.get(c))]}; "
+                "refuse NULL=NULL invent duplicates"
+            )
         key = _key(row)
         prev = best.get(key)
         if prev is None:
@@ -819,11 +839,19 @@ def _scan_existing_by_pk(
     existing: dict[tuple, dict[str, Any]] = {}
 
     def _absorb(arrow_table: Any) -> None:
+        from connectors.writer_common import _is_nullish_conflict_key
+
         names = arrow_table.column_names
         columns = {name: arrow_table.column(name).to_pylist() for name in names}
         for idx in range(arrow_table.num_rows):
             row = {name: columns[name][idx] for name in names}
-            existing[tuple(str(row.get(c, "")) for c in pk_cols)] = row
+            if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
+                continue
+            key = tuple(
+                "" if _is_nullish_conflict_key(row.get(c)) else str(row.get(c))
+                for c in pk_cols
+            )
+            existing[key] = row
 
     unique_keys = list(dict.fromkeys(key_tuples))
     wanted = {
@@ -1091,6 +1119,24 @@ def _write_mapped_rows_pyiceberg(
             existing_arrow = tbl.schema().as_arrow()
 
         final_arrow = existing_arrow
+        schema_extra_cols = [n for n in final_arrow.names if n not in set(target_cols)]
+        # Overwrite replaces the whole table: partial Map would NULL-wipe dest-only cols.
+        if mode in {"overwrite", "replace"} and schema_extra_cols:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "Iceberg overwrite Map omits destination columns "
+                    f"{schema_extra_cols[:12]} — would NULL-wipe them. "
+                    "Map every column or use upsert/merge to preserve unmapped fields."
+                ),
+                driver="iceberg",
+                rejected_details=rejected_details,
+            )
         # Fail-closed quarantine before pa.array (one bad row must not abort the batch).
         quarantine_types = _decimal_target_types_for_iceberg_write(
             target_cols,
@@ -1211,11 +1257,15 @@ def _write_mapped_rows_pyiceberg(
                         ),
                         driver="iceberg",
                     )
-            # A scan is only needed when the batch carries sparse fields to
-            # overlay or an LSN to compare against the destination.
-            needs_scan = DF_LSN_COL in target_cols or any(
-                row_has_missing_sentinel(_row_tuple(target_cols, r))
-                for r in mapped_rows
+            # A scan is needed for sparse/LSN overlay OR to preserve dest-only
+            # columns that pyiceberg upsert would otherwise NULL-wipe.
+            needs_scan = (
+                bool(schema_extra_cols)
+                or DF_LSN_COL in target_cols
+                or any(
+                    row_has_missing_sentinel(_row_tuple(target_cols, r))
+                    for r in mapped_rows
+                )
             )
             existing_by_pk: dict[tuple, dict[str, Any]] = {}
             if needs_scan:
@@ -1324,14 +1374,16 @@ def _write_mapped_rows_pyiceberg(
                     rejected_details=rejected_details,
                     driver="iceberg",
                 )
-            # Emit one dense row per PK touched by this batch (plus untouched
-            # existing rows are left alone via upsert join).
+            # Emit one dense row per PK touched by this batch. Include every
+            # committed schema field so unmapped dest columns keep prior values
+            # (Arrow r.get(missing)→None must not NULL-wipe them on upsert).
             batch_keys = {
                 tuple(str(_row_as_dict(target_cols, r).get(c, "")) for c in pk_cols)
                 for r in fold_kept
             }
+            emit_cols = list(final_arrow.names)
             mapped_rows = [
-                tuple(existing_by_pk[k].get(c) for c in target_cols)
+                tuple(existing_by_pk[k].get(c) for c in emit_cols)
                 for k in batch_keys
                 if k in existing_by_pk
             ]
@@ -1344,7 +1396,10 @@ def _write_mapped_rows_pyiceberg(
 
             mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
-        dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
+        arrow_cols = (
+            list(final_arrow.names) if mode in upsert_modes else list(target_cols)
+        )
+        dict_rows = [_row_as_dict(arrow_cols, r) for r in mapped_rows]
         kept_dicts: list[dict[str, Any]] = []
         for row_idx, d in enumerate(dict_rows):
             try:
@@ -1355,6 +1410,8 @@ def _write_mapped_rows_pyiceberg(
                             "— would invent NULL. Sparse overlay must expand first."
                         )
                 for field in final_arrow:
+                    # Append path: only Map columns present; extras stay None for INSERT.
+                    # Upsert path: d must carry overlay values for dest-only fields.
                     _coerce_arrow_cell(d.get(field.name), field.type, pa)
                 kept_dicts.append(d)
             except ValueError as exc:
@@ -1647,6 +1704,33 @@ def _write_mapped_rows_filesystem(
             driver="iceberg",
         )
     file_warnings: list[str] = []
+    schema_cols_all = [
+        str(f.get("name") or "")
+        for f in (schema_json.get("fields") or [])
+        if f.get("name")
+    ]
+    schema_extra_fs = [c for c in schema_cols_all if c not in set(target_cols)]
+    # Parity with catalog: overwrite of a partial Map NULL-wipes dest-only cols.
+    if (
+        write_mode in {"overwrite", "replace"}
+        and current_meta
+        and schema_extra_fs
+    ):
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=(
+                "Iceberg overwrite Map omits destination columns "
+                f"{schema_extra_fs[:12]} — would NULL-wipe them. "
+                "Map every column or use upsert/merge to preserve unmapped fields."
+            ),
+            rejected_details=rejected_details,
+            driver="iceberg",
+        )
     if write_mode in {"overwrite", "replace"} and current_meta:
         # Drop prior data refs; keep schema evolution
         current_meta = None
@@ -1670,11 +1754,71 @@ def _write_mapped_rows_filesystem(
                 rejected_details=rejected_details,
                 driver="iceberg",
             )
-        existing_rows = _load_existing_rows(table_dir, target_cols, current_meta)
+        # Shared dense empty-PK quarantine (parity with catalog path).
+        from connectors.writer_common import partition_dense_upsert_rows
+
+        before_pk = len(mapped_rows)
+        mapped_rows = partition_dense_upsert_rows(
+            mapped_rows,
+            pk_cols,
+            target_cols=target_cols,
+            rejected_details=rejected_details,
+            policy=policy,
+        )
+        if len(mapped_rows) < before_pk:
+            _pk_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+            if _pk_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=0,
+                    error=_pk_abort,
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
+            if not mapped_rows:
+                return WriteResult(
+                    ok=True,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=1,
+                    rejected_details=rejected_details,
+                    rejected_rows=_rejected_row_count(
+                        data_rows, mapped_rows, rejected_details, policy
+                    ),
+                    driver="iceberg",
+                )
+        # CoW rewrite must keep every committed schema field — Map-only load
+        # would drop dest-only columns from the snapshot.
+        schema_cols = [
+            str(f.get("name") or "")
+            for f in (schema_json.get("fields") or [])
+            if f.get("name")
+        ]
+        load_cols = schema_cols or list(target_cols)
+        existing_rows = _load_existing_rows(table_dir, load_cols, current_meta)
         incoming = [_row_as_dict(target_cols, r) for r in mapped_rows]
-        merged = _merge_upsert_rows(existing_rows, incoming, pk_cols=pk_cols)
+        try:
+            merged = _merge_upsert_rows(existing_rows, incoming, pk_cols=pk_cols)
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=str(table_dir),
+                checksum="",
+                chunks_completed=0,
+                error=str(exc)[:500],
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
         rel_path, n_written, checksum, file_warnings = _write_data_file(
-            table_dir / "data", target_cols, merged, column_types=write_types
+            table_dir / "data", load_cols, merged, column_types=write_types
         )
         operation = "overwrite"  # Iceberg CoW upsert lands as overwrite snapshot
         data_files = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]

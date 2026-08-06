@@ -98,3 +98,53 @@ def test_sparse_known_pk_still_overlays():
     )
     assert merged[0]["note"] == "updated"
     assert merged[0]["extra"] == "stay"
+
+
+def test_filesystem_merge_refuses_null_dense_pk():
+    from connectors.iceberg_writer import _merge_upsert_rows
+
+    with pytest.raises(ValueError, match="null/empty primary-key"):
+        _merge_upsert_rows(
+            existing=[],
+            incoming=[{"id": None, "note": "x"}],
+            pk_cols=["id"],
+        )
+
+
+def test_filesystem_merge_skips_existing_null_pk_no_none_string_collision():
+    """None must not stringify to 'None' and collide with literal PK 'None'."""
+    from connectors.iceberg_writer import _merge_upsert_rows
+
+    merged = _merge_upsert_rows(
+        existing=[{"id": None, "note": "ghost"}, {"id": "None", "note": "literal"}],
+        incoming=[{"id": "None", "note": "updated"}],
+        pk_cols=["id"],
+    )
+    by_id = {r["id"]: r for r in merged}
+    assert "None" in by_id
+    assert by_id["None"]["note"] == "updated"
+    assert None not in by_id
+
+
+def test_scan_absorb_skips_null_pk_no_none_collision():
+    """Catalog PK scan must not key SQL NULL as the string 'None'."""
+    from connectors.writer_common import _is_nullish_conflict_key
+
+    # Mirror _scan_existing_by_pk absorb keying without needing a live table.
+    pk_cols = ["id"]
+    rows = [
+        {"id": None, "extra": "ghost"},
+        {"id": "None", "extra": "literal"},
+    ]
+    existing: dict = {}
+    for row in rows:
+        if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
+            continue
+        key = tuple(
+            "" if _is_nullish_conflict_key(row.get(c)) else str(row.get(c))
+            for c in pk_cols
+        )
+        existing[key] = row
+    assert list(existing.keys()) == [("None",)]
+    assert existing[("None",)]["extra"] == "literal"
+

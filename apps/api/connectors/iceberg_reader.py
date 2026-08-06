@@ -24,8 +24,7 @@ def _stringify(value: Any) -> str:
         return json.dumps(value, default=str)
     if isinstance(value, (datetime, date, time, Decimal)):
         return str(value)
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
+    # Bytes → base64 via cell_to_string SSOT — never UTF-8 errors="replace" (U+FFFD invent).
     return cell_to_string(value, preserve_sql_null=True)
 
 

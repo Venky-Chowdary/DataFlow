@@ -687,3 +687,12 @@ def test_iceberg_stringify_preserves_sql_null():
     from services.value_serializer import SQL_NULL_SENTINEL
 
     assert _stringify(None) == SQL_NULL_SENTINEL
+
+
+def test_iceberg_stringify_bytes_base64():
+    import base64
+
+    from connectors.iceberg_reader import _stringify
+
+    raw = b"\xff\xfe"
+    assert _stringify(raw) == base64.b64encode(raw).decode("ascii")
