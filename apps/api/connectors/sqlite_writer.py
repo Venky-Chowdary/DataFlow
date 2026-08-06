@@ -25,19 +25,10 @@ from connectors.writer_common import (
     CHUNK_SIZE,
     _coerced_null_row_count,
     _rejected_row_count,
+    apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     filter_stale_lsn_rows,
-    quarantine_currency_markers_into_numeric,
-    quarantine_unfit_binaries,
-    quarantine_unfit_bitstrings,
-    quarantine_unfit_booleans,
-    quarantine_unfit_decimals,
-    quarantine_unfit_enum_set,
-    quarantine_unfit_integers,
-    quarantine_unfit_specialty_types,
-    quarantine_unfit_strings,
-    quarantine_unfit_temporals,
-    quarantine_unfit_years,
+    gate8_writer_meta,
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
@@ -404,58 +395,14 @@ def write_mapped_rows(
         # Shared quarantine matrix — SQLite is PRODUCTION_SKU; never skip fit
         # checks that generic_sql / Postgres / BQ run (silent truncate / invent).
         tgt_types = [str(logical_types[i] if i < len(logical_types) else "") for i in range(len(target_cols))]
-        mapped_rows = quarantine_currency_markers_into_numeric(
-            mapped_rows, target_cols, tgt_types, rejected_details, policy
-        )
-        mapped_rows = quarantine_unfit_decimals(
+        mapped_rows = apply_write_quarantine_matrix(
             mapped_rows,
             target_cols,
             tgt_types,
             rejected_details,
             policy,
-            dialect_label="SQLite NUMERIC",
-        )
-        mapped_rows = quarantine_unfit_years(
-            mapped_rows, target_cols, tgt_types, rejected_details, policy
-        )
-        mapped_rows = quarantine_unfit_booleans(
-            mapped_rows, target_cols, tgt_types, rejected_details, policy
-        )
-        mapped_rows = quarantine_unfit_temporals(
-            mapped_rows, target_cols, tgt_types, rejected_details, policy
-        )
-        mapped_rows = quarantine_unfit_specialty_types(
-            mapped_rows, target_cols, tgt_types, rejected_details, policy
-        )
-        mapped_rows = quarantine_unfit_integers(
-            mapped_rows,
-            target_cols,
-            tgt_types,
-            rejected_details,
-            policy,
-            dialect_label="SQLite INTEGER",
-        )
-        mapped_rows = quarantine_unfit_bitstrings(
-            mapped_rows, target_cols, tgt_types, rejected_details, policy
-        )
-        mapped_rows = quarantine_unfit_binaries(
-            mapped_rows,
-            target_cols,
-            tgt_types,
-            rejected_details,
-            policy,
-            dialect_label="SQLite BLOB",
-        )
-        mapped_rows = quarantine_unfit_enum_set(
-            mapped_rows, target_cols, tgt_types, rejected_details, policy
-        )
-        mapped_rows = quarantine_unfit_strings(
-            mapped_rows,
-            target_cols,
-            tgt_types,
-            rejected_details,
-            policy,
-            dialect_label="SQLite TEXT",
+            dialect_label="SQLite",
+            mappings=list(mappings or []) or None,
         )
 
         rows_for_checksum: list[tuple] = []

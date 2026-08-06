@@ -619,7 +619,8 @@ def write_mapped_rows(
         if _final_abort:
             return WriteResult(
                 ok=False,
-                rows_written=0,
+                # Honest count: earlier chunks may already be committed.
+                rows_written=written,
                 rows_skipped=skipped_total,
                 table_name=collection_name,
                 target_schema=db_name,
@@ -652,10 +653,13 @@ def write_mapped_rows(
     except (pymongo.errors.PyMongoError, ValueError, TypeError, KeyError, OSError) as exc:
         return WriteResult(
             ok=False,
-            rows_written=0,
+            rows_written=written if "written" in locals() else 0,
             table_name=table_name,
             target_schema=schema or "db",
             checksum="",
             chunks_completed=0,
             error=str(exc),
+            rejected_details=list(rejected_details) if "rejected_details" in locals() else [],
+            rejected_rows=len(rejected_details) if "rejected_details" in locals() else 0,
+            warnings=transform_errors if "transform_errors" in locals() else [],
         )

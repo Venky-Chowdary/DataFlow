@@ -69,7 +69,12 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
         parse_csv_preview,
     )
 
-from .adapters import records_to_matrix, resolve_connector_config, resolve_dest_table
+from .adapters import (
+    WriteBatchBlocked,
+    records_to_matrix,
+    resolve_connector_config,
+    resolve_dest_table,
+)
 from .stream import _write_batch
 
 STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
@@ -1016,17 +1021,34 @@ def stream_file_to_database(
                 else {}
             ),
         )
-        batch_written, last_checksum, dest_summary = with_retry(
-            write_op,
-            budget=RetryBudget(
-                max_attempts=retry.max_attempts,
-                base_delay_seconds=retry.base_delay_seconds,
-                max_delay_seconds=retry.max_delay_seconds,
-                exponential_base=retry.exponential_base,
-                jitter=retry.jitter,
-            ),
-            replay_safety=replay_safety,
-        )
+        try:
+            batch_written, last_checksum, dest_summary = with_retry(
+                write_op,
+                budget=RetryBudget(
+                    max_attempts=retry.max_attempts,
+                    base_delay_seconds=retry.base_delay_seconds,
+                    max_delay_seconds=retry.max_delay_seconds,
+                    exponential_base=retry.exponential_base,
+                    jitter=retry.jitter,
+                ),
+                replay_safety=replay_safety,
+            )
+        except WriteBatchBlocked as blocked:
+            details = list(blocked.rejected_details or [])
+            if details and job_id:
+                from services.quarantine_dlq import persist_rejected_rows
+
+                persist_rejected_rows(
+                    job_id=str(job_id),
+                    rejected_details=details,
+                    source="file_stream_batch_abort",
+                    connector=str(
+                        getattr(destination, "format", None)
+                        or getattr(destination, "kind", None)
+                        or ""
+                    ),
+                )
+            raise
         return {
             "batch_written": batch_written,
             "last_checksum": last_checksum,
@@ -1051,8 +1073,26 @@ def stream_file_to_database(
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
         warning_samples.extend(result["warnings"])
-        rejected_details.extend(result["rejected_details"])
+        new_details = [
+            d for d in (result.get("rejected_details") or []) if isinstance(d, dict)
+        ]
+        rejected_details.extend(new_details)
         last_checksum = result["last_checksum"] or last_checksum
+
+        # Persist batch quarantine before continuing — crash must not lose DLQ.
+        if new_details and job_id:
+            from services.quarantine_dlq import persist_rejected_rows
+
+            persist_rejected_rows(
+                job_id=str(job_id),
+                rejected_details=new_details,
+                source="file_stream_batch",
+                connector=str(
+                    getattr(destination, "format", None)
+                    or getattr(destination, "kind", None)
+                    or ""
+                ),
+            )
 
         checkpoint.chunk_index = idx
         checkpoint.rows_processed = written

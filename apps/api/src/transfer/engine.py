@@ -104,6 +104,7 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 from .adapters import (
     FileExportMapBlocked,
+    WriteBatchBlocked,
     parse_file_content,
     read_source_database,
     resolve_connector_config,
@@ -1373,17 +1374,48 @@ def _fail_runtime_job(
     exc: Exception,
     *,
     lineage: Any = None,
+    request: Any = None,
+    already_persisted: list[int] | None = None,
 ) -> tuple[str, dict[str, Any]]:
-    """Persist a runtime failure with operator-facing message + failed_at_phase."""
+    """Persist a runtime failure with operator-facing message + failed_at_phase.
+
+    When the exception carries ``rejected_details`` (WriteBatchBlocked or a
+    connection-lost error stamped by ``_raise_write_failure``), persist DLQ
+    before marking the job failed so quarantine cannot disappear.
+    """
+    stamped_details = list(getattr(exc, "rejected_details", None) or [])
+    if stamped_details:
+        summary = dict(getattr(exc, "dest_summary", None) or {})
+        summary["rejected_details"] = stamped_details
+        summary["rejected_rows"] = int(
+            getattr(exc, "rejected_rows", 0) or len(stamped_details)
+        )
+        summary["rows_written"] = int(getattr(exc, "rows_written", 0) or 0)
+        summary["ok"] = False
+        summary["error"] = str(exc)
+        try:
+            _persist_job_quarantine(
+                job_id,
+                summary,
+                request,
+                already_persisted=already_persisted,
+            )
+        except Exception as qexc:
+            logger.warning(
+                "quarantine persist on runtime failure for %s: %s",
+                job_id,
+                qexc,
+                exc_info=qexc,
+            )
     cancelled = isinstance(exc, TransferCancelled)
     status = "cancelled" if cancelled else "failed"
     error_details, lease_extras = _job_failure_fields(exc)
     prev = {}
     try:
         prev = mongo.get_job(job_id) or {}
-    except Exception as exc:
+    except Exception as load_exc:
         logger.warning(
-            "failed to load prior job state for %s: %s", job_id, exc, exc_info=exc
+            "failed to load prior job state for %s: %s", job_id, load_exc, exc_info=load_exc
         )
         prev = {}
     prev_phase = str(prev.get("phase") or "").strip().lower()
@@ -1396,16 +1428,25 @@ def _fail_runtime_job(
         lease_extras.pop("operator_error", None) or error_details.get("message") or exc
     )
     display = str(exc) if cancelled else operator_msg
+    status_kwargs: dict[str, Any] = {
+        "error": display,
+        "phase": status,
+        "failed_at_phase": failed_at_phase,
+        "progress_pct": 0,
+        "message": display,
+        "error_details": error_details,
+        **lease_extras,
+    }
+    if stamped_details:
+        status_kwargs["rejected_rows"] = int(
+            getattr(exc, "rejected_rows", 0) or len(stamped_details)
+        )
+        status_kwargs["rejected_details"] = stamped_details[:2000]
+        status_kwargs["records_processed"] = int(getattr(exc, "rows_written", 0) or 0)
     mongo.update_job_status(
         job_id,
         status,
-        error=display,
-        phase=status,
-        failed_at_phase=failed_at_phase,
-        progress_pct=0,
-        message=display,
-        error_details=error_details,
-        **lease_extras,
+        **status_kwargs,
     )
     if lineage is not None and not cancelled:
         lineage.emit_run_failed(
@@ -3229,6 +3270,43 @@ class UniversalTransferEngine:
                 explanation=explanation,
                 mapping_proof=_mapping_proof_for_request(request),
             )
+        except WriteBatchBlocked as blocked:
+            dest_summary = {
+                **(blocked.dest_summary or {}),
+                "rejected_details": list(blocked.rejected_details),
+                "rejected_rows": int(blocked.rejected_rows),
+                "rows_written": int(blocked.rows_written),
+                "ok": False,
+                "error": str(blocked),
+            }
+            _persist_job_quarantine(
+                job_id,
+                dest_summary,
+                request,
+                already_persisted=_quarantine_persisted,
+            )
+            block_msg = str(blocked)
+            mongo.update_job_status(
+                job_id,
+                "failed",
+                phase="failed",
+                error=block_msg,
+                message=block_msg,
+                records_processed=int(blocked.rows_written or 0),
+                rejected_rows=int(dest_summary.get("rejected_rows") or 0),
+                rejected_details=(
+                    dest_summary.get("rejected_details") or []
+                )[:2000],
+                destination_summary=dest_summary,
+            )
+            return TransferResult(
+                success=False,
+                error=block_msg,
+                job_id=job_id,
+                operation=request.operation,
+                records_transferred=int(blocked.rows_written or 0),
+                destination_summary=dest_summary,
+            )
         except Exception as e:
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
@@ -3880,6 +3958,44 @@ class UniversalTransferEngine:
                 explanation=explanation,
                 mapping_proof=_mapping_proof_for_request(request),
             )
+        except WriteBatchBlocked as blocked:
+            dest_summary = {
+                **(blocked.dest_summary or {}),
+                "rejected_details": list(blocked.rejected_details),
+                "rejected_rows": int(blocked.rejected_rows),
+                "rows_written": int(blocked.rows_written),
+                "ok": False,
+                "error": str(blocked),
+            }
+            _persist_job_quarantine(
+                job_id,
+                dest_summary,
+                request,
+                already_persisted=_quarantine_persisted,
+            )
+            block_msg = str(blocked)
+            mongo.update_job_status(
+                job_id,
+                "failed",
+                phase="failed",
+                error=block_msg,
+                message=block_msg,
+                records_processed=int(blocked.rows_written or 0),
+                rejected_rows=int(dest_summary.get("rejected_rows") or 0),
+                rejected_details=(
+                    dest_summary.get("rejected_details") or []
+                )[:2000],
+                destination_summary=dest_summary,
+            )
+            return TransferResult(
+                success=False,
+                error=block_msg,
+                job_id=job_id,
+                operation=request.operation,
+                records_transferred=int(blocked.rows_written or 0),
+                destination_summary=dest_summary,
+                contract_id=contract_id,
+            )
         except Exception as e:
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
@@ -4432,6 +4548,44 @@ class UniversalTransferEngine:
                 contract_id=contract_id,
                 explanation=explanation,
                 mapping_proof=_mapping_proof_for_request(request),
+            )
+        except WriteBatchBlocked as blocked:
+            dest_summary = {
+                **(blocked.dest_summary or {}),
+                "rejected_details": list(blocked.rejected_details),
+                "rejected_rows": int(blocked.rejected_rows),
+                "rows_written": int(blocked.rows_written),
+                "ok": False,
+                "error": str(blocked),
+            }
+            _persist_job_quarantine(
+                job_id,
+                dest_summary,
+                request,
+                already_persisted=_quarantine_persisted,
+            )
+            block_msg = str(blocked)
+            mongo.update_job_status(
+                job_id,
+                "failed",
+                phase="failed",
+                error=block_msg,
+                message=block_msg,
+                records_processed=int(blocked.rows_written or 0),
+                rejected_rows=int(dest_summary.get("rejected_rows") or 0),
+                rejected_details=(
+                    dest_summary.get("rejected_details") or []
+                )[:2000],
+                destination_summary=dest_summary,
+            )
+            return TransferResult(
+                success=False,
+                error=block_msg,
+                job_id=job_id,
+                operation=request.operation,
+                records_transferred=int(blocked.rows_written or 0),
+                destination_summary=dest_summary,
+                contract_id=contract_id,
             )
         except Exception as e:
             finalize_contract(contract_id, success=False)

@@ -37,6 +37,7 @@ from services.resilience import (  # noqa: E402, F401
 )
 
 from .adapters import (
+    WriteBatchBlocked,
     _introspect_table_schema,
     _introspect_table_schema_rich,
     resolve_connector_config,
@@ -484,9 +485,16 @@ def _unwrap_read(result):
 
 
 def _raise_write_failure(result: Any, label: str) -> None:
-    """Fail a batch write; connection drops are retriable when the writer ledger can skip commits."""
+    """Fail a batch write; connection drops are retriable when the writer ledger can skip commits.
+
+    Always raise :class:`WriteBatchBlocked` (not bare RuntimeError) so mid-write
+    FAIL_JOB / quarantine details reach DLQ persist before the job is marked failed.
+    """
     err = result.error or label
     written = int(getattr(result, "rows_written", 0) or 0)
+    details = list(getattr(result, "rejected_details", []) or [])
+    rejected_rows = int(getattr(result, "rejected_rows", 0) or 0) or len(details)
+    summary = _writer_diagnostics(result)
     try:
         from connectors.write_resilience import is_connection_lost
     except ImportError:
@@ -495,10 +503,26 @@ def _raise_write_failure(result: Any, label: str) -> None:
     # so re-invoking the same batch after a proxy drop is safe (already-written
     # chunks are skipped). Prefer ConnectionError so with_retry can finish the job.
     if is_connection_lost(err):
-        raise ConnectionError(err)
-    if written > 0:
-        raise RuntimeError(f"partial write ({written} rows committed before failure): {err}")
-    raise RuntimeError(err)
+        # Retriable transport failure — but never discard quarantine already
+        # collected on the WriteResult (retry exhaustion must still DLQ).
+        lost = ConnectionError(err)
+        setattr(lost, "rejected_details", details)
+        setattr(lost, "rejected_rows", rejected_rows)
+        setattr(lost, "rows_written", written)
+        setattr(lost, "dest_summary", summary)
+        raise lost
+    msg = (
+        f"partial write ({written} rows committed before failure): {err}"
+        if written > 0
+        else str(err)
+    )
+    raise WriteBatchBlocked(
+        msg,
+        rejected_details=details,
+        rejected_rows=rejected_rows,
+        rows_written=written,
+        dest_summary=summary,
+    )
 
 
 def _write_batch(
@@ -644,7 +668,7 @@ def _write_batch(
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
-            raise RuntimeError(result.error or "MongoDB batch write failed")
+            _raise_write_failure(result, "MongoDB batch write failed")
         summary = {
             "type": "mongodb",
             "database": result.target_schema,
@@ -681,7 +705,7 @@ def _write_batch(
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
-            raise RuntimeError(result.error or "SQLite batch write failed")
+            _raise_write_failure(result, "SQLite batch write failed")
         summary = {
             "type": "sqlite",
             "database": cfg["database"],
@@ -723,7 +747,7 @@ def _write_batch(
             skip_session_setup=skip_session_setup,
         )
         if not result.ok:
-            raise RuntimeError(result.error or "Snowflake batch write failed")
+            _raise_write_failure(result, "Snowflake batch write failed")
         summary = {"type": "snowflake", "schema": result.target_schema, "table": result.table_name,
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
@@ -756,7 +780,7 @@ def _write_batch(
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
         )
         if not result.ok:
-            raise RuntimeError(result.error or "BigQuery batch write failed")
+            _raise_write_failure(result, "BigQuery batch write failed")
         summary = {"type": "bigquery", "dataset": result.target_schema, "table": result.table_name,
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
@@ -838,7 +862,7 @@ def _write_batch(
             kwargs["skip_chunking"] = bool(extra.get("skip_chunking"))
         result = mod.write_mapped_rows(**kwargs)
         if not result.ok:
-            raise RuntimeError(result.error or f"{dest_type} batch write failed")
+            _raise_write_failure(result, f"{dest_type} batch write failed")
         summary = {"type": dest_type, "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
@@ -880,7 +904,7 @@ def _write_batch(
             file_batch_idx=chunk_idx,
         )
         if not result.ok:
-            raise RuntimeError(result.error or f"{dest_type} batch write failed")
+            _raise_write_failure(result, f"{dest_type} batch write failed")
         summary = {"type": type_name, "schema": result.target_schema, "table": result.table_name,
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
@@ -940,7 +964,7 @@ def _write_batch(
             extra=extra or None,
         )
         if not result.ok:
-            raise RuntimeError(result.error or f"{dest_type} batch write failed")
+            _raise_write_failure(result, f"{dest_type} batch write failed")
         summary = {
             "type": dest_type,
             "schema": result.target_schema,
@@ -1860,17 +1884,36 @@ def stream_database_transfer(
             skip_preflight=skip_preflight,
             **write_kwargs,
         )
-        batch_written, last_checksum, dest_summary = with_retry(
-            write_op,
-            budget=RetryBudget(
-                max_attempts=retry.max_attempts,
-                base_delay_seconds=retry.base_delay_seconds,
-                max_delay_seconds=retry.max_delay_seconds,
-                exponential_base=retry.exponential_base,
-                jitter=retry.jitter,
-            ),
-            replay_safety=replay_safety,
-        )
+        try:
+            batch_written, last_checksum, dest_summary = with_retry(
+                write_op,
+                budget=RetryBudget(
+                    max_attempts=retry.max_attempts,
+                    base_delay_seconds=retry.base_delay_seconds,
+                    max_delay_seconds=retry.max_delay_seconds,
+                    exponential_base=retry.exponential_base,
+                    jitter=retry.jitter,
+                ),
+                replay_safety=replay_safety,
+            )
+        except WriteBatchBlocked as blocked:
+            # Persist this batch's quarantine before aborting the stream —
+            # bare RuntimeError would drop mid-write FAIL_JOB details.
+            details = list(blocked.rejected_details or [])
+            if details and job_id:
+                from services.quarantine_dlq import persist_rejected_rows
+
+                persist_rejected_rows(
+                    job_id=str(job_id),
+                    rejected_details=details,
+                    source="stream_batch_abort",
+                    connector=str(
+                        getattr(destination, "format", None)
+                        or getattr(destination, "kind", None)
+                        or ""
+                    ),
+                )
+            raise
         if dest_type == "snowflake":
             sf_conn_state["session_ready"] = True
         return {

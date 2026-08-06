@@ -350,7 +350,8 @@ def write_mapped_rows(
         if _final_abort:
             return WriteResult(
                 ok=False,
-                rows_written=0,
+                # Honest count: keys may already be written before abort-class reject.
+                rows_written=written,
                 table_name=prefix,
                 target_schema=f"db{database or 0}",
                 checksum="",
@@ -379,9 +380,9 @@ def write_mapped_rows(
     except Exception as exc:
         return WriteResult(
             ok=False,
-            rows_written=0,
+            rows_written=written if "written" in locals() else 0,
             table_name=prefix,
-            target_schema="",
+            target_schema=f"db{database or 0}" if "database" in locals() else "",
             checksum="",
             chunks_completed=0,
             error=format_exception_message(exc),

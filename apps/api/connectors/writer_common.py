@@ -1309,6 +1309,10 @@ def map_rows_for_fingerprint(
     Returns ``(mapped_good_rows, rejected_details)``. Callers must pass the same
     ``dest_kind`` / ``destination_pk_columns`` / ``error_policy`` as the writer
     so checksum remap cannot invent a different hold-out set than the load.
+
+    After ``build_mapped_rows_with_details``, runs ``apply_write_quarantine_matrix``
+    whenever destination types are known — typed writers quarantine DECIMAL /
+    VARCHAR / BINARY / temporal overflow the same way.
     """
     mapped, _errors, rejected = build_mapped_rows_with_details(
         headers=headers,
@@ -1324,7 +1328,22 @@ def map_rows_for_fingerprint(
         stream_contracts=stream_contracts,
         contract_primary_key=contract_primary_key,
     )
-    return mapped, list(rejected or [])
+    rejected_details = list(rejected or [])
+    type_map = dict(dest_types or {}) or dict(column_types or {})
+    if mapped and target_cols and type_map:
+        target_types = [str(type_map.get(c) or type_map.get(str(c).lower()) or "") for c in target_cols]
+        if any(t.strip() for t in target_types):
+            policy = transform_error_policy(error_policy)
+            mapped = apply_write_quarantine_matrix(
+                mapped,
+                target_cols,
+                target_types,
+                rejected_details,
+                policy,
+                dialect_label=(dest_kind or "destination").strip() or "destination",
+                mappings=list(mappings or []) or None,
+            )
+    return mapped, rejected_details
 
 
 def build_mapped_rows(

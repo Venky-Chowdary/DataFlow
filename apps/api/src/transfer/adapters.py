@@ -62,6 +62,31 @@ class FileExportMapBlocked(ValueError):
         )
 
 
+class WriteBatchBlocked(RuntimeError):
+    """Writer aborted a batch — carry full quarantine for DLQ before job fail.
+
+    Stream/engine must persist ``rejected_details`` before treating the transfer
+    as a bare RuntimeError (silent DLQ loss on FAIL_JOB / mid-write abort).
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rejected_details: list[dict[str, Any]] | None = None,
+        rejected_rows: int = 0,
+        rows_written: int = 0,
+        dest_summary: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.rejected_details = list(rejected_details or [])
+        self.rejected_rows = int(
+            rejected_rows if rejected_rows else len(self.rejected_details)
+        )
+        self.rows_written = int(rows_written or 0)
+        self.dest_summary = dict(dest_summary or {})
+
+
 def resolve_dest_table(
     dest_type: str, destination: EndpointConfig, fallback_name: str = "import"
 ) -> str:
@@ -131,6 +156,38 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
             if key in meta and meta[key] is not None:
                 out[key] = meta[key]
     return out
+
+
+def raise_writer_failure(result: Any, label: str) -> None:
+    """Raise :class:`WriteBatchBlocked` so DLQ details survive job failure."""
+    err = getattr(result, "error", None) or label
+    written = int(getattr(result, "rows_written", 0) or 0)
+    details = list(getattr(result, "rejected_details", []) or [])
+    rejected_rows = int(getattr(result, "rejected_rows", 0) or 0) or len(details)
+    summary = _writer_diagnostics(result)
+    try:
+        from connectors.write_resilience import is_connection_lost
+    except ImportError:
+        is_connection_lost = lambda _e: False  # noqa: E731
+    if is_connection_lost(err):
+        lost = ConnectionError(err)
+        setattr(lost, "rejected_details", details)
+        setattr(lost, "rejected_rows", rejected_rows)
+        setattr(lost, "rows_written", written)
+        setattr(lost, "dest_summary", summary)
+        raise lost
+    msg = (
+        f"partial write ({written} rows committed before failure): {err}"
+        if written > 0
+        else str(err)
+    )
+    raise WriteBatchBlocked(
+        msg,
+        rejected_details=details,
+        rejected_rows=rejected_rows,
+        rows_written=written,
+        dest_summary=summary,
+    )
 
 
 def _apply_vector_extra(common: dict[str, Any], endpoint: EndpointConfig) -> None:
@@ -1435,7 +1492,7 @@ def write_destination_database(
             **common, write_mode=write_mode, conflict_columns=conflict_columns or []
         )
         if not result.ok:
-            raise RuntimeError(result.error or "Snowflake write failed")
+            raise_writer_failure(result, "Snowflake write failed")
         ddl_log.insert(
             0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}"
         )
@@ -1469,7 +1526,7 @@ def write_destination_database(
             engine=db_type,
         )
         if not result.ok:
-            raise RuntimeError(result.error or f"{db_type} write failed")
+            raise_writer_failure(result, f"{db_type} write failed")
         ddl_log.insert(
             0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}"
         )
@@ -1497,7 +1554,7 @@ def write_destination_database(
             **common, write_mode=write_mode, conflict_columns=conflict_columns or []
         )
         if not result.ok:
-            raise RuntimeError(result.error or "MySQL write failed")
+            raise_writer_failure(result, "MySQL write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.table_name}")
         return (
             result.rows_written,
@@ -1527,7 +1584,7 @@ def write_destination_database(
             conflict_columns=conflict_columns or [],
         )
         if not result.ok:
-            raise RuntimeError(result.error or "BigQuery write failed")
+            raise_writer_failure(result, "BigQuery write failed")
         ddl_log.insert(
             0,
             f"CREATE TABLE IF NOT EXISTS {cfg['database']}.{result.target_schema}.{result.table_name}",
@@ -1562,7 +1619,7 @@ def write_destination_database(
             **common, write_mode=write_mode, conflict_columns=conflict_columns or []
         )
         if not result.ok:
-            raise RuntimeError(result.error or "MongoDB write failed")
+            raise_writer_failure(result, "MongoDB write failed")
         ddl_log.insert(
             0,
             f"CREATE COLLECTION IF NOT EXISTS {result.target_schema}.{result.table_name}",
@@ -1587,7 +1644,7 @@ def write_destination_database(
             ddl_log.append(f"GCS FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "GCS write failed")
+            raise_writer_failure(result, "GCS write failed")
         ddl_log.insert(0, f"PUT gs://{cfg['database']}/{result.table_name}")
         return (
             result.rows_written,
@@ -1609,7 +1666,7 @@ def write_destination_database(
             ddl_log.append(f"ADLS FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "Azure Blob write failed")
+            raise_writer_failure(result, "Azure Blob write failed")
         ddl_log.insert(0, f"PUT abfs://{cfg['database']}/{result.table_name}")
         return (
             result.rows_written,
@@ -1631,7 +1688,7 @@ def write_destination_database(
             ddl_log.append(f"S3 FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "S3 write failed")
+            raise_writer_failure(result, "S3 write failed")
         ddl_log.insert(0, f"PUT s3://{cfg['database']}/{result.table_name}")
         return (
             result.rows_written,
@@ -1653,7 +1710,7 @@ def write_destination_database(
             ddl_log.append(f"DYNAMODB ATTR {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "DynamoDB write failed")
+            raise_writer_failure(result, "DynamoDB write failed")
         ddl_log.insert(0, f"BATCH WRITE DynamoDB table {result.table_name}")
         return (
             result.rows_written,
@@ -1675,7 +1732,7 @@ def write_destination_database(
             ddl_log.append(f"ES FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "Elasticsearch write failed")
+            raise_writer_failure(result, "Elasticsearch write failed")
         ddl_log.insert(0, f"BULK INDEX {result.table_name}")
         return (
             result.rows_written,
@@ -1696,7 +1753,7 @@ def write_destination_database(
             ddl_log.append(f"REDIS FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "Redis write failed")
+            raise_writer_failure(result, "Redis write failed")
         ddl_log.insert(0, f"SET keys under prefix {result.table_name}")
         return (
             result.rows_written,
@@ -1721,7 +1778,7 @@ def write_destination_database(
             **common, write_mode=write_mode, conflict_columns=conflict_columns or []
         )
         if not result.ok:
-            raise RuntimeError(result.error or "SQLite write failed")
+            raise_writer_failure(result, "SQLite write failed")
         ddl_log.insert(0, f"CREATE TABLE IF NOT EXISTS {result.table_name}")
         return (
             result.rows_written,
@@ -1748,7 +1805,7 @@ def write_destination_database(
             **common, write_mode=write_mode, conflict_columns=conflict_columns or []
         )
         if not result.ok:
-            raise RuntimeError(result.error or "Generic SQL write failed")
+            raise_writer_failure(result, "Generic SQL write failed")
         ddl_log.insert(
             0, f"CREATE TABLE IF NOT EXISTS {result.target_schema}.{result.table_name}"
         )
@@ -1780,7 +1837,7 @@ def write_destination_database(
             )
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "SFTP write failed")
+            raise_writer_failure(result, "SFTP write failed")
         ddl_log.insert(0, f"PUT sftp://{cfg.get('host', '')}/{result.table_name}")
         return (
             result.rows_written,
@@ -1802,7 +1859,7 @@ def write_destination_database(
             ddl_log.append(f"EMAIL FIELD {col}")
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "Email send failed")
+            raise_writer_failure(result, "Email send failed")
         ddl_log.insert(0, f"EMAIL {result.table_name} via {cfg.get('host', '')}")
         return (
             result.rows_written,
@@ -1823,7 +1880,7 @@ def write_destination_database(
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "pgvector write failed")
+            raise_writer_failure(result, "pgvector write failed")
         ddl_log.insert(0, f"UPSERT pgvector {result.target_schema}.{result.table_name}")
         return (
             result.rows_written,
@@ -1846,7 +1903,7 @@ def write_destination_database(
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "Qdrant write failed")
+            raise_writer_failure(result, "Qdrant write failed")
         ddl_log.insert(0, f"UPSERT qdrant collection {result.table_name}")
         return (
             result.rows_written,
@@ -1867,7 +1924,7 @@ def write_destination_database(
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "Weaviate write failed")
+            raise_writer_failure(result, "Weaviate write failed")
         ddl_log.insert(0, f"UPSERT weaviate class {result.table_name}")
         return (
             result.rows_written,
@@ -1889,7 +1946,7 @@ def write_destination_database(
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "Pinecone write failed")
+            raise_writer_failure(result, "Pinecone write failed")
         ddl_log.insert(0, f"UPSERT pinecone namespace {result.table_name}")
         return (
             result.rows_written,
@@ -1911,7 +1968,7 @@ def write_destination_database(
         _apply_vector_extra(common, endpoint)
         result = write_mapped_rows(**common)
         if not result.ok:
-            raise RuntimeError(result.error or "Milvus write failed")
+            raise_writer_failure(result, "Milvus write failed")
         ddl_log.insert(0, f"UPSERT milvus collection {result.table_name}")
         return (
             result.rows_written,
@@ -1953,7 +2010,7 @@ def write_destination_database(
             extra=extra or None,
         )
         if not result.ok:
-            raise RuntimeError(result.error or f"{db_type} write failed")
+            raise_writer_failure(result, f"{db_type} write failed")
         ddl_log.insert(0, f"WRITE {db_type} → {result.table_name}")
         return (
             result.rows_written,
