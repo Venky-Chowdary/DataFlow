@@ -205,15 +205,9 @@ def _assert_redshift_conflict_keys_present(
     conflict_cols: list[str],
 ) -> None:
     """Refuse null/empty upsert keys — NULL-safe MERGE/DELETE would mass-touch rows."""
-    idxs = [target_cols.index(c) for c in conflict_cols]
-    for row in batch:
-        for col, idx in zip(conflict_cols, idxs):
-            val = row[idx] if idx < len(row) else None
-            if val is None or (isinstance(val, str) and str(val).strip() == ""):
-                raise ValueError(
-                    f"Redshift upsert refused null/empty conflict key {col!r} — "
-                    "NULL-safe MERGE/DELETE would mass-touch destination rows"
-                )
+    from connectors.writer_common import assert_dense_upsert_keys_present
+
+    assert_dense_upsert_keys_present(batch, conflict_cols, target_cols=target_cols)
 
 
 def _redshift_delete_by_keys(
@@ -225,6 +219,8 @@ def _redshift_delete_by_keys(
     target_cols: list[str],
     conflict_cols: list[str],
     batch: list[tuple] | list[list],
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
 ) -> list[tuple] | list[list]:
     """Upsert matching keys on Redshift (MERGE preferred, delete+insert fallback).
 
@@ -236,9 +232,18 @@ def _redshift_delete_by_keys(
     if not batch or not conflict_cols:
         return list(batch)
 
-    # Fail closed before MERGE or delete — null keys must not fall through as
-    # "MERGE unavailable" and retry mass-touch paths.
-    _assert_redshift_conflict_keys_present(batch, target_cols, conflict_cols)
+    from connectors.writer_common import partition_dense_upsert_rows
+
+    # Quarantine null keys — never abort the whole Redshift upsert chunk.
+    batch = partition_dense_upsert_rows(
+        list(batch),
+        conflict_cols,
+        target_cols=target_cols,
+        rejected_details=rejected_details,
+        policy=policy,
+    )
+    if not batch:
+        return []
 
     try:
         return _redshift_merge_upsert(
@@ -1356,6 +1361,21 @@ def write_mapped_rows(
             )
         cur = conn.cursor()
         try:
+            # Existence before CREATE — create-new may skip overlay require.
+            table_existed = False
+            try:
+                cur.execute(
+                    """
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = %s AND table_name = %s
+                    LIMIT 1
+                    """,
+                    (schema, table_name),
+                )
+                table_existed = cur.fetchone() is not None
+            except Exception:
+                table_existed = not create_table
+
             setup_attempt = 0
             setup_started = time.monotonic()
             while True:
@@ -1380,9 +1400,27 @@ def write_mapped_rows(
             from connectors.writer_common import (
                 bind_sql_mapped_rows_with_quarantine,
                 overlay_physical_bind_types,
+                require_physical_types_for_existing_table,
             )
 
             physical = _fetch_pg_column_types(cur, schema, table_name)
+            overlay_err = require_physical_types_for_existing_table(
+                table_existed=table_existed,
+                physical=physical,
+                dialect_label="PostgreSQL" if port != 5439 else "Redshift",
+            )
+            if overlay_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=overlay_err,
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
             if physical:
                 bind_types = overlay_physical_bind_types(
                     target_cols, bind_types, physical
@@ -1504,6 +1542,8 @@ def write_mapped_rows(
                                     target_cols=target_cols,
                                     conflict_cols=redshift_upsert_cols,
                                     batch=batch,
+                                    rejected_details=rejected_details,
+                                    policy=policy,
                                 )
                                 rows_skipped += max(0, len(batch) - len(write_batch))
                             elif (
@@ -1585,6 +1625,8 @@ def write_mapped_rows(
                                             target_cols=target_cols,
                                             conflict_cols=redshift_upsert_cols,
                                             batch=[row],
+                                            rejected_details=rejected_details,
+                                            policy=policy,
                                         )
                                     if write_rows:
                                         cur.execute(insert, write_rows[0])

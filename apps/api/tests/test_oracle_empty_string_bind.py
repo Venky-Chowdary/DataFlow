@@ -390,31 +390,58 @@ def test_coercion_probe_empty_blocks_unknown_physical():
     assert cols[0].get("failed", 0) >= 1 or report.get("has_blocking_failures")
 
 
-def test_preflight_dest_cols_skip_map_fallback_when_table_exists():
-    """Existing table + empty live types must not invent Map VARCHAR as dest_types."""
-    from services.preflight_service import run_file_preflight
+def test_partition_dense_upsert_rows_quarantines_empty_pk():
+    from connectors.writer_common import partition_dense_upsert_rows
 
-    # Minimal call — if helper isn't easily callable, probe via building logic.
-    from services.mapping_constraints import write_mappings
+    details: list[dict] = []
+    out = partition_dense_upsert_rows(
+        [{"id": "", "n": 1}, {"id": "2", "n": 2}],
+        ["id"],
+        rejected_details=details,
+        policy="quarantine",
+    )
+    assert out == [{"id": "2", "n": 2}]
+    assert details
+    assert any("null/empty conflict key" in str(d.get("reason") or "") for d in details)
 
-    mappings = [
-        {"source": "a", "target": "a", "target_type": "VARCHAR", "confidence": 1.0}
-    ]
-    dest_types: dict[str, str] = {}
-    destination_table_exists = True
-    write_maps = write_mappings(mappings)
-    dest_cols = []
-    for m in write_maps:
-        tgt = m.get("target") or ""
-        live = dest_types.get(tgt)
-        if destination_table_exists is True:
-            if not live:
-                continue
-            inferred = str(live).upper()
-        else:
-            inferred = str(m.get("target_type") or "VARCHAR").upper()
-        dest_cols.append(inferred)
-    assert dest_cols == []
+
+def test_require_physical_types_fails_closed_for_existing():
+    from connectors.writer_common import require_physical_types_for_existing_table
+
+    assert require_physical_types_for_existing_table(
+        table_existed=False, physical={}
+    ) is None
+    assert require_physical_types_for_existing_table(
+        table_existed=True, physical={"id": "INT"}
+    ) is None
+    err = require_physical_types_for_existing_table(
+        table_existed=True, physical={}, dialect_label="Snowflake"
+    )
+    assert err and "refuse silent Map VARCHAR bind" in err
+
+
+def test_clickhouse_hydrate_unknown_pk_quarantines():
+    from connectors.writer_common import run_sparse_cdc_upsert
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    details: list[dict] = []
+    written, skipped, checksum = run_sparse_cdc_upsert(
+        target_cols=["id", "note", "extra"],
+        conflict_columns=["id"],
+        sparse_rows=[("new", "only-note", DF_MISSING_SENTINEL)],
+        fetch_existing_row=lambda pk: None,
+        update_non_pk=lambda non_pk, pk: 0,
+        insert_present=lambda present: (_ for _ in ()).throw(
+            AssertionError("must not insert partial unknown PK")
+        ),
+        hydrate_versioned_insert=True,
+        rejected_details=details,
+        policy="quarantine",
+    )
+    assert written == 0
+    assert details
+    assert any("unknown primary key" in str(d.get("reason") or "") for d in details)
+    del skipped, checksum
 
 
 def test_dynamodb_date_refuses_empty():

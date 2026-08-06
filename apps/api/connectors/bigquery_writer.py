@@ -881,69 +881,79 @@ def write_mapped_rows(
             ] + list(sparse_checksum)
 
         if use_merge and mapped_rows:
-            from connectors.writer_common import assert_dense_upsert_keys_present
+            from connectors.writer_common import partition_dense_upsert_rows
 
-            assert_dense_upsert_keys_present(mapped_rows, conflict, target_cols)
-            staging_name = sanitize_identifier(f"{table_name}_stg_{uuid.uuid4().hex[:8]}")
-            staging_id = f"{project_id}.{dataset_id}.{staging_name}"
-            staging = bigquery.Table(staging_id, schema=schema_fields)
-            client.create_table(staging, exists_ok=True)
-            try:
-                if is_local:
-                    # goccy/bigquery-emulator does not support load jobs; streaming
-                    # inserts into a staging table are immediately MERGE-readable.
-                    for chunk_idx in range(chunks):
-                        start = chunk_idx * CHUNK_SIZE
-                        batch = mapped_rows[start : start + CHUNK_SIZE]
-                        if not batch:
-                            break
-                        records = records_for_bigquery(batch, target_cols, bq_types)
-                        errors = client.insert_rows_json(staging_id, records)
-                        if errors:
-                            raise RuntimeError(f"BigQuery staging insert errors: {errors[:3]}")
-                        merge_sql = build_bigquery_merge_sql(
-                            table_id,
-                            staging_id,
-                            target_cols,
-                            conflict,
-                            lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
+            mapped_rows = partition_dense_upsert_rows(
+                mapped_rows,
+                conflict,
+                target_cols=target_cols,
+                rejected_details=rejected_details,
+                policy=policy,
+            )
+            if not mapped_rows:
+                # All dense rows quarantined — continue to checksum/result path.
+                pass
+            else:
+                staging_name = sanitize_identifier(f"{table_name}_stg_{uuid.uuid4().hex[:8]}")
+                staging_id = f"{project_id}.{dataset_id}.{staging_name}"
+                staging = bigquery.Table(staging_id, schema=schema_fields)
+                client.create_table(staging, exists_ok=True)
+                try:
+                    if is_local:
+                        # goccy/bigquery-emulator does not support load jobs; streaming
+                        # inserts into a staging table are immediately MERGE-readable.
+                        for chunk_idx in range(chunks):
+                            start = chunk_idx * CHUNK_SIZE
+                            batch = mapped_rows[start : start + CHUNK_SIZE]
+                            if not batch:
+                                break
+                            records = records_for_bigquery(batch, target_cols, bq_types)
+                            errors = client.insert_rows_json(staging_id, records)
+                            if errors:
+                                raise RuntimeError(f"BigQuery staging insert errors: {errors[:3]}")
+                            merge_sql = build_bigquery_merge_sql(
+                                table_id,
+                                staging_id,
+                                target_cols,
+                                conflict,
+                                lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
+                            )
+                            client.query(merge_sql).result()
+                            written += len(batch)
+                            chunks_completed = chunk_idx + 1
+                            if on_checkpoint:
+                                on_checkpoint(chunks_completed, chunks, written)
+                    else:
+                        # Load jobs (not streaming inserts) so staging is immediately MERGE-readable.
+                        load_config = bigquery.LoadJobConfig(
+                            schema=schema_fields,
+                            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
                         )
-                        client.query(merge_sql).result()
-                        written += len(batch)
-                        chunks_completed = chunk_idx + 1
-                        if on_checkpoint:
-                            on_checkpoint(chunks_completed, chunks, written)
-                else:
-                    # Load jobs (not streaming inserts) so staging is immediately MERGE-readable.
-                    load_config = bigquery.LoadJobConfig(
-                        schema=schema_fields,
-                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                    )
-                    for chunk_idx in range(chunks):
-                        start = chunk_idx * CHUNK_SIZE
-                        batch = mapped_rows[start : start + CHUNK_SIZE]
-                        if not batch:
-                            break
-                        records = records_for_bigquery(batch, target_cols, bq_types)
-                        load_job = client.load_table_from_json(
-                            records, staging_id, job_config=load_config
-                        )
-                        load_job.result()
-                        merge_sql = build_bigquery_merge_sql(
-                            table_id,
-                            staging_id,
-                            target_cols,
-                            conflict,
-                            lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
-                        )
-                        client.query(merge_sql).result()
-                        written += len(batch)
-                        chunks_completed = chunk_idx + 1
-                        if on_checkpoint:
-                            on_checkpoint(chunks_completed, chunks, written)
-            finally:
-                client.delete_table(staging_id, not_found_ok=True)
+                        for chunk_idx in range(chunks):
+                            start = chunk_idx * CHUNK_SIZE
+                            batch = mapped_rows[start : start + CHUNK_SIZE]
+                            if not batch:
+                                break
+                            records = records_for_bigquery(batch, target_cols, bq_types)
+                            load_job = client.load_table_from_json(
+                                records, staging_id, job_config=load_config
+                            )
+                            load_job.result()
+                            merge_sql = build_bigquery_merge_sql(
+                                table_id,
+                                staging_id,
+                                target_cols,
+                                conflict,
+                                lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
+                            )
+                            client.query(merge_sql).result()
+                            written += len(batch)
+                            chunks_completed = chunk_idx + 1
+                            if on_checkpoint:
+                                on_checkpoint(chunks_completed, chunks, written)
+                finally:
+                    client.delete_table(staging_id, not_found_ok=True)
         else:
             for chunk_idx in range(chunks):
                 start = chunk_idx * CHUNK_SIZE

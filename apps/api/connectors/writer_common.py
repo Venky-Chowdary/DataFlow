@@ -4150,11 +4150,30 @@ def run_sparse_cdc_upsert(
                     # versioned row that would NULL-default omitted attrs.
                     missing = [c for c in target_cols if c not in present]
                     if missing:
-                        raise ValueError(
+                        msg = (
                             "ClickHouse/versioned sparse CDC insert of unknown "
                             f"primary key refused — omitted columns {missing[:8]}; "
                             "require a full row image or an existing destination row"
                         )
+                        if rejected_details is None:
+                            raise ValueError(msg)
+                        sample = ""
+                        try:
+                            sample = cell_to_string(
+                                next(iter(present.values()), "")
+                            )[:120]
+                        except Exception:
+                            sample = ""
+                        rejected_details.append(
+                            {
+                                "row": row_idx,
+                                "column": "*",
+                                "value": sample,
+                                "reason": msg[:300],
+                                "policy": policy,
+                            }
+                        )
+                        continue
                     insert_present(dict(present))
                 else:
                     hydrated = materialize_sparse_row_for_checksum(
@@ -4321,3 +4340,64 @@ def assert_dense_upsert_keys_present(
                     f"dense upsert refused null/empty conflict key {c!r} — "
                     "NULL-safe MERGE would mass-touch destination rows"
                 )
+
+
+def partition_dense_upsert_rows(
+    rows: list[Any],
+    conflict_columns: list[str],
+    *,
+    target_cols: list[str] | None = None,
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
+    row_offset: int = 0,
+) -> list[Any]:
+    """Hold out null/empty conflict-key rows; return rows safe for MERGE.
+
+    Preserves arrival order. When ``rejected_details`` is None, re-raises on the
+    first bad row (fail-closed callers without a quarantine sink).
+    """
+    if not rows or not conflict_columns:
+        return list(rows)
+    kept: list[Any] = []
+    for i, row in enumerate(rows):
+        try:
+            assert_dense_upsert_keys_present(
+                [row], conflict_columns, target_cols=target_cols
+            )
+            kept.append(row)
+        except ValueError as exc:
+            if rejected_details is None:
+                raise
+            rejected_details.append(
+                {
+                    "row": row_offset + i + 1,
+                    "column": "*",
+                    "value": "",
+                    "reason": str(exc)[:300],
+                    "policy": policy,
+                }
+            )
+    return kept
+
+
+def require_physical_types_for_existing_table(
+    *,
+    table_existed: bool,
+    physical: dict[str, str] | None,
+    dialect_label: str = "destination",
+) -> str | None:
+    """Error message when an existing table yields empty physical DDL introspect.
+
+    Map VARCHAR bind without live types invents NULL on typed sinks — refuse.
+    New / create-new tables may pass empty physical (Map stamps are physical).
+    """
+    if not table_existed:
+        return None
+    if physical:
+        return None
+    label = (dialect_label or "destination").strip() or "destination"
+    return (
+        f"{label} physical DDL introspection returned empty for an existing "
+        "table — refuse silent Map VARCHAR bind (empty→NULL invent risk). "
+        "Re-check grants / information_schema visibility and retry."
+    )

@@ -3646,6 +3646,8 @@ def _upsert_batch(
     conflict_columns: list[str],
     target_cols: list[str],
     dialect_name: str,
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
 ) -> int:
     """Write a batch idempotently using the best native upsert available.
 
@@ -3695,10 +3697,17 @@ def _upsert_batch(
         result = conn.execute(table_obj.insert(), batch)
         return max(0, getattr(result, "rowcount", None) or 0) or len(batch)
 
-    from connectors.writer_common import assert_dense_upsert_keys_present
+    from connectors.writer_common import partition_dense_upsert_rows
 
-    # Refuse null keys before any NULL-safe MERGE / delete-by-keys path.
-    assert_dense_upsert_keys_present(batch, conflict_cols)
+    # Quarantine null/empty keys — never abort the whole MERGE chunk.
+    batch = partition_dense_upsert_rows(
+        batch,
+        conflict_cols,
+        rejected_details=rejected_details,
+        policy=policy,
+    )
+    if not batch:
+        return 0
 
     update_cols = [c for c in target_cols if c not in conflict_cols]
     lsn_guarded = DF_LSN_COL in target_cols
@@ -4307,12 +4316,32 @@ def write_mapped_rows(
 
     dialect_name = engine.dialect.name if engine.dialect else ""
     # Overlay live DDL when Map stamped VARCHAR over typed sinks (empty refuse).
+    table_existed = False
+    physical: dict[str, str] = {}
     try:
-        from connectors.writer_common import overlay_physical_bind_types
+        from connectors.writer_common import (
+            overlay_physical_bind_types,
+            require_physical_types_for_existing_table,
+        )
 
         inspector = sa.inspect(engine)
-        existing_cols = inspector.get_columns(table_name, schema=schema_name)
-        physical: dict[str, str] = {}
+        try:
+            table_existed = bool(
+                inspector.has_table(table_name, schema=schema_name)
+            )
+        except Exception:
+            # Unknown existence: if create is disabled the table must already
+            # exist — fail-closed on empty physical rather than Map VARCHAR invent.
+            table_existed = not create_table
+        existing_cols = []
+        if table_existed:
+            try:
+                existing_cols = inspector.get_columns(
+                    table_name, schema=schema_name
+                )
+            except Exception:
+                existing_cols = []
+                # Keep table_existed True so require_physical fail-closes.
         for col_meta in existing_cols or []:
             name = str(col_meta.get("name") or "")
             if not name:
@@ -4322,6 +4351,23 @@ def write_mapped_rows(
             physical[name] = ddl
             physical[name.lower()] = ddl
             physical[name.upper()] = ddl
+        overlay_err = require_physical_types_for_existing_table(
+            table_existed=table_existed,
+            physical=physical,
+            dialect_label="SQL",
+        )
+        if overlay_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=overlay_err,
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
         if physical:
             type_list = [
                 target_column_types.get(c, "string") for c in target_cols
@@ -4334,6 +4380,25 @@ def write_mapped_rows(
             "generic_sql physical column introspection failed",
             exc_info=True,
         )
+        if table_existed:
+            from connectors.writer_common import require_physical_types_for_existing_table
+
+            overlay_err = require_physical_types_for_existing_table(
+                table_existed=True,
+                physical={},
+                dialect_label="SQL",
+            )
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=overlay_err or "SQL physical DDL introspection failed",
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
 
     sa_col_types = {
         col: _sa_type_for_logical(
@@ -4681,6 +4746,8 @@ def write_mapped_rows(
                             conflict_columns,
                             target_cols,
                             dialect_name,
+                            rejected_details=rejected_details,
+                            policy=policy,
                         )
                         if DF_LSN_COL in target_cols:
                             rows_skipped += len(batch) - chunk_written
@@ -4728,6 +4795,8 @@ def write_mapped_rows(
                                         conflict_columns,
                                         target_cols,
                                         dialect_name,
+                                        rejected_details=rejected_details,
+                                        policy=policy,
                                     )
                                     if DF_LSN_COL in target_cols:
                                         if not row_written:

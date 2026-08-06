@@ -649,9 +649,17 @@ def _merge_batch_via_temp(
     """Stage the batch into a temp table, then run a single MERGE into the target."""
     if not mapped_rows:
         return 0
-    from connectors.writer_common import assert_dense_upsert_keys_present
+    from connectors.writer_common import partition_dense_upsert_rows
 
-    assert_dense_upsert_keys_present(mapped_rows, conflict, target_cols)
+    mapped_rows = partition_dense_upsert_rows(
+        mapped_rows,
+        conflict,
+        target_cols=target_cols,
+        rejected_details=rejected_details,
+        policy=policy,
+    )
+    if not mapped_rows:
+        return 0
     temp = f"_DF_UPSERT_{uuid.uuid4().hex[:12]}"
     col_defs = ", ".join(
         f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types)
@@ -1148,6 +1156,7 @@ def write_mapped_rows(
             from connectors.sql_identifiers import snowflake_fold_identifier
 
             found = resolve_snowflake_table_name(cur, schema, table_name)
+            table_existed = found is not None
             if found is None and not create_table:
                 return WriteResult(
                     ok=False,
@@ -1240,10 +1249,31 @@ def write_mapped_rows(
                 # Map may stamp VARCHAR while live column is DATE/NUMBER —
                 # overlay physical DDL before bind so empty refuses quarantine.
                 physical = _fetch_snowflake_column_types(cur, schema, table_name)
+                from connectors.writer_common import (
+                    bind_sql_mapped_rows_with_quarantine,
+                    require_physical_types_for_existing_table,
+                )
+
+                overlay_err = require_physical_types_for_existing_table(
+                    table_existed=table_existed,
+                    physical=physical,
+                    dialect_label="Snowflake",
+                )
+                if overlay_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=overlay_err,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
                 target_types = _overlay_snowflake_physical_bind_types(
                     target_cols, target_types, physical
                 )
-                from connectors.writer_common import bind_sql_mapped_rows_with_quarantine
 
                 if sparse_rows:
                     sparse_rows = bind_sql_mapped_rows_with_quarantine(
@@ -1312,6 +1342,25 @@ def write_mapped_rows(
                 # Prefer COPY INTO for insert / full_refresh when the batch is large enough.
                 # fakesnow does not support PUT/COPY — falls back to INSERT.
                 physical = _fetch_snowflake_column_types(cur, schema, table_name)
+                from connectors.writer_common import require_physical_types_for_existing_table
+
+                overlay_err = require_physical_types_for_existing_table(
+                    table_existed=table_existed,
+                    physical=physical,
+                    dialect_label="Snowflake",
+                )
+                if overlay_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=overlay_err,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
                 target_types = _overlay_snowflake_physical_bind_types(
                     target_cols, target_types, physical
                 )
