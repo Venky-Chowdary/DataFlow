@@ -3372,8 +3372,20 @@ def quarantine_unfit_json(
             if is_missing_sentinel(value):
                 continue
             text = value.strip()
-            looks_structured = (text.startswith("{") and text.endswith("}")) or (
-                text.startswith("[") and text.endswith("]")
+            # coerce_json_wire wraps failed parses as JSON string literals
+            # (\"{not:valid}\"). Detect that wrap so we still quarantine intended
+            # documents instead of inventing a JSON string scalar.
+            candidate = text
+            if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+                try:
+                    inner = json.loads(text)
+                except Exception:
+                    inner = None
+                if isinstance(inner, str):
+                    candidate = inner.strip()
+            looks_structured = (
+                (candidate.startswith("{") and candidate.endswith("}"))
+                or (candidate.startswith("[") and candidate.endswith("]"))
             )
             if not looks_structured:
                 continue
@@ -3381,7 +3393,7 @@ def quarantine_unfit_json(
                 def _reject(name: str) -> None:
                     raise ValueError(f"non-finite JSON constant: {name}")
 
-                json.loads(text, parse_constant=_reject)
+                json.loads(candidate, parse_constant=_reject)
                 continue
             except Exception:
                 pass

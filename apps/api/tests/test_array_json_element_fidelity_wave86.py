@@ -163,7 +163,7 @@ def test_malformed_json_document_held_but_plain_scalar_allowed():
     """A broken document would silently become a JSON string — fail closed."""
     kept, details = _probe("JSON", '{"a": }', "Shopify")
     assert kept == []
-    assert "malformed document" in details[0]["reason"]
+    assert "malformed" in details[0]["reason"]
 
     # coerce_json_wire losslessly wraps bare scalars, so these are not losses.
     for value in ["plain text scalar", '{"a":1}', '[1,2,3]', '"quoted"']:

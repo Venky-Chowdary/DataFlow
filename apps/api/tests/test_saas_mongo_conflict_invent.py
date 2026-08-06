@@ -261,15 +261,15 @@ def test_mongo_boolean_float_int_refuse_passthrough_invent():
             mappings=[{"source": "qty", "target": "qty"}],
             column_types={"qty": "INTEGER"},
         )
-        json_r = write_mapped_rows(
+        bad_json_r = write_mapped_rows(
             **base,
             headers=["doc"],
-            data_rows=[["not-json{"]],
+            data_rows=[["{not:valid}"]],
             mappings=[{"source": "doc", "target": "doc"}],
             column_types={"doc": "JSON"},
         )
     assert bool_r.rejected_rows >= 1 and bool_r.rows_written == 0
     assert float_r.rejected_rows >= 1 and float_r.rows_written == 0
     assert int_r.rejected_rows >= 1 and int_r.rows_written == 0
-    assert json_r.rejected_rows >= 1 and json_r.rows_written == 0
+    assert bad_json_r.rejected_rows >= 1 and bad_json_r.rows_written == 0
     assert coll.insert_many.call_count == 0
