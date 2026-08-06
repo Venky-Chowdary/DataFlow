@@ -570,8 +570,19 @@ def vectorize_records(
                 })
         else:
             # No content and no embedding: still index metadata as a sparse row.
+            # Fingerprint metadata — a fixed "metadata" token collided every row
+            # when source PK was missing (silent upsert overwrite).
+            meta_fp = json.dumps(
+                metadata or {},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                default=str,
+            )
             rows.append({
-                "id": _stable_vector_row_id(source_id, 0, "metadata", multi_chunk=False),
+                "id": _stable_vector_row_id(
+                    source_id, 0, meta_fp or "{}", multi_chunk=False
+                ),
                 "content": "",
                 "embedding": None,
                 "metadata": metadata,

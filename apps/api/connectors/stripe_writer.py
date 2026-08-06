@@ -252,6 +252,22 @@ def write_mapped_rows(
     if on_checkpoint:
         on_checkpoint(len(mapped_rows), written, 1)
 
+    _final_abort = reject_on_strict_policy(policy, all_rejected, "Stripe")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=written,
+            table_name=obj,
+            target_schema=base,
+            checksum=digest.hexdigest()[:32],
+            chunks_completed=chunks or 1,
+            error=_final_abort,
+            rejected_details=all_rejected,
+            rejected_rows=len(all_rejected),
+            warnings=warnings,
+            driver="stripe",
+        )
+
     return WriteResult(
         ok=True,
         rows_written=written,

@@ -246,6 +246,10 @@ def _is_fidelity_signal(
     }:
         return True
     blob = _blob(message, details)
+    # Duplicate / identity integrity failures are their own root — never absorb
+    # "Data integrity failed: id duplicate key…" into fidelity collapse.
+    if _is_duplicate_signal(message, details, gate_id):
+        return False
     if _FIDELITY_RE.search(blob):
         return True
     if _TYPE_ARROW_RE.search(blob) and gate_id in _FIDELITY_GATE_IDS:

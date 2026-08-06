@@ -222,6 +222,44 @@ def test_g3_declared_lossy_not_sample_soft_passed_without_risk_ack():
     assert result_ack.status.value == "pass"
 
 
+def test_g3_failed_samples_pass_with_cast_and_continue_contract():
+    """Signed CAST_AND_CONTINUE: sample cast failures hold out — G3 must not re-block."""
+
+    class _Ctx(PreflightContext):
+        def coercion_report(self):
+            return {
+                "sampled_rows": 2,
+                "by_source": {
+                    "qty": {
+                        "severity": "block",
+                        "sampled": 2,
+                        "failed": 1,
+                        "sentinel_nulls": 0,
+                        "sample_failures": ["row 2: cannot cast 'x' to INTEGER"],
+                    }
+                },
+            }
+
+    plan = _ctx(
+        {"qty": "VARCHAR"},
+        {"qty": "INTEGER"},
+        [("qty", "qty")],
+    ).plan
+    blocked = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert blocked.status.value == "block"
+
+    _clear_with_contract(
+        plan.mappings[0],
+        source_type="VARCHAR",
+        destination_type="INTEGER",
+        execution_policy="CAST_AND_CONTINUE",
+    )
+    cleared = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert cleared.status.value == "pass", cleared.message
+    details = (cleared.details or {}).get("issues_detail") or []
+    assert any(d.get("contracted_holdout") for d in details)
+
+
 def test_g3_objectid_to_text_risk_contract_clears_block():
     """ObjectId→TEXT is domain polarity — Risk Contract unlocks; hex values stay."""
     plan = _ctx(

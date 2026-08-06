@@ -1436,8 +1436,9 @@ def _alternatives(
 
 
 # Create-new / identity passthrough is "will CREATE", not "proven against existing dest".
-# Reserve 0.99 for existing-dest exact+sample match.
-IDENTITY_PASSTHROUGH_CONFIDENCE = 0.92
+# Cap under G4 auto-approve floor (~0.85) so operators must Approve before Validate
+# treats projected DDL as proven. Reserve ≥0.95 for existing-dest exact+sample match.
+IDENTITY_PASSTHROUGH_CONFIDENCE = 0.84
 
 
 def map_columns(
@@ -1500,6 +1501,7 @@ def map_columns(
                             f"types will CREATE on first write as {dest_native}"
                         ),
                         "user_override": False,
+                        "requires_review": True,
                         "source_type": src_type,
                         "target_type": map_target_type,
                         "assignment_strategy": "identity_passthrough",
@@ -1902,15 +1904,17 @@ def _apply_create_new_risk_stamps(
                 hard_cap=0.84,
             )
         elif strategy == "identity_passthrough":
-            # Same semantic form, no risk stamps → keep high but not flat 0.99.
-            src_l = src.strip().upper()
-            tgt_l = str(tgt or "").strip().upper()
-            if src_l and tgt_l and src_l == tgt_l:
-                row["confidence"] = round(min(float(row.get("confidence") or 0.95), 0.96), 3)
-            else:
-                row["confidence"] = round(
-                    min(float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE), 0.93),
-                    3,
-                )
+            # Projected CREATE is not dest-proven — stay under auto-approve floor.
+            row["requires_review"] = True
+            try:
+                base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
+            except (TypeError, ValueError):
+                base = IDENTITY_PASSTHROUGH_CONFIDENCE
+            row["confidence"] = _calibrated_confidence(
+                base,
+                score_gap=float(row.get("score_gap") or 0.0),
+                requires_review=True,
+                hard_cap=0.84,
+            )
         out.append(row)
     return out

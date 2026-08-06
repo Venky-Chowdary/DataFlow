@@ -411,7 +411,9 @@ def _parse_datetime_worker(value: str, date_locale: str) -> str | None:
         except ValueError:
             continue
     parsed = _parse_date(text, date_locale=date_locale)
-    return f"{parsed}T00:00:00Z" if parsed else None
+    # Date-only → datetime: attach midnight without inventing a timezone.
+    # Stamping Z implied UTC and silently shifted warehouse TIMESTAMP_NTZ binds.
+    return f"{parsed}T00:00:00" if parsed else None
 
 
 def _parse_datetime(value: str, date_locale: str = "") -> str | None:

@@ -555,6 +555,22 @@ def write_mapped_rows(
     if on_checkpoint:
         on_checkpoint(len(mapped_rows), written, 1)
 
+    _final_abort = reject_on_strict_policy(policy, all_rejected, "Notion")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=written,
+            table_name=table_name,
+            target_schema=database_id,
+            checksum=digest.hexdigest()[:32],
+            chunks_completed=chunks or 1,
+            error=_final_abort,
+            rejected_details=all_rejected,
+            rejected_rows=len(all_rejected),
+            warnings=warnings[:20],
+            driver="notion",
+        )
+
     return WriteResult(
         ok=True,
         rows_written=written,

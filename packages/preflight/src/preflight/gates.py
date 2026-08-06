@@ -803,12 +803,20 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     oid_label + " — sign Migration Risk Contract or remap to VARCHAR(24)"
                 )
         elif fidelity_collapse or field_shape_loss:
-            # Nested field mismatch always hard-blocks. Declared fidelity collapses
-            # honor verified continue-policy Risk Contract only.
+            # Declared fidelity + nested shape collapses honor verified continue-
+            # policy Risk Contract (same SSOT as G8 holdouts / write quarantine).
+            # Without a contract, nested shape and declared collapses hard-block.
             risk_ack = _risk_cleared(m)
-            collapse_warn = bool(fidelity_collapse and risk_ack and not field_shape_loss)
+            collapse_warn = bool(risk_ack)
             if collapse_warn:
-                warnings.append(label + " (risk contract)")
+                warnings.append(
+                    label
+                    + (
+                        " (risk contract — nested shape accepted; remap preferred)"
+                        if field_shape_loss
+                        else " (risk contract)"
+                    )
+                )
             else:
                 issues.append(
                     label
@@ -825,6 +833,8 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "fidelity_collapse": fidelity_collapse,
                 "nested_shape_collapse": field_shape_loss,
                 "risk_acknowledged": risk_ack,
+                # Holdout only when samples/transforms fail — clean lossy casts still write.
+                "contracted_holdout": False,
                 "reason": label,
                 "message": label,
                 "sampled": 0,
@@ -833,7 +843,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "sample_failures": [],
                 "suggested_fix": (
                     "Accept risk on Map, or remap to a fidelity-preserving type."
-                    if fidelity_collapse and not field_shape_loss
+                    if fidelity_collapse or field_shape_loss
                     else ""
                 ),
                 "suggested_target_type": None,
@@ -873,27 +883,52 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     pass
             issues_detail.append(detail)
         elif document_collapse and not intentional_json:
-            # Nested→document always blocks without explicit Map struct_policy —
-            # balanced/review must not soft-pass (enterprise fail-closed).
-            issues.append(
-                label + " — set Map struct_policy to store_as_json (or flatten) to proceed"
-            )
-            if probe is not None:
-                issues_detail.append({
-                    "source": m.source,
-                    "target": m.target,
-                    "source_type": source_col.inferred_type,
-                    "target_type": target.inferred_type,
-                    "severity": "block",
-                    "nested_document_collapse": True,
-                    "sampled": probe.get("sampled", 0),
-                    "failed": probe.get("failed", 0),
-                    "sentinel_nulls": probe.get("sentinel_nulls", 0),
-                    "sample_failures": probe.get("sample_failures", []),
-                    "suggested_fix": "Set struct_policy=store_as_json or map to native STRUCT/OBJECT",
-                    "suggested_target_type": probe.get("suggested_target_type"),
-                    "suggested_transform": probe.get("suggested_transform"),
-                })
+            # Nested→document: struct_policy OR signed continue-policy Risk Contract.
+            risk_ack = _risk_cleared(m)
+            if risk_ack:
+                warnings.append(
+                    label + " (risk contract — nested document accepted; prefer struct_policy)"
+                )
+                if probe is not None:
+                    issues_detail.append({
+                        "source": m.source,
+                        "target": m.target,
+                        "source_type": source_col.inferred_type,
+                        "target_type": target.inferred_type,
+                        "severity": "warn",
+                        "nested_document_collapse": True,
+                        "risk_acknowledged": True,
+                        "contracted_holdout": int(probe.get("failed") or 0) > 0,
+                        "sampled": probe.get("sampled", 0),
+                        "failed": probe.get("failed", 0),
+                        "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                        "sample_failures": probe.get("sample_failures", []),
+                        "suggested_fix": (
+                            "Set struct_policy=store_as_json or map to native STRUCT/OBJECT"
+                        ),
+                        "suggested_target_type": probe.get("suggested_target_type"),
+                        "suggested_transform": probe.get("suggested_transform"),
+                    })
+            else:
+                issues.append(
+                    label + " — set Map struct_policy to store_as_json (or flatten) to proceed"
+                )
+                if probe is not None:
+                    issues_detail.append({
+                        "source": m.source,
+                        "target": m.target,
+                        "source_type": source_col.inferred_type,
+                        "target_type": target.inferred_type,
+                        "severity": "block",
+                        "nested_document_collapse": True,
+                        "sampled": probe.get("sampled", 0),
+                        "failed": probe.get("failed", 0),
+                        "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                        "sample_failures": probe.get("sample_failures", []),
+                        "suggested_fix": "Set struct_policy=store_as_json or map to native STRUCT/OBJECT",
+                        "suggested_target_type": probe.get("suggested_target_type"),
+                        "suggested_transform": probe.get("suggested_transform"),
+                    })
         elif document_collapse and intentional_json:
             warnings.append(label + f" — acknowledged via struct_policy={policy}")
         elif probe is not None:
@@ -902,13 +937,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             # Head-sample "ok" must never soft-pass declared lossy without a
             # verified continue-policy Migration Risk Contract.
             force_block = bool(declared_lossy and not risk_ack)
-            sample_clean = int(probe.get("failed") or 0) == 0
-            if (
-                risk_ack
-                and declared_lossy
-                and severity == "block"
-                and sample_clean
-            ):
+            # Signed continue policy matches write/G8: sample cast failures hold
+            # out (warn) — do not re-lock Validate after the operator signed.
+            if risk_ack and severity == "block":
                 severity = "warn"
             json_wraps = int(probe.get("json_scalar_wraps") or 0)
             detail = {
@@ -936,6 +967,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "suggested_target_type": probe.get("suggested_target_type"),
                 "suggested_transform": probe.get("suggested_transform"),
                 "risk_acknowledged": risk_ack,
+                "contracted_holdout": bool(
+                    risk_ack and int(probe.get("failed") or 0) > 0
+                ),
                 "declared_lossy": True,
             }
             issues_detail.append(detail)

@@ -107,3 +107,51 @@ def test_create_compatible_new_confidence_capped_for_review():
     )
     assert out[0]["requires_review"] is True
     assert float(out[0]["confidence"]) <= 0.84
+
+
+def test_identity_passthrough_create_new_under_g4_floor():
+    from services.semantic_mapper import map_columns
+
+    mappings = map_columns(
+        ["id", "email"],
+        [],
+        source_schemas=[
+            {"name": "id", "inferred_type": "TEXT", "samples": ["a"]},
+            {"name": "email", "inferred_type": "TEXT", "samples": ["a@b.com"]},
+        ],
+        destination_db_type="postgresql",
+        destination_table_exists=False,
+    )
+    assert all(m["assignment_strategy"] == "identity_passthrough" for m in mappings)
+    assert all(m.get("requires_review") is True for m in mappings)
+    assert all(float(m["confidence"]) <= 0.84 for m in mappings)
+
+
+def test_vectorize_metadata_only_rows_get_distinct_ids():
+    from services.vectorization import vectorize_records
+
+    rows = vectorize_records(
+        [
+            {"content": "", "name": "a", "score": 1},
+            {"content": "", "name": "b", "score": 2},
+        ],
+        content_column="content",
+        embedding_column=None,
+        model="hash/32",
+        skip_chunking=True,
+        metadata_columns=["name", "score"],
+    )
+    # Empty content → sparse metadata path; ids must not collide.
+    assert len(rows) == 2
+    assert rows[0]["embedding"] is None
+    assert rows[0]["id"] != rows[1]["id"]
+
+
+def test_datetime_date_only_does_not_invent_utc_z():
+    from services.transform_engine import apply_transform
+
+    out, err = apply_transform("2024-06-15", "datetime")
+    assert err is None
+    assert out is not None
+    assert not str(out).endswith("Z")
+    assert "T00:00:00" in str(out)

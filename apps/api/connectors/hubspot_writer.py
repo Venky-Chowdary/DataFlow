@@ -508,18 +508,16 @@ def write_mapped_rows(
             driver="hubspot",
         )
 
-    if rejected_details and policy == "fail":
+    _final_abort = reject_on_strict_policy(policy, rejected_details, "HubSpot")
+    if _final_abort:
         return WriteResult(
             ok=False,
-            rows_written=0,
+            rows_written=written,
             table_name=obj,
             target_schema="",
-            checksum="",
-            chunks_completed=0,
-            error=(
-                f"HubSpot rejected {len(rejected_details)} record(s); "
-                "strict error policy blocks partial activation"
-            ),
+            checksum=digest.hexdigest()[:16] if written else "",
+            chunks_completed=chunks,
+            error=_final_abort,
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
             driver="hubspot",

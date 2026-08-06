@@ -251,6 +251,32 @@ def test_g8_transform_errors_are_not_fidelity_collapse_root():
     assert not any(r.kind == "fidelity_collapse" for r in roots)
 
 
+def test_g9_duplicate_integrity_is_not_fidelity_collapse_root():
+    """Duplicate-key integrity failures must stay duplicate_identity — not Accept cast."""
+    from services.root_cause_engine import build_root_causes
+
+    pf = {
+        "gates": [
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "message": "Data integrity failed: id: duplicate key values in sample",
+                "details": {"duplicate_keys": 3, "identity_duplicates": True},
+            }
+        ],
+        "blockers": [
+            {
+                "id": "g9_data_integrity",
+                "message": "Data integrity failed: id: duplicate key values in sample",
+                "details": {"duplicate_keys": 3},
+            }
+        ],
+    }
+    roots = build_root_causes(pf)
+    assert not any(r.kind == "fidelity_collapse" for r in roots), roots
+    assert any(r.kind == "duplicate_identity" for r in roots)
+
+
 def test_risk_unacknowledged_is_not_zero_column_fidelity_collapse():
     """Map→Validate: missing contracts list columns — never '0 columns collapse'."""
     from services.root_cause_engine import build_root_causes
