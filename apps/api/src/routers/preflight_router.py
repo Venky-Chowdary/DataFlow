@@ -199,14 +199,13 @@ async def run_preflight(body: PreflightRequest):
             source_error = msg
 
     dest_column_types = dest_meta.get("column_types") or {}
-    # Prefer live introspect. Studio map is a fallback only when meta is empty
-    # and the table is known to exist — never override live types with stale UI state.
-    if not dest_column_types and dest_meta.get("table_exists") is True:
-        dest_column_types = body.destination_column_types or {}
-    elif not dest_column_types and dest_meta.get("table_exists") is None:
+    # Prefer live introspect. Never fall back to Studio Map stamps when the
+    # table exists but live schema is empty — that greens empties as VARCHAR.
+    if not dest_column_types and dest_meta.get("table_exists") is None:
         # Unknown existence: accept Studio types only as a hint for G6 width checks
         # when non-empty; drift path still treats unknown as non-live.
         dest_column_types = body.destination_column_types or {}
+    # table_exists True + empty live → keep {} (fail-closed Validate probe)
 
     from services.primary_key import extract_contract_primary_key_columns
 

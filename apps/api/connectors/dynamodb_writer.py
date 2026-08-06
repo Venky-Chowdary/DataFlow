@@ -110,6 +110,25 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
             f"DynamoDB JSON refused {value!r} "
             "(refuse silent pass-through invent)"
         )
+    if upper in {
+        "DATE",
+        "TIME",
+        "DATETIME",
+        "TIMESTAMP",
+        "TIMESTAMPTZ",
+        "DATETIMEOFFSET",
+        "TIMESTAMP_NTZ",
+        "TIMESTAMP_LTZ",
+        "TIMESTAMP_TZ",
+    }:
+        from connectors.sql_temporal import coerce_sql_temporal
+
+        if isinstance(value, str) and not str(value).strip():
+            raise ValueError(
+                f"DynamoDB {upper} refused empty string {value!r} "
+                "(refuse silent null invent / attribute wipe)"
+            )
+        return coerce_sql_temporal(value, upper)
     if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"}:
         if isinstance(value, bytes):
             return value

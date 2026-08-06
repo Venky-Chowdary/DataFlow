@@ -180,8 +180,9 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
     )
 
     live_target_schema = dest_meta.get("column_types") or {}
-    # Prefer live introspect; fall back to plan snapshot only when meta is empty
-    # AND the table is known to exist (never for create-new / unknown).
+    # Prefer live introspect. Never fall back to Map stamps when the table
+    # exists but live schema is empty — that greens empties as VARCHAR while
+    # write binds physical DATE/INT (client-deploy wipe cliff).
     table_exists = (
         dest_meta.get("table_exists")
         if isinstance(dest_meta.get("table_exists"), bool)
@@ -192,7 +193,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         )
     )
     if not live_target_schema and table_exists is True:
-        live_target_schema = plan.target_schema or {}
+        live_target_schema = {}
     live_target_columns = list(live_target_schema.keys()) if live_target_schema else plan.target_columns
 
     policies = plan.policies

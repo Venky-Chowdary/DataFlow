@@ -326,6 +326,24 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     if isinstance(value, str):
         text = value.strip()
         if not text:
+            # Typed sinks: leave raw empty so quarantine_unfit_* / bind hold out —
+            # never invent JSON null / 0 from "".
+            if ctype in {
+                "float",
+                "integer",
+                "decimal",
+                "number",
+                "boolean",
+                "uuid",
+                "json",
+                "array",
+                "struct",
+                "map",
+            }:
+                raise ValueError(
+                    f"empty string cannot coerce to {ctype} — "
+                    "refuse silent NULL invent (quarantine or remap upstream)"
+                )
             return value
         if ctype in {"json", "array", "object", "struct"}:
             try:
@@ -2996,6 +3014,91 @@ def quarantine_unfit_integers(
     return out
 
 
+def quarantine_unfit_floats(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    dialect_label: str = "FLOAT",
+) -> list[tuple]:
+    """Hold out empty / non-finite / non-numeric cells into FLOAT/DOUBLE sinks.
+
+    Matrix SSOT for Kafka/S3/GCS/Iceberg — SQL bind already refuses via
+    ``coerce_float_wire``. Empty ``\"\"`` must never invent JSON null / 0.0.
+    """
+    from services.type_system import normalize_logical_type
+    from services.value_serializer import cell_to_string, is_missing_sentinel
+
+    float_cols: list[tuple[int, str]] = []
+    for i, typ in enumerate(target_types):
+        if normalize_logical_type(typ) != "float":
+            continue
+        float_cols.append((i, typ))
+    if not float_cols:
+        return mapped_rows
+
+    from connectors.sql_bind import coerce_float_wire
+
+    out: list[tuple] = []
+    for row_idx, row in enumerate(mapped_rows):
+        cells = list(row)
+        hold_out = False
+        for col_idx, typ in float_cols:
+            if col_idx >= len(cells) or cells[col_idx] is None:
+                continue
+            if is_missing_sentinel(cells[col_idx]):
+                continue
+            raw = cells[col_idx]
+            reason = ""
+            try:
+                coerced = coerce_float_wire(raw, ddl_type=typ)
+            except ValueError as exc:
+                reason = str(exc)
+                coerced = None
+            if not reason and isinstance(coerced, float) and (
+                coerced != coerced or coerced in {float("inf"), float("-inf")}
+            ):
+                reason = (
+                    f"non-finite float into {dialect_label}({typ}) "
+                    "— quarantined (refuse invent)"
+                )
+            if not reason:
+                continue
+            sample = cell_to_string(raw)[:120]
+            append_write_quarantine_detail(
+                rejected_details,
+                {
+                    "row": row_idx + 1,
+                    "column": target_cols[col_idx],
+                    "target": target_cols[col_idx],
+                    "value": sample,
+                    "reason": (
+                        f"{reason} — quarantined ({dialect_label} refuse silent "
+                        "NULL/0.0 invent)"
+                        if "quarantined" not in reason
+                        else reason
+                    ),
+                    "policy": "write_quarantine",
+                    "chars": [],
+                },
+                mapped_row=cells,
+                target_cols=target_cols,
+            )
+            if policy == "coerce_null":
+                from services.value_serializer import DF_MISSING_SENTINEL
+
+                cells[col_idx] = DF_MISSING_SENTINEL
+            else:
+                hold_out = True
+                break
+        if hold_out:
+            continue
+        out.append(tuple(cells))
+    return out
+
+
 def bind_sql_mapped_rows_with_quarantine(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -3584,6 +3687,14 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=f"{label} INTEGER",
+        )
+        mapped_rows = quarantine_unfit_floats(
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=f"{label} FLOAT",
         )
         mapped_rows = quarantine_unfit_bitstrings(
             mapped_rows, target_cols, target_types, rejected_details, policy

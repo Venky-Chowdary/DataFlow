@@ -1048,10 +1048,29 @@ def run_file_preflight(
         tgt = m.get("target") or ""
         if not tgt:
             continue
-        inferred = dest_types.get(
-            tgt,
-            m.get("target_type") or column_types.get(m["source"], "VARCHAR"),
-        ).upper()
+        live = dest_types.get(tgt)
+        if live is None:
+            live = next(
+                (
+                    dest_types[k]
+                    for k in dest_types
+                    if str(k).lower() == str(tgt).lower()
+                ),
+                None,
+            )
+        # Existing table: only live introspect counts as dest_types for Validate.
+        # Map target_type fallback greens empties as VARCHAR while write binds
+        # physical DATE/INT — refuse that false-green invent.
+        if destination_table_exists is True:
+            if not live:
+                continue
+            inferred = str(live).upper()
+        else:
+            inferred = str(
+                live
+                or m.get("target_type")
+                or column_types.get(m["source"], "VARCHAR")
+            ).upper()
         # Prefer explicit map; else case-insensitive lookup; default nullable=True
         # (create-new / unknown) so we never invent NOT NULL.
         if tgt in dest_nulls:

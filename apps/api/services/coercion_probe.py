@@ -86,6 +86,33 @@ def samples_coerce_mapping(
     for row in rows[:DEFAULT_SAMPLE_LIMIT]:
         raw = cell_to_string(row.get(src, ""))
         if not str(raw).strip():
+            # Empty into typed sinks must not sample-clear (Map VARCHAR×INT cliff).
+            from services.type_system import (
+                normalize_logical_type,
+                specialty_carrier_base,
+            )
+
+            tgt_type = str(item.get("target_type") or "")
+            tgt_logical = normalize_logical_type(tgt_type)
+            specialty = specialty_carrier_base(tgt_type)
+            if tgt_logical in {
+                "integer",
+                "float",
+                "decimal",
+                "number",
+                "money",
+                "uuid",
+                "boolean",
+                "json",
+                "array",
+                "struct",
+                "map",
+                "date",
+                "datetime",
+                "time",
+                "timestamp",
+            } or (specialty and specialty not in {"CITEXT", "TSVECTOR"}):
+                return False
             continue
         checked += 1
         _val, err = apply_transform(raw, transform)
@@ -260,11 +287,25 @@ def analyze_coercion(
         from services.type_system import specialty_carrier_base
 
         specialty_base = specialty_carrier_base(tgt_type)
+        tgt_name = str(m.get("target") or "").strip()
+        live_present = bool(
+            (tgt_name and tgt_name in dest_types)
+            or (
+                tgt_name
+                and any(str(k).lower() == tgt_name.lower() for k in dest_types)
+            )
+        )
+        unknown_physical = (
+            table_exists is True
+            and not live_present
+            and not bool(m.get("create_new"))
+        )
         if (
             tgt_logical in _TEXTUAL_LOGICALS
             and is_unlimited_string_carrier(tgt_type)
             and not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
             and not specialty_base
+            and not unknown_physical
         ):
             continue
 
@@ -410,7 +451,27 @@ def analyze_coercion(
                 # Numeric / money destinations: empty is not a natural NULL — write
                 # bind refuses silent invent. Count as coercion failure so Validate
                 # matches write (VARCHAR Map + INT physical is the classic cliff).
-                if tgt_logical in {
+                #
+                # Existing table + missing live DDL for this target: fail-closed —
+                # Map VARCHAR stamp must not green empties when physical may be typed.
+                tgt_name = str(m.get("target") or "").strip()
+                live_present = bool(
+                    (tgt_name and tgt_name in dest_types)
+                    or (
+                        tgt_name
+                        and any(
+                            str(k).lower() == tgt_name.lower() for k in dest_types
+                        )
+                    )
+                )
+                unknown_physical = (
+                    table_exists is True
+                    and not live_present
+                    and not bool(m.get("create_new"))
+                    and tgt_logical in _TEXTUAL_LOGICALS
+                    and not specialty_base
+                )
+                if unknown_physical or tgt_logical in {
                     "integer",
                     "float",
                     "decimal",
@@ -436,9 +497,15 @@ def analyze_coercion(
                             "row": idx,
                             "value": cell[:120],
                             "reason": (
-                                f"Empty value cannot coerce to "
-                                f"{specialty_base or tgt_logical} — "
-                                "refuse silent NULL invent (quarantine or remap)"
+                                "Empty value into existing table with unknown "
+                                "physical DDL — refuse silent NULL invent "
+                                "(re-introspect destination or remap)"
+                                if unknown_physical
+                                else (
+                                    f"Empty value cannot coerce to "
+                                    f"{specialty_base or tgt_logical} — "
+                                    "refuse silent NULL invent (quarantine or remap)"
+                                )
                             ),
                         })
                         raw_failure_values.append(cell[:120])
