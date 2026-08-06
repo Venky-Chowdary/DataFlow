@@ -1905,6 +1905,10 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     contracted_holdouts: list[str] = []
     contracted_null_cells: list[str] = []
     mapped_rows: list[dict[str, Any]] = []
+    # Parallel to mapped_rows: source rows that survive quarantine holdouts.
+    # Fingerprint MUST use this list — never sample_rows[i] vs mapped_rows[i]
+    # after holdouts shrink the write set (production IndexError / Validate 500).
+    kept_sample_rows: list[tuple[int, dict[str, Any]]] = []
     for row_idx, row in enumerate(sample_rows, start=1):
         mapped: dict[str, Any] = {}
         row_holdout = False
@@ -1948,6 +1952,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 mapped[m.target] = transformed
         if not row_holdout:
             mapped_rows.append(mapped)
+            kept_sample_rows.append((row_idx, row))
 
     if transform_errors:
         return _block(
@@ -2136,8 +2141,26 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
 
         mismatches: list[str] = []
         dest_eng = dest_kind
-        for row_idx, row in enumerate(sample_rows, start=1):
+        # Zip kept sources with mapped_rows — quarantine holdouts must not re-index
+        # into a shorter write set (IndexError → API 500 on Validate preflight).
+        if len(kept_sample_rows) != len(mapped_rows):
+            return _block(
+                GateId.G8_RECONCILIATION,
+                "Dry-run reconciliation invariant failed — holdout/write-set length mismatch",
+                start,
+                {
+                    "source_rows": source_count,
+                    "kept_rows": len(kept_sample_rows),
+                    "target_rows": len(mapped_rows),
+                    "preview_only": True,
+                    "rule_id": "g8_reconciliation.holdout_alignment",
+                    "remediation_kind": "retry_validate",
+                },
+            )
+        for (row_idx, row), mapped in zip(kept_sample_rows, mapped_rows):
             for m in ctx.plan.mappings:
+                if _is_intentional_omit_mapping(m) or not m.target:
+                    continue
                 tname = str(m.transform or "").lower().strip()
                 # Identity / rename-only: serialized source wire must equal mapped
                 # cell after destination bind. Use cell_to_string for arrays/objects
@@ -2145,7 +2168,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 # not strip whitespace (that false-failed Mongo long-text samples).
                 if tname in {"", "none", "identity", "passthrough", "string", "varchar", "text"}:
                     raw = row.get(m.source, "")
-                    got = mapped_rows[row_idx - 1].get(m.target)
+                    got = mapped.get(m.target)
                     ddl = ""
                     try:
                         tgt_col = next(

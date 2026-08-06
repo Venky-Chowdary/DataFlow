@@ -155,6 +155,64 @@ def test_g8_pass_url_empty_with_cast_and_continue_contract():
     assert int(details.get("source_rows") or 0) == 2
 
 
+def test_g8_partial_holdout_with_identity_does_not_500():
+    """Production: Risk Contract holdouts + identity mappings must not IndexError on fingerprint.
+
+    Reproduces Railway 500: mapped_rows shorter than sample_rows after quarantine holdout,
+    then ``mapped_rows[row_idx - 1]`` crashed Validate preflight.
+    """
+    from preflight.gates import gate_g8_reconciliation
+
+    plan = _happy_plan()
+    plan.destination.db_type = "postgres"
+    plan.mappings = [
+        ColumnMapping(source="id", target="id", confidence=0.99, transform="identity"),
+        ColumnMapping(source="name", target="name", confidence=0.99, transform="identity"),
+        ColumnMapping(
+            source="image",
+            target="image",
+            confidence=0.9,
+            transform="url",
+            fidelity="mutate",
+            risk_acknowledged=True,
+            risk_contract=make_clearing_risk_contract(
+                column="image",
+                source_type="TEXT",
+                destination_type="TEXT",
+                execution_policy="CAST_AND_CONTINUE",
+                reason="quarantine empty urls",
+            ),
+        ),
+    ]
+    plan.required_targets = ["id", "name", "image"]
+    plan.source.columns = [
+        ColumnSchema(name="id", inferred_type="TEXT", samples=["1", "2", "3"]),
+        ColumnSchema(name="name", inferred_type="TEXT", samples=["a", "b", "c"]),
+        ColumnSchema(name="image", inferred_type="TEXT", samples=["https://ok", "", "https://ok2"]),
+    ]
+    plan.destination.target_columns = [
+        ColumnSchema(name="id", inferred_type="TEXT"),
+        ColumnSchema(name="name", inferred_type="TEXT"),
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+    # Row 2 holds out (empty url); rows 1 and 3 stay — fingerprint must align kept set.
+    result = gate_g8_reconciliation(
+        PreflightContext(
+            plan=plan,
+            sample_rows=[
+                {"id": "1", "name": "a", "image": "https://example.com/a.png"},
+                {"id": "2", "name": "b", "image": ""},
+                {"id": "3", "name": "c", "image": "https://example.com/c.png"},
+            ],
+        )
+    )
+    assert result.status == GateStatus.PASS, result.message
+    details = result.details or {}
+    assert int(details.get("source_rows") or 0) == 3
+    assert int(details.get("target_rows") or 0) == 2
+    assert int(details.get("contracted_holdout_count") or 0) >= 1
+
+
 def test_g1_blocks_unparseable_file():
     plan = _happy_plan()
     plan.source.parseable = False
