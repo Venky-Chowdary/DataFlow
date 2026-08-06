@@ -55,21 +55,44 @@ def allow_job_coerce_null_writes(enabled: bool = True):
     return _cm()
 
 
+def quarantine_cell_wire(value: Any) -> str:
+    """Serialize one quarantine cell without inventing empty string for SQL NULL.
+
+    Replay / DLQ must round-trip polarity:
+    * ``None`` / ``SQL_NULL_SENTINEL`` → ``SQL_NULL_SENTINEL`` (apply_transform → NULL)
+    * ``DF_MISSING`` → ``DF_MISSING_SENTINEL`` (sparse omit on rewrite)
+    * NaN / NA → ``SQL_NULL_SENTINEL`` (not empty invent)
+    * other values → ``cell_to_string`` (preserve_sql_null)
+    """
+    from services.value_serializer import (
+        DF_MISSING_SENTINEL,
+        SQL_NULL_SENTINEL,
+        cell_to_string,
+        is_missing_sentinel,
+    )
+
+    if value is None:
+        return SQL_NULL_SENTINEL
+    if is_missing_sentinel(value):
+        return DF_MISSING_SENTINEL
+    if isinstance(value, str) and value.strip() == SQL_NULL_SENTINEL:
+        return SQL_NULL_SENTINEL
+    # cell_to_string(preserve_sql_null=True) maps NA/NaN → SQL_NULL_SENTINEL.
+    return cell_to_string(value, preserve_sql_null=True)
+
+
 def mapped_row_quarantine_values(row: Any, target_cols: list[str]) -> dict[str, str]:
     """Target-column dict for quarantine replay (full row, not single bad cell)."""
-    from services.value_serializer import cell_to_string, is_missing_sentinel
+    from services.value_serializer import DF_MISSING_SENTINEL
 
     out: dict[str, str] = {}
     seq = list(row) if row is not None else []
     for i, col in enumerate(target_cols or []):
         if i >= len(seq):
-            out[str(col)] = ""
+            # Column absent from the mapped tuple — sparse omit, not empty invent.
+            out[str(col)] = DF_MISSING_SENTINEL
             continue
-        v = seq[i]
-        if v is None or is_missing_sentinel(v):
-            out[str(col)] = ""
-        else:
-            out[str(col)] = cell_to_string(v)
+        out[str(col)] = quarantine_cell_wire(seq[i])
     return out
 
 
@@ -142,11 +165,9 @@ def project_quarantine_source_values(
         if not src:
             continue
         if tgt in target_values:
-            v = target_values[tgt]
-            out[src] = "" if v is None else str(v)
+            out[src] = quarantine_cell_wire(target_values[tgt])
         elif src in target_values:
-            v = target_values[src]
-            out[src] = "" if v is None else str(v)
+            out[src] = quarantine_cell_wire(target_values[src])
     return out
 
 
@@ -168,6 +189,8 @@ def append_write_quarantine_detail(
     Module 9: stamp first-class quarantine contract fields before append.
     """
     d = dict(detail)
+    # Normalize the fault-cell sample so replay overwrite cannot re-invent "".
+    d["value"] = quarantine_cell_wire(d.get("value"))
     if not (isinstance(d.get("values"), dict) and d["values"]):
         d["values"] = mapped_row_quarantine_values(mapped_row, target_cols)
     if not (isinstance(d.get("source_values"), dict) and d["source_values"]):
@@ -1690,15 +1713,21 @@ def build_mapped_rows_with_details(
                     cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
                         mapping, policy
                     )
+                from services.value_serializer import DF_MISSING_SENTINEL
+
                 values = {
-                    h: (str(raw[i]) if i < len(raw) and raw[i] is not None else "")
+                    h: (
+                        quarantine_cell_wire(raw[i])
+                        if i < len(raw)
+                        else DF_MISSING_SENTINEL
+                    )
                     for i, h in enumerate(headers)
                 }
                 detail: dict[str, Any] = {
                     "row": row_number,
                     "column": src_name,
                     "target": tgt_name,
-                    "value": str(val) if val is not None else "",
+                    "value": quarantine_cell_wire(val),
                     "reason": err,
                     "policy": cell_policy,
                     # Full source row so quarantine replay can rewrite without re-reading.
@@ -4260,11 +4289,13 @@ def overlay_physical_bind_types(
     target_types: list[str],
     physical: dict[str, str],
 ) -> list[str]:
-    """Prefer live DDL when Map stamped VARCHAR over typed sinks.
+    """Prefer live DDL when Map stamped a softer carrier over typed / specialty sinks.
 
     Empty ``\"\"`` must refuse at bind against physical DATE/INT/BOOL/NUMBER —
     never survive as VARCHAR and invent NULL on upsert wipe (MySQL/Snowflake
-    parity). Temporal physical types always win; numeric/bool/specialty promote
+    parity). Temporal physical types always win. Specialty physical (HSTORE,
+    OID, POINT, INET, …) always wins — Map JSON/INTEGER/GEOGRAPHY must not
+    invent wrong bind polarity over live specialty. Numeric/bool/JSON promote
     only when the Map carrier is string-like.
     """
     from connectors.sql_temporal import is_temporal_ddl, sql_base_type
@@ -4324,9 +4355,10 @@ def overlay_physical_bind_types(
         map_logical = normalize_logical_type(out[i] if i < len(out) else "")
         if is_temporal_ddl(phys_base) or phys_base in temporal_extra:
             out[i] = phys
-        elif map_logical in {"string", "text", "varchar", ""} and (
-            phys_base in typed_bases or specialty_carrier_base(phys)
-        ):
+        elif specialty_carrier_base(phys):
+            # Live HSTORE/OID/POINT/INET/… beat Map JSON/INTEGER/GEOGRAPHY stamps.
+            out[i] = phys
+        elif map_logical in {"string", "text", "varchar", ""} and phys_base in typed_bases:
             out[i] = phys
     return out
 

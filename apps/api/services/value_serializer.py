@@ -266,7 +266,7 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
 
     # Missing-like values (pd.NA, np.nan, etc.) where value != value.
     if _is_na(value):
-        return ""
+        return SQL_NULL_SENTINEL if preserve_sql_null else ""
 
     if isinstance(value, bool):
         return "true" if value else "false"

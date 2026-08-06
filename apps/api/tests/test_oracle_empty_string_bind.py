@@ -526,6 +526,58 @@ def test_overlay_promotes_specialty_inet_from_map_varchar():
     assert "TEXT" in out[1].upper() or out[1].upper() == "TEXT"
 
 
+def test_overlay_physical_specialty_beats_map_json_integer_geography():
+    """Map JSON/INTEGER/GEOGRAPHY must not invent bind polarity over live specialty."""
+    from connectors.writer_common import overlay_physical_bind_types
+    from connectors.sql_bind import normalize_sql_bind_value
+
+    out = overlay_physical_bind_types(
+        ["tags", "oid", "pt"],
+        ["JSON", "INTEGER", "GEOGRAPHY"],
+        {"tags": "HSTORE", "oid": "OID", "pt": "POINT"},
+    )
+    assert out[0].upper() == "HSTORE"
+    assert out[1].upper() == "OID"
+    assert out[2].upper() == "POINT"
+    # After overlay, hstore literal binds as object JSON — not JSON string-wrap invent.
+    bound = normalize_sql_bind_value('"a"=>"1"', out[0], engine="postgresql")
+    assert bound == '{"a":"1"}' or (isinstance(bound, str) and '"a"' in bound and "=>" not in bound)
+
+
+def test_quarantine_cell_wire_preserves_sql_null_not_empty():
+    from connectors.writer_common import (
+        mapped_row_quarantine_values,
+        project_quarantine_source_values,
+        quarantine_cell_wire,
+    )
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
+    from services.transform_engine import apply_transform
+
+    assert quarantine_cell_wire(None) == SQL_NULL_SENTINEL
+    assert quarantine_cell_wire(DF_MISSING_SENTINEL) == DF_MISSING_SENTINEL
+    assert quarantine_cell_wire("") == ""
+    assert quarantine_cell_wire(float("nan")) == SQL_NULL_SENTINEL
+    vals = mapped_row_quarantine_values(
+        ("1", None, DF_MISSING_SENTINEL),
+        ["id", "note", "extra"],
+    )
+    assert vals["note"] == SQL_NULL_SENTINEL
+    assert vals["extra"] == DF_MISSING_SENTINEL
+    src = project_quarantine_source_values(
+        vals,
+        [
+            {"source": "src_id", "target": "id"},
+            {"source": "src_note", "target": "note"},
+            {"source": "src_extra", "target": "extra"},
+        ],
+    )
+    assert src["src_note"] == SQL_NULL_SENTINEL
+    null_val, err = apply_transform(src["src_note"], "none")
+    assert err is None and null_val is None
+    miss_val, err2 = apply_transform(src["src_extra"], "none")
+    assert err2 is None and miss_val == DF_MISSING_SENTINEL
+
+
 def test_clickhouse_pk_type_not_wrapped_nullable():
     from connectors.generic_sql import _sa_type_for_logical
 

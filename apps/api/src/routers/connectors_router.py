@@ -905,11 +905,15 @@ def _quarantine_details_to_records(details: list[dict], transform_overrides: Opt
         if not base:
             base = detail.get("values") if isinstance(detail.get("values"), dict) else {}
         if base:
+            from connectors.writer_common import quarantine_cell_wire
+
             for k, v in base.items():
-                by_row[row_num].setdefault(str(k), "" if v is None else str(v))
+                by_row[row_num].setdefault(str(k), quarantine_cell_wire(v))
         col = str(detail.get("column") or "").strip()
         if col:
-            by_row[row_num][col] = "" if detail.get("value") is None else str(detail.get("value"))
+            from connectors.writer_common import quarantine_cell_wire
+
+            by_row[row_num][col] = quarantine_cell_wire(detail.get("value"))
     records = [by_row[n] for n in order if by_row[n]]
     columns: list[str] = []
     seen: set[str] = set()
@@ -950,19 +954,21 @@ def _canonicalize_quarantine_records_to_source(
 
     out: list[dict] = []
     for rec in records:
+        from connectors.writer_common import quarantine_cell_wire
+
         shaped: dict[str, str] = {}
         for src, tgt in pairs:
             if src in rec:
-                shaped[src] = "" if rec[src] is None else str(rec[src])
+                shaped[src] = quarantine_cell_wire(rec[src])
             elif tgt in rec:
-                shaped[src] = "" if rec[tgt] is None else str(rec[tgt])
+                shaped[src] = quarantine_cell_wire(rec[tgt])
             else:
                 # Keep absence visible to refuse-incomplete (key missing).
                 continue
         # Preserve unmapped extras (operator edits) under their original keys.
         for k, v in rec.items():
             if k not in shaped and all(k != t for _, t in pairs):
-                shaped[str(k)] = "" if v is None else str(v)
+                shaped[str(k)] = quarantine_cell_wire(v)
         out.append(shaped)
     columns: list[str] = []
     seen_c: set[str] = set()
