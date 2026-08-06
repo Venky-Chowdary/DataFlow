@@ -102,7 +102,11 @@ def build_pinecone_vectors(
     """
     import hashlib
 
-    from services.vector_embedding import coerce_embedding, embedding_reject_reason
+    from services.vector_embedding import (
+        coerce_chunk_index,
+        coerce_embedding,
+        embedding_reject_reason,
+    )
 
     vectors: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -110,7 +114,19 @@ def build_pinecone_vectors(
         meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
         meta["content"] = str(row.get("content") or "")[:40000]
         meta["source_id"] = cell_to_string(row.get("source_id", ""))
-        meta["chunk_index"] = int(row.get("chunk_index") or 0)
+        try:
+            chunk = coerce_chunk_index(row.get("chunk_index"))
+        except ValueError as exc:
+            rejected.append({
+                "row": cell_to_string(row.get("id") or ""),
+                "column": "chunk_index",
+                "target": "chunk_index",
+                "value": cell_to_string(row.get("chunk_index")),
+                "reason": str(exc),
+                "policy": "quarantine",
+            })
+            continue
+        meta["chunk_index"] = chunk
         # Pinecone metadata values must be string/number/bool/list[string].
         clean_meta: dict[str, Any] = {}
         for k, v in meta.items():
@@ -138,7 +154,6 @@ def build_pinecone_vectors(
             vector_id = cell_to_string(raw_id)
         else:
             source = cell_to_string(row.get("source_id", ""))
-            chunk = int(row.get("chunk_index") or 0)
             content = str(row.get("content") or "")
             if not source and not content:
                 rejected.append({

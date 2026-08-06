@@ -121,11 +121,27 @@ def build_qdrant_points(
     import hashlib
     import uuid as uuid_mod
 
-    from services.vector_embedding import coerce_embedding, embedding_reject_reason
+    from services.vector_embedding import (
+        coerce_chunk_index,
+        coerce_embedding,
+        embedding_reject_reason,
+    )
 
     points: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in vector_rows:
+        try:
+            chunk = coerce_chunk_index(row.get("chunk_index"))
+        except ValueError as exc:
+            rejected.append({
+                "row": cell_to_string(row.get("id") or ""),
+                "column": "chunk_index",
+                "target": "chunk_index",
+                "value": cell_to_string(row.get("chunk_index")),
+                "reason": str(exc),
+                "policy": "quarantine",
+            })
+            continue
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
             rejected.append({
@@ -142,7 +158,6 @@ def build_qdrant_points(
             point_id: str | None = cell_to_string(raw_id)
         else:
             source = cell_to_string(row.get("source_id", ""))
-            chunk = int(row.get("chunk_index") or 0)
             content = str(row.get("content") or "")
             if not source and not content:
                 rejected.append({
@@ -161,7 +176,7 @@ def build_qdrant_points(
             payload = {"_meta": payload}
         payload["content"] = row.get("content", "")
         payload["source_id"] = cell_to_string(row.get("source_id", ""))
-        payload["chunk_index"] = row.get("chunk_index", 0)
+        payload["chunk_index"] = chunk
         points.append({
             "id": point_id,
             "vector": sanitize_json_value(values),

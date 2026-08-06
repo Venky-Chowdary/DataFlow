@@ -140,12 +140,28 @@ def build_milvus_entities(
     import hashlib
     import uuid
 
-    from services.vector_embedding import coerce_embedding, embedding_reject_reason
+    from services.vector_embedding import (
+        coerce_chunk_index,
+        coerce_embedding,
+        embedding_reject_reason,
+    )
 
     entities: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in vector_rows:
         meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
+        try:
+            chunk = coerce_chunk_index(row.get("chunk_index"))
+        except ValueError as exc:
+            rejected.append({
+                "row": cell_to_string(row.get("id") or ""),
+                "column": "chunk_index",
+                "target": "chunk_index",
+                "value": cell_to_string(row.get("chunk_index")),
+                "reason": str(exc),
+                "policy": "quarantine",
+            })
+            continue
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
             rejected.append({
@@ -169,7 +185,6 @@ def build_milvus_entities(
                 entity_id = raw_s
         else:
             source = cell_to_string(row.get("source_id", ""))
-            chunk = int(row.get("chunk_index") or 0)
             content = str(row.get("content") or "")
             if not source and not content:
                 rejected.append({
@@ -188,7 +203,7 @@ def build_milvus_entities(
             "vector": sanitize_json_value(values),
             "content": str(row.get("content") or "")[:65000],
             "source_id": cell_to_string(row.get("source_id", ""))[:256],
-            "chunk_index": int(row.get("chunk_index") or 0),
+            "chunk_index": chunk,
             "filename": str(meta.get("filename") or "")[:512],
             "page": str(meta.get("page") or "")[:64],
             "heading": str(meta.get("heading") or "")[:1024],

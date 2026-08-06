@@ -121,7 +121,11 @@ def build_weaviate_objects(
     fabricated as zero vectors. Missing ids → deterministic UUID over
     source_id+chunk+content (retry-safe), else quarantine.
     """
-    from services.vector_embedding import coerce_embedding, embedding_reject_reason
+    from services.vector_embedding import (
+        coerce_chunk_index,
+        coerce_embedding,
+        embedding_reject_reason,
+    )
 
     objects: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -129,7 +133,19 @@ def build_weaviate_objects(
         props = dict(sanitize_json_value(row.get("metadata") or {}) or {})
         props["content"] = row.get("content", "")
         props["source_id"] = cell_to_string(row.get("source_id", ""))
-        props["chunk_index"] = int(row.get("chunk_index") or 0)
+        try:
+            chunk = coerce_chunk_index(row.get("chunk_index"))
+        except ValueError as exc:
+            rejected.append({
+                "row": cell_to_string(row.get("id") or ""),
+                "column": "chunk_index",
+                "target": "chunk_index",
+                "value": cell_to_string(row.get("chunk_index")),
+                "reason": str(exc),
+                "policy": "quarantine",
+            })
+            continue
+        props["chunk_index"] = chunk
         vector, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or vector is None:
             rejected.append({
@@ -144,7 +160,6 @@ def build_weaviate_objects(
         raw_id = cell_to_string(row.get("id") or "")
         if not raw_id:
             source = cell_to_string(row.get("source_id", ""))
-            chunk = int(row.get("chunk_index") or 0)
             content = str(row.get("content") or "")
             if not source and not content:
                 rejected.append({

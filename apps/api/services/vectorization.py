@@ -338,13 +338,16 @@ def _stable_vector_row_id(
     Content must not be part of the id when a source PK exists — otherwise an
     edit creates a new vector id and leaves the old entity orphaned.
     """
+    from services.vector_embedding import coerce_chunk_index
+
     sid = (source_id or "").strip()
+    chunk = coerce_chunk_index(chunk_index)
     if sid:
-        if not multi_chunk and int(chunk_index or 0) == 0 and _is_store_compatible_vector_id(sid):
+        if not multi_chunk and chunk == 0 and _is_store_compatible_vector_id(sid):
             return sid
-        return hashlib.sha256(f"{sid}:{int(chunk_index or 0)}".encode("utf-8")).hexdigest()[:32]
+        return hashlib.sha256(f"{sid}:{chunk}".encode("utf-8")).hexdigest()[:32]
     return hashlib.sha256(
-        f":{int(chunk_index or 0)}:{content}".encode("utf-8")
+        f":{chunk}:{content}".encode("utf-8")
     ).hexdigest()[:32]
 
 
@@ -504,12 +507,30 @@ def vectorize_records(
             metadata = {k: v for k, v in metadata.items() if k in allowed}
 
         existing_chunk_index = 0
+        chunk_index_error = ""
         try:
-            existing_chunk_index = int(rec.get("chunk_index") or 0)
-        except (TypeError, ValueError):
+            from services.vector_embedding import coerce_chunk_index
+
+            existing_chunk_index = coerce_chunk_index(rec.get("chunk_index"))
+        except ValueError as exc:
+            # Never invent chunk 0 from garbage — stamp for writer quarantine.
+            chunk_index_error = str(exc)
             existing_chunk_index = 0
 
-        if embed_column_parse_failed:
+        if chunk_index_error:
+            bounded, meta = _bounded_vector_content(content, metadata)
+            rows.append({
+                "id": _stable_vector_row_id(
+                    source_id, existing_chunk_index, bounded, multi_chunk=False
+                ),
+                "content": bounded,
+                "embedding": None,
+                "metadata": meta,
+                "source_id": source_id,
+                "chunk_index": rec.get("chunk_index"),
+                "_df_embed_error": chunk_index_error,
+            })
+        elif embed_column_parse_failed:
             # Operator mapped an embedding column — never invent a content embedding
             # when that column is present but unparseable (silent fidelity invent).
             bounded, meta = _bounded_vector_content(content, metadata)

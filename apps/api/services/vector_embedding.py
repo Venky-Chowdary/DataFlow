@@ -61,6 +61,63 @@ def embedding_reject_reason(row: dict[str, Any], coerce_err: str | None) -> str:
     return coerce_err or "invalid embedding"
 
 
+def coerce_chunk_index(value: Any, *, default: int = 0) -> int:
+    """Normalize vector ``chunk_index`` for identity hashing / metadata.
+
+    Missing / blank → ``default`` (single-chunk docs). Non-integral floats,
+    booleans, and garbage strings refuse — ``int(3.7)`` / ``int(True)`` would
+    silently invent wrong chunk identity under at-least-once upsert.
+    """
+    if value is None:
+        return int(default)
+    if isinstance(value, bool):
+        raise ValueError(
+            f"chunk_index refused boolean {value!r} — refuse invent"
+        )
+    if isinstance(value, int):
+        if value < 0:
+            raise ValueError(
+                f"chunk_index refused negative {value!r} — refuse invent"
+            )
+        return value
+    if isinstance(value, float):
+        if value != value or value in {float("inf"), float("-inf")}:
+            raise ValueError(
+                f"chunk_index refused non-finite {value!r} — refuse invent"
+            )
+        if not value.is_integer():
+            raise ValueError(
+                f"chunk_index refused fractional {value!r} — refuse truncation invent"
+            )
+        n = int(value)
+        if n < 0:
+            raise ValueError(
+                f"chunk_index refused negative {n!r} — refuse invent"
+            )
+        return n
+    if isinstance(value, str):
+        token = value.strip()
+        if not token:
+            return int(default)
+        from connectors.sql_bind import coerce_integer_wire
+
+        n = coerce_integer_wire(token, ddl_type="INTEGER")
+        if n is None:
+            return int(default)
+        if not isinstance(n, int):
+            raise ValueError(
+                f"chunk_index refused {value!r} — refuse invent"
+            )
+        if n < 0:
+            raise ValueError(
+                f"chunk_index refused negative {n!r} — refuse invent"
+            )
+        return n
+    raise ValueError(
+        f"chunk_index refused {type(value).__name__} {value!r} — refuse invent"
+    )
+
+
 def resolve_embedding_dimension(
     rows: list[dict[str, Any]],
     *,
