@@ -155,3 +155,23 @@ def test_datetime_date_only_does_not_invent_utc_z():
     assert out is not None
     assert not str(out).endswith("Z")
     assert "T00:00:00" in str(out)
+
+
+def test_url_email_iban_transforms_fail_closed_on_garbage():
+    from services.transform_engine import apply_transform
+
+    out, err = apply_transform("not-a-url", "url")
+    assert out is None
+    assert err and "Invalid url" in err
+
+    out, err = apply_transform("not-an-email", "email")
+    assert out is None
+    assert err and "Invalid email" in err
+
+    out, err = apply_transform("XX00", "iban")
+    assert out is None
+    assert err and "Invalid iban" in err
+
+    out, err = apply_transform("https://example.com/a", "url")
+    assert err is None
+    assert out == "https://example.com/a"

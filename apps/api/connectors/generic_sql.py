@@ -4559,6 +4559,28 @@ def write_mapped_rows(
                 "after an interrupted write may duplicate rows"
             )
 
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "SQL")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=written,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=chunks_completed or chunks,
+                error=_final_abort,
+                rejected_rows=max(
+                    _rejected_row_count(
+                        data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+                    ),
+                    len(data_rows) - written - rows_skipped if data_rows else 0,
+                ),
+                rejected_details=rejected_details,
+                coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
+                rows_skipped=rows_skipped,
+                warnings=transform_errors,
+            )
+
         return WriteResult(
             ok=True,
             rows_written=written,

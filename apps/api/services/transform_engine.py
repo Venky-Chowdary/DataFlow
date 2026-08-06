@@ -1220,7 +1220,23 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         converted = normalize_value_for_target(text, st, "decimal" if not target_string else "string")
         if not target_string and not isinstance(converted, Decimal):
             return text, f"Invalid {transform}: {text!r}"
-        return str(converted) if not target_string and isinstance(converted, Decimal) else converted, None
+        if target_string:
+            out = str(converted)
+            # Explicit semantic transforms must fail-closed on garbage — never
+            # silently "normalize" invalid email/url/iban into the primary table.
+            from services.semantic_types import _EMAIL_RE, _IBAN_RE, _URL_RE
+
+            if transform == "email" and not _EMAIL_RE.match(out):
+                return None, f"Invalid email: {text!r}"
+            if transform == "url" and not _URL_RE.match(out):
+                return None, f"Invalid url: {text!r}"
+            if transform == "iban":
+                compact = out.upper().replace(" ", "")
+                if not _IBAN_RE.match(compact):
+                    return None, f"Invalid iban: {text!r}"
+                return compact, None
+            return out, None
+        return str(converted) if isinstance(converted, Decimal) else converted, None
 
     if transform not in KNOWN_TRANSFORMS:
         return None, f"Unknown transform: {transform!r}"
