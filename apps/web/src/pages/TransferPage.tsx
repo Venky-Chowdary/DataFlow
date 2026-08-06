@@ -499,6 +499,10 @@ export function TransferPage({
       service_account: selectedDestConnector?.service_account || undefined,
       // Tri-state existence for plan Validate≡Map (never invent create-new).
       table_exists: destTableExists,
+      // Live dest DDL for write-path transform/quarantine (beats Map stamps).
+      ...(destTableExists === true && Object.keys(destSchemaMap).length
+        ? { schema_types: destSchemaMap }
+        : {}),
       ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
       ...(isVector
         ? {

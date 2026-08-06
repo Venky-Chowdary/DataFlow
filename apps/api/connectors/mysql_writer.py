@@ -334,8 +334,19 @@ def write_mapped_rows(
             )
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
-    target_types = [mysql_type(t) for t in logical_types]
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    # Prefer Studio-probed live DDL over Map stamps (BOOLEAN→VARCHAR invent cliff).
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    live_dest = _kwargs.get("destination_column_types")
+    dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live_dest if isinstance(live_dest, dict) else None,
+    )
+    # Quarantine carriers must match transform dest_types — never Map-only.
+    target_types = [mysql_type(dest_types.get(c, logical_types[i])) for i, c in enumerate(target_cols)]
     policy = transform_error_policy(error_policy)
 
     # Map before opening a socket so public proxies are not idle during transform.

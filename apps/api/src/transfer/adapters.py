@@ -1499,6 +1499,15 @@ def write_destination_database(
             or (getattr(endpoint, "extra", None) or {}).get("schema_nullability")
             or {}
         ),
+        # Live dest DDL from Studio probe — writers prefer this over Map stamps
+        # for transform/quarantine before physical introspect (invent cliff).
+        "destination_column_types": dict(
+            (cfg.get("extra") or {}).get("schema_types")
+            or (getattr(endpoint, "extra", None) or {}).get("schema_types")
+            or (cfg.get("extra") or {}).get("destination_column_types")
+            or (getattr(endpoint, "extra", None) or {}).get("destination_column_types")
+            or {}
+        ),
     }
 
     if db_type == "snowflake":
