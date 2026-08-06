@@ -234,10 +234,11 @@ def write_mapped_rows(
             from services.value_serializer import is_missing_sentinel
 
             # STOP_COLUMN / coerce_null omit — never JSON-SET the sentinel string.
+            # Dense upsert: also omit None so prior JSON fields are not wiped to null.
             doc = {
                 c: v
                 for c, v in zip(target_cols, row)
-                if not is_missing_sentinel(v)
+                if not is_missing_sentinel(v) and v is not None
             }
             try:
                 doc = _normalize_redis_typed_doc(doc, target_cols, logical_types)
@@ -349,13 +350,17 @@ def write_mapped_rows(
                 # Pre-sanitize so extreme Decimals never raise mid-dumps.
                 from connectors.writer_common import row_has_missing_sentinel
 
-                # Sparse STOP_COLUMN / CDC: merge onto existing JSON so omitted
-                # fields are not wiped by a full-key SET.
-                if (
-                    row_has_missing_sentinel(row)
-                    and write_mode not in {"overwrite", "replace", "truncate"}
+                # Sparse STOP_COLUMN / CDC / NULL omit: merge onto existing JSON so
+                # omitted fields are not wiped by a full-key SET.
+                needs_merge = (
+                    write_mode not in {"overwrite", "replace", "truncate"}
                     and not is_overwrite_sync(sync_mode)
-                ):
+                    and (
+                        row_has_missing_sentinel(row)
+                        or len(doc) < len(target_cols)
+                    )
+                )
+                if needs_merge:
                     existing_raw = client.get(key)
                     if existing_raw:
                         try:

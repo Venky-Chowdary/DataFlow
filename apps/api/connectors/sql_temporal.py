@@ -203,6 +203,12 @@ def parse_sql_date(value: Any) -> date | None:
 def coerce_sql_temporal(value: Any, source_type: str) -> Any:
     """Coerce a cell to a Python temporal for the given SQL DDL type, else return value."""
     base = sql_base_type(source_type)
+    # Empty → SQL NULL / MySQL zero-date on upsert wipe. Quarantine owns the cell.
+    if base in _TEMPORAL_BASES and isinstance(value, str) and not value.strip():
+        raise ValueError(
+            f"empty string cannot coerce to {base} — "
+            "refuse silent NULL invent (quarantine or remap upstream)"
+        )
     if base in {
         "TIMESTAMPTZ",
         "TIMESTAMP_TZ",
@@ -290,6 +296,7 @@ _TEMPORAL_BASES = frozenset({
     "TIMESTAMP_LTZ",
     "TIMESTAMP_NTZ",
     "TIMESTAMP WITH TIME ZONE",
+    "TIMESTAMP WITH LOCAL TIME ZONE",
     "TIMESTAMP WITHOUT TIME ZONE",
     "DATE",
     "TIME",
@@ -406,7 +413,15 @@ def wire_check_temporal(value: Any, ddl_type: str) -> dict[str, Any]:
     if value is None:
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
     if isinstance(value, str) and not value.strip():
-        return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
+        return {
+            "ok": False,
+            "wire_value": None,
+            "reason": (
+                f"empty string cannot coerce to {base} — "
+                "refuse silent NULL invent (quarantine or remap upstream)"
+            ),
+            "needs_normalize": False,
+        }
 
     try:
         coerced = coerce_sql_temporal(value, ddl_type)

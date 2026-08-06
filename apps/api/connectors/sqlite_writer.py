@@ -26,6 +26,7 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _rejected_row_count,
     apply_write_quarantine_matrix,
+    bind_sql_mapped_rows_with_quarantine,
     build_mapped_rows_with_details,
     filter_stale_lsn_rows,
     gate8_writer_meta,
@@ -100,12 +101,16 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
     }:
         from connectors.sql_temporal import coerce_sql_temporal, format_wire_value
 
-        coerced = coerce_sql_temporal(
-            value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP"
-        )
-        wire = format_wire_value(
-            value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP"
-        )
+        try:
+            coerced = coerce_sql_temporal(
+                value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP"
+            )
+            wire = format_wire_value(
+                value, upper if upper != "TIMESTAMP_NTZ" else "TIMESTAMP"
+            )
+        except ValueError:
+            # Fail-closed at row bind — never invent NULL from empty temporal.
+            raise
         if wire is not None:
             return wire
         if isinstance(coerced, datetime):
@@ -443,13 +448,34 @@ def write_mapped_rows(
 
             mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
+        converted_rows = bind_sql_mapped_rows_with_quarantine(
+            mapped_rows,
+            target_cols,
+            tgt_types,
+            rejected_details,
+            policy,
+            engine="sqlite",
+            dialect_label="SQLite",
+            mappings=list(mappings or []) or None,
+        )
+        # Dense ISO-Z / typed polish after shared bind refuse path.
         converted_rows = [
-            tuple(_to_sqlite_value(v, logical_types[i]) for i, v in enumerate(row))
-            for row in mapped_rows
+            tuple(_to_sqlite_value(v, tgt_types[i] if i < len(tgt_types) else "") for i, v in enumerate(row))
+            for row in converted_rows
         ]
+        sparse_converted = bind_sql_mapped_rows_with_quarantine(
+            sparse_rows,
+            target_cols,
+            tgt_types,
+            rejected_details,
+            policy,
+            engine="sqlite",
+            dialect_label="SQLite",
+            mappings=list(mappings or []) or None,
+        )
         sparse_converted = [
-            tuple(_to_sqlite_value(v, logical_types[i]) for i, v in enumerate(row))
-            for row in sparse_rows
+            tuple(_to_sqlite_value(v, tgt_types[i] if i < len(tgt_types) else "") for i, v in enumerate(row))
+            for row in sparse_converted
         ]
         # Dense rows are fully written — include them in writer-ack checksum.
         rows_for_checksum = list(converted_rows)

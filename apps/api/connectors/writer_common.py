@@ -311,8 +311,13 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         )
 
         ddl = logical_to_temporal_ddl(ctype) or "DATETIME"
-        coerced = coerce_sql_temporal(value, ddl)
-        wire = format_wire_value(value, ddl)
+        try:
+            coerced = coerce_sql_temporal(value, ddl)
+            wire = format_wire_value(value, ddl)
+        except ValueError:
+            # Dense JSON serializers: keep empty for quarantine upstream —
+            # never invent SQL/JSON null from "".
+            return value
         if wire is not None:
             return wire
         if coerced is not value:
@@ -414,7 +419,10 @@ def normalize_temporal_cells(
                 if i >= len(cells) or cells[i] is None:
                     continue
                 if bigquery_temporal_ddl(typ):
-                    cells[i] = format_bigquery_bind(cells[i], typ)
+                    try:
+                        cells[i] = format_bigquery_bind(cells[i], typ)
+                    except ValueError:
+                        pass
             out.append(tuple(cells))
         return out
 
@@ -436,7 +444,12 @@ def normalize_temporal_cells(
             ddl = logical_to_temporal_ddl(typ) or (typ if is_temporal_ddl(typ) else None)
             if not ddl:
                 continue
-            cells[i] = coerce_sql_temporal(cells[i], ddl)
+            try:
+                cells[i] = coerce_sql_temporal(cells[i], ddl)
+            except ValueError:
+                # Leave raw for bind_sql_mapped_rows_with_quarantine — do not
+                # abort the whole batch on one empty DATE/TIMESTAMP cell.
+                pass
         out.append(tuple(cells))
     return out
 

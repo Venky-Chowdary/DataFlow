@@ -340,10 +340,11 @@ def write_mapped_rows(
         from connectors.writer_common import omit_missing_fields
 
         # STOP_COLUMN / coerce_null → DF_MISSING must omit, never leak the
-        # sentinel string into Shopify Admin REST payloads.
+        # sentinel string into Shopify Admin REST payloads. Empty strings omit
+        # too — never invent CRM field clears on upsert (HubSpot class).
         body = omit_missing_fields(
             ((k, v) for k, v in row_dict.items() if k.lower() != "id"),
-            drop_empty=False,
+            drop_empty=True,
         )
         payload = {singular: body}
         url = _make_url(shop_host, obj, record_id if update else None)

@@ -344,14 +344,25 @@ def write_mapped_rows(
         for row in batch:
             if isinstance(row, dict):
                 batch_dicts.append(
-                    {k: v for k, v in row.items() if not is_missing_sentinel(v)}
+                    {
+                        k: v
+                        for k, v in row.items()
+                        if not is_missing_sentinel(v)
+                        and v is not None
+                        and not (isinstance(v, str) and not str(v).strip())
+                    }
                 )
             else:
                 batch_dicts.append(
                     {
                         c: row[j]
                         for j, c in enumerate(target_cols)
-                        if j < len(row) and not is_missing_sentinel(row[j])
+                        if j < len(row)
+                        and not is_missing_sentinel(row[j])
+                        and row[j] is not None
+                        and not (
+                            isinstance(row[j], str) and not str(row[j]).strip()
+                        )
                     }
                 )
         for d in batch_dicts:

@@ -4892,7 +4892,8 @@ def pg_enum_type_name(members: list[str] | tuple[str, ...]) -> str:
     import hashlib
 
     key = "\0".join(str(m) for m in members)
-    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
+    # Stable ENUM type name — not a security digest.
+    digest = hashlib.sha1(key.encode("utf-8"), usedforsecurity=False).hexdigest()[:12]
     return f"df_enum_{digest}"
 
 
@@ -7126,7 +7127,8 @@ def boolean_value_fits(value: Any) -> bool:
     else:
         text = str(value).strip().lower()
     if not text:
-        return True
+        # Empty ≠ natural NULL on BOOLEAN — bind refuses silent invent.
+        return False
     return text in _BOOLEAN_TRUE_TOKENS or text in _BOOLEAN_FALSE_TOKENS
 
 

@@ -246,7 +246,11 @@ def coerce_mapped_rows_snowflake(
             if i >= len(cells) or cells[i] is None:
                 continue
             if snowflake_temporal_ddl(typ):
-                cells[i] = format_snowflake_bind(cells[i], typ)
+                try:
+                    cells[i] = format_snowflake_bind(cells[i], typ)
+                except ValueError:
+                    # Leave raw for bind quarantine — refuse batch-abort invent.
+                    pass
         out.append(tuple(cells))
     return out
 
@@ -335,15 +339,20 @@ def records_for_bigquery(
             if is_missing_sentinel(val):
                 continue
             element_type = bigquery_repeated_element(typ)
-            if val is not None and element_type is not None:
-                rec[col] = bigquery_repeated_cell(val, element_type)
-            elif val is not None and bigquery_temporal_ddl(typ):
-                rec[col] = format_bigquery_bind(val, typ)
-            elif val is not None:
-                rec[col] = bigquery_json_cell(
-                    normalize_sql_bind_value(val, typ, engine="bigquery")
-                )
-            else:
+            try:
+                if val is not None and element_type is not None:
+                    rec[col] = bigquery_repeated_cell(val, element_type)
+                elif val is not None and bigquery_temporal_ddl(typ):
+                    rec[col] = format_bigquery_bind(val, typ)
+                elif val is not None:
+                    rec[col] = bigquery_json_cell(
+                        normalize_sql_bind_value(val, typ, engine="bigquery")
+                    )
+                else:
+                    rec[col] = val
+            except ValueError:
+                # Leave raw for upstream bind quarantine / BQ row-error holdout —
+                # never invent NULL mid-record.
                 rec[col] = val
         records.append(rec)
     return records

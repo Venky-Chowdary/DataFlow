@@ -327,6 +327,8 @@ def _bq_apply_sparse_upsert(
     conflict_columns: list[str],
     sparse_rows: list[tuple],
     bq_types: list[str],
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
 ) -> tuple[int, int, list[tuple]]:
     """Per-row BigQuery DML omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
     from connectors.writer_common import (
@@ -336,6 +338,7 @@ def _bq_apply_sparse_upsert(
         sparse_present_bindings,
     )
     from services.cdc_effectively_once import should_apply_pk_row
+    from services.value_serializer import cell_to_string
 
     bigquery = _bq_sdk()
     from connectors.writer_common import resolve_conflict_targets
@@ -347,13 +350,36 @@ def _bq_apply_sparse_upsert(
     written = 0
     skipped = 0
     checksum_rows: list[tuple] = []
-    for row in sparse_rows:
-        present = _bq_normalize_present(
-            sparse_present_bindings(row, target_cols),
-            target_cols,
-            bq_types,
-        )
-        assert_sparse_upsert_has_pk(present, conflict)
+    for row_idx, row in enumerate(sparse_rows):
+        raw_present = sparse_present_bindings(row, target_cols)
+        # Pre-bind preferred. Residual refuse / empty PK → quarantine, not
+        # silent skip and not batch-abort.
+        try:
+            present = _bq_normalize_present(
+                raw_present,
+                target_cols,
+                bq_types,
+            )
+            assert_sparse_upsert_has_pk(present, conflict)
+        except ValueError as exc:
+            if rejected_details is not None:
+                sample = ""
+                try:
+                    sample = cell_to_string(
+                        next(iter(raw_present.values()), "")
+                    )[:120]
+                except Exception:
+                    sample = ""
+                rejected_details.append(
+                    {
+                        "row": row_idx,
+                        "column": "*",
+                        "value": sample,
+                        "reason": str(exc)[:300],
+                        "policy": policy,
+                    }
+                )
+            continue
         non_pk = {k: v for k, v in present.items() if k not in conflict}
 
         def _params(values: dict[str, Any], prefix: str) -> list[Any]:
@@ -767,6 +793,31 @@ def write_mapped_rows(
                 rejected_details=rejected_details,
                 warnings=transform_errors,
             )
+        # Map may stamp VARCHAR while physical DDL is DATE/INT — empty must
+        # quarantine before records_for_bigquery / sparse DML (no batch abort).
+        from connectors.writer_common import bind_sql_mapped_rows_with_quarantine
+
+        mapped_rows = bind_sql_mapped_rows_with_quarantine(
+            mapped_rows,
+            target_cols,
+            decimal_target_types,
+            rejected_details,
+            policy,
+            engine="bigquery",
+            dialect_label="BigQuery",
+            mappings=mappings,
+        )
+        if sparse_rows:
+            sparse_rows = bind_sql_mapped_rows_with_quarantine(
+                sparse_rows,
+                target_cols,
+                decimal_target_types,
+                rejected_details,
+                policy,
+                engine="bigquery",
+                dialect_label="BigQuery",
+                mappings=mappings,
+            )
         rejected_rows = _rejected_row_count(
             data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
         )
@@ -820,6 +871,8 @@ def write_mapped_rows(
                 conflict,
                 sparse_rows,
                 bq_types,
+                rejected_details=rejected_details,
+                policy=policy,
             )
             written += sparse_written
             rows_skipped += sparse_skipped

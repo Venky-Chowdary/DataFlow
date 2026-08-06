@@ -120,6 +120,11 @@ def coerce_hubspot_date_wire(value: Any) -> str | None:
 
     if is_missing_sentinel(value):
         return value
+    if isinstance(value, str) and not value.strip():
+        raise ValueError(
+            "empty HubSpot date — refuse silent NULL invent "
+            "(quarantine or omit property upstream)"
+        )
     from connectors.sql_temporal import coerce_sql_temporal
     from datetime import date, datetime
 

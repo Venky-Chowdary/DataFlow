@@ -107,6 +107,27 @@ def test_numeric_bind_refuses_empty_null_invent():
         coerce_salesforce_id_wire("")
 
 
+def test_temporal_bind_refuses_empty_null_invent():
+    """DATE/DATETIME/TIME empty must raise — never invent SQL NULL / zero-date."""
+    import pytest
+    from connectors.sql_bind import normalize_sql_bind_value
+    from connectors.sql_temporal import coerce_sql_temporal, wire_check_temporal
+    from services.type_system import boolean_value_fits
+
+    for ddl in ("DATE", "DATETIME", "TIMESTAMP", "TIME", "TIMESTAMPTZ"):
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            coerce_sql_temporal("", ddl)
+        with pytest.raises(ValueError, match="refuse silent NULL invent"):
+            normalize_sql_bind_value("", ddl, engine="postgresql")
+        check = wire_check_temporal("", ddl)
+        assert check["ok"] is False
+        assert "refuse silent NULL invent" in (check.get("reason") or "")
+
+    assert boolean_value_fits("") is False
+    assert boolean_value_fits(None) is True
+    assert boolean_value_fits("true") is True
+
+
 def test_bind_sql_mapped_rows_quarantines_empty_integer():
     from connectors.writer_common import bind_sql_mapped_rows_with_quarantine
 
@@ -123,3 +144,64 @@ def test_bind_sql_mapped_rows_quarantines_empty_integer():
     assert out == [(30, "ok")]
     assert details
     assert any("refuse silent NULL invent" in str(d.get("reason") or "") for d in details)
+
+
+def test_snowflake_physical_overlay_promotes_varchar_to_date():
+    from connectors.snowflake_writer import _overlay_snowflake_physical_bind_types
+
+    out = _overlay_snowflake_physical_bind_types(
+        ["id", "created", "age"],
+        ["VARCHAR", "VARCHAR", "VARCHAR"],
+        {"created": "DATE", "age": "NUMBER(38,0)"},
+    )
+    assert out[1] == "DATE"
+    assert out[2].startswith("NUMBER")
+    assert out[0] == "VARCHAR"
+
+
+def test_snowflake_sparse_bind_quarantines_empty_date():
+    """Sparse CDC empty DATE must quarantine — not abort whole Snowflake write."""
+    from services.value_serializer import DF_MISSING_SENTINEL
+    from connectors.writer_common import bind_sql_mapped_rows_with_quarantine
+
+    details: list[dict] = []
+    out = bind_sql_mapped_rows_with_quarantine(
+        [
+            ("1", "", "keep"),
+            ("2", "2024-01-15", DF_MISSING_SENTINEL),
+        ],
+        ["id", "created", "note"],
+        ["VARCHAR", "DATE", "VARCHAR"],
+        details,
+        "quarantine",
+        engine="snowflake",
+        dialect_label="Snowflake",
+    )
+    assert len(out) == 1
+    assert out[0][0] == "2"
+    assert details
+    assert any("refuse silent NULL invent" in str(d.get("reason") or "") for d in details)
+
+
+def test_sf_sparse_empty_pk_quarantines_not_abort():
+    """Empty conflict key must quarantine one row — not abort the Snowflake batch."""
+    from unittest.mock import MagicMock
+    from connectors.snowflake_writer import _sf_apply_sparse_upsert
+
+    cur = MagicMock()
+    cur.fetchone.return_value = ("2", "ok")
+    cur.rowcount = 1
+    details: list[dict] = []
+    written, skipped, checksum = _sf_apply_sparse_upsert(
+        cur,
+        "T",
+        ["id", "note"],
+        ["VARCHAR", "VARCHAR"],
+        ["id"],
+        [("", "bad-pk"), ("2", "ok")],
+        rejected_details=details,
+        policy="quarantine",
+    )
+    assert written == 1
+    assert details
+    assert any("null/empty primary-key" in str(d.get("reason") or "") for d in details)

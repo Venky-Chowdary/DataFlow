@@ -152,6 +152,91 @@ def resolve_snowflake_create_types(
     return out
 
 
+def _fetch_snowflake_column_types(
+    cur: Any, schema: str, table_name: str
+) -> dict[str, str]:
+    """Live Snowflake DATA_TYPE (+ NUMBER precision) for bind overlay."""
+    try:
+        cur.execute(
+            """
+            SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE
+            FROM information_schema.columns
+            WHERE UPPER(table_schema) = UPPER(%s) AND UPPER(table_name) = UPPER(%s)
+            """,
+            (schema, table_name),
+        )
+        out: dict[str, str] = {}
+        for name, data_type, precision, scale in cur.fetchall():
+            ddl = str(data_type or "").upper()
+            if ddl == "NUMBER" and precision is not None:
+                ddl = f"NUMBER({int(precision)},{int(scale or 0)})"
+            out[str(name)] = ddl
+            out[str(name).upper()] = ddl
+            out[str(name).lower()] = ddl
+        return out
+    except Exception:
+        logger.debug(
+            "snowflake physical column introspection failed",
+            exc_info=True,
+        )
+        return {}
+
+
+def _overlay_snowflake_physical_bind_types(
+    target_cols: list[str],
+    target_types: list[str],
+    physical: dict[str, str],
+) -> list[str]:
+    """Prefer live DDL when Map stamped VARCHAR over DATE/NUMBER/BOOLEAN.
+
+    Empty ``\"\"`` must refuse at bind against physical typed sinks — never
+    survive as VARCHAR and invent NULL on Snowflake coerce.
+    """
+    from connectors.sql_temporal import is_temporal_ddl, sql_base_type
+    from services.type_system import normalize_logical_type
+
+    if not physical:
+        return list(target_types)
+    out = list(target_types)
+    typed_bases = {
+        "NUMBER",
+        "DECIMAL",
+        "NUMERIC",
+        "INT",
+        "INTEGER",
+        "BIGINT",
+        "SMALLINT",
+        "TINYINT",
+        "FLOAT",
+        "FLOAT4",
+        "FLOAT8",
+        "DOUBLE",
+        "REAL",
+        "BOOLEAN",
+        "BOOL",
+    }
+    for i, col in enumerate(target_cols):
+        phys = physical.get(col) or physical.get(col.lower()) or physical.get(col.upper())
+        if not phys:
+            continue
+        phys_base = sql_base_type(phys)
+        map_logical = normalize_logical_type(out[i] if i < len(out) else "")
+        if is_temporal_ddl(phys_base) or phys_base in {
+            "DATE",
+            "TIME",
+            "DATETIME",
+            "TIMESTAMP",
+            "TIMESTAMP_NTZ",
+            "TIMESTAMP_LTZ",
+            "TIMESTAMP_TZ",
+            "TIMESTAMPTZ",
+        }:
+            out[i] = phys
+        elif map_logical in {"string", "text", "varchar", ""} and phys_base in typed_bases:
+            out[i] = phys
+    return out
+
+
 def _quarantine_unfit_decimals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -337,6 +422,8 @@ def _sf_apply_sparse_upsert(
     target_types: list[str],
     conflict: list[str],
     sparse_rows: list[tuple],
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
 ) -> tuple[int, int, list[tuple]]:
     """Per-row Snowflake upsert omitting DF_MISSING — never SET col=NULL for absent."""
     from connectors.sql_bind import normalize_sql_bind_value
@@ -347,6 +434,7 @@ def _sf_apply_sparse_upsert(
         sparse_present_bindings,
     )
     from services.cdc_effectively_once import should_apply_pk_row
+    from services.value_serializer import cell_to_string
 
     if not conflict:
         raise ValueError("sparse Snowflake upsert requires conflict_columns")
@@ -358,15 +446,37 @@ def _sf_apply_sparse_upsert(
     select_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
     where_sql = " AND ".join(f"{quote_sql_identifier(c)} = %s" for c in conflict)
 
-    for row in sparse_rows:
+    for row_idx, row in enumerate(sparse_rows):
         raw_present = sparse_present_bindings(row, target_cols)
-        present = {
-            k: normalize_sql_bind_value(
-                v, type_by_col.get(k, "VARCHAR"), engine="snowflake"
-            )
-            for k, v in raw_present.items()
-        }
-        assert_sparse_upsert_has_pk(present, conflict)
+        # Pre-bind with physical DDL preferred. Residual refuse / empty PK
+        # quarantine — never silent skip and never abort the whole batch.
+        try:
+            present = {
+                k: normalize_sql_bind_value(
+                    v, type_by_col.get(k, "VARCHAR"), engine="snowflake"
+                )
+                for k, v in raw_present.items()
+            }
+            assert_sparse_upsert_has_pk(present, conflict)
+        except ValueError as exc:
+            if rejected_details is not None:
+                sample = ""
+                try:
+                    sample = cell_to_string(
+                        next(iter(raw_present.values()), "")
+                    )[:120]
+                except Exception:
+                    sample = ""
+                rejected_details.append(
+                    {
+                        "row": row_idx,
+                        "column": "*",
+                        "value": sample,
+                        "reason": str(exc)[:300],
+                        "policy": policy,
+                    }
+                )
+            continue
         non_pk = {k: v for k, v in present.items() if k not in conflict}
         pk_vals = [present[c] for c in conflict]
         cur.execute(
@@ -950,6 +1060,7 @@ def write_mapped_rows(
             )
         else:
             mapped_rows = dedupe_rows(mapped_rows, conflict, target_cols)
+        # Sparse bind waits until physical DDL overlay (inside the write cursor).
     elif write_mode == "upsert" and conflict_columns and not conflict:
         return WriteResult(
             ok=False,
@@ -1170,6 +1281,41 @@ def write_mapped_rows(
             if write_mode == "upsert" and conflict:
                 load_method = "merge_batch"
                 written = 0
+                # Map may stamp VARCHAR while live column is DATE/NUMBER —
+                # overlay physical DDL before bind so empty refuses quarantine.
+                physical = _fetch_snowflake_column_types(cur, schema, table_name)
+                target_types = _overlay_snowflake_physical_bind_types(
+                    target_cols, target_types, physical
+                )
+                from connectors.writer_common import bind_sql_mapped_rows_with_quarantine
+
+                if sparse_rows:
+                    sparse_rows = bind_sql_mapped_rows_with_quarantine(
+                        sparse_rows,
+                        target_cols,
+                        target_types,
+                        rejected_details,
+                        policy,
+                        engine="snowflake",
+                        dialect_label="Snowflake",
+                        mappings=mappings,
+                    )
+                # Dense bind runs in _bind_rows_for_snowflake with overlaid types.
+                _late_abort = reject_on_strict_policy(
+                    policy, rejected_details, "Snowflake", transform_errors
+                )
+                if _late_abort:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=_late_abort,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
                 if sparse_rows:
                     from connectors.writer_common import row_has_missing_sentinel
 
@@ -1181,6 +1327,8 @@ def write_mapped_rows(
                             target_types,
                             conflict,
                             sparse_rows,
+                            rejected_details=rejected_details,
+                            policy=policy,
                         )
                     )
                     written += sparse_written
@@ -1207,6 +1355,10 @@ def write_mapped_rows(
             else:
                 # Prefer COPY INTO for insert / full_refresh when the batch is large enough.
                 # fakesnow does not support PUT/COPY — falls back to INSERT.
+                physical = _fetch_snowflake_column_types(cur, schema, table_name)
+                target_types = _overlay_snowflake_physical_bind_types(
+                    target_cols, target_types, physical
+                )
                 load_method = _load_rows_into_table(
                     cur,
                     table_name,
