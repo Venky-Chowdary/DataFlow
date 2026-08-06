@@ -1373,13 +1373,10 @@ def _to_sa_value(
         return value
 
     if t == LOGICAL_DECIMAL:
-        if isinstance(value, Decimal):
-            return value
-        if isinstance(value, (int, float)):
-            return Decimal(str(value))
-        if isinstance(value, str):
-            return Decimal(value)
-        return value
+        from connectors.sql_bind import coerce_decimal_wire
+
+        # Never bind Decimal('NaN')/Inf — coerce_decimal_wire refuses non-finite.
+        return coerce_decimal_wire(value, ddl_type=str(sa_type or "DECIMAL"))
 
     if t == LOGICAL_INTEGER:
         if isinstance(value, bool):

@@ -68,7 +68,48 @@ def format_snowflake_bind(value: Any, sf_type: str) -> Any:
             return coerced.date().isoformat()
         return value
     if ddl in {"TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMESTAMPTZ"}:
+        # Refuse offset-less wires before aware_utc parse attaches UTC invent.
+        def _wire_has_tz(raw: Any) -> bool:
+            if isinstance(raw, datetime):
+                return raw.tzinfo is not None
+            if isinstance(raw, bool):
+                return False
+            if isinstance(raw, (int, float)):
+                return True  # epoch seconds are UTC instants
+            if not isinstance(raw, str):
+                return False
+            text = raw.strip()
+            if not text:
+                return False
+            if text.endswith(("Z", "z")) or text.upper().endswith(" UTC"):
+                return True
+            # ISO offset suffix +HH:MM / -HH:MM or +HHMM
+            if len(text) >= 6 and text[-6] in "+-" and text[-3] == ":":
+                return text[-5:-3].isdigit() and text[-2:].isdigit()
+            if len(text) >= 5 and text[-5] in "+-" and text[-4:].isdigit():
+                return True
+            return False
+
+        if not _wire_has_tz(value):
+            raise ValueError(
+                f"Snowflake {ddl} refused naive datetime — provide offset/Z "
+                "(refuse silent session-TZ / UTC invent)"
+            )
         coerced = parse_sql_datetime(value, aware_utc=True)
+        if isinstance(coerced, datetime):
+            from datetime import timezone as _tz
+
+            utc = (
+                coerced.astimezone(_tz.utc)
+                if coerced.tzinfo is not None
+                else coerced.replace(tzinfo=_tz.utc)
+            )
+            if utc.microsecond:
+                body = utc.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
+            else:
+                body = utc.strftime("%Y-%m-%d %H:%M:%S")
+            return f"{body} +00:00"
+        return value
     else:
         # TIMESTAMP_NTZ / bare TIMESTAMP / DATETIME / TIME: keep civil digits.
         # Do NOT astimezone(UTC) then strip — that invents a different local time

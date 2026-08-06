@@ -320,12 +320,18 @@ def write_mapped_rows(
                 return value
             if upper == "DATE" and transform != "datetime":
                 from connectors.sql_temporal import coerce_sql_temporal
+                from datetime import timezone as _tz
 
                 coerced = coerce_sql_temporal(value, "DATE")
+                # DATE → BSON Date as UTC midnight (calendar date instant), never
+                # leave naive for PyMongo local-TZ invent.
                 if isinstance(coerced, _datetime):
-                    return coerced
+                    d = coerced.date()
+                    return _datetime(d.year, d.month, d.day, tzinfo=_tz.utc)
                 if isinstance(coerced, _date):
-                    return _datetime.combine(coerced, _time.min)
+                    return _datetime(
+                        coerced.year, coerced.month, coerced.day, tzinfo=_tz.utc
+                    )
                 return value
             # A "DATE" carrier with a datetime transform is Mongo's single BSON
             # date, which stores a full instant. Narrowing it truncated every
@@ -338,11 +344,16 @@ def write_mapped_rows(
 
                 coerced = coerce_sql_temporal(value, "DATETIME")
                 if isinstance(coerced, _datetime):
-                    # Mongo stores timezone-aware UTC when possible.
+                    # BSON Date is a UTC instant — never invent UTC on a naive
+                    # wall-clock (would silently shift polarity). Require offset/Z.
                     if coerced.tzinfo is None:
-                        from datetime import timezone as _tz
-                        return coerced.replace(tzinfo=_tz.utc)
-                    return coerced
+                        raise ValueError(
+                            "MongoDB date/time refused naive wall-clock — "
+                            "provide offset/Z (refuse silent UTC invent)"
+                        )
+                    from datetime import timezone as _tz
+
+                    return coerced.astimezone(_tz.utc)
                 return value
             if upper in {"BINARY", "BYTEA", "BLOB", "VARBINARY"}:
                 from connectors.sql_bind import coerce_binary_wire

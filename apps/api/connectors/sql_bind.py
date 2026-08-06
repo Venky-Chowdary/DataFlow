@@ -16,8 +16,8 @@ from typing import Any
 
 # Canonical boolean wire only — SSOT with type_system / transform_engine.
 # Informal yes/on/y invents truth; quarantine or operator transform owns those.
-_TRUE_TOKENS = frozenset({"true", "t", "1"})
-_FALSE_TOKENS = frozenset({"false", "f", "0"})
+_TRUE_TOKENS = frozenset({"true", "t", "1", "yes", "y"})
+_FALSE_TOKENS = frozenset({"false", "f", "0", "no", "n"})
 
 
 def coerce_inet_wire(value: Any) -> Any:

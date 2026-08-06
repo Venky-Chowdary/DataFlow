@@ -73,23 +73,23 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
             pass
     upper = source_type.upper()
     if upper in {"BOOLEAN", "BOOL", "BIT"}:
-        if isinstance(value, bool):
-            return value
-        text = str(value).strip().lower()
-        if text in {"true", "1", "t", "yes", "y"}:
-            return True
-        if text in {"false", "0", "f", "no", "n"}:
-            return False
-        return bool(value)
+        from connectors.sql_bind import coerce_boolean_wire
+
+        coerced = coerce_boolean_wire(value)
+        if coerced is not None and not isinstance(coerced, bool):
+            raise ValueError(
+                f"DynamoDB BOOLEAN refused unrecognized value {value!r} "
+                "(would invent True from non-empty string)"
+            )
+        return coerced
     # Advertise numeric DDL as DynamoDB N — never silently store typed numbers as S.
     if upper in {
         "DECIMAL", "NUMERIC", "NUMBER", "INTEGER", "BIGINT", "SMALLINT",
         "TINYINT", "FLOAT", "DOUBLE", "REAL", "INT", "INT64", "FLOAT64",
     }:
-        try:
-            return Decimal(str(value))
-        except Exception:
-            return value
+        from connectors.sql_bind import coerce_decimal_wire
+
+        return coerce_decimal_wire(value, ddl_type=upper)
     if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT", "SET"}:
         if isinstance(value, (dict, list, set)):
             return value

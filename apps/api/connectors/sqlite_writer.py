@@ -116,7 +116,15 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
             return coerced.isoformat()
         return value
     if upper == "BOOLEAN":
-        return 1 if value else 0
+        from connectors.sql_bind import coerce_boolean_wire
+
+        coerced = coerce_boolean_wire(value, as_int=True)
+        if coerced is not None and coerced not in (0, 1):
+            raise ValueError(
+                f"SQLite BOOLEAN refused unrecognized value {value!r} "
+                "(would invent non-canonical boolean integer)"
+            )
+        return coerced
     return value
 
 
