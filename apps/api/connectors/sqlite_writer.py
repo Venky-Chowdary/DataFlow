@@ -574,6 +574,25 @@ def write_mapped_rows(
                     "previous attempt (write ledger prevented duplicate rows)"
                 )
 
+            _final_abort = reject_on_strict_policy(policy, rejected_details, "SQLite")
+            if _final_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=table_name,
+                    target_schema=schema or "main",
+                    checksum="",
+                    chunks_completed=chunks or (1 if sparse_converted else 0),
+                    error=_final_abort,
+                    rejected_rows=max(
+                        rejected_rows, len(data_rows) - written - rows_skipped
+                    ),
+                    rejected_details=rejected_details,
+                    coerced_null_rows=coerced_null_rows,
+                    rows_skipped=rows_skipped,
+                    warnings=transform_errors,
+                )
+
             return WriteResult(
                 ok=True,
                 rows_written=written,

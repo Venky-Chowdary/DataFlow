@@ -1845,6 +1845,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     mapped_rows: list[dict[str, Any]] = []
     for row_idx, row in enumerate(sample_rows, start=1):
         mapped: dict[str, Any] = {}
+        row_holdout = False
         for m in ctx.plan.mappings:
             if _is_intentional_omit_mapping(m) or not m.target:
                 continue
@@ -1857,16 +1858,18 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             if err:
                 line = f"row {row_idx} {m.source}→{m.target}: {err}"
                 # Continue-policy Risk Contract matches write path: quarantine /
-                # hold out — do not hard-block Validate after the operator signed.
+                # hold out the row — do not invent NULL cells into the dry-run
+                # primary set, and do not hard-block Validate after sign-off.
                 if _risk_cleared(m):
                     contracted_holdouts.append(line)
-                    mapped[m.target] = None
+                    row_holdout = True
                 else:
                     transform_errors.append(line)
                     mapped[m.target] = None
             else:
                 mapped[m.target] = transformed
-        mapped_rows.append(mapped)
+        if not row_holdout:
+            mapped_rows.append(mapped)
 
     if transform_errors:
         return _block(
@@ -2128,8 +2131,9 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "note": (
                         "Pre-write write-path sample check — live Gate-8 checksum runs after load"
                         + (
-                            f"; {len(contracted_holdouts)} cell(s) held out under "
-                            "continue-policy Risk Contract (quarantine on write)"
+                            f"; {len(contracted_holdouts)} cell(s) / row(s) held out under "
+                            "continue-policy Risk Contract (omitted from primary dry-run; "
+                            "quarantine on write)"
                             if contracted_holdouts
                             else ""
                         )

@@ -150,6 +150,9 @@ def test_g8_pass_url_empty_with_cast_and_continue_contract():
     details = result.details or {}
     assert int(details.get("contracted_holdout_count") or 0) >= 1
     assert details.get("contracted_holdouts")
+    # Held-out rows must not invent NULL cells into the primary dry-run set.
+    assert int(details.get("target_rows") or 0) == 0
+    assert int(details.get("source_rows") or 0) == 2
 
 
 def test_g1_blocks_unparseable_file():
