@@ -1232,6 +1232,11 @@ def _to_sa_value(
             "FLOAT",
             "FLOAT4",
             "FLOAT8",
+            "FLOAT16",
+            "FLOAT32",
+            "FLOAT64",
+            "HALF",
+            "HALFFLOAT",
             "REAL",
             "DOUBLE",
             "DOUBLE PRECISION",
@@ -1254,6 +1259,7 @@ def _to_sa_value(
         LOGICAL_BINARY,
         LOGICAL_BOOLEAN,
         LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
         LOGICAL_INTEGER,
         LOGICAL_JSON,
         LOGICAL_STRING,
@@ -1409,6 +1415,15 @@ def _to_sa_value(
             value,
             ddl_type=str(sa_type or logical or "INTEGER"),
             engine=str(db_type or dialect_name or ""),
+        )
+
+    if t == LOGICAL_FLOAT:
+        from connectors.sql_bind import coerce_float_wire
+
+        # Empty / non-numeric must refuse — never invent 0.0 or pass '' through.
+        return coerce_float_wire(
+            value,
+            ddl_type=str(sa_type or logical or "FLOAT"),
         )
 
     # uuid, string/text are already bound-friendly
@@ -4375,6 +4390,80 @@ def write_mapped_rows(
             overlaid = overlay_physical_bind_types(target_cols, type_list, physical)
             for col, typ in zip(target_cols, overlaid):
                 target_column_types[col] = typ
+            # Re-quarantine on physical DDL — Map VARCHAR empties that survived
+            # pre-overlay must refuse against live DATE/INT/FLOAT/BOOL.
+            _tgt_overlaid = [
+                target_column_types.get(c, "string") for c in target_cols
+            ]
+            mapped_rows = apply_write_quarantine_matrix(
+                mapped_rows,
+                target_cols,
+                _tgt_overlaid,
+                rejected_details,
+                policy,
+                dialect_label=_engine_label,
+                mappings=mappings,
+            )
+            if sparse_rows:
+                sparse_rows = apply_write_quarantine_matrix(
+                    sparse_rows,
+                    target_cols,
+                    _tgt_overlaid,
+                    rejected_details,
+                    policy,
+                    dialect_label=_engine_label,
+                    mappings=mappings,
+                )
+            _late_abort = reject_on_strict_policy(
+                policy, rejected_details, "SQL", transform_errors
+            )
+            if _late_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or database,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_late_abort,
+                    rejected_rows=_rejected_row_count(
+                        data_rows,
+                        mapped_rows,
+                        rejected_details,
+                        policy,
+                        sparse_rows=sparse_rows,
+                    ),
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
+        # After typed empties are quarantined against physical DDL (when known):
+        # Oracle VARCHAR2 ''→NULL on dense MERGE SET is still a wipe — promote
+        # remaining string empties to DF_MISSING sparse omit (leave-alone).
+        _db = str(cfg.get("type") or dest_db or "").strip().lower()
+        if (
+            write_mode == "upsert"
+            and conflict_columns
+            and (
+                _db in {"oracle", "oracledb", "oracle_autonomous"}
+                or _db.startswith("oracle")
+            )
+        ):
+            from services.value_serializer import DF_MISSING_SENTINEL
+
+            kept_dense: list[tuple] = []
+            for row in mapped_rows:
+                if any(isinstance(v, str) and v == "" for v in row):
+                    sparse_rows.append(
+                        tuple(
+                            DF_MISSING_SENTINEL
+                            if (isinstance(v, str) and v == "")
+                            else v
+                            for v in row
+                        )
+                    )
+                else:
+                    kept_dense.append(row)
+            mapped_rows = kept_dense
     except Exception:
         logger.debug(
             "generic_sql physical column introspection failed",

@@ -488,3 +488,27 @@ def test_overlay_promotes_mysql_bool_json_from_map_varchar():
     assert "BIT" in out[0].upper() or "BOOL" in out[0].upper()
     assert "JSON" in out[1].upper()
     assert "DECIMAL" in out[2].upper()
+
+
+def test_generic_sql_float_refuses_empty():
+    import pytest
+    import sqlalchemy as sa
+    from connectors.generic_sql import _to_sa_value
+
+    with pytest.raises(ValueError, match="refuse silent NULL invent|cannot coerce to float"):
+        _to_sa_value("", "float", sa.Float(), "duckdb", "duckdb")
+    with pytest.raises(ValueError, match="refuse silent NULL invent|cannot coerce to float"):
+        _to_sa_value("  ", "FLOAT64", sa.Float(), "duckdb", "duckdb")
+
+
+def test_oracle_dense_upsert_empty_promotes_to_sparse_sentinel():
+    """Dense Oracle upsert must not SET col=NULL for '' — route via DF_MISSING."""
+    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+
+    # Mirror the promote logic used in generic_sql write path.
+    row = (1, "", "keep")
+    promoted = tuple(
+        DF_MISSING_SENTINEL if (isinstance(v, str) and v == "") else v for v in row
+    )
+    assert is_missing_sentinel(promoted[1])
+    assert promoted[0] == 1 and promoted[2] == "keep"

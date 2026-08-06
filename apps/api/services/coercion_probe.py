@@ -296,7 +296,7 @@ def analyze_coercion(
             )
         )
         unknown_physical = (
-            table_exists is True
+            table_exists is not False
             and not live_present
             and not bool(m.get("create_new"))
         )
@@ -465,7 +465,7 @@ def analyze_coercion(
                     )
                 )
                 unknown_physical = (
-                    table_exists is True
+                    table_exists is not False
                     and not live_present
                     and not bool(m.get("create_new"))
                     and tgt_logical in _TEXTUAL_LOGICALS

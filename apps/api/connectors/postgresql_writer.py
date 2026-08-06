@@ -199,17 +199,6 @@ def uses_pg_on_conflict_upsert(engine: str) -> bool:
     return (engine or "postgresql").lower() not in {"redshift", "amazon_redshift", "redshift_serverless"}
 
 
-def _assert_redshift_conflict_keys_present(
-    batch: list[tuple] | list[list],
-    target_cols: list[str],
-    conflict_cols: list[str],
-) -> None:
-    """Refuse null/empty upsert keys — NULL-safe MERGE/DELETE would mass-touch rows."""
-    from connectors.writer_common import assert_dense_upsert_keys_present
-
-    assert_dense_upsert_keys_present(batch, conflict_cols, target_cols=target_cols)
-
-
 def _redshift_delete_by_keys(
     cursor: Any,
     sql_mod: Any,
