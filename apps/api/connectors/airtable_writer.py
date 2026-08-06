@@ -198,14 +198,15 @@ def _batch_payload(
             },
         )
     if update:
+        # PATCH only rows with Airtable record id — never fall through to POST
+        # create invent for the whole batch when some/all ids are missing.
         records = [
             {"id": rid, "fields": {k: v for k, v in r.items() if k.lower() != "id"}}
             for r in rows
             for rid in [r.get("id") or r.get("Id")]
             if rid
         ]
-        if records:
-            return url, "PATCH", {"records": records}
+        return url, "PATCH", {"records": records}
     return url, "POST", {"records": [{"fields": dict(r)} for r in rows]}
 
 
@@ -357,6 +358,42 @@ def write_mapped_rows(
             if len(produced_sample) < 50:
                 produced_sample.append(dict(d))
 
+        if update and merge_field:
+            # performUpsert with empty merge value invents creates — quarantine.
+            kept: list[dict[str, Any]] = []
+            dropped = 0
+            for j, row in enumerate(batch_dicts):
+                merge_val = row.get(merge_field)
+                if merge_val is None or str(merge_val).strip() == "":
+                    dropped += 1
+                    all_rejected.append({
+                        "row": i + j + 1,
+                        "column": merge_field,
+                        "target": table,
+                        "value": "",
+                        "reason": (
+                            f"Airtable upsert missing merge field {merge_field!r} — "
+                            "quarantined (refuse create invent on empty merge key)"
+                        ),
+                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    })
+                    continue
+                kept.append(row)
+            if dropped and policy == "fail":
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=table,
+                    target_schema=base_id,
+                    checksum=digest.hexdigest()[:32] if written else "",
+                    chunks_completed=chunks,
+                    error=f"Airtable write blocked: upsert missing merge field {merge_field!r}",
+                    rejected_details=all_rejected,
+                    rejected_rows=len(all_rejected),
+                    driver="airtable",
+                )
+            batch_dicts = kept
+
         url, method, payload = _batch_payload(
             batch_dicts,
             table_name=table,
@@ -364,8 +401,45 @@ def write_mapped_rows(
             update=update,
             merge_field=merge_field,
         )
+        if update and not merge_field:
+            # Surface per-row id-less drops that PATCH filtering omitted.
+            missing_ids = []
+            for j, row in enumerate(batch_dicts):
+                if not (row.get("id") or row.get("Id")):
+                    missing_ids.append(j)
+                    all_rejected.append({
+                        "row": i + j + 1,
+                        "column": "id",
+                        "target": table,
+                        "value": "",
+                        "reason": (
+                            "Airtable upsert/update missing record id — quarantined "
+                            "(refuse create invent / silent skip)"
+                        ),
+                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    })
+            if missing_ids and policy == "fail":
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=table,
+                    target_schema=base_id,
+                    checksum=digest.hexdigest()[:32] if written else "",
+                    chunks_completed=chunks,
+                    error="Airtable write blocked: upsert/update missing record id",
+                    rejected_details=all_rejected,
+                    rejected_rows=len(all_rejected),
+                    driver="airtable",
+                )
         if not payload["records"]:
             for j, row in enumerate(batch_dicts):
+                # Avoid duplicate quarantine when already recorded above.
+                if update and not merge_field and not (row.get("id") or row.get("Id")):
+                    continue
+                if update and merge_field:
+                    merge_val = row.get(merge_field)
+                    if merge_val is None or str(merge_val).strip() == "":
+                        continue
                 all_rejected.append({
                     "row": i + j + 1,
                     "column": merge_field or "id",

@@ -828,6 +828,9 @@ def write_mapped_rows(
             ] + list(sparse_checksum)
 
         if use_merge and mapped_rows:
+            from connectors.writer_common import assert_dense_upsert_keys_present
+
+            assert_dense_upsert_keys_present(mapped_rows, conflict, target_cols)
             staging_name = sanitize_identifier(f"{table_name}_stg_{uuid.uuid4().hex[:8]}")
             staging_id = f"{project_id}.{dataset_id}.{staging_name}"
             staging = bigquery.Table(staging_id, schema=schema_fields)

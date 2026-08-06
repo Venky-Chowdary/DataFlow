@@ -614,25 +614,26 @@ def write_mapped_rows(
                 )
                 _submit(records, method="PATCH", endpoint=endpoint, row_base=i)
             elif write_mode in {"upsert", "update"} and ext_field == "Id":
-                # Id present → PATCH update; Id missing → POST insert on upsert
-                # (update-only quarantines missing Id — never invent duplicates).
+                # Id present → PATCH update; Id missing → quarantine (never POST
+                # invent duplicates under at-least-once retry — HubSpot/Stripe class).
                 collections = f"{url_base}/services/data/{API_VERSION}/composite/sobjects"
                 with_id = [r for r in records if r.get("Id")]
                 without_id = [r for r in records if not r.get("Id")]
                 if with_id:
                     _submit(with_id, method="PATCH", endpoint=collections, row_base=i)
-                if without_id and write_mode == "upsert":
-                    _submit(without_id, method="POST", endpoint=collections, row_base=i)
-                elif without_id:
+                if without_id:
                     for idx, rec in enumerate(without_id):
                         rejected_details.append({
                             "row_index": i + idx,
-                            "reason": "Salesforce update requires Id — quarantined (no invent)",
+                            "reason": (
+                                "Salesforce upsert/update requires Id — quarantined "
+                                "(refuse POST invent duplicates)"
+                            ),
                             "values": rec,
                         })
                     if policy == "fail":
                         raise RuntimeError(
-                            f"Salesforce update missing Id on {len(without_id)} record(s)"
+                            f"Salesforce upsert/update missing Id on {len(without_id)} record(s)"
                         )
             else:
                 endpoint = f"{url_base}/services/data/{API_VERSION}/composite/sobjects"

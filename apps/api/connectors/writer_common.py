@@ -3928,3 +3928,43 @@ def assert_sparse_upsert_has_pk(
             "sparse CDC upsert has null/empty primary-key column(s) "
             f"{nullish}; refuse NULL=NULL invent duplicates"
         )
+
+
+def assert_dense_upsert_keys_present(
+    rows: list[tuple] | list[list] | list[dict[str, Any]],
+    conflict_columns: list[str],
+    target_cols: list[str] | None = None,
+) -> None:
+    """Refuse null/empty conflict keys before dense MERGE / NULL-safe ON.
+
+    ``null_safe_merge_on`` treats NULL≡NULL as a match so one staged null-PK
+    row can mass-update every destination row with a null key. Redshift already
+    refuses; BQ/Snowflake/generic MERGE must share this gate.
+    """
+    if not rows or not conflict_columns:
+        return
+    cols = list(conflict_columns)
+    idxs: list[int] | None = None
+    if target_cols is not None:
+        idxs = [target_cols.index(c) for c in cols]
+    for row in rows:
+        if isinstance(row, dict):
+            for c in cols:
+                val = row.get(c)
+                if val is None or (isinstance(val, str) and str(val).strip() == ""):
+                    raise ValueError(
+                        f"dense upsert refused null/empty conflict key {c!r} — "
+                        "NULL-safe MERGE would mass-touch destination rows"
+                    )
+            continue
+        if idxs is None:
+            raise ValueError(
+                "dense upsert key check requires target_cols for tuple rows"
+            )
+        for c, idx in zip(cols, idxs):
+            val = row[idx] if idx < len(row) else None
+            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+                raise ValueError(
+                    f"dense upsert refused null/empty conflict key {c!r} — "
+                    "NULL-safe MERGE would mass-touch destination rows"
+                )

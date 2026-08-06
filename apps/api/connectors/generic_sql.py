@@ -3687,6 +3687,11 @@ def _upsert_batch(
         result = conn.execute(table_obj.insert(), batch)
         return max(0, getattr(result, "rowcount", None) or 0) or len(batch)
 
+    from connectors.writer_common import assert_dense_upsert_keys_present
+
+    # Refuse null keys before any NULL-safe MERGE / delete-by-keys path.
+    assert_dense_upsert_keys_present(batch, conflict_cols)
+
     update_cols = [c for c in target_cols if c not in conflict_cols]
     lsn_guarded = DF_LSN_COL in target_cols
 

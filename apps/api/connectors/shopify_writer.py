@@ -243,13 +243,42 @@ def write_mapped_rows(
                 if val:
                     record_id = str(val).strip() or None
                     break
-            # If conflict column is not 'id', Shopify Admin REST does not support
-            # upsert by arbitrary fields; fall back to create and surface a warning.
-            if record_id and not (candidates[0] or "").lower() in ("id",):
-                warnings.append(
-                    f"row {i}: Shopify update by non-id field not supported; creating instead."
-                )
-                record_id = None
+            # Shopify Admin REST only updates by numeric/string id — never invent
+            # create when conflict is missing or a non-id external key.
+            non_id_conflict = bool(candidates) and (candidates[0] or "").lower() not in (
+                "id",
+            )
+            if non_id_conflict or not record_id:
+                detail = {
+                    "row": i + 1,
+                    "column": str(candidates[0] if candidates else "id"),
+                    "target": obj,
+                    "value": str(record_id or ""),
+                    "reason": (
+                        "Shopify upsert missing supported id — refuse create invent "
+                        "(non-id conflict or empty id would duplicate under retry)"
+                        if non_id_conflict or not record_id
+                        else "Shopify upsert identity missing"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                }
+                all_rejected.append(detail)
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="shopify",
+                    )
+                continue
 
         update = mode in upsert_modes and bool(record_id)
         from connectors.writer_common import omit_missing_fields

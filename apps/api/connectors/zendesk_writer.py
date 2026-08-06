@@ -358,10 +358,36 @@ def write_mapped_rows(
                 if val:
                     record_id = str(val).strip() or None
                     break
-            # Zendesk updates require a numeric object id; otherwise create.
-            if record_id and not record_id.isdigit():
-                warnings.append(f"row {i}: Zendesk update id must be numeric; creating instead.")
-                record_id = None
+            # Zendesk updates require a numeric object id — never invent create.
+            if not record_id or not record_id.isdigit():
+                detail = {
+                    "row": i + 1,
+                    "column": str(candidates[0] if candidates else "id"),
+                    "target": obj,
+                    "value": str(record_id or ""),
+                    "reason": (
+                        "Zendesk upsert missing numeric id — refuse create invent "
+                        "(would duplicate tickets/users under at-least-once retry)"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                }
+                all_rejected.append(detail)
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="zendesk",
+                    )
+                continue
 
         update = mode in upsert_modes and bool(record_id)
         from connectors.writer_common import omit_missing_fields

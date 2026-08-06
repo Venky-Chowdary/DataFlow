@@ -562,6 +562,9 @@ def _merge_batch_via_temp(
     """Stage the batch into a temp table, then run a single MERGE into the target."""
     if not mapped_rows:
         return 0
+    from connectors.writer_common import assert_dense_upsert_keys_present
+
+    assert_dense_upsert_keys_present(mapped_rows, conflict, target_cols)
     temp = f"_DF_UPSERT_{uuid.uuid4().hex[:12]}"
     col_defs = ", ".join(
         f"{quote_sql_identifier(c)} {t}" for c, t in zip(target_cols, target_types)

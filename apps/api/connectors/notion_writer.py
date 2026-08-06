@@ -445,24 +445,13 @@ def write_mapped_rows(
                     has_title = True
 
         if title_name and not has_title:
-            # Notion requires a title on create; fall back to the first non-empty value.
-            fallback_value = ""
-            fallback_col = ""
-            for col, val in row_dict.items():
-                if val is None or is_missing_sentinel(val):
-                    continue
-                if str(val).strip():
-                    fallback_value = str(val).strip()
-                    fallback_col = col
-                    break
-            if fallback_value:
-                notion_properties[title_name] = _as_property_value(fallback_value, "title", title_name, warnings, i)
-                warnings.append(
-                    f"row {i}: missing Notion title; used '{fallback_col}' value as fallback title."
+            # Notion requires a title on create — never invent from an unrelated
+            # mapped field (schema/value invent outside honest Map).
+            if not record_id:
+                msg = (
+                    f"row {i}: Notion create/upsert requires title property "
+                    f"'{title_name}' — refuse inventing title from other columns"
                 )
-                has_title = True
-            else:
-                msg = f"row {i}: Notion requires a title property; no value available."
                 detail = {
                     "row": i,
                     "column": title_name,
@@ -494,6 +483,37 @@ def write_mapped_rows(
             url = f"https://{DEFAULT_HOST}/v1/pages/{record_id}"
             method = "PATCH"
             payload: dict[str, Any] = {"properties": notion_properties}
+        elif mode in upsert_modes:
+            msg = (
+                f"row {i}: Notion upsert missing page id — refuse create invent "
+                "(would duplicate pages under at-least-once retry)"
+            )
+            detail = {
+                "row": i,
+                "column": str((conflict_columns or ["id"])[0]),
+                "target": table_name,
+                "value": "",
+                "reason": msg,
+                "policy": policy,
+                "values": dict(row_dict),
+            }
+            all_rejected.append(detail)
+            warnings.append(msg)
+            if policy == "fail":
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=table_name,
+                    target_schema=database_id,
+                    checksum=digest.hexdigest()[:32],
+                    chunks_completed=chunks,
+                    error=msg,
+                    rejected_details=all_rejected,
+                    rejected_rows=len(all_rejected),
+                    warnings=warnings[:20],
+                    driver="notion",
+                )
+            continue
         else:
             url = f"https://{DEFAULT_HOST}/v1/pages"
             method = "POST"
