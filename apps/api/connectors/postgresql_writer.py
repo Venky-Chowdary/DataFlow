@@ -211,13 +211,15 @@ def _redshift_delete_by_keys(
         values: list[Any] = []
         for col, idx in zip(conflict_cols, conflict_idxs):
             val = row[idx] if idx < len(row) else None
-            if val is None:
-                predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
-            else:
-                predicates.append(
-                    sql_mod.SQL("{} = {}").format(sql_mod.Identifier(col), sql_mod.Placeholder())
+            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+                raise ValueError(
+                    f"Redshift upsert delete refused null/empty conflict key {col!r} — "
+                    "IS NULL predicates would mass-delete destination rows"
                 )
-                values.append(val)
+            predicates.append(
+                sql_mod.SQL("{} = {}").format(sql_mod.Identifier(col), sql_mod.Placeholder())
+            )
+            values.append(val)
         where = sql_mod.SQL(" AND ").join(predicates)
 
         if lsn_idx is not None:
@@ -437,6 +439,15 @@ def _redshift_stage_delete(
         to_write.append(row)
     if not to_write:
         return []
+
+    for row in to_write:
+        for col, idx in zip(conflict_cols, conflict_idxs):
+            val = row[idx] if idx < len(row) else None
+            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+                raise ValueError(
+                    f"Redshift upsert stage-delete refused null/empty conflict key "
+                    f"{col!r} — NULL-safe join would mass-delete destination rows"
+                )
 
     # Build TEMP table of conflict key columns only.
     col_defs = sql_mod.SQL(", ").join(

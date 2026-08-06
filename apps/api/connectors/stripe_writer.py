@@ -187,6 +187,32 @@ def write_mapped_rows(
             ((k, v) for k, v in row_dict.items() if k not in ("id", "Id"))
         )
 
+        if mode in upsert_modes and not record_id:
+            detail = {
+                "row": i + 1,
+                "reason": (
+                    "Stripe upsert missing object id — refuse create invent "
+                    "(would duplicate customers/objects on retry)"
+                ),
+                "values": {k: str(v)[:80] for k, v in list(payload.items())[:8]},
+                "policy": "write_fail" if policy == "fail" else "write_quarantine",
+            }
+            all_rejected.append(detail)
+            if policy == "fail":
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=obj,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=chunks,
+                    error=detail["reason"],
+                    rejected_details=all_rejected,
+                    warnings=warnings,
+                    driver="stripe",
+                )
+            continue
+
         if record_id and mode in upsert_modes:
             url = f"{base}/v1/{obj}/{record_id}"
         else:

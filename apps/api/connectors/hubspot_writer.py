@@ -445,7 +445,9 @@ def write_mapped_rows(
                     and not is_missing_sentinel(v)
                     and str(v) != ""
                 }
-                id_val = props.pop(id_property, None) or props.get("email") or props.get("id")
+                id_val = props.pop(id_property, None)
+                # Never invent identity from a different property while idProperty
+                # stays configured (wrong-object upsert / create).
                 if not id_val:
                     detail = {
                         "row_index": i + len(inputs),

@@ -491,7 +491,12 @@ def _resolve_key_schema(
     Prefer explicit conflict_columns (HASH, optional RANGE). Refuse inventing a
     key from an arbitrary first column when no identity metadata is available.
     """
-    conflict = [c for c in (conflict_columns or []) if c and c in target_cols]
+    if conflict_columns:
+        from connectors.writer_common import resolve_conflict_targets
+
+        conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
+    else:
+        conflict = []
     if not conflict:
         # Legacy soft path only when a clear identity name exists.
         preferred = {"id", "_id", "pk", "sk", "uuid", "key"}

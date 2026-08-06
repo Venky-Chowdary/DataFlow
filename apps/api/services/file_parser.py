@@ -804,8 +804,11 @@ class FileParser:
                 for k, v in list(rec.items()):
                     if hasattr(v, "item"):
                         rec[k] = v.item()
-                    elif v != v:  # NaN
-                        rec[k] = None
+                        v = rec[k]
+                    # Keep IEEE NaN/Inf — never invent SQL NULL (silent loss).
+                    # Downstream quarantine / sanitize_json_value refuse_nonfinite.
+                    if isinstance(v, float) and v != v:
+                        continue
             return ParseResult(
                 success=True,
                 data=records,

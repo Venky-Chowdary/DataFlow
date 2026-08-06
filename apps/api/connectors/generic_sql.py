@@ -2407,24 +2407,27 @@ def _delete_by_keys(
     """Delete existing rows that match the provided conflict keys.
 
     Uses equality ``OR (a=1 AND b=2)`` clauses instead of ``(a,b) IN (...)`` so
-    that NULL keys match correctly and dialects with limited tuple-IN support
-    still work.  Deletions are chunked to avoid generating queries that exceed
-    engine statement-length limits.
+    dialects with limited tuple-IN support still work. Deletions are chunked to
+    avoid statement-length limits.
+
+    Null/empty conflict keys are refused — ``col IS NULL`` would mass-delete
+    every destination row with a null key (silent data loss).
     """
     if not rows:
         return
+    for row in rows:
+        for c in conflict_cols:
+            val = row.get(c) if isinstance(row, dict) else None
+            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+                raise ValueError(
+                    f"upsert delete-by-keys refused null/empty conflict key {c!r} — "
+                    "IS NULL predicates would mass-delete destination rows"
+                )
     for i in range(0, len(rows), chunk_size):
         chunk = rows[i : i + chunk_size]
         clauses = [
             sa.and_(
-                *[
-                    (
-                        table_obj.c[c].is_(None)
-                        if row[c] is None
-                        else table_obj.c[c] == row[c]
-                    )
-                    for c in conflict_cols
-                ]
+                *[table_obj.c[c] == row[c] for c in conflict_cols]
             )
             for row in chunk
         ]
