@@ -64,9 +64,9 @@ export function ObjectNameCombobox({
     return options.some((n) => n.toLowerCase() === q);
   }, [options, value]);
 
-  const placeMenu = () => {
+  const computeMenuBox = () => {
     const control = controlRef.current;
-    if (!control) return;
+    if (!control) return null;
     const rect = control.getBoundingClientRect();
     const gap = 4;
     const spaceBelow = window.innerHeight - rect.bottom - gap - 8;
@@ -76,19 +76,33 @@ export function ObjectNameCombobox({
     const top = preferBelow
       ? rect.bottom + gap
       : Math.max(8, rect.top - gap - maxHeight);
-    setMenuBox({
+    return {
       top,
       left: rect.left,
       width: Math.max(rect.width, 180),
       maxHeight,
-    });
+    };
+  };
+
+  const placeMenu = () => {
+    const box = computeMenuBox();
+    if (box) setMenuBox(box);
+  };
+
+  const openMenu = () => {
+    // Place immediately so the first paint is not a blank frame (menuBox null).
+    const box = computeMenuBox();
+    if (box) setMenuBox(box);
+    setOpen(true);
+  };
+
+  const closeMenu = () => {
+    setOpen(false);
+    setMenuBox(null);
   };
 
   useLayoutEffect(() => {
-    if (!open) {
-      setMenuBox(null);
-      return;
-    }
+    if (!open) return;
     placeMenu();
     const onReposition = () => placeMenu();
     window.addEventListener("resize", onReposition);
@@ -105,7 +119,7 @@ export function ObjectNameCombobox({
     const onDoc = (e: MouseEvent) => {
       const t = e.target as Node;
       if (rootRef.current?.contains(t) || menuRef.current?.contains(t)) return;
-      setOpen(false);
+      closeMenu();
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
@@ -117,14 +131,16 @@ export function ObjectNameCombobox({
 
   const pick = (name: string) => {
     onChange(name);
-    setOpen(false);
+    closeMenu();
     inputRef.current?.focus();
   };
 
   const showCreateRow =
-    value.trim().length > 0 && !exactMatch && options.length > 0;
+    value.trim().length > 0 && !exactMatch;
 
-  const canOpen = options.length > 0 || loading;
+  // Always allow open — empty discovery must still show the create/empty hint
+  // (previously options.length===0 hid the dropdown entirely → "sometimes not showing").
+  const canOpen = true;
   const optionCount = filtered.length + (showCreateRow ? 1 : 0);
 
   const menu =
@@ -176,14 +192,14 @@ export function ObjectNameCombobox({
                         activeIndex === filtered.length ? " is-active" : ""
                       }`}
                       onMouseEnter={() => setActiveIndex(filtered.length)}
-                      onClick={() => {
-                        setOpen(false);
-                        inputRef.current?.focus();
-                      }}
-                    >
-                      <span className="df2-object-combobox-option-name">
-                        Create “{value.trim()}”
-                      </span>
+                    onClick={() => {
+                      closeMenu();
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    <span className="df2-object-combobox-option-name">
+                      Create “{value.trim()}”
+                    </span>
                       <span className="df2-object-combobox-option-meta">new</span>
                     </button>
                   </li>
@@ -219,19 +235,19 @@ export function ObjectNameCombobox({
           placeholder={placeholder}
           onChange={(e) => {
             onChange(e.target.value);
-            if (canOpen) setOpen(true);
+            openMenu();
           }}
           onFocus={() => {
-            if (canOpen) setOpen(true);
+            openMenu();
           }}
           onKeyDown={(e) => {
             if (e.key === "Escape") {
-              setOpen(false);
+              closeMenu();
               return;
             }
             if (e.key === "ArrowDown") {
               e.preventDefault();
-              if (!open && canOpen) setOpen(true);
+              if (!open) openMenu();
               else setActiveIndex((i) => Math.min(i + 1, Math.max(optionCount - 1, 0)));
               return;
             }
@@ -244,7 +260,7 @@ export function ObjectNameCombobox({
               const createIdx = showCreateRow ? filtered.length : -1;
               if (activeIndex === createIdx && showCreateRow) {
                 e.preventDefault();
-                setOpen(false);
+                closeMenu();
                 return;
               }
               if (filtered[activeIndex]) {
@@ -259,10 +275,9 @@ export function ObjectNameCombobox({
           className="df2-object-combobox-toggle"
           tabIndex={-1}
           aria-label={open ? `Hide ${objectNoun} list` : `Show ${objectNoun} list`}
-          disabled={!canOpen}
           onClick={() => {
-            if (!canOpen) return;
-            setOpen((v) => !v);
+            if (open) closeMenu();
+            else openMenu();
             inputRef.current?.focus();
           }}
         >

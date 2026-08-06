@@ -162,7 +162,17 @@ def write_mapped_rows(
 
     collection_name = sanitize_identifier(table_name, preserve_case=True)
     db_name = database or schema or "test"
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    # Prefer Studio-probed live field types over Map stamps (invent cliff).
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    live_dest = _kwargs.get("destination_column_types")
+    dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live_dest if isinstance(live_dest, dict) else None,
+    )
     policy = transform_error_policy(error_policy)
 
     try:
@@ -449,7 +459,10 @@ def write_mapped_rows(
         for row_idx, row in enumerate(mapped_rows):
             cells: list[Any] = []
             hold_out = False
-            for i, (v, t) in enumerate(zip(row, logical_types)):
+            # Coerce with live-aware dest types (tgt_types), not Map-only
+            # logical_types — otherwise quarantine can pass live DDL while
+            # BSON invents a different wire shape (Bugbot invent cliff).
+            for i, (v, t) in enumerate(zip(row, tgt_types)):
                 col = target_cols[i] if i < len(target_cols) else f"col_{i}"
                 try:
                     cells.append(_to_bson(v, t, transform_by_col.get(col, "")))

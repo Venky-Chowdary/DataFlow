@@ -508,6 +508,7 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     dest_nullability = _kwargs.get("destination_column_nullability")
+    live_dest_types = _kwargs.get("destination_column_types")
     del username, password, ssl, warehouse, _kwargs
     from connectors.writer_common import resolve_writer_backfill
 
@@ -574,7 +575,16 @@ def write_mapped_rows(
             ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
             checksum="", chunks_completed=0, error="No column mappings",
         )
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    # Prefer Studio-probed live DDL over Map stamps; physical schema may refine later.
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live_dest_types if isinstance(live_dest_types, dict) else None,
+    )
 
     try:
         from google.cloud import bigquery
