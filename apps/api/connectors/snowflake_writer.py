@@ -1219,9 +1219,11 @@ def write_mapped_rows(
                 )
                 if tgt and tgt not in by_tgt:
                     by_tgt[tgt] = mapping
-            for col, typ in zip(target_cols, target_types):
-                if str((by_tgt.get(col) or {}).get("target_type") or "").strip():
-                    stamp_ceiling_by_col[col] = typ
+            for col in target_cols:
+                stamp = str((by_tgt.get(col) or {}).get("target_type") or "").strip()
+                if stamp:
+                    # Map≡ALTER ceiling is the approved stamp — never live overlay.
+                    stamp_ceiling_by_col[col] = sf_type(stamp)
             alter_refusals = _widen_existing_number_columns(
                 cur,
                 schema,
