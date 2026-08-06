@@ -3268,6 +3268,24 @@ def _binary_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         return None
     w = min(width, cap)
     fixed = is_fixed_width_binary_carrier(inferred, dest_db=db)
+    # Over-cap create-new: unbounded binary beats silent width clamp (string path parity).
+    if not fixed and width > cap:
+        if db in {"mysql", "mariadb"}:
+            return "LONGBLOB"
+        if db == "oracle":
+            return "BLOB"
+        if db == "sqlserver":
+            return "VARBINARY(MAX)"
+        if db in {"postgresql", "redshift"}:
+            return "BYTEA" if db == "postgresql" else "VARBYTE(65535)"
+        if db == "snowflake":
+            return "BINARY"
+        if db == "bigquery":
+            return "BYTES"
+        if db == "iceberg":
+            return "binary"
+        if db == "clickhouse":
+            return "String"
     if db == "bigquery":
         return f"BYTES({w})"
     if db == "snowflake":

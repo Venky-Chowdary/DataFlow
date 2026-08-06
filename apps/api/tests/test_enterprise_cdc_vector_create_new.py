@@ -238,3 +238,15 @@ def test_create_new_over_cap_prefers_unbounded_text():
     assert _string_ddl_for_dest("sqlserver", "VARCHAR(5000)") == "VARCHAR(MAX)"
     # Under cap still emits bounded VARCHAR.
     assert _string_ddl_for_dest("mysql", "VARCHAR(100)").startswith("VARCHAR")
+
+
+def test_create_new_over_cap_prefers_unbounded_binary():
+    """Binary create-new must mirror string path — never silent clamp to engine cap."""
+    from services.type_system import create_new_mapping_target_type
+
+    assert create_new_mapping_target_type("VARBINARY(90000)", "mysql") == "LONGBLOB"
+    assert create_new_mapping_target_type("VARBINARY(90000)", "sqlserver") == "VARBINARY(MAX)"
+    assert create_new_mapping_target_type("RAW(5000)", "oracle") == "BLOB"
+    assert create_new_mapping_target_type("VARBINARY(2000000)", "iceberg").lower() == "binary"
+    # Under cap still emits bounded carrier.
+    assert "VARBINARY" in create_new_mapping_target_type("VARBINARY(100)", "mysql").upper()

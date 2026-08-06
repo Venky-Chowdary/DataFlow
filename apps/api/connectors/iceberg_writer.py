@@ -1193,6 +1193,14 @@ def _write_mapped_rows_pyiceberg(
                 if k in existing_by_pk
             ]
 
+        # Append/overwrite are dense Arrow writes — STOP_COLUMN DF_MISSING must
+        # materialize to NULL (same as pre-omit semantics), never raise or leak
+        # the sentinel string into Parquet. Upsert path overlays sparse first.
+        if mode not in upsert_modes:
+            from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+            mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
+
         dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
         for d in dict_rows:
             for k, v in d.items():

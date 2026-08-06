@@ -68,7 +68,11 @@ def test_coerce_null_nulls_cell_keeps_row():
     assert details and "PostgreSQL NUMERIC(10,2)" in details[0]["reason"]
 
 
-def test_fail_policy_leaves_rows_unchanged():
+def test_fail_policy_stamps_and_holds_out_unfit_decimals():
+    """Strict/fail must stamp unfit cells so reject_on_strict_policy can abort.
+
+    Leaving rows unchanged used to rely on soft SQL drivers — silent truncate.
+    """
     rows = [("99999999999999999999", "ok")]
     details: list[dict] = []
     out = quarantine_unfit_decimals(
@@ -78,5 +82,7 @@ def test_fail_policy_leaves_rows_unchanged():
         details,
         policy="fail",
     )
-    assert out is rows
-    assert details == []
+    assert out == []
+    assert details
+    assert "would truncate/overflow" in details[0]["reason"]
+    assert details[0]["policy"] == "write_quarantine"

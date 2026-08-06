@@ -233,7 +233,18 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     instead of quoted Decimal strings. Temporal logical types are normalized via
     the shared SQL temporal helpers so ISO-Z does not leak inconsistently across
     S3/GCS/ADLS/SFTP/Kafka JSON exports.
+
+    ``DF_MISSING`` (STOP_COLUMN / sparse CDC omit) never serializes as the
+    sentinel string — treat as JSON null so dense document writers cannot
+    corrupt payloads with ``__DF_MISSING__``.
     """
+    try:
+        from services.value_serializer import is_missing_sentinel
+
+        if is_missing_sentinel(value):
+            return None
+    except Exception:
+        pass
     if value is None:
         return None
     try:
@@ -1613,16 +1624,37 @@ def build_mapped_rows_with_details(
                         row_action = "quarantine"
                     converted = None
                 elif cell_policy == "stop_column":
-                    # Omit this cell; allow other columns on the same row to write.
+                    # Omit this cell from SET/INSERT projection (DF_MISSING), never
+                    # invent SQL NULL — upsert NULL would wipe a prior good value.
                     if row_action == "ok":
                         row_action = "stop_column"
-                    converted = None
+                    converted = DF_MISSING_SENTINEL
                 elif cell_policy == "coerce_null":
                     if row_action == "ok":
                         row_action = "coerce_null"
                     converted = None
                 else:
                     continue
+                # Write-time NOT NULL parity with G3: refuse NULL invent / omit-as-NULL
+                # into required columns when the Map stamp declares non-nullable.
+                if cell_policy in {"stop_column", "coerce_null"}:
+                    tgt_nullable = mapping.get("target_nullable")
+                    if tgt_nullable is None:
+                        tgt_nullable = mapping.get("nullable")
+                    if tgt_nullable is False or (
+                        isinstance(tgt_nullable, str)
+                        and tgt_nullable.strip().lower() in {"false", "0", "no"}
+                    ):
+                        detail["reason"] = (
+                            f"{detail.get('reason') or err} — NOT NULL destination "
+                            "refuses STOP_COLUMN/coerce NULL invent"
+                        )
+                        detail["policy"] = (
+                            "fail" if policy == "fail" else "quarantine"
+                        )
+                        cell_policy = detail["policy"]
+                        row_action = cell_policy
+                        converted = None
             if target_idx >= 0:
                 out[target_idx] = converted
         # Rows not written to primary: abort / quarantine / skip.
@@ -1637,7 +1669,7 @@ def build_mapped_rows_with_details(
         if row_has_error and row_action == "ok" and policy in {"fail", "quarantine"}:
             # Legacy path when resolve unavailable — keep prior job semantics.
             continue
-        # stop_column / coerce_null: row is written with omitted/NULL failing cells.
+        # stop_column: DF_MISSING omit-from-SET; coerce_null: NULL cell kept.
         mapped.append(tuple(out))
 
     return mapped, errors, rejected_details
@@ -2006,11 +2038,9 @@ def quarantine_unfit_decimals(
     """Hold out / NULL cells that cannot fit DECIMAL/NUMBER(p,s).
 
     ``quarantine`` omits the whole row from the primary write (no NULL invent).
-    ``coerce_null`` keeps the row with a NULL cell. ``fail`` leaves rows unchanged
-    so the driver/strict path can abort.
+    ``coerce_null`` keeps the row with a NULL cell. ``fail`` stamps unfit cells and holds out rows like ``quarantine`` so
+    ``reject_on_strict_policy`` can abort before bind (never rely on soft drivers).
     """
-    if policy == "fail":
-        return mapped_rows
     number_cols: list[tuple[int, int, int]] = []
     for i, typ in enumerate(target_types):
         parsed = parse_decimal_precision_scale(typ)
@@ -2154,8 +2184,6 @@ def quarantine_unfit_bitstrings(
 
     BIT destinations must not receive base64/UTF-8 invent (BYTEA path).
     """
-    if policy == "fail":
-        return mapped_rows
 
     from connectors.sql_bind import coerce_bitstring_wire
     from services.type_system import (
@@ -2234,8 +2262,6 @@ def quarantine_unfit_binaries(
     is forbidden. Invalid base64 is quarantined (not re-encoded).
     BIT/VARBIT columns are handled by ``quarantine_unfit_bitstrings``.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import (
         is_bitstring_carrier,
@@ -2337,8 +2363,6 @@ def quarantine_unfit_enum_set(
     MySQL non-strict ENUM stores invalid values as '' — silent wipe. Fail closed.
     HubSpot checkbox / Salesforce multipicklist use ``set_joiner=';'``.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import parse_enum_or_set_ordered_members
     from services.value_serializer import cell_to_string
@@ -2418,8 +2442,6 @@ def quarantine_unfit_years(
 
     Non-strict MySQL stores invalid YEAR as 0000 — silent wipe. Fail closed.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import is_year_carrier, year_value_fits
     from services.value_serializer import cell_to_string
@@ -2489,8 +2511,6 @@ def quarantine_unfit_booleans(
     Accepts bool / 0|1 / true|false|t|f only. Refuses silent ``yes``/``Y``/``2``
     invent into BOOLEAN / BIT / TINYINT(1) destinations.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import boolean_value_fits, normalize_logical_type
     from services.value_serializer import cell_to_string
@@ -2557,8 +2577,6 @@ def quarantine_unfit_temporals(
     - ``TIME(6)`` → ``TIME(0)`` truncates fractional seconds
     - Offset-aware / ``Z`` wire into NTZ/DATETIME strips the offset (Airbyte invent)
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import (
         datetime_timezone_polarity,
@@ -2644,8 +2662,6 @@ def quarantine_currency_markers_into_numeric(
     Identity-mapped ``$1,234.56`` must not be silently stripped to 1234.56 or
     fail mid-batch. Operator must apply an explicit currency transform first.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import (
         has_currency_marker,
@@ -2746,8 +2762,6 @@ def quarantine_unfit_integers(
     Mirrors DECIMAL/VARCHAR write quarantine: preflight samples can miss production
     outliers (UINT32 into INT, BIGINT into SMALLINT). Fail-closed — never wrap.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import integer_storage_bounds, normalize_logical_type
 
@@ -2820,8 +2834,6 @@ def quarantine_unfit_strings(
     reach SQL Server and silently truncate. Quarantine is fail-closed.
     Unlimited carriers (TEXT, NVARCHAR(MAX), STRING) are skipped.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.ddl_compatibility import parse_varchar_width
 
@@ -3078,8 +3090,6 @@ def quarantine_unfit_arrays(
     Ambiguous scalars (SET joiner text, engine-native literals) are never held
     out — only unambiguous breakage is.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import (
         LOGICAL_ARRAY,
@@ -3187,8 +3197,6 @@ def quarantine_unfit_json(
     wrapped as a JSON *string* — silently degrading a document into text.
     That is the fail-closed case.
     """
-    if policy == "fail":
-        return mapped_rows
 
     from services.type_system import LOGICAL_JSON, normalize_logical_type
 
@@ -3400,8 +3408,6 @@ def quarantine_unfit_specialty_types(
     Fail-closed — never invent empty geometry, wrong interval family, or pad/truncate
     embedding dimensions (pgvector/Snowflake VECTOR reject wrong width).
     """
-    if policy == "fail":
-        return mapped_rows
     specialty_cols: list[tuple[int, str, str]] = []
     for i, typ in enumerate(target_types):
         kind = _specialty_column_kind(typ)

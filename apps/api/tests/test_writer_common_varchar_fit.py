@@ -112,6 +112,26 @@ def test_unlimited_carrier_skips_quarantine():
     assert details == []
 
 
+def test_fail_policy_stamps_oversize_varchar_for_strict_abort():
+    """Strict mode must stamp VARCHAR overflow — never leave soft drivers to truncate."""
+    from connectors.writer_common import reject_on_strict_policy
+
+    rows = [("toolong", "ok")]
+    details: list[dict] = []
+    out = quarantine_unfit_strings(
+        rows,
+        ["name", "label"],
+        ["VARCHAR(3)", "TEXT"],
+        details,
+        policy="fail",
+        dialect_label="PostgreSQL",
+    )
+    assert out == []
+    assert details
+    abort = reject_on_strict_policy("fail", details, "postgres")
+    assert abort and "strict error policy" in abort
+
+
 def test_apply_mssql_session_guards_sets_ansi_warnings():
     from connectors.write_resilience import apply_mssql_session_guards
 

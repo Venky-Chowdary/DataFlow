@@ -426,6 +426,8 @@ def write_mapped_rows(
     digest = hashlib.sha256()
     written_ids: list[str] = []
 
+    from services.value_serializer import is_missing_sentinel
+
     try:
         for i in range(0, len(mapped_rows), chunk):
             batch = mapped_rows[i : i + chunk]
@@ -435,7 +437,13 @@ def write_mapped_rows(
                     pairs = row.items()
                 else:
                     pairs = zip(target_cols, row)
-                props = {k: str(v) for k, v in pairs if v is not None and str(v) != ""}
+                props = {
+                    k: str(v)
+                    for k, v in pairs
+                    if v is not None
+                    and not is_missing_sentinel(v)
+                    and str(v) != ""
+                }
                 id_val = props.pop(id_property, None) or props.get("email") or props.get("id")
                 if not id_val:
                     detail = {

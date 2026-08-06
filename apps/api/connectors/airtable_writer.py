@@ -334,10 +334,24 @@ def write_mapped_rows(
     warnings: list[str] = []
     written_ids: list[str] = []
     produced_sample: list[dict[str, Any]] = []
+    from services.value_serializer import is_missing_sentinel
 
     for i in range(0, len(mapped_rows), _BATCH):
         batch = mapped_rows[i : i + _BATCH]
-        batch_dicts = [dict(zip(target_cols, row)) if not isinstance(row, dict) else dict(row) for row in batch]
+        batch_dicts = []
+        for row in batch:
+            if isinstance(row, dict):
+                batch_dicts.append(
+                    {k: v for k, v in row.items() if not is_missing_sentinel(v)}
+                )
+            else:
+                batch_dicts.append(
+                    {
+                        c: row[j]
+                        for j, c in enumerate(target_cols)
+                        if j < len(row) and not is_missing_sentinel(row[j])
+                    }
+                )
         for d in batch_dicts:
             if len(produced_sample) < 50:
                 produced_sample.append(dict(d))

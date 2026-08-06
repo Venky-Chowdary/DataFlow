@@ -186,14 +186,16 @@ def test_coerce_null_policy_nulls_cell_instead_of_dropping_row():
     assert details
 
 
-def test_fail_policy_leaves_rows_for_strict_driver_abort():
+def test_fail_policy_stamps_and_holds_out_unfit_arrays():
+    """Strict/fail must stamp unfit ARRAY cells before bind — never soft-driver hope."""
     details: list[dict] = []
     rows = [('["not-a-number"]',)]
     kept = quarantine_unfit_arrays(
         rows, ["arr"], ["ARRAY<BIGINT>"], details, "fail", dialect_label="Shopify"
     )
-    assert kept == rows
-    assert details == []
+    assert kept == []
+    assert details
+    assert details[0]["policy"] == "write_quarantine"
 
 
 def test_quarantine_detail_stamps_row_column_and_replay_values():

@@ -14,7 +14,7 @@ import logging
 import ssl
 from typing import Any, Callable
 
-from services.value_serializer import json_default
+from services.value_serializer import is_missing_sentinel, json_default
 
 from connectors.writer_common import (
     reject_on_strict_policy,
@@ -300,9 +300,15 @@ def write_mapped_rows(
     try:
         for idx, row in enumerate(mapped_rows):
             if isinstance(row, dict):
-                payload = row
+                payload = {
+                    k: v for k, v in row.items() if not is_missing_sentinel(v)
+                }
             else:
-                payload = {c: row[i] if i < len(row) else None for i, c in enumerate(target_cols)}
+                payload = {
+                    c: row[i]
+                    for i, c in enumerate(target_cols)
+                    if i < len(row) and not is_missing_sentinel(row[i])
+                }
             raw_key = payload.get(key_col) if key_col else None
             if key_col and (raw_key is None or str(raw_key).strip() == ""):
                 null_key_rejected += 1
