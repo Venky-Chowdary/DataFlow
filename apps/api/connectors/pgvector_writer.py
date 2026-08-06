@@ -188,6 +188,7 @@ def write_mapped_rows(
         )
 
     inserted = 0
+    committed = False
     rejected_details: list[dict[str, Any]] = list(map_rejected)
     valid_rows: list[dict[str, Any]] = []
     conn = get_connection(
@@ -237,12 +238,14 @@ def write_mapped_rows(
             for row in vector_rows:
                 emb, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
                 if err or emb is None:
+                    from services.vector_embedding import embedding_reject_reason
+
                     rejected_details.append({
                         "row": str(row.get("id") or ""),
                         "column": "embedding",
                         "target": "embedding",
                         "value": "",
-                        "reason": err or "invalid embedding",
+                        "reason": embedding_reject_reason(row, err),
                         "policy": "quarantine",
                     })
                     continue
@@ -261,6 +264,23 @@ def write_mapped_rows(
                     checksum="",
                     chunks_completed=0,
                     error=strict_error,
+                    rejected_details=rejected_details,
+                    rejected_rows=len(rejected_details),
+                )
+            if not valid_rows and rejected_details:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        rejected_details[-1].get("reason")
+                        if rejected_details
+                        else None
+                    )
+                    or "all embeddings rejected",
                     rejected_details=rejected_details,
                     rejected_rows=len(rejected_details),
                 )
@@ -310,14 +330,21 @@ def write_mapped_rows(
                     )
 
             conn.commit()
+            committed = True
     except Exception as exc:
+        try:
+            if conn is not None and not committed:
+                conn.rollback()
+        except Exception:
+            pass
         return WriteResult(
             ok=False,
-            rows_written=inserted,
+            # Only report durable rows — uncommitted inserts are not written.
+            rows_written=inserted if committed else 0,
             table_name=table_name,
             target_schema=schema or "public",
             checksum="",
-            chunks_completed=(inserted + 999) // 1000,
+            chunks_completed=(inserted + 999) // 1000 if committed else 0,
             error=str(exc),
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),

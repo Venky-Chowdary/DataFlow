@@ -140,7 +140,7 @@ def build_milvus_entities(
     import hashlib
     import uuid
 
-    from services.vector_embedding import coerce_embedding
+    from services.vector_embedding import coerce_embedding, embedding_reject_reason
 
     entities: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -153,7 +153,7 @@ def build_milvus_entities(
                 "column": "embedding",
                 "target": "vector",
                 "value": "",
-                "reason": err or "invalid embedding",
+                "reason": embedding_reject_reason(row, err),
                 "policy": "quarantine",
             })
             continue
@@ -430,11 +430,31 @@ def write_mapped_rows(
             warnings=[r.get("reason") or "" for r in map_rejected[:10] if r.get("reason")],
         )
 
-    dimension = 384
-    for row in vector_rows:
-        if row.get("embedding"):
-            dimension = len(row["embedding"])
-            break
+    from services.vector_embedding import resolve_embedding_dimension
+
+    dimension, dim_err = resolve_embedding_dimension(vector_rows, default=None)
+    if dimension is None:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=collection,
+            target_schema=db_name,
+            checksum="",
+            chunks_completed=0,
+            error=dim_err or "embedding dimension unknown — refuse fabricated defaults",
+            rejected_details=list(map_rejected)
+            + [
+                {
+                    "row": "",
+                    "column": "embedding",
+                    "target": "vector",
+                    "value": "",
+                    "reason": dim_err or "no embeddings",
+                    "policy": "fail",
+                }
+            ],
+            rejected_rows=len(map_rejected) + 1,
+        )
 
     entities, embed_rejected = build_milvus_entities(vector_rows, dimension=dimension)
     rejected = list(map_rejected) + list(embed_rejected)

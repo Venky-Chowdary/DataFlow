@@ -1671,6 +1671,22 @@ def prepare_records_for_vector_write(
         stream_contracts=stream_contracts,
         contract_primary_key=contract_primary_key,
     )
+    # Typed specialty holdout (VECTOR(n) length) before embed/upsert — same bar
+    # as SQL writers. No-op when dest_types are unbounded strings.
+    if mapped and target_cols and any(
+        "vector" in str(dest_types.get(c) or "").lower() for c in target_cols
+    ):
+        policy = transform_error_policy(error_policy)
+        target_types = [str(dest_types.get(c) or "") for c in target_cols]
+        mapped = apply_write_quarantine_matrix(
+            mapped,
+            target_cols,
+            target_types,
+            rejected,
+            policy,
+            dialect_label=(dest_kind or label or "vector").strip() or "vector",
+            mappings=list(mappings or []) or None,
+        )
     abort = reject_on_strict_policy(error_policy, rejected, label)
     if abort:
         return [], list(rejected), abort

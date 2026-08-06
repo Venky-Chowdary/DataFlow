@@ -121,7 +121,7 @@ def build_weaviate_objects(
     fabricated as zero vectors. Missing ids → deterministic UUID over
     source_id+chunk+content (retry-safe), else quarantine.
     """
-    from services.vector_embedding import coerce_embedding
+    from services.vector_embedding import coerce_embedding, embedding_reject_reason
 
     objects: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -137,7 +137,7 @@ def build_weaviate_objects(
                 "column": "embedding",
                 "target": "vector",
                 "value": "",
-                "reason": err or "invalid embedding",
+                "reason": embedding_reject_reason(row, err),
                 "policy": "quarantine",
             })
             continue
@@ -429,6 +429,21 @@ def write_mapped_rows(
             inserted += len(batch) - len(failures)
             if on_checkpoint:
                 on_checkpoint((i // batch_size) + 1, (total + batch_size - 1) // batch_size, inserted)
+        # Re-check FAIL_JOB / strict after mid-write per-object rejects.
+        _final_abort = reject_on_strict_policy(policy, rejected, "Weaviate")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=inserted,
+                table_name=class_name,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=(inserted + 99) // 100,
+                error=_final_abort,
+                rejected_details=rejected,
+                rejected_rows=len(rejected),
+                warnings=[r.get("reason") or "" for r in rejected[:10] if r.get("reason")],
+            )
     except Exception as exc:
         return WriteResult(
             ok=False,
@@ -439,6 +454,7 @@ def write_mapped_rows(
             chunks_completed=(inserted + 99) // 100,
             error=str(exc),
             rejected_details=rejected,
+            rejected_rows=len(rejected),
         )
 
     return WriteResult(

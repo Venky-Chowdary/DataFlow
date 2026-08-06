@@ -102,7 +102,7 @@ def build_pinecone_vectors(
     """
     import hashlib
 
-    from services.vector_embedding import coerce_embedding
+    from services.vector_embedding import coerce_embedding, embedding_reject_reason
 
     vectors: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -129,7 +129,7 @@ def build_pinecone_vectors(
                 "column": "embedding",
                 "target": "values",
                 "value": "",
-                "reason": err or "invalid embedding",
+                "reason": embedding_reject_reason(row, err),
                 "policy": "quarantine",
             })
             continue

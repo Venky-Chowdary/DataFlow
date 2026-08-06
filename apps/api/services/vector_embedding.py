@@ -53,6 +53,14 @@ def coerce_embedding(
     return out, None
 
 
+def embedding_reject_reason(row: dict[str, Any], coerce_err: str | None) -> str:
+    """Prefer vectorize-stamped parse failures over generic coerce messages."""
+    stamped = str(row.get("_df_embed_error") or "").strip()
+    if stamped:
+        return stamped
+    return coerce_err or "invalid embedding"
+
+
 def resolve_embedding_dimension(
     rows: list[dict[str, Any]],
     *,

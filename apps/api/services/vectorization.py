@@ -383,15 +383,60 @@ def vectorize_records(
                 )[:4000]
 
         embedding = None
+        embed_column_parse_failed = False
+        embed_column_parse_reason = ""
         if embedding_column and embedding_column in rec:
             raw = rec[embedding_column]
             if isinstance(raw, list):
-                embedding = [float(x) for x in raw]
+                if len(raw) == 0:
+                    embed_column_parse_failed = True
+                    embed_column_parse_reason = (
+                        f"embedding_column '{embedding_column}' is empty — "
+                        "refuse silent re-embed"
+                    )
+                else:
+                    try:
+                        embedding = [float(x) for x in raw]
+                    except (TypeError, ValueError) as exc:
+                        embed_column_parse_failed = True
+                        embed_column_parse_reason = (
+                            f"embedding_column '{embedding_column}' has non-numeric "
+                            f"values — refuse silent re-embed ({exc})"
+                        )
             elif isinstance(raw, str):
-                try:
-                    embedding = [float(x) for x in json.loads(raw)]
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                text = raw.strip()
+                if not text or text.lower() in {"null", "none", "[]"}:
+                    embed_column_parse_failed = True
+                    embed_column_parse_reason = (
+                        f"embedding_column '{embedding_column}' is empty — "
+                        "refuse silent re-embed"
+                    )
+                else:
+                    try:
+                        parsed = json.loads(text)
+                        if not isinstance(parsed, list):
+                            raise ValueError("JSON value is not an array")
+                        if len(parsed) == 0:
+                            raise ValueError("empty array")
+                        embedding = [float(x) for x in parsed]
+                    except Exception as exc:
+                        embed_column_parse_failed = True
+                        embed_column_parse_reason = (
+                            f"embedding_column '{embedding_column}' is not a numeric "
+                            f"JSON array — refuse silent re-embed ({exc})"
+                        )
+            elif raw is None:
+                embed_column_parse_failed = True
+                embed_column_parse_reason = (
+                    f"embedding_column '{embedding_column}' is null — "
+                    "refuse silent re-embed"
+                )
+            else:
+                embed_column_parse_failed = True
+                embed_column_parse_reason = (
+                    f"embedding_column '{embedding_column}' must be a list or "
+                    f"JSON array, got {type(raw).__name__} — refuse silent re-embed"
+                )
 
         source_id = str(rec.get("id", rec.get("_id", rec.get("source_id", ""))))
         metadata = rec.copy()
@@ -412,7 +457,21 @@ def vectorize_records(
         except (TypeError, ValueError):
             existing_chunk_index = 0
 
-        if embedding:
+        if embed_column_parse_failed:
+            # Operator mapped an embedding column — never invent a content embedding
+            # when that column is present but unparseable (silent fidelity invent).
+            rows.append({
+                "id": hashlib.sha256(
+                    f"{source_id}:{existing_chunk_index}:{content}".encode()
+                ).hexdigest()[:32],
+                "content": content[:4000],
+                "embedding": None,
+                "metadata": metadata,
+                "source_id": source_id,
+                "chunk_index": existing_chunk_index,
+                "_df_embed_error": embed_column_parse_reason,
+            })
+        elif embedding:
             rows.append({
                 "id": hashlib.sha256(f"{source_id}:{existing_chunk_index}:{content}".encode()).hexdigest()[:32],
                 "content": content[:4000],
