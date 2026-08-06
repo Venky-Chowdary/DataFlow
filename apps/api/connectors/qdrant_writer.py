@@ -156,9 +156,10 @@ def build_qdrant_points(
         from services.cdc_identity import is_present_cdc_row_key
 
         raw_id = row.get("id")
-        if is_present_cdc_row_key(raw_id):
-            point_id: str | None = cell_to_string(raw_id)
-        else:
+        point_id: str | None = (
+            cell_to_string(raw_id).strip() if is_present_cdc_row_key(raw_id) else ""
+        )
+        if not point_id:
             source = cell_to_string(row.get("source_id", ""))
             content = str(row.get("content") or "")
             if not source and not content:

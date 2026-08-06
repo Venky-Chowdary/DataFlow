@@ -176,8 +176,10 @@ def build_milvus_entities(
         from services.cdc_identity import is_present_cdc_row_key
 
         raw_id = row.get("id")
-        if is_present_cdc_row_key(raw_id):
-            raw_s = cell_to_string(raw_id)
+        raw_s = (
+            cell_to_string(raw_id).strip() if is_present_cdc_row_key(raw_id) else ""
+        )
+        if raw_s:
             if len(raw_s) > 64:
                 # Keep original as metadata; use collision-resistant digest as entity id.
                 digest = hashlib.sha256(raw_s.encode("utf-8")).hexdigest()

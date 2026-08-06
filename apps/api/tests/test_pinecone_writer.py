@@ -69,6 +69,25 @@ def test_build_pinecone_vectors_sql_null_id_falls_back_not_sentinel():
     assert len(vectors[0]["id"]) == 64  # sha256 hex fallback
 
 
+def test_build_pinecone_vectors_nan_id_falls_back_not_empty():
+    """NaN serializes to '' via cell_to_string — must not upsert empty vector id."""
+    rows = [
+        {
+            "id": float("nan"),
+            "content": "hello",
+            "source_id": "src-nan",
+            "chunk_index": 0,
+            "embedding": [0.1, 0.2, 0.3],
+            "metadata": {},
+        }
+    ]
+    vectors, rejected = build_pinecone_vectors(rows, dimension=3)
+    assert not rejected
+    assert len(vectors) == 1
+    assert vectors[0]["id"]  # non-empty
+    assert vectors[0]["id"] != "nan"
+
+
 def test_pinecone_probe_requires_host_and_key():
     ok, msg = probe_pinecone(host="", connection_string="", api_key="")
     assert not ok

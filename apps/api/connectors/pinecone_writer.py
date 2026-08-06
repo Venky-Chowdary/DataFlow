@@ -152,9 +152,10 @@ def build_pinecone_vectors(
         from services.cdc_identity import is_present_cdc_row_key
 
         raw_id = row.get("id")
-        if is_present_cdc_row_key(raw_id):
-            vector_id = cell_to_string(raw_id)
-        else:
+        vector_id = (
+            cell_to_string(raw_id).strip() if is_present_cdc_row_key(raw_id) else ""
+        )
+        if not vector_id:
             source = cell_to_string(row.get("source_id", ""))
             content = str(row.get("content") or "")
             if not source and not content:
