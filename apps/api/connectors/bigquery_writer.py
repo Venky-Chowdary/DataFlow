@@ -38,6 +38,7 @@ from connectors.writer_common import (
     sanitize_identifier,
     sparse_present_bindings,
     reject_on_strict_policy,
+    resolve_conflict_targets,
     split_dense_sparse_rows,
     transform_error_policy,
 )
@@ -722,14 +723,46 @@ def write_mapped_rows(
         )
         sparse_rows: list[tuple] = []
         rows_for_checksum: list[tuple] = list(mapped_rows)
-        if write_mode == "upsert" and conflict_columns:
+        try:
+            conflict = resolve_conflict_targets(conflict_columns, target_cols)
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=dataset_id,
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
+        if write_mode == "upsert" and conflict:
             mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
             if DF_LSN_COL in target_cols:
                 mapped_rows = dedupe_rows_by_pk_and_lsn(
-                    mapped_rows, conflict_columns, target_cols
+                    mapped_rows, conflict, target_cols
                 )
             else:
-                mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+                mapped_rows = dedupe_rows(mapped_rows, conflict, target_cols)
+        elif write_mode == "upsert" and conflict_columns and not conflict:
+            # Operator supplied PKs that do not resolve onto Map targets — refuse
+            # rather than split-and-drop sparse CDC rows on the append path.
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=dataset_id,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "BigQuery upsert conflict_columns do not match mapped targets "
+                    f"{list(conflict_columns)!r} vs {target_cols!r} — refuse silent "
+                    "sparse CDC drop"
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
         rejected_rows = _rejected_row_count(
             data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
         )
@@ -756,7 +789,22 @@ def write_mapped_rows(
         written = 0
         rows_skipped = 0
         chunks_completed = 0
-        use_merge = write_mode == "upsert" and any(c in target_cols for c in conflict_columns)
+        use_merge = write_mode == "upsert" and bool(conflict)
+        if sparse_rows and not use_merge:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=dataset_id,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "BigQuery sparse CDC rows require upsert MERGE with resolvable "
+                    "conflict_columns — refuse silent drop of omit-from-SET updates"
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
 
         if sparse_rows and use_merge:
             from connectors.writer_common import row_has_missing_sentinel
@@ -765,7 +813,7 @@ def write_mapped_rows(
                 client,
                 table_id,
                 target_cols,
-                conflict_columns,
+                conflict,
                 sparse_rows,
                 bq_types,
             )
@@ -797,7 +845,7 @@ def write_mapped_rows(
                             table_id,
                             staging_id,
                             target_cols,
-                            conflict_columns,
+                            conflict,
                             lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
                         )
                         client.query(merge_sql).result()
@@ -826,7 +874,7 @@ def write_mapped_rows(
                             table_id,
                             staging_id,
                             target_cols,
-                            conflict_columns,
+                            conflict,
                             lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
                         )
                         client.query(merge_sql).result()

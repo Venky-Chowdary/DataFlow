@@ -417,3 +417,55 @@ def test_scd2_numeric_zero_pk_is_valid_identity():
             Path(db_path).unlink(missing_ok=True)
         except PermissionError:
             pass
+
+
+def test_scd2_df_missing_hydrates_prior_attr_not_null_history():
+    """STOP_COLUMN / DF_MISSING must keep prior SCD2 attr — never invent NULL version."""
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        apply_scd2(
+            endpoint,
+            [{"id": 1, "name": "alice", "city": "NYC"}],
+            columns=["id", "name", "city"],
+            schema={"id": "integer", "name": "string", "city": "string"},
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "name", "target": "name"},
+                {"source": "city", "target": "city"},
+            ],
+            conflict_columns=["id"],
+            validation_mode="balanced",
+        )
+        # Only name changes; city is STOP_COLUMN omit.
+        summary = apply_scd2(
+            endpoint,
+            [{"id": 1, "name": "alice2", "city": DF_MISSING_SENTINEL}],
+            columns=["id", "name", "city"],
+            schema={"id": "integer", "name": "string", "city": "string"},
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "name", "target": "name"},
+                {"source": "city", "target": "city"},
+            ],
+            conflict_columns=["id"],
+            validation_mode="balanced",
+        )
+        assert summary.get("ok") is not False, summary.get("error")
+        import sqlite3
+
+        conn = sqlite3.connect(db_path)
+        row = conn.execute(
+            "SELECT name, city FROM products WHERE is_current = 1 AND id = 1"
+        ).fetchone()
+        conn.close()
+        assert row is not None
+        assert row[0] == "alice2"
+        assert row[1] == "NYC"
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass

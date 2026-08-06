@@ -44,6 +44,7 @@ from connectors.writer_common import (
     snowflake_lsn_match_predicate,
     sparse_present_bindings,
     reject_on_strict_policy,
+    resolve_conflict_targets,
     split_dense_sparse_rows,
     transform_error_policy,
 )
@@ -899,15 +900,45 @@ def write_mapped_rows(
 
     sparse_rows: list[tuple] = []
     rows_for_checksum: list[tuple] = list(mapped_rows)
+    try:
+        conflict = resolve_conflict_targets(conflict_columns, target_cols)
+    except ValueError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "PUBLIC",
+            checksum="",
+            chunks_completed=0,
+            error=str(exc),
+            rejected_details=rejected_details,
+            warnings=transform_errors,
+        )
     # Within a single batch, the last occurrence of an upsert key wins.
-    if write_mode == "upsert" and conflict_columns:
+    if write_mode == "upsert" and conflict:
         mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
         if DF_LSN_COL in target_cols:
             mapped_rows = dedupe_rows_by_pk_and_lsn(
-                mapped_rows, conflict_columns, target_cols
+                mapped_rows, conflict, target_cols
             )
         else:
-            mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+            mapped_rows = dedupe_rows(mapped_rows, conflict, target_cols)
+    elif write_mode == "upsert" and conflict_columns and not conflict:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "PUBLIC",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                "Snowflake upsert conflict_columns do not match mapped targets "
+                f"{list(conflict_columns)!r} vs {target_cols!r} — refuse silent "
+                "sparse CDC drop"
+            ),
+            rejected_details=rejected_details,
+            warnings=transform_errors,
+        )
 
     rejected_rows = _rejected_row_count(
         data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
@@ -1093,12 +1124,22 @@ def write_mapped_rows(
                         cur.execute(f"ALTER TABLE {tbl_q} ADD COLUMN {col_q} {typ}")
 
             total = len(mapped_rows)
-            target_cols_lower = {t.lower(): t for t in target_cols}
-            conflict = [
-                target_cols_lower[c.lower()]
-                for c in (conflict_columns or [])
-                if c.lower() in target_cols_lower
-            ]
+            if sparse_rows and not (write_mode == "upsert" and conflict):
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Snowflake sparse CDC rows require upsert MERGE with "
+                        "resolvable conflict_columns — refuse silent drop of "
+                        "omit-from-SET updates"
+                    ),
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
             if write_mode == "upsert" and conflict:
                 load_method = "merge_batch"
                 written = 0

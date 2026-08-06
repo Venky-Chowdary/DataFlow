@@ -449,6 +449,101 @@ def test_omit_missing_fields_drops_df_missing_sentinel():
     assert DF_MISSING_SENTINEL not in out.values()
 
 
+def test_resolve_conflict_targets_casefold():
+    from connectors.writer_common import resolve_conflict_targets
+
+    assert resolve_conflict_targets(["ID", "note"], ["id", "NOTE", "extra"]) == [
+        "id",
+        "NOTE",
+    ]
+    assert resolve_conflict_targets(["missing"], ["id"], strict=False) == []
+    try:
+        resolve_conflict_targets(["id", "missing"], ["id"])
+        raise AssertionError("expected strict unresolved raise")
+    except ValueError as exc:
+        assert "unresolved" in str(exc).lower()
+
+
+def test_bq_refuses_unresolved_conflict_with_sparse_signal():
+    """Case-mismatched PK must fail closed — never append-path drop sparse CDC."""
+    from unittest.mock import MagicMock, patch
+
+    from connectors.bigquery_writer import write_mapped_rows
+
+    client = MagicMock()
+    table = MagicMock()
+    table.schema = []
+    client.get_table.return_value = table
+    with patch("connectors.bigquery_writer.stub_writes_allowed", return_value=False):
+        with patch(
+            "connectors.bigquery_conn.get_client", return_value=client
+        ):
+            with patch(
+                "connectors.bigquery_conn._is_local_endpoint", return_value=(True, "")
+            ):
+                result = write_mapped_rows(
+                    host="localhost",
+                    port=9050,
+                    database="proj",
+                    username="",
+                    password="",
+                    schema="ds",
+                    connection_string="",
+                    ssl=False,
+                    warehouse="",
+                    table_name="t",
+                    headers=["id", "note", "extra"],
+                    data_rows=[["1", "n", DF_MISSING_SENTINEL]],
+                    mappings=[
+                        {"source": "id", "target": "id"},
+                        {"source": "note", "target": "note"},
+                        {"source": "extra", "target": "extra"},
+                    ],
+                    column_types={
+                        "id": "STRING",
+                        "note": "STRING",
+                        "extra": "STRING",
+                    },
+                    write_mode="upsert",
+                    conflict_columns=["ID_NOT_MAPPED"],
+                    create_table=False,
+                )
+    assert result.ok is False
+    assert "conflict_columns" in (result.error or "").lower() or "refuse" in (
+        result.error or ""
+    ).lower()
+
+
+def test_versioned_sparse_insert_hydrates_existing_attrs():
+    """ClickHouse-class path must INSERT hydrated full image, not present-only."""
+    from connectors.writer_common import run_sparse_cdc_upsert
+
+    inserted: list[dict] = []
+
+    def fetch(pk_vals):
+        assert pk_vals == ["1"]
+        return ("1", "prior-note", "prior-extra")
+
+    def update(_non_pk, _pk):
+        return 0
+
+    def insert(present):
+        inserted.append(dict(present))
+
+    written, skipped, checksum = run_sparse_cdc_upsert(
+        target_cols=["id", "note", "extra"],
+        conflict_columns=["id"],
+        sparse_rows=[("1", "new-note", DF_MISSING_SENTINEL)],
+        fetch_existing_row=fetch,
+        update_non_pk=update,
+        insert_present=insert,
+        hydrate_versioned_insert=True,
+    )
+    assert written == 1 and skipped == 0
+    assert inserted == [{"id": "1", "note": "new-note", "extra": "prior-extra"}]
+    assert checksum == [("1", "new-note", "prior-extra")]
+
+
 def test_adapters_records_to_matrix_preserves_df_missing():
     from src.transfer.adapters import records_to_matrix
 

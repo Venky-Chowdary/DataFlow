@@ -78,15 +78,45 @@ def _target_columns(records_columns: list[str], mappings: list[dict[str, Any]] |
 
 
 def _row_hash(row: dict[str, Any], target_cols: list[str]) -> str:
-    """Stable hash of the non-SCD target attribute values."""
-    from services.value_serializer import cell_to_string
+    """Stable hash of the non-SCD target attribute values.
+
+    ``DF_MISSING`` must never participate — callers hydrate omit-from-SET cells
+    from the current SCD2 version before hashing so STOP_COLUMN cannot invent
+    false history by hashing as empty/NULL.
+    """
+    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     parts = []
     for c in target_cols:
         if c in SCD2_COLUMNS:
             continue
-        parts.append(f"{c}={cell_to_string(row.get(c))}")
+        val = row.get(c)
+        if is_missing_sentinel(val):
+            continue
+        parts.append(f"{c}={cell_to_string(val)}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _hydrate_scd2_omit(
+    row: dict[str, Any],
+    current_attrs: dict[str, Any] | None,
+    target_cols: list[str],
+) -> dict[str, Any]:
+    """Overlay DF_MISSING from the current SCD2 version (never invent NULL history)."""
+    from services.value_serializer import is_missing_sentinel
+
+    out = dict(row)
+    for c in target_cols:
+        if c in SCD2_COLUMNS:
+            continue
+        if not is_missing_sentinel(out.get(c)):
+            continue
+        if current_attrs is not None and c in current_attrs:
+            out[c] = current_attrs[c]
+        else:
+            # New PK with STOP_COLUMN omit — NULL is honest for a brand-new version.
+            out[c] = None
+    return out
 
 
 def _ensure_scd_columns(engine: Any, table_obj: Any, dialect_name: str) -> None:
@@ -165,6 +195,43 @@ def _build_scd_table(
     return table_obj
 
 
+def _fetch_current_snapshots(
+    conn: Any,
+    qualified: str,
+    pk_columns: list[str],
+    target_cols: list[str],
+    keys: set[str],
+    dialect_name: str,
+) -> dict[str, dict[str, Any]]:
+    """Return {composite_key: {hash, attrs}} for current rows in ``keys``."""
+    import sqlalchemy as sa
+    from connectors.writer_common import quote_sql_identifier
+
+    if not keys or not pk_columns:
+        return {}
+    attr_cols = [c for c in target_cols if c not in SCD2_COLUMNS]
+    select_cols = list(dict.fromkeys(list(pk_columns) + [ROW_HASH_COLUMN] + attr_cols))
+    cols_quoted = ", ".join(quote_sql_identifier(c) for c in select_cols)
+    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
+    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="k")
+    current_pred = f"{current_quoted} = 1" if dialect_name == "sqlite" else f"{current_quoted} IS TRUE"
+    sql = (
+        f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
+        f"WHERE {where_keys} AND {current_pred}"
+    )
+    result = conn.execute(sa.text(sql), params)
+    out: dict[str, dict[str, Any]] = {}
+    for row in result:
+        mapping = dict(row._mapping)
+        key = _compose_key(mapping, pk_columns)
+        attrs = {c: mapping.get(c) for c in attr_cols}
+        out[key] = {
+            "hash": str(mapping.get(ROW_HASH_COLUMN) or ""),
+            "attrs": attrs,
+        }
+    return out
+
+
 def _fetch_current_rows(
     conn: Any,
     qualified: str,
@@ -173,27 +240,10 @@ def _fetch_current_rows(
     dialect_name: str,
 ) -> dict[str, str]:
     """Return {composite_key: row_hash} for current rows whose key is in ``keys``."""
-    import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
-
-    if not keys or not pk_columns:
-        return {}
-    pk_select = ", ".join(quote_sql_identifier(c) for c in pk_columns)
-    hash_quoted = quote_sql_identifier(ROW_HASH_COLUMN)
-    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
-    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="k")
-    current_pred = f"{current_quoted} = 1" if dialect_name == "sqlite" else f"{current_quoted} IS TRUE"
-    sql = (
-        f"SELECT {pk_select}, {hash_quoted} FROM {qualified} "  # nosec B608
-        f"WHERE {where_keys} AND {current_pred}"
+    snaps = _fetch_current_snapshots(
+        conn, qualified, pk_columns, pk_columns, keys, dialect_name
     )
-    result = conn.execute(sa.text(sql), params)
-    out: dict[str, str] = {}
-    for row in result:
-        mapping = row._mapping
-        key = _compose_key(dict(mapping), pk_columns)
-        out[key] = str(mapping[ROW_HASH_COLUMN])
-    return out
+    return {k: str(v.get("hash") or "") for k, v in snaps.items()}
 
 
 def _insert_rows(conn: Any, table_obj: Any, rows: list[dict[str, Any]]) -> int:
@@ -298,12 +348,12 @@ def prepare_scd2_mapped_rows(
     from connectors.writer_common import (
         apply_write_quarantine_matrix,
         build_mapped_rows_with_details,
-        materialize_missing_as_null_for_dense_write,
         reject_on_strict_policy,
         sanitize_identifier,
         transform_error_policy,
         transform_error_policy_for_validation_mode,
     )
+    from services.value_serializer import is_missing_sentinel
     from src.transfer.adapters import records_to_matrix
     from src.transfer.connector_capabilities import resolve_driver_type
 
@@ -332,6 +382,9 @@ def prepare_scd2_mapped_rows(
     dest_kind = resolve_driver_type(getattr(endpoint, "format", "") or "")
 
     _, data_rows = records_to_matrix(records, columns)
+    dest_nullability = dict(
+        (getattr(endpoint, "extra", None) or {}).get("schema_nullability") or {}
+    )
     mapped_tuples, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=columns,
         data_rows=data_rows,
@@ -343,6 +396,7 @@ def prepare_scd2_mapped_rows(
         preserve_case=True,
         dest_kind=dest_kind,
         destination_pk_columns=list(pk_columns),
+        destination_column_nullability=dest_nullability,
     )
     # Same write-quarantine matrix as typed SQL writers — SCD2 history must not
     # absorb VARCHAR/DECIMAL/temporal overflow that preflight samples missed.
@@ -358,8 +412,8 @@ def prepare_scd2_mapped_rows(
             dialect_label=(dest_kind or "SCD2").strip() or "SCD2",
             mappings=list(effective_mappings) or None,
         )
-    # Dense history INSERT — STOP_COLUMN DF_MISSING → NULL (never leak sentinel).
-    mapped_tuples = materialize_missing_as_null_for_dense_write(mapped_tuples)
+    # Keep DF_MISSING through prepare — apply_scd2 hydrates from the current
+    # version before hash/history insert (STOP_COLUMN must not invent NULL history).
     abort = reject_on_strict_policy(error_policy, rejected_details, "SCD2")
     if abort:
         return {
@@ -379,6 +433,20 @@ def prepare_scd2_mapped_rows(
     # Empty PK identity must quarantine before history merge — never silent skip.
     pk_ok_rows: list[dict[str, Any]] = []
     for row_idx, row in enumerate(mapped_rows):
+        # DF_MISSING on a PK component is incomplete identity.
+        if any(is_missing_sentinel(row.get(c)) for c in pk_columns):
+            rejected_details.append(
+                {
+                    "row": row_idx + 1,
+                    "column": ",".join(pk_columns),
+                    "target": ",".join(pk_columns),
+                    "value": "",
+                    "reason": "SCD2 primary key cannot be DF_MISSING / STOP_COLUMN omit",
+                    "policy": "quarantine",
+                    "chars": [],
+                }
+            )
+            continue
         key = _compose_key(row, pk_columns)
         # Never use truthiness — numeric 0 / "0" are valid PK values.
         parts: list[str] = []
@@ -417,9 +485,7 @@ def prepare_scd2_mapped_rows(
             "error_policy": error_policy,
         }
 
-    for row in pk_ok_rows:
-        row[ROW_HASH_COLUMN] = _row_hash(row, target_cols)
-
+    # Hash is finalized in apply_scd2 after DF_MISSING hydrate from current version.
     return {
         "ok": True,
         "mapped_rows": pk_ok_rows,
@@ -513,7 +579,12 @@ def apply_scd2(
                     key = _compose_key(r, pk_columns)
                     if key and not all(p == "" for p in key.split(_KEY_SEP)):
                         keys.add(key)
-                current_hashes = _fetch_current_rows(conn, qualified, pk_columns, keys, dialect_name)
+                current_snaps = _fetch_current_snapshots(
+                    conn, qualified, pk_columns, target_cols, keys, dialect_name
+                )
+                current_hashes = {
+                    k: str(v.get("hash") or "") for k, v in current_snaps.items()
+                }
 
                 to_insert: list[dict[str, Any]] = []
                 to_expire: set[str] = set()
@@ -522,16 +593,22 @@ def apply_scd2(
                     key = _compose_key(row, pk_columns)
                     if not key or all(p == "" for p in key.split(_KEY_SEP)):
                         continue
-                    new_hash = row[ROW_HASH_COLUMN]
+                    snap = current_snaps.get(key)
+                    hydrated = _hydrate_scd2_omit(
+                        row,
+                        (snap or {}).get("attrs") if snap else None,
+                        target_cols,
+                    )
+                    new_hash = _row_hash(hydrated, target_cols)
+                    hydrated[ROW_HASH_COLUMN] = new_hash
                     if key in current_hashes and current_hashes[key] == new_hash:
                         continue
                     if key in current_hashes:
                         to_expire.add(key)
-                    row[VALID_FROM_COLUMN] = timestamp
-                    row[VALID_TO_COLUMN] = None
-                    row[IS_CURRENT_COLUMN] = True
-                    row[ROW_HASH_COLUMN] = new_hash
-                    to_insert.append(row)
+                    hydrated[VALID_FROM_COLUMN] = timestamp
+                    hydrated[VALID_TO_COLUMN] = None
+                    hydrated[IS_CURRENT_COLUMN] = True
+                    to_insert.append(hydrated)
 
                 if to_expire:
                     expired_total += _expire_rows(
@@ -542,7 +619,14 @@ def apply_scd2(
                 # Update in-memory current_hashes so duplicate keys within the same batch
                 # do not create multiple current versions.
                 for row in to_insert:
-                    current_hashes[_compose_key(row, pk_columns)] = row[ROW_HASH_COLUMN]
+                    k = _compose_key(row, pk_columns)
+                    current_hashes[k] = row[ROW_HASH_COLUMN]
+                    current_snaps[k] = {
+                        "hash": row[ROW_HASH_COLUMN],
+                        "attrs": {
+                            c: row.get(c) for c in target_cols if c not in SCD2_COLUMNS
+                        },
+                    }
 
             active_rows, active_checksum = _active_checksum(
                 conn, qualified, target_cols, batch_size, dialect_name

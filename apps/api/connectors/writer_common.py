@@ -3644,6 +3644,49 @@ def materialize_missing_as_null_for_dense_write(
     return out
 
 
+def resolve_conflict_targets(
+    conflict_columns: list[str] | None,
+    target_cols: list[str],
+    *,
+    strict: bool = True,
+) -> list[str]:
+    """Map conflict/PK names onto ``target_cols`` with case-insensitive match.
+
+    Warehouse writers (BQ/Snowflake) often see operator PKs in a different case
+    than Map targets — a case-sensitive miss must not silently disable MERGE and
+    drop sparse CDC rows.
+
+    When ``strict`` (default), every non-empty conflict name must resolve. A
+    partial composite PK (one good name + one typo) must not degrade MERGE to a
+    shorter key and touch the wrong rows.
+    """
+    if not conflict_columns or not target_cols:
+        return []
+    lower_map = {str(c).lower(): c for c in target_cols}
+    out: list[str] = []
+    seen: set[str] = set()
+    unresolved: list[str] = []
+    for raw in conflict_columns:
+        key = str(raw or "").strip()
+        if not key:
+            continue
+        resolved = lower_map.get(key.lower())
+        if resolved is None:
+            unresolved.append(key)
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        out.append(resolved)
+    if strict and unresolved:
+        raise ValueError(
+            "conflict_columns do not fully match mapped targets — unresolved "
+            f"{unresolved!r} vs targets {list(target_cols)!r}; refuse partial "
+            "composite PK degrade"
+        )
+    return out
+
+
 def split_dense_sparse_rows(
     mapped_rows: list[tuple],
 ) -> tuple[list[tuple], list[tuple]]:
@@ -3709,13 +3752,19 @@ def run_sparse_cdc_upsert(
     fetch_existing_row: Callable[[list[Any]], tuple | list | None],
     update_non_pk: Callable[[dict[str, Any], list[Any]], int],
     insert_present: Callable[[dict[str, Any]], None],
+    hydrate_versioned_insert: bool = False,
 ) -> tuple[int, int, list[tuple]]:
     """Shared sparse CDC upsert: omit DF_MISSING, LSN skip, hydrate checksum rows.
 
     ``fetch_existing_row(pk_vals)`` must return a full row in ``target_cols`` order
     (or ``None``). ``update_non_pk(non_pk, pk_vals)`` returns affected rowcount.
+
+    When ``hydrate_versioned_insert`` is True (ClickHouse ReplacingMergeTree-class),
+    INSERT of a sparse image must be a full hydrated row — partial INSERT would
+    become the new version and NULL-wipe omitted attributes after merge/FINAL.
     """
     from services.cdc_effectively_once import should_apply_pk_row
+    from services.value_serializer import is_missing_sentinel
 
     conflict = [c for c in conflict_columns if c in target_cols]
     if not conflict:
@@ -3745,7 +3794,7 @@ def run_sparse_cdc_upsert(
             ).applied:
                 skipped += 1
                 continue
-        if non_pk:
+        if non_pk and not hydrate_versioned_insert:
             affected = update_non_pk(non_pk, pk_vals)
             if affected and affected > 0:
                 written += 1
@@ -3754,13 +3803,37 @@ def run_sparse_cdc_upsert(
                 )
                 continue
         try:
-            insert_present(present)
+            if hydrate_versioned_insert:
+                if existing is None:
+                    # Unknown PK + partial CDC image — refuse inventing a
+                    # versioned row that would NULL-default omitted attrs.
+                    missing = [c for c in target_cols if c not in present]
+                    if missing:
+                        raise ValueError(
+                            "ClickHouse/versioned sparse CDC insert of unknown "
+                            f"primary key refused — omitted columns {missing[:8]}; "
+                            "require a full row image or an existing destination row"
+                        )
+                    insert_present(dict(present))
+                else:
+                    hydrated = materialize_sparse_row_for_checksum(
+                        present, existing, target_cols
+                    )
+                    insert_present(
+                        {
+                            c: v
+                            for c, v in zip(target_cols, hydrated)
+                            if not is_missing_sentinel(v)
+                        }
+                    )
+            else:
+                insert_present(present)
             written += 1
             checksum_rows.append(
                 materialize_sparse_row_for_checksum(present, existing, target_cols)
             )
         except Exception:
-            if not non_pk:
+            if hydrate_versioned_insert or not non_pk:
                 raise
             update_non_pk(non_pk, pk_vals)
             written += 1

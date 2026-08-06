@@ -2464,6 +2464,8 @@ def _generic_apply_sparse_upsert(
     target_cols: list[str],
     conflict_columns: list[str],
     sparse_rows: list[dict[str, Any]],
+    *,
+    dialect_name: str = "",
 ) -> tuple[int, int, list[tuple]]:
     """Per-row upsert omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
     from connectors.writer_common import run_sparse_cdc_upsert
@@ -2489,6 +2491,10 @@ def _generic_apply_sparse_upsert(
             )
         )
 
+    is_clickhouse = dialect_name == "clickhouse" or str(dialect_name).startswith(
+        "clickhouse"
+    )
+
     def fetch_existing(pk_vals: list[Any]) -> tuple | None:
         pk_clause = sa.and_(
             *[table_obj.c[c] == pk_vals[i] for i, c in enumerate(conflict)]
@@ -2497,10 +2503,33 @@ def _generic_apply_sparse_upsert(
         if len(cols) != len(target_cols):
             # Missing physical columns — return None so insert path can run.
             return None
+        if is_clickhouse:
+            # ReplacingMergeTree without FINAL can miss the current version and
+            # fall through to a partial INSERT that NULL-wipes omitted attrs.
+            from connectors.writer_common import quote_sql_identifier
+
+            parts = []
+            if table_obj.schema:
+                parts.append(quote_sql_identifier(table_obj.schema))
+            parts.append(quote_sql_identifier(table_obj.name))
+            table_ref = clickhouse_final_table_sql(".".join(parts))
+            col_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
+            where_sql = " AND ".join(
+                f"{quote_sql_identifier(c)} = :p{i}" for i, c in enumerate(conflict)
+            )
+            params = {f"p{i}": pk_vals[i] for i in range(len(conflict))}
+            found = conn.execute(
+                sa.text(f"SELECT {col_sql} FROM {table_ref} WHERE {where_sql}"),  # nosec B608
+                params,
+            ).fetchone()
+            return tuple(found) if found is not None else None
         found = conn.execute(sa.select(*cols).where(pk_clause)).fetchone()
         return tuple(found) if found is not None else None
 
     def update_non_pk(non_pk: dict[str, Any], pk_vals: list[Any]) -> int:
+        if is_clickhouse:
+            # Mutations are not Airbyte-class upsert; force versioned INSERT path.
+            return 0
         pk_clause = sa.and_(
             *[table_obj.c[c] == pk_vals[i] for i, c in enumerate(conflict)]
         )
@@ -2517,6 +2546,7 @@ def _generic_apply_sparse_upsert(
         fetch_existing_row=fetch_existing,
         update_non_pk=update_non_pk,
         insert_present=insert_present,
+        hydrate_versioned_insert=is_clickhouse,
     )
 
 
@@ -4397,6 +4427,11 @@ def write_mapped_rows(
                         target_cols,
                         conflict_columns,
                         sparse_converted,
+                        dialect_name=str(
+                            dest_db
+                            or getattr(getattr(engine, "dialect", None), "name", "")
+                            or ""
+                        ).lower(),
                     )
                 )
                 written += sparse_written
