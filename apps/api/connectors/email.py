@@ -257,6 +257,8 @@ def write_mapped_rows(
         dest_types=dest_types,
         error_policy=policy,
         preserve_case=True,
+        dest_kind="email",
+        destination_pk_columns=None,
     )
     if transform_errors and policy == "fail":
         return WriteResult(

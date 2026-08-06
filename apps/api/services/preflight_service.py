@@ -1104,15 +1104,14 @@ def run_file_preflight(
     if available_staging_bytes is None:
         available_staging_bytes = _available_staging_bytes(est_bytes)
 
+    # Unknown privilege must not invent create-new (Pilot often omits the flag).
     dest_can_create = (
-        destination_can_create
-        if destination_can_create is not None
-        else destination_connected
+        bool(destination_can_create) if destination_can_create is not None else False
     )
     dest_can_write = (
-        destination_can_write
+        bool(destination_can_write)
         if destination_can_write is not None
-        else destination_connected
+        else bool(destination_connected)
     )
     # Keep tri-state: None = probe unknown. Never coerce unknown → create-new.
     dest_table_exists = destination_table_exists

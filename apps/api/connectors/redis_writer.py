@@ -160,6 +160,8 @@ def write_mapped_rows(
         dest_types=dest_types,
         preserve_case=True,
         error_policy=policy,
+        dest_kind="redis",
+        destination_pk_columns=list(conflict_columns or []) or None,
     )
 
     conflict = _infer_redis_conflict_columns(target_cols, mappings, conflict_columns)

@@ -104,6 +104,16 @@ def test_parity_kwargs_prefer_stream_matched_contract_pk() -> None:
     assert kw["destination_can_create"] is not True or meta["can_create_table"] is True
 
 
+def test_parity_kwargs_never_invent_create_when_inspect_empty() -> None:
+    """Failed/empty inspect must not invent can_create from connectivity alone."""
+    with patch(
+        "services.preflight_service.inspect_destination_for_preflight",
+        return_value={"connected": True},
+    ):
+        kw = _execute_preflight_parity_kwargs(_request(), destination_connected=True)
+    assert kw["destination_can_create"] is False
+
+
 def test_parity_kwargs_never_invent_create_when_privilege_denies() -> None:
     meta = {
         "connected": True,

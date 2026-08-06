@@ -109,6 +109,8 @@ def write_mapped_rows(
         dest_types=dest_types,
         preserve_case=True,
         error_policy=policy,
+        dest_kind="gcs",
+        destination_pk_columns=None,
     )
     tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(

@@ -162,6 +162,8 @@ def write_mapped_rows(
         dest_types=dest_types,
         preserve_case=True,
         error_policy=policy,
+        dest_kind="dynamodb",
+        destination_pk_columns=list(conflict_columns or []) or None,
     )
     if errors and policy == "fail":
         return WriteResult(

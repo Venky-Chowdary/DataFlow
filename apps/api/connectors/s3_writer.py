@@ -152,6 +152,8 @@ def write_mapped_rows(
         dest_types=dest_types,
         error_policy=policy,
         preserve_case=True,
+        dest_kind="s3",
+        destination_pk_columns=None,
     )
     # Object-store exports still honor typed carriers from Map (DECIMAL/BINARY/
     # VARCHAR(n)) — refuse silent invent / overflow before JSON/CSV serialize.

@@ -20,6 +20,24 @@ def test_apply_transform_phone():
     assert apply_transform("555-123-4567", "phone") == ("555-123-4567", None)
 
 
+def test_empty_semantic_transform_errors_not_silent_null():
+    val, err = apply_transform("", "phone")
+    assert val is None
+    assert err and "Empty value" in err
+
+
+def test_typed_null_sentinel_errors_not_silent_null():
+    val, err = apply_transform("n/a", "integer")
+    assert val is None
+    assert err and "Null sentinel" in err
+
+
+def test_identity_preserves_whitespace_only():
+    val, err = apply_transform("   ", "identity")
+    assert err is None
+    assert val == "   "
+
+
 def test_apply_transform_email():
     assert apply_transform("  User@Example.COM  ", "email") == ("user@example.com", None)
 

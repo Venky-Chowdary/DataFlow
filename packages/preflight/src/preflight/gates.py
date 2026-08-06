@@ -211,6 +211,17 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
             _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
         )
 
+    # INSERT grant alone must not green-light create-new. Unknown/false create with
+    # a missing table is a hard block — otherwise Validate APPROVE invents DDL.
+    if dest.table_exists is False and not dest.can_create_table:
+        return _block(
+            GateId.G2_DESTINATION,
+            "Destination table is missing and CREATE is not proven "
+            "(INSERT may be allowed on other objects, but create-new DDL is denied/unknown)",
+            start,
+            _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
+        )
+
     create_note = ""
     if dest.table_exists is False and dest.can_create_table:
         create_note = "; CREATE table allowed"

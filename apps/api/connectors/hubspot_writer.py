@@ -379,6 +379,8 @@ def write_mapped_rows(
         error_policy=policy,
         dest_types=dest_types,
         preserve_case=True,
+        dest_kind="hubspot",
+        destination_pk_columns=list(conflict_columns or []) or None,
     )
     tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(

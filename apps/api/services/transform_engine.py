@@ -1077,25 +1077,25 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     if transform_l in {"omit", "intentional_omit", "drop", "exclude"}:
         return None, "intentional omit — mapping should not project"
 
-    # Identity / text transforms: empty string is a real value.
-    if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
-        return "", None
-    # Typed transforms: empty/whitespace must not silently become SQL NULL.
-    # That bypassed Risk Contracts (no err → no CAST/QUARANTINE path) and looked
-    # like a successful TEXT→INTEGER write. Empty → error; continue policies may
-    # quarantine or coerce_null only when the contract/job policy says so.
-    if text == "" and transform_l in _TYPED_TRANSFORMS:
-        return None, f"Empty value cannot coerce to {transform_l}"
-    if text == "":
-        return None, None
-
     # Identity aliases must preserve exact wire (incl. leading/trailing whitespace).
-    # Silent strip previously false-failed Gate-8 ("identity transform altered value")
-    # on Mongo/long-text samples and silently mutated VARCHAR payloads at write.
+    # Before empty collapse — otherwise ``"   "`` was stripped to ``""`` and mutated.
     if transform_l in _IDENTITY_TRANSFORMS:
         return raw_s, None
 
-    # Null/missing sentinels for typed transforms are treated as None.
+    # Identity / text transforms: empty string is a real value.
+    if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
+        return "", None
+    # Typed + semantic transforms: empty/whitespace must not silently become SQL NULL.
+    # That bypassed Risk Contracts (no err → no CAST/QUARANTINE path) and looked
+    # like a successful write. Empty → error; continue policies may quarantine or
+    # coerce_null only when the contract/job policy says so.
+    if text == "" and transform_l in _TYPED_TRANSFORMS:
+        return None, f"Empty value cannot coerce to {transform_l}"
+    if text == "":
+        return None, f"Empty value cannot coerce to {transform_l or 'transform'}"
+
+    # Null/missing sentinels for typed transforms must surface as coerce errors
+    # (Risk Contract / quarantine path) — never silent NULL invent.
     # Exception: NaN / ±Infinity are NOT SQL null for JSON/vector — reject as
     # non-finite (never invent JSON null / empty embedding).
     if transform_l in _TYPED_TRANSFORMS:
@@ -1104,7 +1104,7 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
             if transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
             else:
-                return None, None
+                return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
 
     if transform == "decimal":
         parsed = _parse_decimal(text)

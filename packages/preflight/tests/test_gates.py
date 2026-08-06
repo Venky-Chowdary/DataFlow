@@ -263,6 +263,19 @@ def test_g2_blocks_create_denied_for_missing_table():
     assert "create" in g2.message.lower()
 
 
+def test_g2_blocks_create_unknown_even_when_write_true():
+    """INSERT-true + CREATE-false + missing table must not Validate-approve."""
+    plan = _happy_plan()
+    plan.destination.can_write = True
+    plan.destination.can_create_table = False
+    plan.destination.table_exists = False
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert not result.passed
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.BLOCK
+    assert "create" in g2.message.lower()
+
+
 def test_g2_blocks_unavailable_probe_on_create_new():
     """Connectivity-only fallback must not green-light create-new."""
     plan = _happy_plan()

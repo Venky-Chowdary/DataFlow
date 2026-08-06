@@ -782,8 +782,8 @@ def _execute_preflight_parity_kwargs(
         elif "create" in privilege_probe:
             can_create = privilege_probe.get("create")
     if can_create is None:
-        # Last resort — still better than inventing True from a failed inspect.
-        can_create = bool(destination_connected)
+        # Fail-closed: unknown privilege must not invent create-new DDL.
+        can_create = False
 
     can_write = dest_meta.get("can_write")
     if can_write is None and privilege_probe:
@@ -792,6 +792,8 @@ def _execute_preflight_parity_kwargs(
         elif "write" in privilege_probe:
             can_write = privilege_probe.get("write")
     if can_write is None:
+        # Connectivity ≠ write grant. Unknown → assume writeable only for
+        # append paths that still hit live driver errors; never invent create.
         can_write = bool(destination_connected)
 
     table_exists = dest_meta.get("table_exists")

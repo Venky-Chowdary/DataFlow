@@ -893,6 +893,8 @@ def _write_mapped_rows_pyiceberg(
         error_policy=policy,
         dest_types=dest_types,
         preserve_case=True,
+        dest_kind="iceberg",
+        destination_pk_columns=list(conflict_columns or []) or None,
     )
     if transform_errors and policy == "fail":
         return WriteResult(
@@ -1320,6 +1322,8 @@ def _write_mapped_rows_filesystem(
         error_policy=policy,
         dest_types=dest_types,
         preserve_case=True,
+        dest_kind="iceberg",
+        destination_pk_columns=list(conflict_columns or []) or None,
     )
     if transform_errors and policy == "fail":
         return WriteResult(
