@@ -52,7 +52,9 @@ export function remapToTypeForMismatch(sourceType: string, targetType: string): 
     return src || "TIMESTAMP";
   }
   if (/VARCHAR|TEXT|STRING|CHAR/.test(srcU) && /INT|DECIMAL|NUMBER|FLOAT|DOUBLE/.test(tgtU)) {
-    return "VARCHAR";
+    // Keep physical typed sink (backend suggest_remap → TEXT widen for create-new;
+    // never stamp bare VARCHAR onto INT/DECIMAL and green empty invent).
+    return tgt || "TEXT";
   }
   // Same-logical text/json create-new twins — keep destination type, never invent VARCHAR.
   if (

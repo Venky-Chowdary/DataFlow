@@ -273,7 +273,15 @@ def write_mapped_rows(
                         f"MongoDB FLOAT refused {value!r} (refuse silent string invent)"
                     ) from exc
             if transform in {"decimal", "currency", "percentage"} or upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
-                return Decimal128(str(value))
+                if isinstance(value, str) and not str(value).strip():
+                    raise ValueError(
+                        f"MongoDB DECIMAL refused empty string {value!r} "
+                        "(refuse silent Decimal128 invent / field wipe)"
+                    )
+                from connectors.sql_bind import coerce_decimal_wire
+
+                coerced = coerce_decimal_wire(value, ddl_type=upper or "DECIMAL")
+                return Decimal128(str(coerced))
             if transform == "integer" or upper in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "LONG", "SERIAL", "BIGSERIAL"}:
                 from decimal import Decimal
 

@@ -29,7 +29,7 @@ describe("remapToTypeForMismatch", () => {
     assert.equal(remapToTypeForMismatch("FLOAT", "DECIMAL(38,10)"), "DOUBLE");
     assert.equal(remapToTypeForMismatch("DECIMAL(38,10)", "INTEGER"), "DECIMAL(38,10)");
     assert.equal(remapToTypeForMismatch("TIMESTAMPTZ", "TIMESTAMP_NTZ"), "TIMESTAMPTZ");
-    assert.equal(remapToTypeForMismatch("VARCHAR", "NUMBER(38,0)"), "VARCHAR");
+    assert.equal(remapToTypeForMismatch("VARCHAR", "NUMBER(38,0)"), "NUMBER(38,0)");
     // Create-new dialect twins — keep destination text/json, never invent VARCHAR.
     assert.equal(remapToTypeForMismatch("TEXT COLLATE UTF8MB4_0900_AI_CI", "TEXT"), "TEXT");
     assert.equal(remapToTypeForMismatch("JSON", "JSONB"), "JSONB");

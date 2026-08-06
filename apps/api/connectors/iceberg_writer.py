@@ -155,6 +155,13 @@ def _decimal_target_types_for_iceberg_write(
             if pa_mod.types.is_time(ftype):
                 out.append("TIME")
                 continue
+            if pa_mod.types.is_floating(ftype):
+                # Map VARCHAR + physical float — empty must quarantine before Arrow.
+                if pa_mod.types.is_float64(ftype):
+                    out.append("DOUBLE")
+                else:
+                    out.append("FLOAT")
+                continue
             if pa_mod.types.is_binary(ftype) or pa_mod.types.is_large_binary(ftype):
                 out.append("BINARY")
                 continue
@@ -391,6 +398,14 @@ def _merge_upsert_rows(
         best[_key(row)] = dict(row)
     for row in incoming:
         clean = _present(row)
+        # Sparse/empty PK must quarantine upstream — refuse invent duplicates here.
+        from connectors.writer_common import assert_sparse_upsert_has_pk
+
+        try:
+            if any(is_missing_sentinel(v) for v in row.values()):
+                assert_sparse_upsert_has_pk(clean, pk_cols)
+        except ValueError:
+            raise
         key = _key(row)
         prev = best.get(key)
         if prev is None:
@@ -1137,12 +1152,13 @@ def _write_mapped_rows_pyiceberg(
         # running per-PK map (dense replace / sparse overlay) with should_apply.
         from connectors.writer_common import (
             DF_LSN_COL,
+            assert_dense_upsert_keys_present,
             assert_sparse_upsert_has_pk,
             row_has_missing_sentinel,
             sparse_present_bindings,
-)
+        )
         from services.cdc_effectively_once import should_apply_pk_row
-        from services.value_serializer import is_missing_sentinel
+        from services.value_serializer import cell_to_string, is_missing_sentinel
 
         if mode in upsert_modes:
             pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
@@ -1154,12 +1170,63 @@ def _write_mapped_rows_pyiceberg(
                     target_schema=target_schema,
                     checksum="",
                     chunks_completed=0,
-                    error=(
-                        "Iceberg upsert/merge requires explicit conflict_columns "
-                        "(record key); refusing to invent PK from the first column"
-                    ),
+                    error="Iceberg upsert requires conflict_columns that match mapped targets",
                     driver="iceberg",
+                    rejected_details=rejected_details,
                 )
+            # Dense empty/null PK would mass-merge onto "" keys — quarantine first.
+            # Sparse rows (DF_MISSING) are checked in the fold via assert_sparse.
+            # Preserve arrival order (same-PK fold depends on it).
+            dense_ok: list[bool] = []
+            for row_idx, raw in enumerate(mapped_rows):
+                if row_has_missing_sentinel(_row_tuple(target_cols, raw)):
+                    dense_ok.append(True)  # sparse handled later
+                    continue
+                try:
+                    assert_dense_upsert_keys_present(
+                        [raw], pk_cols, target_cols=target_cols
+                    )
+                    dense_ok.append(True)
+                except ValueError as row_exc:
+                    dense_ok.append(False)
+                    rejected_details.append(
+                        {
+                            "row": row_idx + 1,
+                            "column": "*",
+                            "value": "",
+                            "reason": str(row_exc)[:300],
+                            "policy": policy,
+                        }
+                    )
+            if not all(dense_ok):
+                mapped_rows = [r for r, ok in zip(mapped_rows, dense_ok) if ok]
+                _pk_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+                if _pk_abort:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=_pk_abort,
+                        rejected_details=rejected_details,
+                        driver="iceberg",
+                    )
+                if not mapped_rows:
+                    return WriteResult(
+                        ok=True,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=1,
+                        rejected_details=rejected_details,
+                        rejected_rows=_rejected_row_count(
+                            data_rows, mapped_rows, rejected_details, policy
+                        ),
+                        driver="iceberg",
+                    )
             # A scan is only needed when the batch carries sparse fields to
             # overlay or an LSN to compare against the destination.
             needs_scan = DF_LSN_COL in target_cols or any(
@@ -1191,30 +1258,49 @@ def _write_mapped_rows_pyiceberg(
                         driver="iceberg",
                     )
             # Fold in arrival order so same-PK twice in one batch is correct.
-            for raw in mapped_rows:
+            fold_kept: list[tuple] = []
+            for row_idx, raw in enumerate(mapped_rows):
                 row_dict = _row_as_dict(target_cols, raw)
                 row_values = _row_tuple(target_cols, raw)
                 if row_has_missing_sentinel(row_values):
                     present = sparse_present_bindings(row_values, target_cols)
-                    assert_sparse_upsert_has_pk(present, pk_cols)
+                    try:
+                        assert_sparse_upsert_has_pk(present, pk_cols)
+                    except ValueError as exc:
+                        sample = ""
+                        try:
+                            sample = cell_to_string(
+                                next(iter(present.values()), "")
+                            )[:120]
+                        except Exception:
+                            sample = ""
+                        rejected_details.append(
+                            {
+                                "row": row_idx + 1,
+                                "column": "*",
+                                "value": sample,
+                                "reason": str(exc)[:300],
+                                "policy": policy,
+                            }
+                        )
+                        continue
                     key = tuple(str(present.get(c, "")) for c in pk_cols)
                     base = existing_by_pk.get(key)
                     if base is None:
-                        return WriteResult(
-                            ok=False,
-                            rows_written=0,
-                            table_name=table,
-                            target_schema=target_schema,
-                            checksum="",
-                            chunks_completed=0,
-                            error=(
-                                "Iceberg sparse CDC insert of unknown primary key "
-                                f"{key!r} refused — would invent NULL for absent "
-                                "fields. Require a full row image (no DF_MISSING) "
-                                "or an existing destination row to overlay."
-                            ),
-                            driver="iceberg",
+                        rejected_details.append(
+                            {
+                                "row": row_idx + 1,
+                                "column": "*",
+                                "value": str(key)[:120],
+                                "reason": (
+                                    "Iceberg sparse CDC insert of unknown primary key "
+                                    f"{key!r} refused — would invent NULL for absent "
+                                    "fields"
+                                ),
+                                "policy": policy,
+                            }
                         )
+                        continue
                     if DF_LSN_COL in present and not should_apply_pk_row(
                         existing_lsn=base.get(DF_LSN_COL),
                         incoming_lsn=present[DF_LSN_COL],
@@ -1223,6 +1309,7 @@ def _write_mapped_rows_pyiceberg(
                     merged = dict(base)
                     merged.update(present)
                     existing_by_pk[key] = merged
+                    fold_kept.append(raw)
                 else:
                     key = tuple(str(row_dict.get(c, "")) for c in pk_cols)
                     base = existing_by_pk.get(key)
@@ -1239,11 +1326,25 @@ def _write_mapped_rows_pyiceberg(
                         **(base or {}),
                         **{k: v for k, v in row_dict.items() if not is_missing_sentinel(v)},
                     }
+                    fold_kept.append(raw)
+            _fold_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+            if _fold_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_fold_abort,
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
             # Emit one dense row per PK touched by this batch (plus untouched
             # existing rows are left alone via upsert join).
             batch_keys = {
                 tuple(str(_row_as_dict(target_cols, r).get(c, "")) for c in pk_cols)
-                for r in mapped_rows
+                for r in fold_kept
             }
             mapped_rows = [
                 tuple(existing_by_pk[k].get(c) for c in target_cols)
@@ -1260,13 +1361,56 @@ def _write_mapped_rows_pyiceberg(
             mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
         dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
-        for d in dict_rows:
-            for k, v in d.items():
-                if is_missing_sentinel(v):
-                    raise ValueError(
-                        f"Iceberg write refused residual DF_MISSING on column {k!r} "
-                        "— would invent NULL. Sparse overlay must expand first."
-                    )
+        kept_dicts: list[dict[str, Any]] = []
+        for row_idx, d in enumerate(dict_rows):
+            try:
+                for k, v in d.items():
+                    if is_missing_sentinel(v):
+                        raise ValueError(
+                            f"Iceberg write refused residual DF_MISSING on column {k!r} "
+                            "— would invent NULL. Sparse overlay must expand first."
+                        )
+                for field in final_arrow:
+                    _coerce_arrow_cell(d.get(field.name), field.type, pa)
+                kept_dicts.append(d)
+            except ValueError as exc:
+                rejected_details.append(
+                    {
+                        "row": row_idx + 1,
+                        "column": "*",
+                        "value": "",
+                        "reason": str(exc)[:300],
+                        "policy": policy,
+                    }
+                )
+        _arrow_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+        if _arrow_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=_arrow_abort,
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
+        dict_rows = kept_dicts
+        if not dict_rows:
+            return WriteResult(
+                ok=True,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=1,
+                rejected_details=rejected_details,
+                rejected_rows=_rejected_row_count(
+                    data_rows, [], rejected_details, policy
+                ),
+                driver="iceberg",
+            )
         arrays = []
         for field in final_arrow:
             at = field.type

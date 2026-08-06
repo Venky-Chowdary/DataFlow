@@ -92,6 +92,22 @@ def _to_es_value(value: Any, source_type: str) -> Any:
                 "(refuse invent via bool())"
             )
         return coerced
+    if upper in {
+        "DATE",
+        "TIME",
+        "DATETIME",
+        "TIMESTAMP",
+        "TIMESTAMPTZ",
+        "DATETIMEOFFSET",
+    }:
+        from connectors.sql_temporal import coerce_sql_temporal
+
+        if isinstance(value, str) and not str(value).strip():
+            raise ValueError(
+                f"Elasticsearch {upper} refused empty string {value!r} "
+                "(refuse silent null invent / field wipe)"
+            )
+        return coerce_sql_temporal(value, upper)
     if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
         from connectors.sql_bind import coerce_uuid_wire
 

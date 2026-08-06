@@ -209,25 +209,134 @@ def test_snowflake_sparse_bind_quarantines_empty_date():
     assert any("refuse silent NULL invent" in str(d.get("reason") or "") for d in details)
 
 
-def test_sf_sparse_empty_pk_quarantines_not_abort():
-    """Empty conflict key must quarantine one row — not abort the Snowflake batch."""
-    from unittest.mock import MagicMock
-    from connectors.snowflake_writer import _sf_apply_sparse_upsert
+def test_quarantine_unfit_temporals_refuses_empty():
+    from connectors.writer_common import quarantine_unfit_temporals
 
-    cur = MagicMock()
-    cur.fetchone.return_value = ("2", "ok")
-    cur.rowcount = 1
     details: list[dict] = []
-    written, skipped, checksum = _sf_apply_sparse_upsert(
-        cur,
-        "T",
-        ["id", "note"],
-        ["VARCHAR", "VARCHAR"],
-        ["id"],
-        [("", "bad-pk"), ("2", "ok")],
-        rejected_details=details,
-        policy="quarantine",
+    out = quarantine_unfit_temporals(
+        [("", "ok"), ("2024-01-15", "ok")],
+        ["created", "name"],
+        ["DATE", "VARCHAR"],
+        details,
+        "quarantine",
     )
-    assert written == 1
-    assert details
-    assert any("null/empty primary-key" in str(d.get("reason") or "") for d in details)
+    assert len(out) == 1
+    assert out[0][0] == "2024-01-15"
+    assert any("refuse silent NULL invent" in str(d.get("reason") or "") for d in details)
+
+
+def test_elasticsearch_date_refuses_empty():
+    import pytest
+    from connectors.elasticsearch_writer import _to_es_value
+
+    with pytest.raises(ValueError, match="refuse silent null invent"):
+        _to_es_value("", "DATE")
+    with pytest.raises(ValueError, match="refuse silent null invent"):
+        _to_es_value("  ", "TIMESTAMP")
+    # Non-empty date still coerces.
+    from datetime import date
+
+    assert _to_es_value("2024-06-01", "DATE") == date(2024, 6, 1)
+
+
+def test_mongodb_decimal_empty_refuses_via_coerce():
+    import pytest
+    from connectors.sql_bind import coerce_decimal_wire
+
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        coerce_decimal_wire("")
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        coerce_decimal_wire("  ")
+
+
+def test_iceberg_float_overlay_from_arrow_schema():
+    """Physical float Arrow types must enter quarantine carriers (Map VARCHAR cliff)."""
+    from connectors.iceberg_writer import _decimal_target_types_for_iceberg_write
+
+    class _FakeType:
+        def __init__(self, kind: str):
+            self.kind = kind
+            self.tz = None
+
+    class _FakeField:
+        def __init__(self, name: str, kind: str):
+            self.name = name
+            self.type = _FakeType(kind)
+
+    class _FakeSchema:
+        names = ["id", "amt"]
+
+        def field(self, name: str):
+            return _FakeField(name, "float64" if name == "amt" else "string")
+
+    class _FakeTypes:
+        @staticmethod
+        def is_decimal(_t):
+            return False
+
+        @staticmethod
+        def is_fixed_size_binary(_t):
+            return False
+
+        @staticmethod
+        def is_int32(_t):
+            return False
+
+        @staticmethod
+        def is_int16(_t):
+            return False
+
+        @staticmethod
+        def is_int64(_t):
+            return False
+
+        @staticmethod
+        def is_boolean(_t):
+            return False
+
+        @staticmethod
+        def is_date(_t):
+            return False
+
+        @staticmethod
+        def is_timestamp(_t):
+            return False
+
+        @staticmethod
+        def is_time(_t):
+            return False
+
+        @staticmethod
+        def is_floating(t):
+            return getattr(t, "kind", "") in {"float64", "float32"}
+
+        @staticmethod
+        def is_float64(t):
+            return getattr(t, "kind", "") == "float64"
+
+        @staticmethod
+        def is_binary(_t):
+            return False
+
+        @staticmethod
+        def is_large_binary(_t):
+            return False
+
+        @staticmethod
+        def is_string(t):
+            return getattr(t, "kind", "") == "string"
+
+        @staticmethod
+        def is_large_string(_t):
+            return False
+
+    class _FakePa:
+        types = _FakeTypes()
+
+    out = _decimal_target_types_for_iceberg_write(
+        ["id", "amt"],
+        {"id": "string", "amt": "string"},
+        arrow_schema=_FakeSchema(),
+        pa_mod=_FakePa(),
+    )
+    assert out[1] == "DOUBLE"

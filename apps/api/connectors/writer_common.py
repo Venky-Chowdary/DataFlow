@@ -2739,8 +2739,10 @@ def quarantine_unfit_temporals(
     rejected_details: list[dict[str, Any]],
     policy: str,
 ) -> list[tuple]:
-    """Hold out temporal cells that would silently lose FSP or timezone polarity.
+    """Hold out temporal cells that would invent NULL, lose FSP, or strip TZ.
 
+    - Empty ``\"\"`` into DATE/TIME/DATETIME → refuse silent NULL invent (Iceberg
+      Arrow / SQL bind parity)
     - ``TIME(6)`` → ``TIME(0)`` truncates fractional seconds
     - Offset-aware / ``Z`` wire into NTZ/DATETIME strips the offset (Airbyte invent)
     """
@@ -2752,17 +2754,16 @@ def quarantine_unfit_temporals(
         temporal_value_exceeds_precision,
         temporal_value_has_timezone,
     )
-    from services.value_serializer import cell_to_string
+    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     temporal_cols: list[tuple[int, str, bool, bool]] = []
     for i, typ in enumerate(target_types):
         logical = normalize_logical_type(typ)
-        if logical not in {"time", "datetime"}:
+        if logical not in {"date", "time", "datetime"}:
             continue
         check_fsp = parse_temporal_fractional_precision(typ) is not None
         check_tz = logical == "datetime" and datetime_timezone_polarity(typ) == "ntz"
-        if not check_fsp and not check_tz:
-            continue
+        # Always include temporal columns so empty refuse runs even without FSP/TZ.
         temporal_cols.append((i, typ, check_fsp, check_tz))
     if not temporal_cols:
         return mapped_rows
@@ -2774,24 +2775,28 @@ def quarantine_unfit_temporals(
         for col_idx, typ, check_fsp, check_tz in temporal_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
-            from services.value_serializer import is_missing_sentinel
-
             if is_missing_sentinel(cells[col_idx]):
                 continue
             reason = ""
-            if check_fsp and temporal_value_exceeds_precision(cells[col_idx], typ):
+            raw = cells[col_idx]
+            if isinstance(raw, str) and not raw.strip():
+                reason = (
+                    f"empty string into temporal destination {typ} "
+                    "— quarantined (refuse silent NULL invent)"
+                )
+            elif check_fsp and temporal_value_exceeds_precision(raw, typ):
                 reason = (
                     f"fractional seconds exceed destination {typ} "
                     "— quarantined (refuse silent truncate)"
                 )
-            elif check_tz and temporal_value_has_timezone(cells[col_idx]):
+            elif check_tz and temporal_value_has_timezone(raw):
                 reason = (
                     f"timezone-aware value into NTZ destination {typ} "
                     "— quarantined (refuse silent offset strip; use explicit UTC transform)"
                 )
             if not reason:
                 continue
-            sample = cell_to_string(cells[col_idx])[:120]
+            sample = cell_to_string(raw)[:120]
             append_write_quarantine_detail(
                 rejected_details,
                 {
