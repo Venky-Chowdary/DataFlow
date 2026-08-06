@@ -4202,7 +4202,23 @@ def write_mapped_rows(
     dest_db = (cfg.get("type") or "").lower()
     target_column_types = {}
     explicit_stamps: set[str] = set()
+    # Studio-probed live DDL beats Map stamps for existing tables (invent cliff).
+    live_dest = _kwargs.get("destination_column_types")
+    live_fold = {
+        str(k).lower(): str(v)
+        for k, v in (live_dest.items() if isinstance(live_dest, dict) else [])
+        if k and v
+    }
+    live_locked: set[str] = set()
     for i, col in enumerate(target_cols):
+        live_hit = live_fold.get(str(col).lower())
+        if live_hit:
+            derived = (
+                materialize_dest_ddl(dest_db, live_hit) if dest_db else str(live_hit)
+            )
+            target_column_types[col] = derived
+            live_locked.add(col)
+            continue
         explicit = mappings[i].get("target_type") if i < len(mappings) else None
         source_type = (
             column_types.get(mappings[i]["source"]) if i < len(mappings) else None
@@ -4223,12 +4239,13 @@ def write_mapped_rows(
     # Map≡ALTER: source DDL may propose a wider type; explicit Map stamps are a
     # hard ceiling (same helper as PostgreSQL / MySQL writers). Overflow cells
     # quarantine on write — never silent ALTER past the approved mapping.
+    # Live-locked columns stay physical — widen must not erase Studio probe.
     from connectors.writer_common import desired_types_honoring_map_stamps
 
     ceiling_types = [target_column_types[col] for col in target_cols]
     candidate_by_col: dict[str, str] = {}
     for i, col in enumerate(target_cols):
-        if col in explicit_stamps:
+        if col in explicit_stamps or col in live_locked:
             continue
         mapping_source = mappings[i].get("source_type") if i < len(mappings) else None
         catalog_source = (
@@ -4246,13 +4263,15 @@ def write_mapped_rows(
         mappings=mappings,
         candidate_by_col=candidate_by_col,
         preserve_case=True,
-        explicit_columns=explicit_stamps,
+        explicit_columns=explicit_stamps | live_locked,
     )
     if alter_refusals:
         logger.info(
             "generic_sql Map≡ALTER refusals (stamp ceiling): %s", alter_refusals
         )
     for i, col in enumerate(target_cols):
+        if col in live_locked:
+            continue
         new_typ = desired_list[i]
         old_typ = target_column_types[col]
         target_column_types[col] = new_typ

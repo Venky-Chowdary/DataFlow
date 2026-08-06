@@ -420,8 +420,20 @@ def write_mapped_rows(
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
     table_quoted = quote_sql_identifier(table_name)
-    target_types = [sqlite_type(t) for t in logical_types]
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    # Prefer Studio-probed live DDL over Map stamps (BOOLEAN→TEXT invent cliff).
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    live_dest = _kwargs.get("destination_column_types")
+    dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live_dest if isinstance(live_dest, dict) else None,
+    )
+    target_types = [
+        sqlite_type(dest_types.get(c, logical_types[i])) for i, c in enumerate(target_cols)
+    ]
     policy = transform_error_policy(error_policy)
 
     mapped_rows: list[tuple] = []
@@ -449,7 +461,8 @@ def write_mapped_rows(
         )
         # Shared quarantine matrix — SQLite is PRODUCTION_SKU; never skip fit
         # checks that generic_sql / Postgres / BQ run (silent truncate / invent).
-        tgt_types = [str(logical_types[i] if i < len(logical_types) else "") for i in range(len(target_cols))]
+        # Carriers must match transform dest_types (live DDL), not Map-only logicals.
+        tgt_types = [str(target_types[i] if i < len(target_types) else "") for i in range(len(target_cols))]
         mapped_rows = apply_write_quarantine_matrix(
             mapped_rows,
             target_cols,

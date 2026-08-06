@@ -819,6 +819,7 @@ def write_mapped_rows(
     **_kwargs: Any,
 ) -> WriteResult:
     dest_nullability = _kwargs.get("destination_column_nullability")
+    live_dest_types = _kwargs.get("destination_column_types")
     del port, ssl, _kwargs
     from connectors.writer_common import resolve_writer_backfill
 
@@ -899,8 +900,16 @@ def write_mapped_rows(
     # so legacy quoted-lowercase tables (e.g. "csvtestfile") are reused instead of
     # creating a parallel "CSVTESTFILE".
     table_name = sanitize_identifier(table_name)
-    target_types = [sf_type(t) for t in logical_types]
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    # Prefer Studio-probed live DDL over Map stamps (BOOLEAN→VARCHAR invent cliff).
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=live_dest_types if isinstance(live_dest_types, dict) else None,
+    )
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
 
@@ -920,7 +929,15 @@ def write_mapped_rows(
     # Size Snowflake NUMBER columns from the actual batch data only when Map
     # did not stamp an explicit DECIMAL/NUMBER(p,s). Prefer integer capacity
     # over fractional digits so NUMBER(38,s) never under-fits bare DECIMAL.
-    target_types = resolve_snowflake_create_types(logical_types, mapped_rows)
+    sized_logical = [dest_types.get(c, logical_types[i]) for i, c in enumerate(target_cols)]
+    target_types = resolve_snowflake_create_types(sized_logical, mapped_rows)
+    # Live physical columns beat create-sizing invent (existing table path).
+    if isinstance(live_dest_types, dict) and live_dest_types:
+        live_fold = {str(k).lower(): str(v) for k, v in live_dest_types.items() if k and v}
+        for i, col in enumerate(target_cols):
+            hit = live_fold.get(str(col).lower())
+            if hit:
+                target_types[i] = sf_type(hit)
     mapped_rows = _quarantine_unfit_decimals(
         mapped_rows, target_cols, target_types, rejected_details, policy
     )
