@@ -255,10 +255,16 @@ def analyze_coercion(
 
         # Only skip truly unbounded TEXT sinks with no declared fidelity loss.
         # Bounded VARCHAR(n) / LOB-tier narrow / national charset must be probed.
+        # Specialty DDL (INET/LTREE/…) normalizes to LOGICAL_STRING — must NOT skip
+        # or Validate greens empty/invalid while write refuse-raises.
+        from services.type_system import specialty_carrier_base
+
+        specialty_base = specialty_carrier_base(tgt_type)
         if (
             tgt_logical in _TEXTUAL_LOGICALS
             and is_unlimited_string_carrier(tgt_type)
             and not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
+            and not specialty_base
         ):
             continue
 
@@ -327,6 +333,26 @@ def analyze_coercion(
             "snowflake",
             "bigquery",
         }
+        use_specialty_wire = bool(
+            specialty_base
+            and specialty_base not in {"CITEXT", "TSVECTOR"}
+            and dest_l
+            in {
+                "mysql",
+                "mariadb",
+                "postgresql",
+                "postgres",
+                "generic_sql",
+                "redshift",
+                "duckdb",
+                "sqlserver",
+                "mssql",
+                "snowflake",
+                "bigquery",
+                "oracle",
+                "oracledb",
+            }
+        )
         # UUID / binary destination wire — same fail-closed path as writers
         # (Airbyte base64 binary + RFC 4122 UUID; never invent).
         _uuid_binary_dests = {
@@ -392,14 +418,18 @@ def analyze_coercion(
                     "datetime",
                     "time",
                     "timestamp",
-                }:
+                } or (
+                    specialty_base
+                    and specialty_base not in {"CITEXT", "TSVECTOR"}
+                ):
                     failed += 1
                     if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
                         sample_failures.append({
                             "row": idx,
                             "value": cell[:120],
                             "reason": (
-                                f"Empty value cannot coerce to {tgt_logical} — "
+                                f"Empty value cannot coerce to "
+                                f"{specialty_base or tgt_logical} — "
                                 "refuse silent NULL invent (quarantine or remap)"
                             ),
                         })
@@ -470,7 +500,7 @@ def analyze_coercion(
                                 "wire_form": wire.get("wire_value"),
                                 "reason": wire.get("reason") or "Will normalize for destination",
                             })
-                if use_json_wire or use_bool_wire or use_uuid_wire or use_binary_wire:
+                if use_json_wire or use_bool_wire or use_uuid_wire or use_binary_wire or use_specialty_wire:
                     try:
                         from connectors.sql_bind import normalize_sql_bind_value
 
@@ -480,7 +510,11 @@ def analyze_coercion(
                             else (
                                 "BOOLEAN"
                                 if use_bool_wire
-                                else ("UUID" if use_uuid_wire else "BYTEA")
+                                else (
+                                    "UUID"
+                                    if use_uuid_wire
+                                    else ("BYTEA" if use_binary_wire else tgt_type)
+                                )
                             )
                         )
                         bound = normalize_sql_bind_value(
@@ -488,6 +522,15 @@ def analyze_coercion(
                             bind_type,
                             engine=dest_l or "mysql",
                         )
+                        # Informal yes/no pass through without raising — writers
+                        # still refuse non-bool. Fail Validate to match write.
+                        if use_bool_wire and not isinstance(bound, bool) and not (
+                            isinstance(bound, int) and bound in (0, 1)
+                        ):
+                            raise ValueError(
+                                f"BOOLEAN refused informal wire {cell[:64]!r} "
+                                "(refuse invent — use true/false/0/1)"
+                            )
                         if sample_wire_form is None and bound is not None:
                             sample_wire_form = (
                                 bound.hex()[:120]

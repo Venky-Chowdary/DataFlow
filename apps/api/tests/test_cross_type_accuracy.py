@@ -371,10 +371,10 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
         ("not-json", "json", '"not-json"', False),
         # uuids
         ("550e8400-e29b-41d4-a716-446655440000", "uuid", "550e8400-e29b-41d4-a716-446655440000", False),
-        # null sentinels collapse to None for typed transforms
-        ("NULL", "integer", None, False),
-        ("N/A", "decimal", None, False),
-        ("", "boolean", None, False),
+        # null sentinels refuse invent into typed sinks (quarantine owns the cell)
+        ("NULL", "integer", None, True),
+        ("N/A", "decimal", None, True),
+        ("", "boolean", None, True),
         # time values
         ("12:30:45", "time", "12:30:45", False),
         ("14:30", "time", "14:30:00", False),

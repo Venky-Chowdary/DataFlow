@@ -15,9 +15,9 @@ import re
 from typing import Any
 
 # Canonical boolean wire only — SSOT with type_system / transform_engine.
-# Informal yes/on/y invents truth; quarantine or operator transform owns those.
-_TRUE_TOKENS = frozenset({"true", "t", "1", "yes", "y"})
-_FALSE_TOKENS = frozenset({"false", "f", "0", "no", "n"})
+# Informal yes/on/y/no/n invents truth; quarantine or operator transform owns those.
+_TRUE_TOKENS = frozenset({"true", "t", "1"})
+_FALSE_TOKENS = frozenset({"false", "f", "0"})
 
 
 def _refuse_empty_specialty(text: str, label: str) -> str:
@@ -1337,7 +1337,11 @@ def coerce_year_wire(value: Any) -> int | None:
 
 
 def coerce_boolean_wire(value: Any, *, as_int: bool = False) -> Any:
-    """Normalize Mongo/CSV boolean wire. Unrecognized values pass through."""
+    """Normalize Mongo/CSV boolean wire. Unrecognized values pass through.
+
+    Empty string refuses NULL invent on boolean sinks (upsert wipe). Informal
+    ``yes``/``no`` pass through for quarantine — never invent True/False.
+    """
     if value is None:
         return None
     if isinstance(value, bool):
@@ -1347,6 +1351,11 @@ def coerce_boolean_wire(value: Any, *, as_int: bool = False) -> Any:
         return bit if as_int else bool(bit)
     if isinstance(value, str):
         token = value.strip().lower()
+        if not token:
+            raise ValueError(
+                "empty string cannot coerce to boolean — "
+                "refuse silent NULL invent (quarantine or remap upstream)"
+            )
         if token in _TRUE_TOKENS:
             return 1 if as_int else True
         if token in _FALSE_TOKENS:
@@ -2187,19 +2196,28 @@ def normalize_sql_bind_value(
     if is_year_carrier(ddl_type) or upper == "YEAR":
         return coerce_year_wire(value)
     # Oracle VARCHAR2/CHAR: zero-length string is stored as NULL (HVR write
-    # coercion / Oracle semantics). Collapse before other typed binds so Gate-8
-    # write-location fingerprints match destination read-back.
+    # coercion / Oracle semantics). Collapse only for true string carriers —
+    # never silence specialty DDL (INET/CITEXT/TSVECTOR/…) that maps to
+    # LOGICAL_STRING but must raise or keep '' under the honesty bar.
     if (
         isinstance(value, str)
         and value == ""
         and (eng in {"oracle", "oracledb", "oracle_autonomous"} or eng.startswith("oracle"))
     ):
-        from services.type_system import LOGICAL_STRING, LOGICAL_TEXT, normalize_logical_type
-
-        if not upper or normalize_logical_type(ddl_type or upper) in {
+        from services.type_system import (
             LOGICAL_STRING,
             LOGICAL_TEXT,
-        }:
+            normalize_logical_type,
+            specialty_carrier_base,
+        )
+
+        if not specialty_carrier_base(ddl_type or upper) and (
+            not upper
+            or normalize_logical_type(ddl_type or upper) in {
+                LOGICAL_STRING,
+                LOGICAL_TEXT,
+            }
+        ):
             return None
     # BIT / VARBIT before BINARY — "BIT" must not fall through as boolean here
     # when width > 1 (caller passes BIT(32) etc.).

@@ -44,8 +44,15 @@ def _to_es_value(value: Any, source_type: str) -> Any:
         return None
     upper = source_type.upper()
     if upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
+        from connectors.sql_bind import coerce_decimal_wire
+
+        if isinstance(value, str) and not str(value).strip():
+            raise ValueError(
+                f"Elasticsearch DECIMAL refused empty string {value!r} "
+                "(refuse silent null invent / field wipe)"
+            )
         # Keep as string — float64 would silently lose precision (no quarantine).
-        return str(value)
+        return str(coerce_decimal_wire(value, ddl_type=upper))
     if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
         from connectors.sql_bind import coerce_float_wire
 
@@ -55,6 +62,26 @@ def _to_es_value(value: Any, source_type: str) -> Any:
                 "(refuse silent null invent / field wipe)"
             )
         return coerce_float_wire(value, ddl_type=upper)
+    if upper in {
+        "INTEGER",
+        "INT",
+        "INT32",
+        "INT64",
+        "LONG",
+        "SHORT",
+        "BYTE",
+        "BIGINT",
+        "SMALLINT",
+        "TINYINT",
+    }:
+        from connectors.sql_bind import coerce_integer_wire
+
+        if isinstance(value, str) and not str(value).strip():
+            raise ValueError(
+                f"Elasticsearch {upper} refused empty string {value!r} "
+                "(refuse silent null invent / field wipe)"
+            )
+        return coerce_integer_wire(value, ddl_type=upper)
     if upper in {"BOOLEAN", "BOOL"}:
         from connectors.sql_bind import coerce_boolean_wire
 

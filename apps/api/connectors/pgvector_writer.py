@@ -289,17 +289,33 @@ def write_mapped_rows(
                 batch = valid_rows[i : i + batch_size]
                 values = []
                 for row in batch:
+                    from services.vector_embedding import coerce_chunk_index
+
                     vector = _vector_literal(row.get("embedding"))
                     metadata = row.get("metadata") or {}
+                    try:
+                        chunk_idx = coerce_chunk_index(row.get("chunk_index"))
+                    except ValueError as exc:
+                        rejected_details.append({
+                            "row": row.get("id") or row.get("source_id") or "?",
+                            "column": "chunk_index",
+                            "target": "chunk_index",
+                            "value": str(row.get("chunk_index"))[:120],
+                            "reason": str(exc),
+                            "policy": "write_quarantine",
+                        })
+                        continue
                     values.append((
                         row["id"],
                         row.get("content", ""),
                         vector,
                         json.dumps(metadata, ensure_ascii=False, default=sanitize_json_value),
                         row.get("source_id", ""),
-                        row.get("chunk_index", 0),
+                        chunk_idx,
                     ))
 
+                if not values:
+                    continue
                 args_str = ",".join(
                     cur.mogrify(
                         "(%s, %s, %s::vector, %s::jsonb, %s, %s)",
@@ -321,7 +337,7 @@ def write_mapped_rows(
                     """
                 ).format(schema_id, table_id, sql.SQL(args_str))
                 cur.execute(insert_sql)
-                inserted += len(batch)
+                inserted += len(values)
                 if on_checkpoint:
                     on_checkpoint(
                         (i // batch_size) + 1,
