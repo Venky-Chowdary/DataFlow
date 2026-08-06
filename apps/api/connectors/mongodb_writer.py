@@ -25,6 +25,7 @@ from connectors.writer_common import (
     lsn_is_newer,
     resolve_target_columns,
     row_checksum,
+    reject_on_strict_policy,
     sanitize_identifier,
     transform_error_policy,
 )
@@ -207,7 +208,8 @@ def write_mapped_rows(
         )
         rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-        if transform_errors and policy == "fail":
+        _map_abort = reject_on_strict_policy(policy, rejected_details, 'MongoDB')
+        if _map_abort or (transform_errors and policy == "fail"):
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -215,7 +217,7 @@ def write_mapped_rows(
                 target_schema=db_name,
                 checksum="",
                 chunks_completed=0,
-                error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+                error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
                 rejected_rows=rejected_rows,
                 rejected_details=rejected_details,
                 warnings=transform_errors,
@@ -448,7 +450,7 @@ def write_mapped_rows(
             # would delete destination keys for fields absent in the CDC image).
             from services.value_serializer import is_missing_sentinel
 
-            from connectors.writer_common import row_has_missing_sentinel
+            from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
 
             docs: list[dict[str, Any]] = []
             sparse_flags: list[bool] = []

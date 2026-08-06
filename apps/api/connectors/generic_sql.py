@@ -116,6 +116,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     materialize_missing_as_null_for_dense_write,
+    reject_on_strict_policy,
     split_dense_sparse_rows,
     transform_error_policy,
 )
@@ -4170,7 +4171,8 @@ def write_mapped_rows(
     # Dense INSERT/MERGE: absent schemaless fields → SQL NULL (sparse keeps sentinel).
     mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'SQL')
+    if _map_abort or (transform_errors and policy == "fail"):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -4178,7 +4180,7 @@ def write_mapped_rows(
             target_schema=schema or database,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_rows=_rejected_row_count(
                 data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
             ),
@@ -4362,7 +4364,7 @@ def write_mapped_rows(
                 reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if sparse_converted and write_mode == "upsert" and conflict_columns:
-                from connectors.writer_common import row_has_missing_sentinel
+                from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
 
                 sparse_written, sparse_skipped, sparse_checksum = (
                     _generic_apply_sparse_upsert(

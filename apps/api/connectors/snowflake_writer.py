@@ -43,6 +43,7 @@ from connectors.writer_common import (
     sanitize_identifier,
     snowflake_lsn_match_predicate,
     sparse_present_bindings,
+    reject_on_strict_policy,
     split_dense_sparse_rows,
     transform_error_policy,
 )
@@ -911,7 +912,8 @@ def write_mapped_rows(
     )
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Snowflake')
+    if _map_abort or (transform_errors and policy == "fail"):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -919,7 +921,7 @@ def write_mapped_rows(
             target_schema=schema,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_rows=rejected_rows,
             warnings=transform_errors,
             rejected_details=rejected_details,
@@ -1099,7 +1101,7 @@ def write_mapped_rows(
                 load_method = "merge_batch"
                 written = 0
                 if sparse_rows:
-                    from connectors.writer_common import row_has_missing_sentinel
+                    from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
 
                     sparse_written, sparse_skipped, sparse_checksum = (
                         _sf_apply_sparse_upsert(

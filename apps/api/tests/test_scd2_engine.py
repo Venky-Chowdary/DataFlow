@@ -276,3 +276,64 @@ def test_scd2_fail_job_contract_aborts_before_merge():
             Path(db_path).unlink(missing_ok=True)
         except PermissionError:
             pass
+
+
+def test_scd2_empty_pk_quarantined_not_silent():
+    """Blank primary keys must surface in rejected_details — never vanish."""
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        summary = apply_scd2(
+            endpoint,
+            [
+                {"id": "", "name": "ghost"},
+                {"id": "2", "name": "ok"},
+            ],
+            columns=["id", "name"],
+            schema={"id": "string", "name": "string"},
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "name", "target": "name"},
+            ],
+            conflict_columns=["id"],
+            validation_mode="balanced",
+        )
+        assert summary.get("ok") is not False
+        assert int(summary.get("rejected_rows") or 0) >= 1
+        assert any(
+            "primary key" in str(d.get("reason") or "").lower()
+            for d in (summary.get("rejected_details") or [])
+        )
+        assert int(summary.get("active_rows") or 0) == 1
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
+
+
+def test_scd2_numeric_zero_pk_is_valid_identity():
+    """Numeric 0 must not be treated as missing PK (truthiness trap)."""
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        summary = apply_scd2(
+            endpoint,
+            [{"id": 0, "name": "zero"}, {"id": 1, "name": "one"}],
+            columns=["id", "name"],
+            schema={"id": "integer", "name": "string"},
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "name", "target": "name"},
+            ],
+            conflict_columns=["id"],
+            validation_mode="balanced",
+        )
+        assert summary.get("ok") is not False, summary.get("error")
+        assert int(summary.get("rejected_rows") or 0) == 0
+        assert int(summary.get("active_rows") or 0) == 2
+    finally:
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass

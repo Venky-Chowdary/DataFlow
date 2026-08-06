@@ -61,6 +61,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     sanitize_identifier,
+    reject_on_strict_policy,
     sparse_present_bindings,
     transform_error_policy,
 )
@@ -1000,7 +1001,8 @@ def write_mapped_rows(
         data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
     )
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'PostgreSQL')
+    if _map_abort or (transform_errors and policy == "fail"):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -1008,7 +1010,7 @@ def write_mapped_rows(
             target_schema=schema,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
             warnings=transform_errors,
@@ -1266,7 +1268,7 @@ def write_mapped_rows(
             rows_skipped = 0
             if sparse_rows and write_mode == "upsert" and conflict_columns:
                 from psycopg2 import sql as _psql
-                from connectors.writer_common import row_has_missing_sentinel
+                from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
 
                 written_sparse, sparse_skipped, sparse_checksum = _pg_apply_sparse_upsert(
                     cur,

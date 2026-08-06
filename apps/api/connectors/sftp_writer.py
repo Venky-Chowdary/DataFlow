@@ -17,6 +17,7 @@ from services.value_serializer import cell_to_string, json_default
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
+    reject_on_strict_policy,
     _rejected_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
@@ -102,7 +103,8 @@ def write_mapped_rows(
         dest_kind="sftp",
         destination_pk_columns=None,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'SFTP')
+    if _map_abort or (transform_errors and policy == "fail"):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -110,7 +112,7 @@ def write_mapped_rows(
             target_schema=cfg.host,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
         )

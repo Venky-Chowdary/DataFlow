@@ -165,22 +165,8 @@ def write_mapped_rows(
         dest_kind="dynamodb",
         destination_pk_columns=list(conflict_columns or []) or None,
     )
-    if errors and policy == "fail":
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table,
-            target_schema=host or "",
-            checksum="",
-            chunks_completed=0,
-            error=f"Transform errors: {'; '.join(errors[:3])}",
-            warnings=errors[:10],
-            rejected_rows=len({d["row"] for d in rejected_details}),
-            rejected_details=rejected_details[:100],
-        )
-
     tgt_types = [str(dest_types.get(c, logical_types[i] if i < len(logical_types) else "VARCHAR") or "VARCHAR") for i, c in enumerate(target_cols)]
-    from connectors.writer_common import apply_write_quarantine_matrix
+    from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
 
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
@@ -191,6 +177,20 @@ def write_mapped_rows(
         dialect_label="DynamoDB",
         mappings=mappings,
     )
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "DynamoDB")
+    if _map_abort or (errors and policy == "fail"):
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=_map_abort or f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d["row"] for d in rejected_details}),
+            rejected_details=list(rejected_details),
+        )
 
     client = boto3_client("dynamodb", cfg)
     if create_table:

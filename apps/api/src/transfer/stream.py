@@ -2717,12 +2717,17 @@ def stream_scd2_mirror_transfer(
             dest_summary["active_rows"] = active_rows
             dest_summary["active_checksum"] = active_checksum
             dest_summary["updated_rows"] = updated_total
-            dest_summary["rejected_details"] = rejected_all
-            dest_summary["rejected_rows"] = len(rejected_all)
+            stage_rejects = list(stage_summary.get("rejected_details") or [])
+            merged_rejects = stage_rejects + rejected_all
+            dest_summary["rejected_details"] = merged_rejects
+            dest_summary["rejected_rows"] = len(merged_rejects)
             if scd2_block_error:
+                # Prior batches may already be committed (per-batch txn). Report
+                # honest progress — never claim 0 writes when history already moved.
                 dest_summary["ok"] = False
                 dest_summary["error"] = scd2_block_error
-                rows_written = 0
+                dest_summary["partial_scd2_committed"] = True
+                rows_written = written_total
             else:
                 rows_written = written_total
 
@@ -2751,6 +2756,17 @@ def stream_scd2_mirror_transfer(
             rows_written = rows_upserted
             dest_summary["upserted"] = rows_upserted
             dest_summary["checksum"] = upsert_summary.get("checksum", "")
+            # Merge upsert quarantine into dest_summary — never drop stage/upsert DLQ.
+            upsert_rejects = list(upsert_summary.get("rejected_details") or [])
+            stage_rejects = list(stage_summary.get("rejected_details") or [])
+            merged_rejects = stage_rejects + upsert_rejects
+            if merged_rejects:
+                dest_summary["rejected_details"] = merged_rejects
+                dest_summary["rejected_rows"] = len(merged_rejects)
+            else:
+                dest_summary.setdefault(
+                    "rejected_rows", int(upsert_summary.get("rejected_rows") or 0)
+                )
 
             # Single SQL pass to reactivate present keys and soft-delete missing keys.
             engine = get_sqlalchemy_engine(dest_cfg)
@@ -2760,7 +2776,10 @@ def stream_scd2_mirror_transfer(
                     map_source_to_target(col, mappings) for col in contract.primary_key_columns()
                 ]
             else:
-                pk_cols = [target_cols[0]]
+                raise ValueError(
+                    "Mirror requires an explicit primary_key on the stream contract; "
+                    "refuse inventing a conflict key from the first mapped column"
+                )
             # Correlate target↔staging without UPDATE aliases (SQLite-compatible).
             join_pred = " AND ".join(
                 f"{staging_qualified}.{quote_sql_identifier(c)} = "

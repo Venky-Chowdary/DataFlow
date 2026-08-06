@@ -163,6 +163,22 @@ def write_mapped_rows(
         dest_kind="redis",
         destination_pk_columns=list(conflict_columns or []) or None,
     )
+    from connectors.writer_common import reject_on_strict_policy
+
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "Redis")
+    if _map_abort or (errors and policy == "fail"):
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=prefix,
+            target_schema=f"db{database or 0}",
+            checksum="",
+            chunks_completed=0,
+            error=_map_abort or f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
+            rejected_details=list(rejected_details),
+        )
 
     conflict = _infer_redis_conflict_columns(target_cols, mappings, conflict_columns)
     client = _redis_client(cfg)

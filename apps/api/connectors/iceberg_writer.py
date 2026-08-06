@@ -29,6 +29,7 @@ from connectors.writer_common import (
     _rejected_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    reject_on_strict_policy,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -896,7 +897,8 @@ def _write_mapped_rows_pyiceberg(
         dest_kind="iceberg",
         destination_pk_columns=list(conflict_columns or []) or None,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg')
+    if _map_abort or (transform_errors and policy == "fail"):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -904,7 +906,7 @@ def _write_mapped_rows_pyiceberg(
             target_schema=target_schema,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             driver="iceberg",
         )
@@ -1011,6 +1013,19 @@ def _write_mapped_rows_pyiceberg(
             rejected_details,
             policy,
         )
+        _post_q_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+        if _post_q_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=_post_q_abort,
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
         if not mapped_rows:
             return WriteResult(
                 ok=True,
@@ -1021,8 +1036,8 @@ def _write_mapped_rows_pyiceberg(
                 chunks_completed=1,
                 rejected_details=rejected_details,
                 rejected_rows=_rejected_row_count(
-                data_rows, mapped_rows, rejected_details, policy
-            ),
+                    data_rows, mapped_rows, rejected_details, policy
+                ),
                 warnings=type_locked_warnings[:20],
                 driver="iceberg",
             )
@@ -1034,7 +1049,7 @@ def _write_mapped_rows_pyiceberg(
             assert_sparse_upsert_has_pk,
             row_has_missing_sentinel,
             sparse_present_bindings,
-        )
+)
         from services.cdc_effectively_once import should_apply_pk_row
         from services.value_serializer import is_missing_sentinel
 
@@ -1325,11 +1340,12 @@ def _write_mapped_rows_filesystem(
         dest_kind="iceberg",
         destination_pk_columns=list(conflict_columns or []) or None,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg')
+    if _map_abort or (transform_errors and policy == "fail"):
         return WriteResult(
             ok=False, rows_written=0, table_name=table, target_schema=str(table_dir),
             checksum="", chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details, driver="iceberg",
         )
 
@@ -1355,6 +1371,19 @@ def _write_mapped_rows_filesystem(
         rejected_details,
         policy,
     )
+    _post_q_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+    if _post_q_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=_post_q_abort,
+            rejected_details=rejected_details,
+            driver="iceberg",
+        )
     file_warnings: list[str] = []
     if write_mode in {"overwrite", "replace"} and current_meta:
         # Drop prior data refs; keep schema evolution

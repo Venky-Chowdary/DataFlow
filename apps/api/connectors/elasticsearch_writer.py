@@ -148,7 +148,10 @@ def write_mapped_rows(
         dest_kind="elasticsearch",
         destination_pk_columns=list(conflict_columns or []) or None,
     )
-    if errors and policy == "fail":
+    from connectors.writer_common import reject_on_strict_policy
+
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "Elasticsearch")
+    if _map_abort or (errors and policy == "fail"):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -156,10 +159,10 @@ def write_mapped_rows(
             target_schema=host or "localhost",
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(errors[:3])}",
             warnings=errors[:10],
             rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
-            rejected_details=rejected_details[:100],
+            rejected_details=list(rejected_details),
         )
 
     conflict = [c for c in (conflict_columns or []) if c]

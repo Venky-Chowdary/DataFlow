@@ -352,6 +352,51 @@ def apply_scd2(
 
     mapped_rows: list[dict[str, Any]] = [dict(zip(target_cols, row)) for row in mapped_tuples]
 
+    # Empty PK identity must quarantine before history merge — never silent skip.
+    pk_ok_rows: list[dict[str, Any]] = []
+    for row_idx, row in enumerate(mapped_rows):
+        key = _compose_key(row, pk_columns)
+        # Never use truthiness — numeric 0 / "0" are valid PK values.
+        parts: list[str] = []
+        for c in pk_columns:
+            raw = row.get(c)
+            if raw is None:
+                parts.append("")
+            else:
+                parts.append(str(raw).strip())
+        # Any blank PK component is incomplete identity (including composites).
+        if not key or any(p == "" for p in parts):
+            rejected_details.append(
+                {
+                    "row": row_idx + 1,
+                    "column": ",".join(pk_columns),
+                    "target": ",".join(pk_columns),
+                    "value": "",
+                    "reason": "SCD2 row missing primary key identity",
+                    "policy": "quarantine",
+                    "chars": [],
+                }
+            )
+            continue
+        pk_ok_rows.append(row)
+    mapped_rows = pk_ok_rows
+    abort_pk = reject_on_strict_policy(error_policy, rejected_details, "SCD2")
+    if abort_pk:
+        return {
+            "ok": False,
+            "error": abort_pk,
+            "rows_written": 0,
+            "updated_rows": 0,
+            "active_rows": 0,
+            "active_checksum": "",
+            "mode": "scd2",
+            "primary_key_columns": pk_columns,
+            "target_columns": target_cols,
+            "rejected_details": list(rejected_details),
+            "rejected_rows": len(rejected_details),
+            "transform_errors": list(transform_errors)[:20],
+        }
+
     for row in mapped_rows:
         row[ROW_HASH_COLUMN] = _row_hash(row, target_cols)
 

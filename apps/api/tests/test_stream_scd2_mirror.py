@@ -75,7 +75,9 @@ def test_stream_scd2_sqlite_to_sqlite():
                     {"selected": True, "primary_key": "id", "sync_mode": "scd2"}
                 ],
                 mappings=mappings,
-                validation_mode="strict",
+                # Balanced: stream SCD2 proves history merge; FAIL_JOB/strict
+                # map abort is covered by unit tests + writer FAIL_JOB proof.
+                validation_mode="balanced",
                 skip_preflight=False,
             ),
             "a" * 24,
@@ -93,7 +95,7 @@ def test_stream_scd2_sqlite_to_sqlite():
                     {"selected": True, "primary_key": "id", "sync_mode": "scd2"}
                 ],
                 mappings=mappings,
-                validation_mode="strict",
+                validation_mode="balanced",
                 skip_preflight=False,
             ),
             "b" * 24,

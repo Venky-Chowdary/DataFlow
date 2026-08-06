@@ -19,6 +19,7 @@ from services.value_serializer import cell_to_string, json_default
 
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
+    reject_on_strict_policy,
     _rejected_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
@@ -260,19 +261,6 @@ def write_mapped_rows(
         dest_kind="email",
         destination_pk_columns=None,
     )
-    if transform_errors and policy == "fail":
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table_name,
-            target_schema=cfg.host,
-            checksum="",
-            chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_details=rejected_details,
-            rejected_rows=len(rejected_details),
-        )
-
     # Typed carriers still apply — refuse silent invent into the attachment
     # (parity with S3/SFTP). SMTP has no independent Gate-8 read-back; stamp
     # reconcile_sample so sample-verified honesty can still fire.
@@ -286,6 +274,19 @@ def write_mapped_rows(
         dialect_label="Email",
         mappings=mappings,
     )
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "Email")
+    if _map_abort or (transform_errors and policy == "fail"):
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=cfg.host,
+            checksum="",
+            chunks_completed=0,
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_details=rejected_details,
+            rejected_rows=len(rejected_details),
+        )
 
     rejected_rows = max(
         _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),

@@ -52,6 +52,7 @@ from connectors.writer_common import (
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
+    reject_on_strict_policy,
     sanitize_identifier,
     transform_error_policy,
 )
@@ -412,11 +413,12 @@ def write_mapped_rows(
         data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
     )
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'MySQL')
+    if _map_abort or (transform_errors and policy == "fail"):
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=database,
             checksum="", chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
             warnings=transform_errors,
@@ -658,7 +660,7 @@ def write_mapped_rows(
                 conn.commit()
                 written += sparse_written
                 rows_skipped += sparse_skipped
-                from connectors.writer_common import row_has_missing_sentinel
+                from connectors.writer_common import reject_on_strict_policy, row_has_missing_sentinel
 
                 rows_for_checksum = [
                     r for r in rows_for_checksum if not row_has_missing_sentinel(r)

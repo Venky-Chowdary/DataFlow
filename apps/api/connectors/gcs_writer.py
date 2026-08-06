@@ -117,7 +117,10 @@ def write_mapped_rows(
         mapped_rows, target_cols, tgt_types, rejected_details, policy, dialect_label="GCS",
         mappings=mappings,
     )
-    if errors and policy == "fail":
+    from connectors.writer_common import reject_on_strict_policy
+
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "GCS")
+    if _map_abort or (errors and policy == "fail"):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -125,10 +128,10 @@ def write_mapped_rows(
             target_schema=database,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(errors[:3])}",
             warnings=errors[:10],
             rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
-            rejected_details=rejected_details[:100],
+            rejected_details=list(rejected_details),
         )
 
     records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]

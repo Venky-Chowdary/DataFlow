@@ -351,7 +351,7 @@ def write_mapped_rows(
             error="SQLite path is required (database or connection_string).",
         )
 
-    from connectors.writer_common import sample_values_by_source_from_batch
+    from connectors.writer_common import reject_on_strict_policy, sample_values_by_source_from_batch
 
     batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
     target_cols, logical_types = resolve_target_columns(
@@ -478,7 +478,8 @@ def write_mapped_rows(
             data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-        if transform_errors and policy == "fail":
+        _map_abort = reject_on_strict_policy(policy, rejected_details, 'SQLite')
+        if _map_abort or (transform_errors and policy == "fail"):
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -486,7 +487,7 @@ def write_mapped_rows(
                 target_schema=schema or "main",
                 checksum="",
                 chunks_completed=0,
-                error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+                error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
                 rejected_rows=rejected_rows,
                 rejected_details=rejected_details,
                 warnings=transform_errors,

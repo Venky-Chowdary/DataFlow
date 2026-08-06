@@ -265,7 +265,7 @@ def _normalize_salesforce_id_cells(
     policy: str,
 ) -> list[tuple]:
     """Expand 15-char Ids to 18-char on Id/reference VARCHAR(18) columns."""
-    from connectors.writer_common import append_write_quarantine_detail
+    from connectors.writer_common import reject_on_strict_policy, append_write_quarantine_detail
     from services.value_serializer import cell_to_string, is_missing_sentinel
 
     id_cols = [
@@ -503,7 +503,8 @@ def write_mapped_rows(
         rejected_details,
         policy,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Salesforce')
+    if _map_abort or (transform_errors and policy == "fail"):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -511,7 +512,7 @@ def write_mapped_rows(
             target_schema="",
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             driver="salesforce",
         )

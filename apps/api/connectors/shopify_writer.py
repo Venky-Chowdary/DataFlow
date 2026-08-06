@@ -20,6 +20,7 @@ from connectors.saas_common import (
 )
 from connectors.saas_write_carriers import shopify_live_types_for_columns
 from connectors.writer_common import (
+    reject_on_strict_policy,
     WriteResult,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
@@ -198,7 +199,8 @@ def write_mapped_rows(
         dialect_label="Shopify",
         mappings=mappings,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Shopify')
+    if _map_abort or (transform_errors and policy == "fail"):
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -206,7 +208,7 @@ def write_mapped_rows(
             target_schema=shop_host,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             driver="shopify",
         )
