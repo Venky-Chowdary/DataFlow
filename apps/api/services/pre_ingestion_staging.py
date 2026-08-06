@@ -188,7 +188,7 @@ def write_via_pre_ingestion_staging(
             "promoted_rows": 0,
             "rejected_rows": len(rejected_row_nums),
             "coerced_null_rows": 0,
-            "rejected_details": rejected_details[:2000],
+            "rejected_details": list(rejected_details),
             "warnings": list(stage_summary.get("warnings") or [])[:10],
         }
         ddl_log.append(
@@ -215,7 +215,7 @@ def write_via_pre_ingestion_staging(
             "promoted_rows": 0,
             "rejected_rows": len(rejected_row_nums),
             "coerced_null_rows": 0,
-            "rejected_details": rejected_details[:2000],
+            "rejected_details": list(rejected_details),
             "warnings": list(stage_summary.get("warnings") or [])[:10],
         }
         ddl_log.append("PRE-INGESTION PROMOTE: 0 clean rows (all quarantined)")
@@ -250,7 +250,8 @@ def write_via_pre_ingestion_staging(
     summary["promoted_rows"] = int(promoted_n or 0)
     summary["rejected_rows"] = len(rejected_row_nums)
     summary["coerced_null_rows"] = 0
-    summary["rejected_details"] = rejected_details[:2000]
+    summary["rejected_details"] = list(rejected_details)
+    summary["rejected_details_sample"] = list(rejected_details)[:200]
     if stage_summary.get("warnings"):
         summary["warnings"] = list(stage_summary.get("warnings") or [])[:10]
     return int(promoted_n or 0), ddl_log, summary

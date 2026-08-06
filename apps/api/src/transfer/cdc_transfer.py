@@ -598,6 +598,38 @@ def _gate_cdc_sink(
     )
 
 
+def _refuse_cdc_advance_on_abort(
+    dest_summary: dict[str, Any] | None,
+    validation_mode: str,
+) -> None:
+    """Raise when CDC must not advance watermark/ack after abort-class rejects.
+
+    At-least-once CDC must redeliver FAIL_JOB / strict-blocked rows. Advancing
+    the cursor after quarantine would permanently skip them.
+    """
+    from connectors.writer_common import (
+        reject_on_strict_policy,
+        transform_error_policy_for_validation_mode,
+    )
+
+    if not isinstance(dest_summary, dict):
+        return
+    if dest_summary.get("ok") is False:
+        raise ValueError(
+            str(
+                dest_summary.get("error")
+                or "CDC destination write blocked — refuse watermark advance"
+            )
+        )
+    abort = reject_on_strict_policy(
+        transform_error_policy_for_validation_mode(validation_mode),
+        dest_summary.get("rejected_details") or [],
+        "CDC",
+    )
+    if abort:
+        raise ValueError(abort)
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -1207,6 +1239,7 @@ def _run_cdc_shared_multi_table(
         )
         if dest_summary:
             last_summary = dest_summary
+        _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
 
         skip_ack = False
         if change.resume_token is not None:
@@ -1912,6 +1945,8 @@ def _run_cdc_single_stream(
         state.last_checksum = last_checksum or state.last_checksum
         if dest_summary:
             state.last_dest_summary = dest_summary
+
+        _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
 
         # Never overwrite a durable log resume with incremental/side-channel tokens
         # (binlog gaps / wrong PG slots under load). Never ack those tokens either.

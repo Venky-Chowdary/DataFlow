@@ -102,20 +102,6 @@ def write_mapped_rows(
         dest_kind="sftp",
         destination_pk_columns=None,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'SFTP')
-    if _map_abort or (transform_errors and policy == "fail"):
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table_name,
-            target_schema=cfg.host,
-            checksum="",
-            chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_details=rejected_details,
-            rejected_rows=len(rejected_details),
-        )
-
     # Same object-store honesty as S3/GCS/ADLS — typed DECIMAL/BINARY/VARCHAR(n)
     # must quarantine before CSV/JSON serialize (Airbyte SFTP-JSON has no Gate-8).
     tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
@@ -128,6 +114,20 @@ def write_mapped_rows(
         dialect_label="SFTP",
         mappings=mappings,
     )
+    # FAIL_JOB / strict abort after matrix — never write when matrix added abort-class rejects.
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "SFTP")
+    if _map_abort or (transform_errors and policy == "fail"):
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=cfg.host,
+            checksum="",
+            chunks_completed=0,
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_details=list(rejected_details),
+            rejected_rows=len(rejected_details),
+        )
 
     directory, filename = split_remote_path(cfg.path)
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()

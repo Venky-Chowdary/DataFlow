@@ -225,7 +225,7 @@ def write_mapped_rows(
                         checksum="",
                         chunks_completed=0,
                         error=str(cell_exc)[:500],
-                        rejected_details=rejected_details[:100],
+                        rejected_details=list(rejected_details),
                     )
                 continue
             doc_id = _resolve_doc_id(
@@ -297,9 +297,15 @@ def write_mapped_rows(
         fail_closed = policy == "fail" and bool(bulk_details or identity_missing)
         if requires_identity and identity_missing > 0 and written == 0:
             fail_closed = True
+        # Re-check FAIL_JOB / strict after mid-write identity/bulk rejects.
+        _final_abort = reject_on_strict_policy(policy, all_rejected, "Elasticsearch")
+        if _final_abort:
+            fail_closed = True
         err_msg = None
         if fail_closed:
-            if identity_missing and written == 0:
+            if _final_abort:
+                err_msg = _final_abort
+            elif identity_missing and written == 0:
                 err_msg = (
                     f"elasticsearch blocked: {identity_missing} row(s) "
                     "lack document identity — set Primary key on Map"
@@ -310,6 +316,7 @@ def write_mapped_rows(
                 err_msg = "elasticsearch write failed"
         return WriteResult(
             ok=not fail_closed,
+            # Honest count: mid-write may have landed docs before abort-class reject.
             rows_written=written,
             table_name=index,
             target_schema=host or "localhost",
@@ -322,7 +329,7 @@ def write_mapped_rows(
             error=err_msg,
             warnings=(errors + [str(e) for e in (bulk_errors or [])[:5]])[:10],
             rejected_rows=len({str(d.get("row")) for d in all_rejected if d.get("row") not in (None, "")}),
-            rejected_details=all_rejected[:100],
+            rejected_details=list(all_rejected),
             meta=gate8_writer_meta(mapped_rows, target_cols) if not fail_closed else {},
         )
     except Exception as exc:
@@ -334,6 +341,8 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=str(exc),
+            rejected_details=list(rejected_details) if "rejected_details" in locals() else [],
+            rejected_rows=len(rejected_details) if "rejected_details" in locals() else 0,
         )
     finally:
         try:

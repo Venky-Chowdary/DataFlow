@@ -218,10 +218,12 @@ def write_mapped_rows(
             chunks_completed=1,
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
-            rejected_details=rejected_details[:100],
+            rejected_details=list(rejected_details),
         )
     except Exception as exc:
         return WriteResult(
             ok=False, rows_written=0, table_name=key, target_schema=bucket,
             checksum="", chunks_completed=0, error=str(exc),
+            rejected_details=list(rejected_details) if "rejected_details" in locals() else [],
+            rejected_rows=len(rejected_details) if "rejected_details" in locals() else 0,
         )

@@ -209,7 +209,7 @@ def write_mapped_rows(
                         error=msg,
                         warnings=errors[:10],
                         rejected_rows=len({d["row"] for d in rejected_details}) + 1,
-                        rejected_details=rejected_details[:100]
+                        rejected_details=list(rejected_details)
                         + [
                             {
                                 "row": i + 1,
@@ -253,7 +253,7 @@ def write_mapped_rows(
                         error=msg,
                         warnings=errors[:10],
                         rejected_rows=len({d["row"] for d in rejected_details}) + 1,
-                        rejected_details=rejected_details[:100]
+                        rejected_details=list(rejected_details)
                         + [
                             {
                                 "row": i + 1,
@@ -296,7 +296,7 @@ def write_mapped_rows(
                     error=msg,
                     warnings=errors[:10],
                     rejected_rows=len({d["row"] for d in rejected_details}),
-                    rejected_details=rejected_details[:100],
+                    rejected_details=list(rejected_details),
                 )
             seen_keys[key] = i
 
@@ -318,7 +318,7 @@ def write_mapped_rows(
                         error=msg,
                         warnings=errors[:10],
                         rejected_rows=len({d["row"] for d in rejected_details}) + 1,
-                        rejected_details=rejected_details[:100]
+                        rejected_details=list(rejected_details)
                         + [
                             {
                                 "row": i + 1,
@@ -345,6 +345,21 @@ def write_mapped_rows(
                 errors.append(msg)
         if on_checkpoint:
             on_checkpoint(1, 1, written)
+        # Re-check FAIL_JOB / strict after mid-write identity/type rejects.
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "Redis")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=prefix,
+                target_schema=f"db{database or 0}",
+                checksum="",
+                chunks_completed=0,
+                error=_final_abort,
+                warnings=errors[:10],
+                rejected_rows=len({d["row"] for d in rejected_details}),
+                rejected_details=list(rejected_details),
+            )
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -358,7 +373,7 @@ def write_mapped_rows(
             chunks_completed=1,
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
-            rejected_details=rejected_details[:100],
+            rejected_details=list(rejected_details),
             meta=gate8_writer_meta(mapped_rows, target_cols),
         )
     except Exception as exc:
@@ -370,6 +385,8 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=format_exception_message(exc),
+            rejected_details=list(rejected_details) if "rejected_details" in locals() else [],
+            rejected_rows=len(rejected_details) if "rejected_details" in locals() else 0,
         )
     finally:
         client.close()

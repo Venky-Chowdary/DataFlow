@@ -1035,7 +1035,8 @@ def stream_file_to_database(
             "rejected": int(dest_summary.get("rejected_rows", 0) or 0),
             "coerced_null": int(dest_summary.get("coerced_null_rows", 0) or 0),
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
-            "rejected_details": (dest_summary.get("rejected_details") or [])[:2000],
+            # Full rejected_details for DLQ — never truncate before persist.
+            "rejected_details": list(dest_summary.get("rejected_details") or []),
             "batch_rows": len(data_rows),
         }
 
@@ -1125,7 +1126,8 @@ def stream_file_to_database(
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
-    dest_summary["rejected_details"] = rejected_details[:2000]
+    dest_summary["rejected_details"] = list(rejected_details)
+    dest_summary["rejected_details_sample"] = list(rejected_details)[:200]
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     # Stash a bounded source sample so append/upsert Gate-8 reconciliation can

@@ -1533,11 +1533,8 @@ def build_mapped_rows_with_details(
                         or mm.get("identity")
                     ]
                     pk_cols = [c for c in flagged if c]
-                if not pk_cols:
-                    if "id" in values:
-                        pk_cols = ["id"]
-                    elif "_id" in values:
-                        pk_cols = ["_id"]
+                # Never invent id/_id as PK for quarantine replay — only contract/
+                # mapping/destination-proven columns. Invented PK poisons DLQ identity.
                 if pk_cols:
                     detail["primary_key"] = pk_cols
                     detail["pk_value"] = {

@@ -206,22 +206,7 @@ def write_mapped_rows(
             dest_kind="mongodb",
             destination_pk_columns=list(conflict_columns or []) or None,
         )
-        rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-        _map_abort = reject_on_strict_policy(policy, rejected_details, 'MongoDB')
-        if _map_abort or (transform_errors and policy == "fail"):
-            return WriteResult(
-                ok=False,
-                rows_written=0,
-                table_name=collection_name,
-                target_schema=db_name,
-                checksum="",
-                chunks_completed=0,
-                error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
-                rejected_rows=rejected_rows,
-                rejected_details=rejected_details,
-                warnings=transform_errors,
-            )
 
         tgt_types = [
             str(dest_types.get(c, logical_types[i] if i < len(logical_types) else "VARCHAR") or "VARCHAR")
@@ -239,6 +224,21 @@ def write_mapped_rows(
             mappings=mappings,
         )
         rejected_rows = _rejected_row_count(data_rows, mapped_rows, rejected_details, policy)
+        # FAIL_JOB / strict abort after matrix — matrix may add abort-class rejects.
+        _map_abort = reject_on_strict_policy(policy, rejected_details, "MongoDB")
+        if _map_abort or (transform_errors and policy == "fail"):
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection_name,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
+                rejected_rows=rejected_rows,
+                rejected_details=list(rejected_details),
+                warnings=transform_errors,
+            )
 
         from datetime import date as _date
         from datetime import datetime as _datetime
@@ -496,7 +496,7 @@ def write_mapped_rows(
                             f"{missing_keys or requested_keys}"
                         ),
                         rejected_rows=len(rejected_details),
-                        rejected_details=rejected_details[:100],
+                        rejected_details=list(rejected_details),
                         warnings=transform_errors,
                     )
 
@@ -555,7 +555,7 @@ def write_mapped_rows(
                                 f"idempotent delivery: {exc}"
                             ),
                             rejected_rows=len(rejected_details),
-                            rejected_details=rejected_details[:100],
+                            rejected_details=list(rejected_details),
                             warnings=transform_errors,
                         )
 
@@ -588,7 +588,7 @@ def write_mapped_rows(
                                 chunks_completed=chunk_idx,
                                 error=detail["reason"],
                                 rejected_rows=len(rejected_details),
-                                rejected_details=rejected_details[:100],
+                                rejected_details=list(rejected_details),
                                 warnings=transform_errors,
                             )
                         continue
@@ -614,6 +614,23 @@ def write_mapped_rows(
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written + skipped_total)
 
+        # Re-check FAIL_JOB / strict after mid-write incomplete-PK quarantine.
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "MongoDB")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                rows_skipped=skipped_total,
+                table_name=collection_name,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=chunks,
+                error=_final_abort,
+                rejected_rows=len(rejected_details),
+                rejected_details=list(rejected_details),
+                coerced_null_rows=coerced_null_rows,
+                warnings=transform_errors,
+            )
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -627,7 +644,7 @@ def write_mapped_rows(
             ),
             chunks_completed=chunks,
             rejected_rows=max(rejected_rows, len(data_rows) - written - skipped_total),
-            rejected_details=rejected_details,
+            rejected_details=list(rejected_details),
             coerced_null_rows=coerced_null_rows,
             warnings=transform_errors,
             meta=gate8_writer_meta(mapped_rows, target_cols),

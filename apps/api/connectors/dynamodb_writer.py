@@ -237,7 +237,7 @@ def write_mapped_rows(
                         chunks_completed=0,
                         error=detail["reason"],
                         rejected_rows=len({d["row"] for d in rejected_details}),
-                        rejected_details=rejected_details[:100],
+                        rejected_details=list(rejected_details),
                     )
                 break
             i = target_cols.index(key_col)
@@ -267,7 +267,7 @@ def write_mapped_rows(
                         chunks_completed=0,
                         error=detail["reason"],
                         rejected_rows=len({d["row"] for d in rejected_details}),
-                        rejected_details=rejected_details[:100],
+                        rejected_details=list(rejected_details),
                     )
                 break
         if key_ok:
@@ -325,13 +325,15 @@ def write_mapped_rows(
             chunks_completed=chunks if valid_rows else 0,
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
-            rejected_details=rejected_details[:100],
+            rejected_details=list(rejected_details),
             meta=gate8_writer_meta(valid_rows, target_cols),
         )
     except Exception as exc:
         return WriteResult(
             ok=False, rows_written=written, table_name=table, target_schema=host or "",
             checksum="", chunks_completed=0, error=str(exc),
+            rejected_details=list(rejected_details) if "rejected_details" in locals() else [],
+            rejected_rows=len(rejected_details) if "rejected_details" in locals() else 0,
         )
 
 
