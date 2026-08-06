@@ -351,7 +351,7 @@ def _merge_cdc_dest_summary(
 
 def _records_to_matrix(records: list[dict[str, Any]], headers: list[str]) -> list[list[str]]:
     """CDC matrix with SQL NULL ≠ empty string; absent keys stay missing sentinels."""
-    from services.value_serializer import DF_MISSING_SENTINEL
+    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
 
     rows: list[list[str]] = []
     for r in records:
@@ -360,7 +360,12 @@ def _records_to_matrix(records: list[dict[str, Any]], headers: list[str]) -> lis
             if h not in r:
                 row.append(DF_MISSING_SENTINEL)
             else:
-                row.append(cell_to_string(r.get(h), preserve_sql_null=True))
+                val = r.get(h)
+                # Present DF_MISSING must stay omit-from-SET (never cell_to_string → "").
+                if is_missing_sentinel(val):
+                    row.append(DF_MISSING_SENTINEL)
+                else:
+                    row.append(cell_to_string(val, preserve_sql_null=True))
         rows.append(row)
     return rows
 

@@ -36,8 +36,11 @@ def _to_es_value(value: Any, source_type: str) -> Any:
     """
     from services.value_serializer import is_missing_sentinel
 
-    # STOP_COLUMN / coerce_null omit — JSON null, never the sentinel string.
-    if value is None or is_missing_sentinel(value):
+    # STOP_COLUMN / coerce_null omit — callers must skip projecting this cell.
+    # Returning None here would write JSON null and wipe prior _source fields.
+    if is_missing_sentinel(value):
+        raise ValueError("DF_MISSING must be omitted from Elasticsearch _source")
+    if value is None:
         return None
     upper = source_type.upper()
     if upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
@@ -150,6 +153,7 @@ def write_mapped_rows(
         error_policy=policy,
         dest_kind="elasticsearch",
         destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
     from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
 
@@ -220,12 +224,17 @@ def write_mapped_rows(
 
         identity_missing = 0
         actions: list[dict[str, Any]] = []
+        from connectors.writer_common import row_has_missing_sentinel
+        from services.value_serializer import is_missing_sentinel
+
         for row_idx, row in enumerate(mapped_rows):
             try:
-                source = {
-                    target_cols[i]: _to_es_value(value, logical_types[i])
-                    for i, value in enumerate(row)
-                }
+                # Omit DF_MISSING — never project JSON null (would wipe prior fields).
+                source: dict[str, Any] = {}
+                for i, value in enumerate(row):
+                    if is_missing_sentinel(value):
+                        continue
+                    source[target_cols[i]] = _to_es_value(value, logical_types[i])
             except (ValueError, TypeError) as cell_exc:
                 rejected_details.append({
                     "row": row_idx + 1,
@@ -254,13 +263,8 @@ def write_mapped_rows(
                 target_cols=target_cols,
             )
             source.pop("_id", None)
-            action: dict[str, Any] = {"_index": index, "_source": source}
-            if doc_id is not None:
-                action["_id"] = str(doc_id)
-                # Insert/append must not silently overwrite existing docs (index vs create).
-                if mode in {"insert", "append", "create"}:
-                    action["_op_type"] = "create"
-            else:
+            sparse = row_has_missing_sentinel(row)
+            if doc_id is None:
                 identity_missing += 1
                 rejected_details.append({
                     "row": row_idx + 1,
@@ -274,6 +278,20 @@ def write_mapped_rows(
                     "policy": "write_fail" if policy == "fail" else "write_quarantine",
                 })
                 continue
+            # Sparse upsert: update+doc merges present fields only (never null-wipe).
+            if sparse and mode in {"upsert", "update", "merge"}:
+                action = {
+                    "_op_type": "update",
+                    "_index": index,
+                    "_id": str(doc_id),
+                    "doc": source,
+                    "doc_as_upsert": True,
+                }
+            else:
+                action = {"_index": index, "_source": source, "_id": str(doc_id)}
+                # Insert/append must not silently overwrite existing docs (index vs create).
+                if mode in {"insert", "append", "create"}:
+                    action["_op_type"] = "create"
             actions.append(action)
 
         written, bulk_errors = bulk(client, actions, raise_on_error=False) if actions else (0, [])

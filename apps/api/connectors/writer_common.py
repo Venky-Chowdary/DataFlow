@@ -1732,6 +1732,7 @@ def prepare_records_for_vector_write(
     stream_contracts: list[dict[str, Any]] | None = None,
     contract_primary_key: str | None = None,
     label: str = "vector",
+    destination_column_nullability: dict[str, bool] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
     """Apply Map transforms + Risk Contracts before embedding/upsert.
 
@@ -1778,6 +1779,7 @@ def prepare_records_for_vector_write(
         destination_pk_columns=destination_pk_columns,
         stream_contracts=stream_contracts,
         contract_primary_key=contract_primary_key,
+        destination_column_nullability=destination_column_nullability,
     )
     # Typed specialty holdout (VECTOR(n) length) before embed/upsert — same bar
     # as SQL writers. No-op when dest_types are unbounded strings.
@@ -1815,8 +1817,11 @@ def prepare_records_for_vector_write(
     }
 
     def _cell(val: Any) -> Any:
-        if val is None:
-            return ""
+        from services.value_serializer import is_missing_sentinel
+
+        # STOP_COLUMN / coerce_null — omit from vector metadata (never leak sentinel).
+        if val is None or is_missing_sentinel(val):
+            return None
         if isinstance(val, (str, int, float, bool)):
             return val
         return str(val)
@@ -1831,11 +1836,16 @@ def prepare_records_for_vector_write(
         tup = mapped[mapped_i]
         mapped_i += 1
         # Preserve unmapped source headers for metadata_columns / content_column.
-        row: dict[str, Any] = {
-            h: _cell(raw[i] if i < len(raw) else None) for i, h in enumerate(headers)
-        }
+        row: dict[str, Any] = {}
+        for i, h in enumerate(headers):
+            cell = _cell(raw[i] if i < len(raw) else None)
+            if cell is not None:
+                row[h] = cell
         for i, tgt in enumerate(target_cols):
             val = _cell(tup[i] if i < len(tup) else None)
+            if val is None:
+                # Omit DF_MISSING / null overlay — do not invent "" into metadata.
+                continue
             row[tgt] = val
             src = source_for_target[i] if i < len(source_for_target) else ""
             if src:

@@ -839,6 +839,7 @@ def _write_mapped_rows_pyiceberg(
     conflict_columns: list[str] | None,
     sync_mode: str = "",
     file_batch_idx: int = 0,
+    destination_column_nullability: dict[str, bool] | None = None,
 ) -> WriteResult:
     """Write a batch through a real pyiceberg catalog with MERGE/upsert support."""
     from services.sync_cursor import is_overwrite_sync
@@ -899,6 +900,7 @@ def _write_mapped_rows_pyiceberg(
         preserve_case=True,
         dest_kind="iceberg",
         destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
     )
     _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg')
     if _map_abort or (transform_errors and policy == "fail"):
@@ -1398,6 +1400,7 @@ def _write_mapped_rows_filesystem(
         preserve_case=True,
         dest_kind="iceberg",
         destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
     _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg')
     if _map_abort or (transform_errors and policy == "fail"):
@@ -1650,6 +1653,7 @@ def write_mapped_rows(
             conflict_columns=conflict_columns,
             sync_mode=sync_mode,
             file_batch_idx=file_batch_idx,
+            destination_column_nullability=_kwargs.get("destination_column_nullability"),
         )
 
     return _write_mapped_rows_filesystem(

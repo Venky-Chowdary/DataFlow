@@ -303,6 +303,7 @@ def write_mapped_rows(
         preserve_case=True,
         dest_kind="zendesk",
         destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
     tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(

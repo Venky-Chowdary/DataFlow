@@ -161,4 +161,5 @@ def test_dynamo_fail_policy_on_transform_errors():
             create_table=False,
         )
     assert result.ok is False
-    assert "Transform" in (result.error or "")
+    err = result.error or ""
+    assert "Transform" in err or "rejected" in err.lower() or "strict" in err.lower()

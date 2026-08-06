@@ -270,16 +270,32 @@ def parse_file_route_sample(
 def _matrix_cell(value: Any) -> Any:
     # Preserve SQL NULL / missing distinctly from the literal empty string so
     # downstream writers can tell the difference.
+    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+
     if value is None:
         return None
+    # STOP_COLUMN / sparse CDC — never collapse DF_MISSING to "" via cell_to_string.
+    if is_missing_sentinel(value):
+        return DF_MISSING_SENTINEL
     return cell_to_string(value)
 
 
 def records_to_matrix(
     records: list[dict], columns: list[str]
 ) -> tuple[list[str], list[list[Any]]]:
+    from services.value_serializer import DF_MISSING_SENTINEL
+
     headers = columns or (list(records[0].keys()) if records else [])
-    rows = [[_matrix_cell(rec.get(h)) for h in headers] for rec in records]
+    rows: list[list[Any]] = []
+    for rec in records:
+        row: list[Any] = []
+        for h in headers:
+            # Absent key = omit-from-SET (same contract as cdc_transfer._records_to_matrix).
+            if h not in rec:
+                row.append(DF_MISSING_SENTINEL)
+            else:
+                row.append(_matrix_cell(rec.get(h)))
+        rows.append(row)
     return headers, rows
 
 

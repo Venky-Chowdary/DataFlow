@@ -118,6 +118,69 @@ def _to_attr(value: Any, source_type: str) -> dict:
     return ser.serialize(native)
 
 
+def _coerce_dynamo_cell(
+    value: Any,
+    *,
+    col: str,
+    logical_type: str,
+    key_types: dict[str, str],
+) -> Any:
+    """Apply Dynamo key-type / binary wire coercion before AttributeValue encode."""
+    attr_type = key_types.get(col)
+    if attr_type == "S":
+        return str(value) if value is not None else ""
+    if attr_type == "N":
+        try:
+            return Decimal(value) if value is not None else None
+        except Exception:
+            return value
+    if attr_type == "B":
+        from connectors.sql_bind import coerce_binary_wire
+
+        if isinstance(value, str):
+            return coerce_binary_wire(value)
+        if value is not None and not isinstance(value, (bytes, bytearray)):
+            return coerce_binary_wire(value)
+        return value
+    return value
+
+
+def _sparse_update_item(
+    client: Any,
+    table: str,
+    *,
+    key_attrs: dict[str, Any],
+    set_attrs: dict[str, Any],
+) -> None:
+    """UpdateItem SET present attrs only — PutItem would wipe omitted fields."""
+    if not set_attrs:
+        # Key-only sparse image: ensure the item exists without clearing attrs.
+        client.update_item(
+            TableName=table,
+            Key=key_attrs,
+            UpdateExpression="SET #df_touch = if_not_exists(#df_touch, :z)",
+            ExpressionAttributeNames={"#df_touch": "__df_touch"},
+            ExpressionAttributeValues={":z": {"N": "0"}},
+        )
+        return
+    names: dict[str, str] = {}
+    values: dict[str, Any] = {}
+    parts: list[str] = []
+    for i, (col, attr) in enumerate(set_attrs.items()):
+        nk = f"#c{i}"
+        vk = f":v{i}"
+        names[nk] = col
+        values[vk] = attr
+        parts.append(f"{nk} = {vk}")
+    client.update_item(
+        TableName=table,
+        Key=key_attrs,
+        UpdateExpression="SET " + ", ".join(parts),
+        ExpressionAttributeNames=names,
+        ExpressionAttributeValues=values,
+    )
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -165,6 +228,7 @@ def write_mapped_rows(
         error_policy=policy,
         dest_kind="dynamodb",
         destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
     tgt_types = [str(dest_types.get(c, logical_types[i] if i < len(logical_types) else "VARCHAR") or "VARCHAR") for i, c in enumerate(target_cols)]
     from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
@@ -275,6 +339,8 @@ def write_mapped_rows(
             valid_rows.append(row)
 
     chunks = max(1, (len(valid_rows) + batch_size - 1) // batch_size) if valid_rows else 1
+    from connectors.writer_common import row_has_missing_sentinel
+    from services.value_serializer import is_missing_sentinel
 
     try:
         for chunk_idx in range(0 if not valid_rows else chunks):
@@ -283,32 +349,32 @@ def write_mapped_rows(
             slice_rows = valid_rows[chunk_idx * batch_size : (chunk_idx + 1) * batch_size]
             request_items = []
             for row in slice_rows:
-                item = {}
-                from services.value_serializer import is_missing_sentinel
-
+                sparse = row_has_missing_sentinel(row)
+                item: dict[str, Any] = {}
                 for i, col in enumerate(target_cols):
                     value = row[i]
                     # STOP_COLUMN / coerce_null omit — never PutItem the sentinel string.
                     if is_missing_sentinel(value):
                         continue
-                    attr_type = key_types.get(col)
-                    if attr_type == "S":
-                        value = str(value) if value is not None else ""
-                    elif attr_type == "N":
-                        try:
-                            value = Decimal(value) if value is not None else None
-                        except Exception:
-                            value = value
-                    elif attr_type == "B":
-                        from connectors.sql_bind import coerce_binary_wire
-
-                        if isinstance(value, str):
-                            value = coerce_binary_wire(value)
-                        elif value is not None and not isinstance(value, (bytes, bytearray)):
-                            value = coerce_binary_wire(value)
+                    value = _coerce_dynamo_cell(
+                        value, col=col, logical_type=logical_types[i], key_types=key_types
+                    )
                     item[col] = _to_attr(value, logical_types[i])
-                request_items.append({"PutRequest": {"Item": item}})
-            _batch_write_with_retry(client, table, request_items)
+
+                if sparse:
+                    # BatchWrite PutItem replaces the whole item — sparse CDC /
+                    # STOP_COLUMN must UpdateItem SET present attrs only.
+                    key_attrs = {k: item[k] for k in key_types if k in item}
+                    if len(key_attrs) != len(key_types):
+                        continue
+                    set_attrs = {k: v for k, v in item.items() if k not in key_types}
+                    _sparse_update_item(
+                        client, table, key_attrs=key_attrs, set_attrs=set_attrs
+                    )
+                else:
+                    request_items.append({"PutRequest": {"Item": item}})
+            if request_items:
+                _batch_write_with_retry(client, table, request_items)
             written += len(slice_rows)
             if on_checkpoint:
                 on_checkpoint(chunk_idx + 1, chunks, written)

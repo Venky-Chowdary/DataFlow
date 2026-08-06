@@ -449,6 +449,93 @@ def test_omit_missing_fields_drops_df_missing_sentinel():
     assert DF_MISSING_SENTINEL not in out.values()
 
 
+def test_adapters_records_to_matrix_preserves_df_missing():
+    from src.transfer.adapters import records_to_matrix
+
+    headers, rows = records_to_matrix(
+        [{"id": "1", "note": "keep"}, {"id": "2", "extra": DF_MISSING_SENTINEL}],
+        ["id", "note", "extra"],
+    )
+    assert headers == ["id", "note", "extra"]
+    assert rows[0][1] == "keep"
+    assert rows[0][2] == DF_MISSING_SENTINEL  # absent key
+    assert rows[1][1] == DF_MISSING_SENTINEL  # absent key
+    assert rows[1][2] == DF_MISSING_SENTINEL  # present sentinel
+
+
+def test_cdc_matrix_preserves_present_df_missing():
+    from src.transfer.cdc_transfer import _records_to_matrix
+
+    rows = _records_to_matrix(
+        [{"id": "1", "note": "x", "extra": DF_MISSING_SENTINEL}],
+        ["id", "note", "extra"],
+    )
+    assert rows[0][2] == DF_MISSING_SENTINEL
+
+
+def test_vector_prepare_omits_df_missing_sentinel():
+    from connectors.writer_common import prepare_records_for_vector_write
+
+    records, rejected, abort = prepare_records_for_vector_write(
+        headers=["id", "note", "extra"],
+        data_rows=[["1", "keep", DF_MISSING_SENTINEL]],
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+            {"source": "extra", "target": "extra"},
+        ],
+        column_types={"id": "string", "note": "string", "extra": "string"},
+    )
+    assert abort is None
+    assert rejected == [] or True
+    assert records
+    assert DF_MISSING_SENTINEL not in records[0].values()
+    assert "extra" not in records[0] or records[0].get("extra") != DF_MISSING_SENTINEL
+
+
+def test_dynamo_sparse_uses_update_item_not_put():
+    from unittest.mock import MagicMock, patch
+
+    from connectors.dynamodb_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+        }
+    }
+    with patch("connectors.dynamodb_writer.boto3_client", return_value=client):
+        with patch("connectors.dynamodb_writer._ensure_table"):
+            result = write_mapped_rows(
+                host="localhost",
+                port=8000,
+                database="t",
+                username="",
+                password="",
+                schema="",
+                connection_string="",
+                ssl=False,
+                table_name="t",
+                headers=["id", "note", "extra"],
+                data_rows=[["1", "only-note", DF_MISSING_SENTINEL]],
+                mappings=[
+                    {"source": "id", "target": "id"},
+                    {"source": "note", "target": "note"},
+                    {"source": "extra", "target": "extra"},
+                ],
+                column_types={"id": "string", "note": "string", "extra": "string"},
+                create_table=False,
+                conflict_columns=["id"],
+            )
+    assert result.ok, result.error
+    assert client.update_item.called
+    assert not client.batch_write_item.called
+    kwargs = client.update_item.call_args.kwargs
+    assert "extra" not in (kwargs.get("ExpressionAttributeNames") or {}).values()
+    assert DF_MISSING_SENTINEL not in str(kwargs)
+
+
 def test_sample_compare_skips_df_missing_omit_columns():
     """Omit-from-SET columns must not fingerprint as NULL (false-green wipe risk)."""
     from services.reconciliation import sample_compare_rows

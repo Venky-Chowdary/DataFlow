@@ -162,6 +162,7 @@ def write_mapped_rows(
         error_policy=policy,
         dest_kind="redis",
         destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
     from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
 
@@ -326,6 +327,23 @@ def write_mapped_rows(
 
             try:
                 # Pre-sanitize so extreme Decimals never raise mid-dumps.
+                from connectors.writer_common import row_has_missing_sentinel
+
+                # Sparse STOP_COLUMN / CDC: merge onto existing JSON so omitted
+                # fields are not wiped by a full-key SET.
+                if (
+                    row_has_missing_sentinel(row)
+                    and write_mode not in {"overwrite", "replace", "truncate"}
+                    and not is_overwrite_sync(sync_mode)
+                ):
+                    existing_raw = client.get(key)
+                    if existing_raw:
+                        try:
+                            existing = json.loads(existing_raw)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            existing = None
+                        if isinstance(existing, dict):
+                            doc = {**existing, **doc}
                 safe_doc = sanitize_json_value(doc)
                 client.set(key, json.dumps(safe_doc, default=json_default, allow_nan=False))
                 written += 1
