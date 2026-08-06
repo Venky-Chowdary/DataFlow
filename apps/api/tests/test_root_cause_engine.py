@@ -249,6 +249,81 @@ def test_g8_transform_errors_are_not_fidelity_collapse_root():
     }
     roots = build_root_causes(pf)
     assert not any(r.kind == "fidelity_collapse" for r in roots)
+    assert any(r.kind == "sample_transform" for r in roots)
+
+
+def test_g5_transform_errors_are_not_fidelity_collapse_root():
+    """G5 empty-url dry-run must be sample_transform — not Lossy / fidelity collapse."""
+    from services.root_cause_engine import build_root_causes
+
+    pf = {
+        "gates": [
+            {
+                "id": "g5_dry_run",
+                "status": "block",
+                "message": "Dry-run failed: image→image: Empty value cannot coerce to url",
+                "details": {
+                    "kind": "transform_errors",
+                    "errors": ["image→image: Empty value cannot coerce to url"],
+                },
+            },
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "message": (
+                    "Data integrity failed: image→image: Empty value cannot coerce to url"
+                ),
+                "details": {
+                    "kind": "transform_errors",
+                    "issues": ["image→image: Empty value cannot coerce to url"],
+                    "note": (
+                        "Preflight blocked the transfer (0 rows written). "
+                        "Findings below are for inspection."
+                    ),
+                },
+            },
+        ],
+        "blockers": [
+            {
+                "id": "g5_dry_run",
+                "message": "Dry-run failed: image→image: Empty value cannot coerce to url",
+                "details": {"kind": "transform_errors"},
+            },
+            {
+                "id": "g9_data_integrity",
+                "message": "Data integrity failed: image→image: Empty value cannot coerce to url",
+                "details": {
+                    "kind": "transform_errors",
+                    "issues": [
+                        "Preflight blocked the transfer (0 rows written). Findings.",
+                        "image→image: Empty value cannot coerce to url",
+                    ],
+                },
+            },
+        ],
+        "coercion_report": {
+            "sampled_rows": 306,
+            "columns": [
+                {
+                    "source": "country_auto_detected",
+                    "fidelity_collapse": True,
+                    "severity": "warn",
+                },
+                {
+                    "source": "image",
+                    "severity": "block",
+                },
+            ],
+        },
+    }
+    roots = build_root_causes(pf)
+    assert not any(r.kind == "fidelity_collapse" for r in roots), roots
+    xf = [r for r in roots if r.kind == "sample_transform"]
+    assert len(xf) == 1, roots
+    assert "image" in xf[0].affected_columns
+    assert "Preflight blocked the transfer" not in xf[0].affected_columns
+    # Signed/warn fidelity columns must not re-inflate a fidelity root.
+    assert "country_auto_detected" not in xf[0].affected_columns
 
 
 def test_g9_duplicate_integrity_is_not_fidelity_collapse_root():

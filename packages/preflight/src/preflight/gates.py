@@ -1369,10 +1369,24 @@ def _block_message(prefix: str, issues: list[Any]) -> str:
 def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     passed, errors = ctx.run_dry_run()
-    details: dict[str, Any] = {"errors": list(errors[:20])}
+    # Parity with G8: continue-policy Risk Contracts hold out cast failures —
+    # they must not keep Sample dry-run blocked after Accept · cast & continue.
+    from preflight.risk_contract import partition_transform_dry_run_errors
+
+    hard_errors, contracted = partition_transform_dry_run_errors(
+        list(errors or []),
+        list(ctx.plan.mappings or []),
+    )
+    details: dict[str, Any] = {
+        "errors": list(hard_errors[:20]),
+        "contracted_holdouts": list(contracted[:20]),
+        "contracted_holdout_count": len(contracted),
+    }
+    if hard_errors:
+        details["kind"] = "transform_errors"
     dry_meta = getattr(ctx, "_last_dry_run_meta", None)
     if isinstance(dry_meta, dict):
-        details.update(dry_meta)
+        details.update({k: v for k, v in dry_meta.items() if k not in details})
 
     scanned = int(details.get("sample_rows_scanned") or 0)
     available = int(details.get("sample_rows_available") or scanned or 0)
@@ -1386,11 +1400,25 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     )
     details = _with_scope(details, g5_scope)
 
-    if not passed:
-        details["issue_texts"] = [_issue_text(i) for i in errors[:20]]
+    if hard_errors:
+        details["issue_texts"] = [_issue_text(i) for i in hard_errors[:20]]
         return _block(
             GateId.G5_DRY_RUN,
-            _block_message("Dry-run failed", errors),
+            _block_message("Dry-run failed", hard_errors),
+            start,
+            details,
+        )
+    # Contracted-only failures: gate passes; holdouts remain auditable.
+    if contracted:
+        details["note"] = (
+            "Continue-policy Risk Contract holdouts on sample — primary dry-run "
+            "cleared; cast failures quarantine/hold out at write (not silent invent)"
+        )
+    elif not passed and not errors:
+        # run_dry_run returned False with empty errors (rare adapter failure).
+        return _block(
+            GateId.G5_DRY_RUN,
+            "Dry-run failed — no sample transform proof",
             start,
             details,
         )
@@ -1401,6 +1429,11 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
             + (
                 f" ({int(details.get('sample_rows_scanned', 0))} preview rows)"
                 if details.get("sample_rows_scanned")
+                else ""
+            )
+            + (
+                f" · {len(contracted)} contracted holdout(s)"
+                if contracted
                 else ""
             )
         ),
@@ -2389,20 +2422,39 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
     encoding_issues = (encoding or {}).get("issues") or []
     if report.get("blocks_transfer"):
         issues = report.get("issues", [])[:15]
+        checks = list(report.get("checks") or [])
+        transform_fail = next(
+            (
+                c
+                for c in checks
+                if c.get("check") == "transform_dry_run" and not c.get("passed")
+            ),
+            None,
+        )
+        g9_details: dict[str, Any] = {
+            "issues": issues,
+            "issue_texts": [_issue_text(i) for i in issues],
+            "checks_failed": report.get("checks_failed", 0),
+            "encoding_issues": encoding_issues[:12],
+            "source_uniqueness_probe": probe,
+        }
+        # Stamp transform_errors so root-cause does not invent "fidelity collapse"
+        # for empty-url / cast holdouts (parity with G5/G8).
+        if transform_fail is not None and not any(
+            c.get("fidelity_collapse") for c in checks if isinstance(c, dict)
+        ):
+            g9_details["kind"] = str(transform_fail.get("kind") or "transform_errors")
+            if transform_fail.get("note"):
+                g9_details["note"] = transform_fail.get("note")
+            if transform_fail.get("contracted_holdouts"):
+                g9_details["contracted_holdouts"] = transform_fail.get(
+                    "contracted_holdouts"
+                )
         return _block(
             GateId.G9_DATA_INTEGRITY,
             _block_message("Data integrity failed", issues),
             start,
-            _with_scope(
-                {
-                    "issues": issues,
-                    "issue_texts": [_issue_text(i) for i in issues],
-                    "checks_failed": report.get("checks_failed", 0),
-                    "encoding_issues": encoding_issues[:12],
-                    "source_uniqueness_probe": probe,
-                },
-                g9_scope,
-            ),
+            _with_scope(g9_details, g9_scope),
         )
     warnings = list(report.get("warnings") or [])
     if encoding_issues and not warnings:

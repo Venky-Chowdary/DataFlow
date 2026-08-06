@@ -155,6 +155,98 @@ def test_g8_pass_url_empty_with_cast_and_continue_contract():
     assert int(details.get("source_rows") or 0) == 2
 
 
+def test_g5_block_url_empty_without_contract():
+    """Empty url cells hard-block G5 until Map remaps or signs a continue policy."""
+    from preflight.gates import gate_g5_dry_run
+
+    plan = _happy_plan()
+    plan.mappings = [
+        ColumnMapping(source="image", target="image", confidence=0.9, transform="url"),
+    ]
+    plan.source.columns = [ColumnSchema(name="image", inferred_type="TEXT", samples=[""])]
+    plan.destination.target_columns = [
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+
+    class _Ctx(PreflightContext):
+        def run_dry_run(self, sample_size: int = 1000):
+            from services.transform_engine import dry_run_sample
+
+            headers = ["image"]
+            rows = [[""], [""]]
+            return dry_run_sample(
+                headers=headers,
+                sample_rows=rows,
+                mappings=[
+                    {
+                        "source": "image",
+                        "target": "image",
+                        "transform": "url",
+                    }
+                ],
+                column_types={"image": "TEXT"},
+            )
+
+    result = gate_g5_dry_run(_Ctx(plan=plan, sample_rows=[{"image": ""}, {"image": ""}]))
+    assert result.status == GateStatus.BLOCK
+    assert "cannot coerce" in (result.message or "").lower() or "dry-run failed" in (
+        result.message or ""
+    ).lower()
+
+
+def test_g5_pass_url_empty_with_cast_and_continue_contract():
+    """Parity with G8: signed CAST_AND_CONTINUE demotes empty-url off G5 hard block."""
+    from preflight.gates import gate_g5_dry_run
+
+    contract = make_clearing_risk_contract(
+        column="image",
+        source_type="TEXT",
+        destination_type="TEXT",
+        execution_policy="CAST_AND_CONTINUE",
+        reason="quarantine empty urls",
+    )
+    plan = _happy_plan()
+    plan.mappings = [
+        ColumnMapping(
+            source="image",
+            target="image",
+            confidence=0.9,
+            transform="url",
+            fidelity="mutate",
+            risk_acknowledged=True,
+            risk_contract=contract,
+        ),
+    ]
+    plan.source.columns = [ColumnSchema(name="image", inferred_type="TEXT", samples=[""])]
+    plan.destination.target_columns = [
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+
+    class _Ctx(PreflightContext):
+        def run_dry_run(self, sample_size: int = 1000):
+            from services.transform_engine import dry_run_sample
+
+            return dry_run_sample(
+                headers=["image"],
+                sample_rows=[[""], [""]],
+                mappings=[
+                    {
+                        "source": "image",
+                        "target": "image",
+                        "transform": "url",
+                        "risk_contract": contract,
+                    }
+                ],
+                column_types={"image": "TEXT"},
+            )
+
+    result = gate_g5_dry_run(_Ctx(plan=plan, sample_rows=[{"image": ""}, {"image": ""}]))
+    assert result.status == GateStatus.PASS, result.message
+    details = result.details or {}
+    assert int(details.get("contracted_holdout_count") or 0) >= 1
+    assert details.get("contracted_holdouts")
+
+
 def test_g8_partial_holdout_with_identity_does_not_500():
     """Production: Risk Contract holdouts + identity mappings must not IndexError on fingerprint.
 

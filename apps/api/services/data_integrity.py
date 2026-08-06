@@ -191,7 +191,18 @@ def _check_transform_dry_run(
         mappings=enriched,
         column_types=source_types,
     )
-    missing_col_errors = [e for e in errors if "Source column missing" in e]
+    # Parity with G8 / G5: continue-policy contracts demote cast failures to
+    # holdouts — they must not keep G9 Data integrity blocked after Accept risk.
+    try:
+        from preflight.risk_contract import partition_transform_dry_run_errors
+    except Exception:  # pragma: no cover — package always available in GA
+        partition_transform_dry_run_errors = None  # type: ignore[assignment]
+
+    hard_errors = list(errors or [])
+    contracted: list[str] = []
+    if partition_transform_dry_run_errors is not None:
+        hard_errors, contracted = partition_transform_dry_run_errors(errors, enriched)
+    missing_col_errors = [e for e in hard_errors if "Source column missing" in e]
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless and not missing_col_errors:
         # Schemaless stores values as-is; transform failures (e.g. typed casts
@@ -200,23 +211,39 @@ def _check_transform_dry_run(
             "check": "transform_dry_run",
             "passed": True,
             "blocks_transfer": False,
-            "issues": errors[:20],
+            "issues": (hard_errors + contracted)[:20],
+            "contracted_holdouts": contracted[:20],
+            "kind": "transform_errors" if hard_errors else None,
         }
-    issues = list(errors[:20])
+    # Contracted-only → pass (holdouts audited). Hard errors → block.
+    ok = len(hard_errors) == 0
+    issues = list(hard_errors[:20])
+    note = None
     if not ok and issues:
-        # Preflight quarantine rows are inspect-only — the job does not continue.
-        issues.insert(
-            0,
+        # Keep prose out of issues[] — root-cause column extractors must not
+        # invent "Preflight blocked the transfer" as a fake column name.
+        note = (
             "Preflight blocked the transfer (0 rows written). "
             "Findings below are for inspection — fix Map types/targets, then re-Validate. "
-            "Write-time quarantine only applies after preflight passes.",
+            "Write-time quarantine only applies after preflight passes."
         )
-    return {
+    result: dict[str, Any] = {
         "check": "transform_dry_run",
         "passed": ok,
         "blocks_transfer": not ok,
         "issues": issues,
+        "contracted_holdouts": contracted[:20],
+        "contracted_holdout_count": len(contracted),
     }
+    if note:
+        result["note"] = note
+    if hard_errors:
+        result["kind"] = "transform_errors"
+    elif contracted:
+        result["warnings"] = [
+            f"Contracted holdout (continue-policy): {c}" for c in contracted[:5]
+        ]
+    return result
 
 
 def _check_financial_precision(

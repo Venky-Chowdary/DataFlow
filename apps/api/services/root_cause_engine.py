@@ -218,27 +218,52 @@ def _is_fidelity_signal(
     # Missing Risk Contract is its own root — never "0 columns collapse fidelity".
     if _is_risk_contract_incomplete_signal(message, details, gate_id):
         return False
-    # G8 dry-run transform / identity / duplicate failures are not type-path
-    # fidelity collapse. ``image→image`` in the issue line must not trip the
-    # type-arrow regex into a false "Lossy / fidelity collapse" root.
-    if str(gate_id or "") == "g8_reconciliation":
-        kind = str(details.get("kind") or "").lower()
+    # G5/G8/G9 transform / identity / duplicate failures are not type-path
+    # fidelity collapse. ``image→image`` empty-url lines must not trip the
+    # type-arrow regex into a false "Lossy / fidelity collapse" root after the
+    # operator already signed TEXT→INTEGER Risk Contracts.
+    gid = str(gate_id or "")
+    kind = str(details.get("kind") or "").lower()
+    framing = details.get("framing") if isinstance(details.get("framing"), dict) else {}
+    framing_kind = str(framing.get("kind") or "").lower()
+    if gid in {"g5_dry_run", "g5_sample", "g5_sample_validation", "g8_reconciliation"}:
         if kind in {"transform_errors", "duplicate_keys", "identity_transform"}:
             return False
         msg_l = (message or "").lower()
         if (
             "transform errors" in msg_l
+            or "dry-run failed" in msg_l
+            or "cannot coerce to" in msg_l
             or "duplicate target key" in msg_l
             or "identity transform" in msg_l
             or "identity mapping" in msg_l
         ):
+            # Only absorb when the gate itself stamped collapse.
+            return details.get("fidelity_collapse") is True
+        # G8: only absorb when the gate itself stamped collapse.
+        if gid == "g8_reconciliation":
+            return details.get("fidelity_collapse") is True
+    if gid == "g9_data_integrity":
+        if kind in {"transform_errors", "duplicate_keys", "identity_transform"}:
             return False
-        # Only absorb G8 into fidelity when the gate itself stamped collapse.
-        return details.get("fidelity_collapse") is True
+        if framing_kind in {"transform_errors"}:
+            return False
+        msg_l = (message or "").lower()
+        # Transform dry-run / empty-url integrity copy — not declared type collapse.
+        if (
+            "cannot coerce to" in msg_l
+            or "transform_dry_run" in str(details.get("failed_checks") or "").lower()
+            or any(
+                "cannot coerce" in str(i).lower()
+                for i in (details.get("issues") or details.get("errors") or [])[:8]
+            )
+        ) and details.get("fidelity_collapse") is not True:
+            # Still allow true fidelity stamps on G9.
+            if not details.get("issues_detail") and not details.get("fidelity_collapse"):
+                return False
     if details.get("fidelity_collapse") is True:
         return True
-    framing = details.get("framing") if isinstance(details.get("framing"), dict) else {}
-    kind = str(framing.get("kind") or details.get("kind") or "").lower()
+    kind = framing_kind or kind
     if kind in {
         "fidelity_collapse",
         "nested_shape_collapse",
@@ -261,6 +286,38 @@ def _is_fidelity_signal(
     return False
 
 
+def _is_transform_error_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """Sample cast / transform failures — not declared type-path fidelity collapse."""
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    gid = str(gate_id or "")
+    if gid not in {
+        "g5_dry_run",
+        "g5_sample",
+        "g5_sample_validation",
+        "g8_reconciliation",
+        "g9_data_integrity",
+    }:
+        return False
+    kind = str(details.get("kind") or "").lower()
+    if kind == "transform_errors":
+        return True
+    msg_l = (message or "").lower()
+    if "dry-run failed" in msg_l or "transform errors" in msg_l:
+        return True
+    if "cannot coerce to" in msg_l:
+        return True
+    for issue in (details.get("errors") or details.get("issues") or [])[:12]:
+        if "cannot coerce" in str(issue).lower():
+            return True
+    return False
+
+
 def _is_duplicate_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -276,14 +333,28 @@ def _is_duplicate_signal(
 
 
 def _source_from_pair_label(label: str) -> str:
-    """Parse ``source→target`` / ``source -> target`` labels to source column."""
+    """Parse ``source→target`` / ``source -> target`` labels to source column.
+
+    Never invent column names from free prose (e.g. the G9 note
+    ``Preflight blocked the transfer (0 rows written)…``).
+    """
     name = str(label or "").strip()
     if not name:
         return ""
+    # Strip leading ``row N `` from G8-style lines.
+    name = re.sub(r"^row\s+\d+\s+", "", name, flags=re.I)
     for sep in ("→", "->"):
         if sep in name:
-            return name.split(sep, 1)[0].strip()
-    return name.split("(")[0].strip()
+            left = name.split(sep, 1)[0].strip()
+            # Bare identifier only — reject multi-word prose.
+            if re.fullmatch(r"[\w.]+", left):
+                return left
+            return ""
+    # No arrow: only accept a bare identifier (optionally with type paren).
+    head = name.split("(", 1)[0].strip()
+    if re.fullmatch(r"[\w.]+", head):
+        return head
+    return ""
 
 
 def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
@@ -294,7 +365,11 @@ def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
         if isinstance(val, list):
             cols.extend(str(x) for x in val if x)
         elif isinstance(val, str) and val.strip():
-            cols.append(val.strip())
+            parsed = _source_from_pair_label(val.strip())
+            if parsed:
+                cols.append(parsed)
+            elif re.fullmatch(r"[\w.]+", val.strip()):
+                cols.append(val.strip())
     for key in ("risk_unacknowledged", "structural_unacknowledged"):
         for entry in details.get(key) or []:
             left = _source_from_pair_label(str(entry))
@@ -313,10 +388,11 @@ def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
                 left = _source_from_pair_label(issue)
                 if left:
                     cols.append(left)
-                else:
-                    m2 = re.search(r"^([\w.]+)\s*\(", issue)
-                    if m2:
-                        cols.append(m2.group(1))
+    # Also harvest structured dry-run error lines.
+    for err in details.get("errors") or []:
+        left = _source_from_pair_label(str(err))
+        if left:
+            cols.append(left)
     # Dedupe preserve order
     seen: set[str] = set()
     out: list[str] = []
@@ -402,15 +478,19 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 cols.extend(_columns_from_details(g.get("details") or {}))
             for b in fidelity_blockers:
                 cols.extend(_columns_from_details(b.get("details") or {}))
-            # Coercion report columns with fidelity_collapse / block severity
+            # Coercion report: only blocking severity. Signed continue-policy
+            # rows stay fidelity_collapse=true with severity=warn — they must
+            # not re-inflate a blocking root after Accept risk.
             cr = preflight.get("coercion_report") or {}
             for col in cr.get("columns") or []:
                 if not isinstance(col, dict):
                     continue
-                if col.get("fidelity_collapse") or col.get("severity") == "block":
-                    src = col.get("source") or col.get("column")
-                    if src:
-                        cols.append(str(src))
+                sev = str(col.get("severity") or "").lower()
+                if sev != "block":
+                    continue
+                src = col.get("source") or col.get("column")
+                if src:
+                    cols.append(str(src))
             cols = list(dict.fromkeys(cols))
             absorbed = sorted(
                 {
@@ -664,6 +744,101 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 rollback_policy="DOCUMENT_ONLY",
                 documentation="docs/MAPPING_CONFIDENCE_AUTHORITY.md",
                 impacted_gates=absorbed or ["g4_mapping_confidence"],
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
+    # Sample transform / cast failures (empty url, bad decimal, …) — own root.
+    # Must not be framed as Lossy / fidelity collapse after TEXT→INTEGER contracts.
+    xf_gates = [
+        g
+        for g in gates
+        if g.get("status") == "block"
+        and _is_transform_error_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+        and not _is_fidelity_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+        and not _is_duplicate_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+    ]
+    xf_blockers = [
+        b
+        for b in blockers
+        if _is_transform_error_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+        and not _is_fidelity_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+        and not _is_duplicate_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+    ]
+    if xf_gates or xf_blockers:
+        absorbed = sorted(
+            {
+                *[str(g.get("id")) for g in xf_gates if g.get("id")],
+                *[str(b.get("id")) for b in xf_blockers if b.get("id")],
+            }
+        )
+        cols: list[str] = []
+        for src in xf_gates + xf_blockers:
+            cols.extend(_columns_from_details(src.get("details") or {}))
+        cols = list(dict.fromkeys(cols))
+        col_label = ", ".join(cols[:5]) + (
+            f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
+        )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("sample_transform", cols, absorbed),
+                kind="sample_transform",
+                title="Sample transform / cast failures",
+                summary=(
+                    (
+                        f"{len(cols)} column(s) fail write-path transforms on the "
+                        f"Validate sample ({col_label})"
+                        if cols
+                        else "Write-path transforms failed on the Validate sample"
+                    )
+                    + f" — impacts {len(absorbed)} gate check(s)"
+                ),
+                business_impact=(
+                    "Sample cells cannot pass the same transforms writers use "
+                    "(e.g. empty value → url). Execute stays locked until Map remaps "
+                    "off the failing transform, cleans source cells, or a continue-policy "
+                    "Risk Contract (QUARANTINE_ROW / CAST_AND_CONTINUE) holds them out."
+                ),
+                affected_columns=cols,
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    "Open Map → set transform to none/identity for text image/url "
+                    "carriers, or Accept risk with QUARANTINE_ROW / CAST_AND_CONTINUE "
+                    "→ re-run Validate."
+                ),
+                alternative_fixes=[
+                    "Remap image/url columns off the url semantic transform",
+                    "Sign QUARANTINE_ROW so empty/invalid cells hold out of primary write",
+                    "Clean empty URL cells in the source before transfer",
+                ],
+                recovery_strategy=(
+                    "After remap or Risk Contract, re-Validate. Contracted holdouts "
+                    "quarantine at write — primary table must not invent NULL unless "
+                    "the contract says so."
+                ),
+                expected_runtime_impact="Re-Validate is sample-scoped",
+                quarantine_policy=(
+                    "holdout_rejected_rows under CAST_AND_CONTINUE / QUARANTINE_ROW "
+                    "(see docs/MIGRATION_RISK_CONTRACT.md)"
+                ),
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                impacted_gates=absorbed,
                 absorbed_blocker_ids=absorbed,
                 severity="block",
             )

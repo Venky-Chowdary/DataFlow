@@ -501,3 +501,67 @@ def test_strip_controls_skip_is_case_insensitive():
     assert enc is not None
     assert enc["blocks_transfer"] is False
     assert not enc["issues"]
+
+
+def test_transform_dry_run_blocks_empty_url_without_contract():
+    """Empty image→url cells hard-block G9 transform_dry_run until Risk Contract."""
+    report = run_integrity_audit(
+        source_columns=["image"],
+        mappings=[
+            {
+                "source": "image",
+                "target": "image",
+                "confidence": 0.95,
+                "transform": "url",
+                "target_type": "TEXT",
+            }
+        ],
+        source_schemas=[{"name": "image", "inferred_type": "TEXT"}],
+        sample_rows=[{"image": ""}, {"image": ""}, {"image": "https://ok.example/a.png"}],
+        destination_db_type="postgres",
+        validation_mode="strict",
+    )
+    transform = next((c for c in report["checks"] if c["check"] == "transform_dry_run"), None)
+    assert transform is not None
+    assert transform["passed"] is False
+    assert transform["blocks_transfer"] is True
+    assert transform.get("kind") == "transform_errors"
+    # Prose note must not pollute issues[] (fake column extraction).
+    assert not any(str(i).startswith("Preflight blocked") for i in transform.get("issues") or [])
+    assert transform.get("note") and "Preflight blocked" in str(transform["note"])
+
+
+def test_transform_dry_run_passes_empty_url_with_cast_and_continue():
+    """Parity with G8: CAST_AND_CONTINUE demotes empty-url off G9 hard block."""
+    from preflight.risk_contract import make_clearing_risk_contract
+
+    contract = make_clearing_risk_contract(
+        column="image",
+        source_type="TEXT",
+        destination_type="TEXT",
+        execution_policy="CAST_AND_CONTINUE",
+        reason="quarantine empty urls",
+    )
+    report = run_integrity_audit(
+        source_columns=["image"],
+        mappings=[
+            {
+                "source": "image",
+                "target": "image",
+                "confidence": 0.95,
+                "transform": "url",
+                "target_type": "TEXT",
+                "risk_contract": contract,
+            }
+        ],
+        source_schemas=[{"name": "image", "inferred_type": "TEXT"}],
+        sample_rows=[{"image": ""}, {"image": ""}, {"image": "https://ok.example/a.png"}],
+        destination_db_type="postgres",
+        validation_mode="strict",
+    )
+    transform = next((c for c in report["checks"] if c["check"] == "transform_dry_run"), None)
+    assert transform is not None
+    assert transform["passed"] is True, transform
+    assert transform["blocks_transfer"] is False
+    assert int(transform.get("contracted_holdout_count") or 0) >= 1
+    assert transform.get("contracted_holdouts")
