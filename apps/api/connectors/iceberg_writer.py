@@ -524,7 +524,22 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
         except (InvalidOperation, ValueError, TypeError) as exc:
             raise ValueError(f"cannot cast {value!r} to decimal") from exc
     if pa.types.is_floating(arrow_type):
-        return float(value)
+        from connectors.sql_bind import coerce_float_wire
+
+        if isinstance(value, str) and not str(value).strip():
+            raise ValueError(
+                "empty string cannot coerce to float — refuse silent NULL invent"
+            )
+        out = coerce_float_wire(value, ddl_type="FLOAT")
+        if out is None:
+            return None
+        if isinstance(out, float) and (
+            out != out or out in {float("inf"), float("-inf")}
+        ):
+            raise ValueError(
+                f"cannot cast non-finite {value!r} to Iceberg float — refuse invent"
+            )
+        return out
     if pa.types.is_integer(arrow_type):
         from decimal import Decimal
 

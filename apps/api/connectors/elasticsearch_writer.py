@@ -47,13 +47,14 @@ def _to_es_value(value: Any, source_type: str) -> Any:
         # Keep as string — float64 would silently lose precision (no quarantine).
         return str(value)
     if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
-        try:
-            return float(value)
-        except (ValueError, TypeError) as exc:
+        from connectors.sql_bind import coerce_float_wire
+
+        if isinstance(value, str) and not str(value).strip():
             raise ValueError(
-                f"Elasticsearch FLOAT refused {value!r} "
-                "(refuse silent string invent)"
-            ) from exc
+                f"Elasticsearch FLOAT refused empty string {value!r} "
+                "(refuse silent null invent / field wipe)"
+            )
+        return coerce_float_wire(value, ddl_type=upper)
     if upper in {"BOOLEAN", "BOOL"}:
         from connectors.sql_bind import coerce_boolean_wire
 

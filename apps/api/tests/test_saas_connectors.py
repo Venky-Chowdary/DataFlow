@@ -290,7 +290,7 @@ def test_stripe_writer_creates_customers():
             {"source": "name", "target": "name", "transform": "direct"},
             {"source": "email", "target": "email", "transform": "direct"},
         ],
-        write_mode="upsert",
+        write_mode="insert",
     )
     assert r.ok
     assert r.rows_written == 2
@@ -346,12 +346,31 @@ def test_stripe_writer_quarantines_bad_rows():
         headers=["name"],
         data_rows=[["Bad"], ["Good"]],
         mappings=[{"source": "name", "target": "name", "transform": "direct"}],
-        write_mode="upsert",
+        write_mode="insert",
         error_policy="quarantine",
     )
     assert r.ok
     assert r.rows_written == 1
     assert r.rejected_rows == 1
+
+
+@responses.activate
+def test_stripe_upsert_without_conflict_refuses_create_invent():
+    import connectors.stripe_writer as stripe_writer
+
+    r = stripe_writer.write_mapped_rows(
+        api_key="sk_test_123",
+        table_name="customers",
+        headers=["name"],
+        data_rows=[["Alice"]],
+        mappings=[{"source": "name", "target": "name", "transform": "direct"}],
+        write_mode="upsert",
+        conflict_columns=[],
+        error_policy="fail",
+    )
+    assert r.ok is False
+    assert "refuse" in (r.error or "").lower()
+    assert len(responses.calls) == 0
 
 
 @responses.activate
@@ -370,7 +389,7 @@ def test_stripe_writer_auth_fails_closed():
         headers=["name"],
         data_rows=[["Alice"]],
         mappings=[{"source": "name", "target": "name", "transform": "direct"}],
-        write_mode="upsert",
+        write_mode="insert",
         error_policy="quarantine",
     )
     assert r.ok is False

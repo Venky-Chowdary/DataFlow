@@ -88,3 +88,30 @@ def test_iceberg_integer_boolean_refuse_invent():
     with pytest.raises(ValueError, match="boolean|refuse invent"):
         _coerce_arrow_cell("maybe", pa.bool_(), pa)
     assert _coerce_arrow_cell("false", pa.bool_(), pa) is False
+    with pytest.raises(ValueError, match="float|bool|invent"):
+        _coerce_arrow_cell(True, pa.float64(), pa)
+    with pytest.raises(ValueError, match="float|invent"):
+        _coerce_arrow_cell("not-a-float", pa.float64(), pa)
+
+
+def test_es_float_uses_coerce_float_wire_ssot():
+    from connectors.elasticsearch_writer import _to_es_value
+
+    assert _to_es_value("1.5", "FLOAT") == 1.5
+    with pytest.raises(ValueError, match="float|invent|refused"):
+        _to_es_value("maybe", "FLOAT")
+    with pytest.raises(ValueError, match="bool|invent"):
+        _to_es_value(True, "FLOAT")
+    with pytest.raises(ValueError, match="empty|null invent"):
+        _to_es_value("", "FLOAT")
+    with pytest.raises(ValueError, match="empty|null invent"):
+        _to_es_value("  ", "FLOAT")
+
+
+def test_stripe_upsert_refuses_default_id_and_secondary_conflict():
+    from connectors.stripe_writer import _row_id
+
+    assert _row_id({"id": "cus_1"}, ["id"]) == "cus_1"
+    assert _row_id({"id": "cus_1", "email": "a@b.c"}, []) is None
+    assert _row_id({"email": "a@b.c"}, ["email"]) is None
+    assert _row_id({"id": "", "email": "a@b.c"}, ["id", "email"]) is None

@@ -54,13 +54,22 @@ def resolve_stripe_dest_types(
 
 
 def _row_id(row: dict[str, Any], conflict_columns: list[str] | None) -> str | None:
-    """Return the Stripe object id if the row provides one."""
+    """Return the Stripe object id if the row provides one.
+
+    Empty conflict_columns must not invent a default ``id`` lookup — callers
+    quarantine when this returns None under upsert.
+    """
     from services.value_serializer import is_missing_sentinel
 
     candidates = [c for c in (conflict_columns or []) if c]
     if not candidates:
-        candidates = ["id"]
-    for c in candidates:
+        return None
+    # Stripe Admin REST updates by resource ``id`` only — never take a
+    # secondary conflict column (email/customer) as the URL identity.
+    id_cols = [c for c in candidates if (c or "").lower() == "id"]
+    if not id_cols:
+        return None
+    for c in id_cols:
         val = row.get(c)
         if val is None or is_missing_sentinel(val):
             continue
@@ -190,8 +199,10 @@ def write_mapped_rows(
         if mode in upsert_modes and not record_id:
             detail = {
                 "row": i + 1,
+                "column": "id",
                 "reason": (
-                    "Stripe upsert missing object id — refuse create invent "
+                    "Stripe upsert requires conflict column 'id' with a value — "
+                    "refuse inventing default id / create invent "
                     "(would duplicate customers/objects on retry)"
                 ),
                 "values": {k: str(v)[:80] for k, v in list(payload.items())[:8]},

@@ -184,7 +184,7 @@ def test_es_float_refuses_string_invent():
     from connectors.elasticsearch_writer import _to_es_value
 
     assert _to_es_value("1.5", "FLOAT") == 1.5
-    with pytest.raises(ValueError, match="FLOAT refused"):
+    with pytest.raises(ValueError, match="FLOAT refused|refuse invent float"):
         _to_es_value("not-a-float", "FLOAT")
 
 
