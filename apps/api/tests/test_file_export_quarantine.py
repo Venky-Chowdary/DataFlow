@@ -1,7 +1,8 @@
-"""File export must surface quarantine — never silent-drop mapped rows."""
+"""File export must surface quarantine ? never silent-drop mapped rows."""
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -121,3 +122,41 @@ def test_file_export_fail_job_raises_with_quarantine_payload():
         )
     assert excinfo.value.rejected_details
     assert int(excinfo.value.rejected_rows) >= 1
+
+
+def test_file_export_jsonl_omits_df_missing_keys():
+    """JSONL must omit STOP_COLUMN keys; never invent null."""
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    endpoint = EndpointConfig(kind="file_export", format="jsonl")
+    contract = create_migration_risk_contract(
+        column="note",
+        source_type="TEXT",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="omit bad note",
+        execution_policy="STOP_COLUMN",
+    )
+    content, _name, summary = write_destination_file(
+        endpoint,
+        [{"id": "1", "note": "not-an-int"}],
+        ["id", "note"],
+        mappings=[
+            {"source": "id", "target": "id", "transform": "none"},
+            {
+                "source": "note",
+                "target": "note",
+                "transform": "integer",
+                "target_type": "INTEGER",
+                "risk_contract": contract.to_dict(),
+                "risk_acknowledged": True,
+            },
+        ],
+        column_types={"id": "string", "note": "string"},
+        validation_mode="balanced",
+    )
+    text = content.decode("utf-8") if isinstance(content, (bytes, bytearray)) else str(content)
+    assert DF_MISSING_SENTINEL not in text
+    line = json.loads(text.strip().splitlines()[0])
+    assert line.get("id") == "1"
+    assert "note" not in line

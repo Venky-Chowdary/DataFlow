@@ -2091,15 +2091,31 @@ def write_destination_file(
         from connectors.writer_common import (
             apply_write_quarantine_matrix,
             build_mapped_rows_with_details,
-            materialize_missing_as_null_for_dense_write,
             reject_on_strict_policy,
             transform_error_policy,
         )
+        from services.value_serializer import (
+            DF_MISSING_SENTINEL,
+            is_missing_sentinel,
+        )
 
         headers = columns
-        data_rows = [
-            [cell_to_string(rec.get(col, "")) for col in headers] for rec in records
-        ]
+        data_rows: list[list[Any]] = []
+        for rec in records:
+            row: list[Any] = []
+            for col in headers:
+                if col not in rec:
+                    # Absent key ≠ empty string — preserve omit semantics for Map.
+                    row.append(DF_MISSING_SENTINEL)
+                    continue
+                val = rec[col]
+                if is_missing_sentinel(val):
+                    row.append(val)
+                elif val is None:
+                    row.append(None)
+                else:
+                    row.append(cell_to_string(val))
+            data_rows.append(row)
         target_cols, _ = resolve_target_columns(mappings, types)
         error_policy = transform_error_policy_for_validation_mode(validation_mode)
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
@@ -2144,7 +2160,8 @@ def write_destination_file(
                 dialect_label="file_export",
                 mappings=list(mappings) or None,
             )
-        mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
+        # Keep DF_MISSING through export — JSON/JSONL omit keys; dense CSV/grid
+        # render empty via cell_to_string. Never force-null invent before serialize.
         abort = reject_on_strict_policy(error_policy, rejected_details, "file_export")
         if abort:
             raise FileExportMapBlocked(
@@ -2181,7 +2198,9 @@ def write_destination_file(
         for rec in export_records
     ]
 
-    if can_convert(src_fmt, fmt) and grid:
+    # JSON/JSONL must use omit-aware serialization below — the grid convert path
+    # runs cell_to_string which collapses DF_MISSING to "" (false invent).
+    if fmt not in {"json", "jsonl"} and can_convert(src_fmt, fmt) and grid:
         content, mime = convert_rows(
             export_columns, grid, source_format=src_fmt, target_format=fmt
         )
@@ -2214,13 +2233,6 @@ def write_destination_file(
         )
 
     def _to_json_value(value: Any, col: str) -> Any:
-        try:
-            from services.value_serializer import is_missing_sentinel
-
-            if is_missing_sentinel(value):
-                return None
-        except Exception:
-            pass
         if value is None:
             return None
         if isinstance(value, str):
@@ -2260,6 +2272,19 @@ def write_destination_file(
                 return value
         return value
 
+    def _json_export_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from services.value_serializer import is_missing_sentinel
+
+        # Kafka/object-store class: omit STOP_COLUMN / sparse CDC keys entirely.
+        return [
+            {
+                c: _to_json_value(v, c)
+                for c, v in r.items()
+                if not is_missing_sentinel(v)
+            }
+            for r in rows
+        ]
+
     if fmt == "csv":
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
@@ -2281,9 +2306,7 @@ def write_destination_file(
         content = buf.getvalue().encode("utf-8")
         filename = "export.tsv"
     elif fmt == "jsonl":
-        records = [
-            {c: _to_json_value(v, c) for c, v in r.items()} for r in export_records
-        ]
+        records = _json_export_records(export_records)
         lines = [
             json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False)
             for r in records
@@ -2301,9 +2324,7 @@ def write_destination_file(
         )
         filename = "export.parquet"
     else:
-        records = [
-            {c: _to_json_value(v, c) for c, v in r.items()} for r in export_records
-        ]
+        records = _json_export_records(export_records)
         content = json.dumps(
             records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
         ).encode("utf-8")
