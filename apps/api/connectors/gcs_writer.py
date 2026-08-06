@@ -20,9 +20,9 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     _coerced_null_row_count,
+    mapped_rows_to_json_records,
     resolve_target_columns,
     row_checksum,
-    to_json_value,
     transform_error_policy,
 )
 
@@ -135,7 +135,7 @@ def write_mapped_rows(
             rejected_details=list(rejected_details),
         )
 
-    records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
+    records = mapped_rows_to_json_records(mapped_rows, target_cols, dest_types)
 
     if key.endswith(".csv"):
         def _csv_cell(value: Any) -> str:

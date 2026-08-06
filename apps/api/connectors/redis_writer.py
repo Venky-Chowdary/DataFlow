@@ -198,7 +198,21 @@ def write_mapped_rows(
             rejected_details=list(rejected_details),
         )
 
-    conflict = _infer_redis_conflict_columns(target_cols, mappings, conflict_columns)
+    try:
+        conflict = _infer_redis_conflict_columns(target_cols, mappings, conflict_columns)
+    except ValueError as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=prefix,
+            target_schema=f"db{database or 0}",
+            checksum="",
+            chunks_completed=0,
+            error=str(exc),
+            warnings=errors[:10],
+            rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
+            rejected_details=list(rejected_details),
+        )
     client = _redis_client(cfg)
     try:
         # Full-refresh overwrite must replace the destination keyspace once per job,

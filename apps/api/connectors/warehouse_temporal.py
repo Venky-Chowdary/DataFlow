@@ -228,7 +228,15 @@ def bigquery_json_cell(value: Any) -> Any:
     """
     from services.value_serializer import sanitize_json_value
 
-    if value is None or isinstance(value, (bool, str, float)):
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, float):
+        import math
+
+        if not math.isfinite(value):
+            raise ValueError(
+                f"non-finite float refused for BigQuery JSON wire: {value!r}"
+            )
         return value
     if isinstance(value, int):
         return str(value) if abs(value) > _BQ_EXACT_JSON_INT_MAX else value

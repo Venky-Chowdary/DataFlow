@@ -440,7 +440,8 @@ def _normalize_rows(rows: list[dict]) -> tuple[list[dict], list[str], dict[str, 
 
 def _jsonify_value(value: Any) -> Any:
     """Return a JSON-safe Python value (no Python repr() artifacts)."""
-    return sanitize_json_value(value)
+    # Query display: null placeholder for NA/NaN is OK — write paths refuse.
+    return sanitize_json_value(value, refuse_nonfinite=False)
 
 
 def _build_mongodb_connection_string(connector) -> str:

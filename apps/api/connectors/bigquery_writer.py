@@ -249,7 +249,9 @@ def build_bigquery_merge_sql(
     lsn_column: str | None = None,
 ) -> str:
     """Build a BigQuery MERGE for PK upsert with optional monotonic LSN guard."""
-    conflict = [c for c in conflict_columns if c in target_cols]
+    from connectors.writer_common import resolve_conflict_targets
+
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("BigQuery MERGE requires conflict_columns present in target_cols")
     on_clause = null_safe_merge_on(
@@ -336,7 +338,9 @@ def _bq_apply_sparse_upsert(
     from services.cdc_effectively_once import should_apply_pk_row
 
     bigquery = _bq_sdk()
-    conflict = [c for c in conflict_columns if c in target_cols]
+    from connectors.writer_common import resolve_conflict_targets
+
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("sparse BigQuery upsert requires conflict_columns")
     type_by_col = {c: bq_types[i] for i, c in enumerate(target_cols)}

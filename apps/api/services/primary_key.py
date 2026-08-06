@@ -169,9 +169,10 @@ def infer_redis_conflict_columns(
 ) -> list[str]:
     """Return Redis key column(s) — same ranking for Validate and Execute."""
     if conflict_columns:
-        cols = [c for c in conflict_columns if c in target_cols]
-        if cols:
-            return cols
+        # Fail closed — never soft-shrink a composite Redis key on case/partial miss.
+        from connectors.writer_common import resolve_conflict_targets
+
+        return resolve_conflict_targets(conflict_columns, target_cols, strict=True)
 
     source_to_target: dict[str, str] = {}
     for m in mappings or []:

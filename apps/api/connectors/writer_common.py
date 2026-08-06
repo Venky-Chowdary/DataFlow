@@ -99,6 +99,30 @@ def omit_missing_fields(
     return out
 
 
+def mapped_rows_to_json_records(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Object-store / document JSON records — omit ``DF_MISSING`` keys (Kafka-class).
+
+    Dense CSV still gets empty cells for omitted keys via DictWriter fieldnames;
+    JSON/JSONL must never emit ``\"col\": null`` for STOP_COLUMN / sparse CDC.
+    """
+    from services.value_serializer import is_missing_sentinel
+
+    dest_types = dest_types or {}
+    records: list[dict[str, Any]] = []
+    for row in mapped_rows:
+        rec: dict[str, Any] = {}
+        for col, val in zip(target_cols, row):
+            if is_missing_sentinel(val):
+                continue
+            rec[col] = to_json_value(val, col, dest_types)
+        records.append(rec)
+    return records
+
+
 def project_quarantine_source_values(
     target_values: dict[str, Any],
     mappings: list[dict[str, Any]] | None,
@@ -261,8 +285,9 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     S3/GCS/ADLS/SFTP/Kafka JSON exports.
 
     ``DF_MISSING`` (STOP_COLUMN / sparse CDC omit) never serializes as the
-    sentinel string — treat as JSON null so dense document writers cannot
-    corrupt payloads with ``__DF_MISSING__``.
+    sentinel string. Prefer ``mapped_rows_to_json_records`` which omits the key
+    entirely (Kafka-class). This helper still maps the sentinel to ``None`` as a
+    last-resort safety net so dense serializers cannot leak ``__DF_MISSING__``.
     """
     try:
         from services.value_serializer import is_missing_sentinel
@@ -3879,11 +3904,27 @@ def assert_sparse_upsert_has_pk(
     present: dict[str, Any],
     conflict_columns: list[str],
 ) -> None:
-    """Refuse sparse upsert that omits the conflict key (would invent a row)."""
+    """Refuse sparse upsert that omits or nulls the conflict key (would invent rows).
+
+    SQL ``NULL = NULL`` is UNKNOWN, so equality-based sparse UPDATE/INSERT paths
+    would miss the destination row and INSERT unbounded duplicates. Kafka already
+    refuses null keys; all sparse CDC dialects share this assert.
+    """
     missing = [c for c in conflict_columns if c not in present]
     if missing:
         raise ValueError(
             "sparse CDC upsert is missing primary-key column(s) "
             f"{missing}; refuse silent invent (require binlog_row_image=FULL / "
             "REPLICA IDENTITY FULL)"
+        )
+    nullish = [
+        c
+        for c in conflict_columns
+        if present.get(c) is None
+        or (isinstance(present.get(c), str) and str(present.get(c)).strip() == "")
+    ]
+    if nullish:
+        raise ValueError(
+            "sparse CDC upsert has null/empty primary-key column(s) "
+            f"{nullish}; refuse NULL=NULL invent duplicates"
         )

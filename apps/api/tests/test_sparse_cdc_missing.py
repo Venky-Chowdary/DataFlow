@@ -889,3 +889,50 @@ def test_dedupe_rows_refuses_partial_composite_pk():
         raise AssertionError("expected strict unresolved raise")
     except ValueError as exc:
         assert "unresolved" in str(exc).lower()
+
+def test_mapped_rows_to_json_records_omits_df_missing():
+    from connectors.writer_common import mapped_rows_to_json_records
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    recs = mapped_rows_to_json_records(
+        [("1", "keep", DF_MISSING_SENTINEL)],
+        ["id", "note", "extra"],
+        {"id": "string", "note": "string", "extra": "string"},
+    )
+    assert recs == [{"id": "1", "note": "keep"}]
+    assert "extra" not in recs[0]
+
+
+def test_assert_sparse_upsert_refuses_null_pk():
+    from connectors.writer_common import assert_sparse_upsert_has_pk
+
+    try:
+        assert_sparse_upsert_has_pk({"id": None, "note": "x"}, ["id"])
+        raise AssertionError("expected null PK refuse")
+    except ValueError as exc:
+        assert "null" in str(exc).lower()
+
+
+def test_redis_conflict_strict_casefold_and_partial():
+    from services.primary_key import infer_redis_conflict_columns
+
+    assert infer_redis_conflict_columns(
+        ["userid", "orgid"], None, ["UserId", "OrgId"]
+    ) == ["userid", "orgid"]
+    try:
+        infer_redis_conflict_columns(["orgid"], None, ["UserId", "OrgId"])
+        raise AssertionError("expected partial composite refuse")
+    except ValueError as exc:
+        assert "unresolved" in str(exc).lower()
+
+
+def test_sanitize_json_value_refuses_nan():
+    from services.value_serializer import sanitize_json_value
+    import math
+
+    try:
+        sanitize_json_value(math.nan)
+        raise AssertionError("expected NaN refuse")
+    except ValueError as exc:
+        assert "non-finite" in str(exc).lower()
+    assert sanitize_json_value(math.nan, refuse_nonfinite=False) is None

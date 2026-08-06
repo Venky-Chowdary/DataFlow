@@ -23,9 +23,9 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
+    mapped_rows_to_json_records,
     resolve_target_columns,
     row_checksum,
-    to_json_value,
     transform_error_policy,
 )
 
@@ -292,7 +292,7 @@ def write_mapped_rows(
         len(data_rows) - len(mapped_rows),
     )
 
-    records = [{c: to_json_value(v, c, dest_types) for c, v in zip(target_cols, row)} for row in mapped_rows]
+    records = mapped_rows_to_json_records(mapped_rows, target_cols, dest_types)
     fmt = cfg.format.lower()
     if fmt == "jsonl":
         body = "\n".join(json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False) for r in records).encode("utf-8")

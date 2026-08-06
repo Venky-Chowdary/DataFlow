@@ -338,18 +338,31 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     return str(value)
 
 
-def sanitize_json_value(value: Any) -> Any:
+def sanitize_json_value(value: Any, *, refuse_nonfinite: bool = True) -> Any:
     """Recursively convert a value into a JSON-serializable Python object.
 
     Unlike `_json_default`, this is a pre-processor: it returns values that
-    `json.dumps` can serialize without needing a `default` callback. It replaces
-    `NaN` / `Infinity` / missing values with `None`, converts `Decimal` to numbers
-    (or strings when they overflow float), encodes bytes as base64, and normalizes
-    datetime / UUID / ObjectId / Binary / numpy values. Strings are left as-is.
+    `json.dumps` can serialize without needing a `default` callback. It converts
+    ``Decimal`` to exact text (or numbers when safe), encodes bytes as base64, and
+    normalizes datetime / UUID / ObjectId / Binary / numpy values. Strings are
+    left as-is.
+
+    Non-finite floats/Decimals and NA-like values raise by default (write path
+    must quarantine, never invent JSON null). Pass ``refuse_nonfinite=False``
+    for read/display surfaces that need a null placeholder.
     """
     if value is None:
         return None
+    if is_missing_sentinel(value):
+        if refuse_nonfinite:
+            raise ValueError(
+                "DF_MISSING sentinel refused for JSON sanitize — omit the key "
+                "before serialize (STOP_COLUMN / sparse CDC)"
+            )
+        return None
     if _is_na(value):
+        if refuse_nonfinite:
+            raise ValueError("non-finite / NA value refused for JSON write")
         return None
     if isinstance(value, bool):
         return value
@@ -358,10 +371,16 @@ def sanitize_json_value(value: Any) -> Any:
     if isinstance(value, float):
         if math.isfinite(value):
             return value
+        if refuse_nonfinite:
+            raise ValueError(f"non-finite float refused for JSON write: {value!r}")
         return None
     if isinstance(value, str):
         return value
     if isinstance(value, Decimal):
+        if value.is_nan() or value.is_infinite():
+            if refuse_nonfinite:
+                raise ValueError(f"non-finite Decimal refused for JSON write: {value!r}")
+            return None
         return _decimal_to_json(value)
     if isinstance(value, datetime):
         return value.isoformat()
@@ -377,7 +396,9 @@ def sanitize_json_value(value: Any) -> Any:
         return str(value)
     if _is_decimal128(value):
         try:
-            return sanitize_json_value(value.to_decimal())
+            return sanitize_json_value(
+                value.to_decimal(), refuse_nonfinite=refuse_nonfinite
+            )
         except (Overflow, InvalidOperation, ValueError, TypeError):
             try:
                 return str(value)
@@ -386,21 +407,32 @@ def sanitize_json_value(value: Any) -> Any:
     if _is_binary(value):
         return base64.b64encode(value.value).decode("ascii")
     if isinstance(value, Enum):
-        return sanitize_json_value(value.value)
+        return sanitize_json_value(value.value, refuse_nonfinite=refuse_nonfinite)
     if isinstance(value, (bytes, bytearray, memoryview)):
         return base64.b64encode(bytes(value)).decode("ascii")
     if hasattr(value, "ndim") and hasattr(value, "tolist"):
         if value.ndim == 0 and hasattr(value, "item") and callable(value.item):
-            return sanitize_json_value(value.item())
-        return sanitize_json_value(value.tolist())
+            return sanitize_json_value(
+                value.item(), refuse_nonfinite=refuse_nonfinite
+            )
+        return sanitize_json_value(value.tolist(), refuse_nonfinite=refuse_nonfinite)
     if value.__class__.__name__ in {"NAType", "NaTType"}:
+        if refuse_nonfinite:
+            raise ValueError("pandas NA/NaT refused for JSON write")
         return None
     if isinstance(value, (set, tuple, frozenset)):
-        return [sanitize_json_value(v) for v in value]
+        return [
+            sanitize_json_value(v, refuse_nonfinite=refuse_nonfinite) for v in value
+        ]
     if isinstance(value, dict):
-        return {str(k): sanitize_json_value(v) for k, v in value.items()}
+        return {
+            str(k): sanitize_json_value(v, refuse_nonfinite=refuse_nonfinite)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
-        return [sanitize_json_value(v) for v in value]
+        return [
+            sanitize_json_value(v, refuse_nonfinite=refuse_nonfinite) for v in value
+        ]
     # Last resort: never emit repr() artifacts.
     return str(value)
 
