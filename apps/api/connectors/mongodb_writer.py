@@ -343,7 +343,9 @@ def write_mapped_rows(
                     return _datetime(
                         coerced.year, coerced.month, coerced.day, tzinfo=_tz.utc
                     )
-                return value
+                raise ValueError(
+                    f"MongoDB DATE refused {value!r} (refuse silent pass-through invent)"
+                )
             # A "DATE" carrier with a datetime transform is Mongo's single BSON
             # date, which stores a full instant. Narrowing it truncated every
             # timestamp to midnight even though the carrier could hold the time.
@@ -365,7 +367,10 @@ def write_mapped_rows(
                     from datetime import timezone as _tz
 
                     return coerced.astimezone(_tz.utc)
-                return value
+                raise ValueError(
+                    f"MongoDB DATETIME refused {value!r} "
+                    "(refuse silent pass-through invent)"
+                )
             if upper in {"BINARY", "BYTEA", "BLOB", "VARBINARY"}:
                 from connectors.sql_bind import coerce_binary_wire
                 from bson.binary import Binary as _Bin
@@ -383,9 +388,15 @@ def write_mapped_rows(
                             raise ValueError(f"non-finite JSON constant: {name}")
 
                         return json.loads(value, parse_constant=_reject)
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        return value
-                return value
+                    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                        raise ValueError(
+                            f"MongoDB JSON refused {value!r} "
+                            "(refuse silent string invent)"
+                        ) from exc
+                raise ValueError(
+                    f"MongoDB JSON refused {value!r} "
+                    "(refuse silent pass-through invent)"
+                )
             if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
                 from connectors.sql_bind import coerce_uuid_wire
 

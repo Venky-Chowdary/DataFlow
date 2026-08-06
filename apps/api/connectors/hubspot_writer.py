@@ -415,11 +415,45 @@ def write_mapped_rows(
             driver="hubspot",
         )
 
-    id_property = "email"
+    id_property = ""
+    mode_l = (write_mode or "upsert").lower()
+    upsert_modes = {"upsert", "merge", "update", "overwrite", "replace"}
     if conflict_columns:
-        id_property = str(conflict_columns[0]).strip() or "email"
-    elif "hs_object_id" in target_cols or "id" in target_cols:
-        id_property = "hs_object_id" if "hs_object_id" in target_cols else "id"
+        id_property = str(conflict_columns[0]).strip()
+        if not id_property and mode_l in upsert_modes:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "HubSpot upsert requires conflict_columns/primary_key — "
+                    "refuse inventing default 'email'"
+                ),
+                rejected_details=rejected_details,
+                driver="hubspot",
+            )
+    elif "hs_object_id" in target_cols:
+        id_property = "hs_object_id"
+    elif "id" in target_cols:
+        id_property = "id"
+    elif mode_l in upsert_modes:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                "HubSpot upsert requires conflict_columns/primary_key — "
+                "refuse inventing default 'email' (wrong-object upsert)"
+            ),
+            rejected_details=rejected_details,
+            driver="hubspot",
+        )
 
     url = f"{base_url(host, DEFAULT_HOST)}/crm/v3/objects/{obj}/batch/upsert"
     written = 0

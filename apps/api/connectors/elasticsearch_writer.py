@@ -49,8 +49,11 @@ def _to_es_value(value: Any, source_type: str) -> Any:
     if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
         try:
             return float(value)
-        except (ValueError, TypeError):
-            return value
+        except (ValueError, TypeError) as exc:
+            raise ValueError(
+                f"Elasticsearch FLOAT refused {value!r} "
+                "(refuse silent string invent)"
+            ) from exc
     if upper in {"BOOLEAN", "BOOL"}:
         from connectors.sql_bind import coerce_boolean_wire
 

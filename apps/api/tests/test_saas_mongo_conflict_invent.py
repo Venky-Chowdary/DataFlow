@@ -149,6 +149,43 @@ def test_shopify_upsert_refuses_secondary_conflict_as_id():
     req.assert_not_called()
 
 
+def test_es_float_refuses_string_invent():
+    from connectors.elasticsearch_writer import _to_es_value
+
+    assert _to_es_value("1.5", "FLOAT") == 1.5
+    with pytest.raises(ValueError, match="FLOAT refused"):
+        _to_es_value("not-a-float", "FLOAT")
+
+
+def test_hubspot_upsert_refuses_default_email_invent():
+    from connectors.hubspot_writer import write_mapped_rows
+    from unittest.mock import patch
+
+    with patch("connectors.hubspot_writer.request") as req:
+        result = write_mapped_rows(
+            host="api.hubapi.com",
+            table_name="contacts",
+            api_key="tok",
+            headers=["firstname"],
+            data_rows=[["Ada"]],
+            mappings=[{"source": "firstname", "target": "firstname"}],
+            column_types={"firstname": "VARCHAR"},
+            write_mode="upsert",
+            conflict_columns=[],
+            error_policy="fail",
+            port=0,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=True,
+        )
+    assert result.ok is False
+    assert "refuse inventing default 'email'" in (result.error or "")
+    req.assert_not_called()
+
+
 def test_mongo_boolean_float_int_refuse_passthrough_invent():
     pytest.importorskip("bson")
     from connectors.mongodb_writer import write_mapped_rows
@@ -193,7 +230,15 @@ def test_mongo_boolean_float_int_refuse_passthrough_invent():
             mappings=[{"source": "qty", "target": "qty"}],
             column_types={"qty": "INTEGER"},
         )
+        json_r = write_mapped_rows(
+            **base,
+            headers=["doc"],
+            data_rows=[["not-json{"]],
+            mappings=[{"source": "doc", "target": "doc"}],
+            column_types={"doc": "JSON"},
+        )
     assert bool_r.rejected_rows >= 1 and bool_r.rows_written == 0
     assert float_r.rejected_rows >= 1 and float_r.rows_written == 0
     assert int_r.rejected_rows >= 1 and int_r.rows_written == 0
+    assert json_r.rejected_rows >= 1 and json_r.rows_written == 0
     assert coll.insert_many.call_count == 0
