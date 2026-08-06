@@ -265,13 +265,10 @@ def write_mapped_rows(
             upper = stype.upper()
             # An explicit mapping transform overrides the inferred source type so
             # values like decimal strings are stored as the correct BSON type.
-            if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL"}:
-                try:
-                    return float(value)
-                except (ValueError, TypeError) as exc:
-                    raise ValueError(
-                        f"MongoDB FLOAT refused {value!r} (refuse silent string invent)"
-                    ) from exc
+            if upper in {"FLOAT", "DOUBLE", "FLOAT64", "REAL", "FLOAT32", "FLOAT16"}:
+                from connectors.sql_bind import coerce_float_wire
+
+                return coerce_float_wire(value, ddl_type=upper or "FLOAT")
             if transform in {"decimal", "currency", "percentage"} or upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
                 if isinstance(value, str) and not str(value).strip():
                     raise ValueError(
@@ -429,8 +426,24 @@ def write_mapped_rows(
         # wire). Letting a ValueError escape aborted the whole write with
         # rows_written=0, so one bad cell lost every good row. Hold the row out
         # and record why instead — quarantine, never silent drop, never abort.
-        from connectors.writer_common import append_write_quarantine_detail
+        from connectors.writer_common import (
+            append_write_quarantine_detail,
+            partition_dense_upsert_rows,
+        )
         from services.value_serializer import cell_to_string as _cell_to_string
+
+        if write_mode == "upsert" and conflict_columns:
+            pk_for_part = [str(c) for c in conflict_columns if str(c) and str(c) in target_cols]
+            if pk_for_part:
+                # Partition before BSON coerce / same-key fold — empty keys must
+                # never collapse onto None/"" and mass-touch destination docs.
+                mapped_rows = partition_dense_upsert_rows(
+                    mapped_rows,
+                    pk_for_part,
+                    target_cols=target_cols,
+                    rejected_details=rejected_details,
+                    policy=policy,
+                )
 
         typed_rows: list[tuple] = []
         for row_idx, row in enumerate(mapped_rows):

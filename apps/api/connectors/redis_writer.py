@@ -219,6 +219,16 @@ def write_mapped_rows(
             rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
             rejected_details=list(rejected_details),
         )
+    from connectors.writer_common import partition_dense_upsert_rows
+
+    if conflict:
+        mapped_rows = partition_dense_upsert_rows(
+            mapped_rows,
+            conflict,
+            target_cols=target_cols,
+            rejected_details=rejected_details,
+            policy=policy,
+        )
     client = _redis_client(cfg)
     try:
         # Full-refresh overwrite must replace the destination keyspace once per job,

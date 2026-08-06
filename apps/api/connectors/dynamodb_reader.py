@@ -187,7 +187,10 @@ def _cell(value: Any) -> str:
     if value is DDB_EXPLICIT_NULL:
         return DDB_NULL_SENTINEL
     if value is None:
-        return ""
+        # Python None is SQL/Dynamo NULL polarity — never invent empty string.
+        from services.value_serializer import SQL_NULL_SENTINEL
+
+        return SQL_NULL_SENTINEL
     return cell_to_string(value)
 
 

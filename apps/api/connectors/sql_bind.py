@@ -2303,7 +2303,7 @@ def normalize_sql_bind_value(
         return coerce_cid_wire(value)
     if upper in {"TXID_SNAPSHOT", "PG_SNAPSHOT"}:
         return coerce_txid_snapshot_wire(value)
-    if upper in {"INET", "IPV4", "IPV6"}:
+    if upper in {"INET", "IPV4", "IPV6", "IP"}:
         return coerce_inet_wire(value)
     if upper in {"CIDR"}:
         return coerce_cidr_wire(value)

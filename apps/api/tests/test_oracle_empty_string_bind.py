@@ -566,3 +566,77 @@ def test_cdc_row_key_rejects_sql_null_sentinel():
     assert not is_present_cdc_row_key("")
     assert not is_present_cdc_row_key(None)
     assert not is_present_cdc_row_key(SQL_NULL_SENTINEL)
+
+
+def test_questdb_ddl_stamps_decimal_as_double():
+    from services.type_system import ddl_type
+
+    assert ddl_type("questdb", "DECIMAL(18,4)") == "DOUBLE"
+    assert ddl_type("questdb", "NUMBER") == "DOUBLE"
+    assert ddl_type("questdb", "TIME") == "VARCHAR"
+    assert ddl_type("questdb", "UUID") == "VARCHAR"
+
+
+def test_pg_test_decoding_null_is_sql_null_sentinel():
+    from connectors.postgresql_change_stream import _parse_value
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    assert _parse_value("null") == SQL_NULL_SENTINEL
+    assert _parse_value("None") == SQL_NULL_SENTINEL
+    assert _parse_value("'hello'") == "hello"
+
+
+def test_specialty_matrix_quarantines_empty_inet():
+    from connectors.writer_common import quarantine_unfit_specialty_types
+
+    details: list[dict] = []
+    out = quarantine_unfit_specialty_types(
+        [("1", ""), ("2", "127.0.0.1")],
+        ["id", "addr"],
+        ["INTEGER", "INET"],
+        details,
+        "quarantine",
+    )
+    assert out == [("2", "127.0.0.1")]
+    assert details
+    assert any("INET" in str(d.get("reason") or "").upper() or "inet" in str(d.get("reason") or "").lower() or "empty" in str(d.get("reason") or "").lower() for d in details)
+
+
+def test_sql_bind_ip_alias_refuses_empty():
+    import pytest
+    from connectors.sql_bind import normalize_sql_bind_value
+
+    with pytest.raises(ValueError, match="empty string cannot coerce to INET"):
+        normalize_sql_bind_value("", "IP", engine="elasticsearch")
+
+
+def test_dense_partition_holds_sql_null_sentinel_pk():
+    from connectors.writer_common import partition_dense_upsert_rows
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    details: list[dict] = []
+    out = partition_dense_upsert_rows(
+        [(SQL_NULL_SENTINEL, "a"), ("2", "b")],
+        ["id"],
+        target_cols=["id", "note"],
+        rejected_details=details,
+        policy="quarantine",
+    )
+    assert out == [("2", "b")]
+    assert details
+
+
+def test_specialty_matrix_allows_sql_null_on_inet():
+    from connectors.writer_common import quarantine_unfit_specialty_types
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    details: list[dict] = []
+    out = quarantine_unfit_specialty_types(
+        [("1", SQL_NULL_SENTINEL)],
+        ["id", "addr"],
+        ["INTEGER", "INET"],
+        details,
+        "quarantine",
+    )
+    assert out == [("1", SQL_NULL_SENTINEL)]
+    assert not details

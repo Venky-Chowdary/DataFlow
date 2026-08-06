@@ -142,8 +142,10 @@ def _lsn_at_or_before(candidate: str, watermark: str) -> bool:
 
 def _parse_value(raw: str) -> str:
     """Strip PostgreSQL test_decoding quotes and null markers."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+
     if raw == "null" or raw == "None":
-        return ""
+        return SQL_NULL_SENTINEL
     if len(raw) >= 2 and raw.startswith("'") and raw.endswith("'"):
         return raw[1:-1].replace("''", "'")
     return raw

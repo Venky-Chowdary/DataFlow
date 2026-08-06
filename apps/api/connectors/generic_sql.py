@@ -1004,7 +1004,8 @@ def _sa_type_for_logical(
         precision, scale = parse_numeric_precision_scale(raw)
         if db_type == "risingwave":
             return sa.Numeric()
-        # QuestDB lacks true DECIMAL — DOUBLE is the platform limit (documented).
+        # QuestDB lacks true DECIMAL — CREATE uses DOUBLE; ddl_type stamps
+        # DOUBLE so Map/Validate match physical (never silent DECIMAL invent).
         if db_type == "questdb":
             return sa.Double()
         # Preserve source DECIMAL(p,s) when present — never invent TEXT.

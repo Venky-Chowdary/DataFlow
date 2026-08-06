@@ -256,6 +256,16 @@ def write_mapped_rows(
     # Elasticsearch is key-addressed: auto-generated ids break idempotent retry /
     # upsert / CDC and hide collisions. Always require resolvable document identity.
     requires_identity = True
+    if conflict:
+        from connectors.writer_common import partition_dense_upsert_rows
+
+        mapped_rows = partition_dense_upsert_rows(
+            mapped_rows,
+            conflict,
+            target_cols=target_cols,
+            rejected_details=rejected_details,
+            policy=policy,
+        )
 
     client = _client(cfg)
     try:
@@ -286,7 +296,6 @@ def write_mapped_rows(
 
         identity_missing = 0
         actions: list[dict[str, Any]] = []
-        from connectors.writer_common import row_has_missing_sentinel
         from services.value_serializer import is_missing_sentinel
 
         for row_idx, row in enumerate(mapped_rows):
@@ -325,7 +334,6 @@ def write_mapped_rows(
                 target_cols=target_cols,
             )
             source.pop("_id", None)
-            sparse = row_has_missing_sentinel(row)
             if doc_id is None:
                 identity_missing += 1
                 rejected_details.append({
@@ -340,8 +348,9 @@ def write_mapped_rows(
                     "policy": "write_fail" if policy == "fail" else "write_quarantine",
                 })
                 continue
-            # Sparse upsert: update+doc merges present fields only (never null-wipe).
-            if sparse and mode in {"upsert", "update", "merge"}:
+            # Upsert/update/merge: update+doc merges present fields only —
+            # never full _source replace (would wipe unmapped destination fields).
+            if mode in {"upsert", "update", "merge"}:
                 action = {
                     "_op_type": "update",
                     "_index": index,

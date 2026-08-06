@@ -2399,6 +2399,18 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
     Nested ARRAY/STRUCT/MAP carriers are preserved on lakehouse engines
     (Databricks, DuckDB, ClickHouse, Iceberg, BigQuery, Trino, Snowflake).
     """
+    raw_db = (db_type or "").strip().lower()
+    # QuestDB has no DECIMAL/TIME/UUID natives — stamp honest DOUBLE/VARCHAR
+    # before generic_sql normalize invents DECIMAL(38,15) Map stamps.
+    if raw_db == "questdb":
+        t = normalize_logical_type(inferred)
+        if t == LOGICAL_DECIMAL:
+            return "DOUBLE"
+        if t == LOGICAL_TIME:
+            return "VARCHAR"
+        if t == LOGICAL_UUID:
+            return "VARCHAR"
+        # Fall through for other logicals via generic_sql mapping.
     db = _normalize_dest_db(db_type)
     nested = _nested_ddl_for_dest(db, inferred)
     if nested:

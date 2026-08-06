@@ -3755,7 +3755,11 @@ def _specialty_column_kind(type_str: str) -> str | None:
     String/VARCHAR carriers (Databricks/Iceberg) are skipped for geo/interval —
     quarantine applies only when the destination expects specialty bind.
     """
-    from services.type_system import normalize_logical_type, parse_vector_dimension
+    from services.type_system import (
+        normalize_logical_type,
+        parse_vector_dimension,
+        specialty_carrier_base,
+    )
 
     logical = normalize_logical_type(type_str)
     if logical == "geography":
@@ -3773,6 +3777,19 @@ def _specialty_column_kind(type_str: str) -> str | None:
         return "geography"
     if re.search(r"\bINTERVAL\b", upper):
         return "interval"
+    # Network / text specialty — bind refuse must be mirrored in the matrix so
+    # object-store / SaaS paths never green empty INET then crash mid-batch.
+    spec = specialty_carrier_base(type_str)
+    if spec in {"INET", "IPV4", "IPV6", "IP"}:
+        return "inet"
+    if spec == "CIDR":
+        return "cidr"
+    if spec in {"MACADDR", "MACADDR8"}:
+        return "macaddr"
+    if spec in {"XML", "XMLTYPE"}:
+        return "xml"
+    if spec == "LTREE":
+        return "ltree"
     return None
 
 
@@ -3783,7 +3800,7 @@ def quarantine_unfit_specialty_types(
     rejected_details: list[dict[str, Any]],
     policy: str,
 ) -> list[tuple]:
-    """Hold out cells unfit for GEOGRAPHY / INTERVAL / VECTOR(n) destinations.
+    """Hold out cells unfit for GEOGRAPHY / INTERVAL / VECTOR / INET / … sinks.
 
     Specialty types travel as identity payloads (WKT/GeoJSON/ISO-8601/float lists).
     Fail-closed — never invent empty geometry, wrong interval family, or pad/truncate
@@ -3797,6 +3814,13 @@ def quarantine_unfit_specialty_types(
     if not specialty_cols:
         return mapped_rows
 
+    from connectors.sql_bind import (
+        coerce_cidr_wire,
+        coerce_inet_wire,
+        coerce_ltree_wire,
+        coerce_macaddr_wire,
+        coerce_xml_wire,
+    )
     from services.schema_inference import (
         geography_wire_srid,
         interval_wire_family,
@@ -3808,6 +3832,7 @@ def quarantine_unfit_specialty_types(
         parse_geography_srid,
         parse_vector_dimension,
         parse_vector_length,
+        specialty_carrier_base,
     )
     from services.value_serializer import cell_to_string
 
@@ -3818,9 +3843,9 @@ def quarantine_unfit_specialty_types(
         for col_idx, kind, typ in specialty_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
-            from services.value_serializer import is_missing_sentinel
+            from services.value_serializer import SQL_NULL_SENTINEL, is_missing_sentinel
 
-            if is_missing_sentinel(cells[col_idx]):
+            if is_missing_sentinel(cells[col_idx]) or cells[col_idx] == SQL_NULL_SENTINEL:
                 continue
             reason = ""
             ok = True
@@ -3867,6 +3892,22 @@ def quarantine_unfit_specialty_types(
                         f"vector length {wire_len} ≠ destination VECTOR({dest_dim}) "
                         "— quarantined (refuse pad/truncate embedding)"
                     )
+            elif kind in {"inet", "cidr", "macaddr", "xml", "ltree"}:
+                try:
+                    if kind == "inet":
+                        coerce_inet_wire(cells[col_idx])
+                    elif kind == "cidr":
+                        coerce_cidr_wire(cells[col_idx])
+                    elif kind == "macaddr":
+                        eui64 = specialty_carrier_base(typ) == "MACADDR8"
+                        coerce_macaddr_wire(cells[col_idx], eui64=eui64)
+                    elif kind == "xml":
+                        coerce_xml_wire(cells[col_idx])
+                    else:
+                        coerce_ltree_wire(cells[col_idx])
+                except ValueError as exc:
+                    ok = False
+                    reason = str(exc)[:300]
             if ok:
                 continue
             sample = cell_to_string(cells[col_idx])[:120]
@@ -4279,6 +4320,20 @@ def overlay_physical_bind_types(
     return out
 
 
+def _is_nullish_conflict_key(val: Any) -> bool:
+    """True when a conflict-key cell cannot identify a dense upsert row."""
+    if val is None:
+        return True
+    from services.value_serializer import SQL_NULL_SENTINEL, is_missing_sentinel
+
+    if is_missing_sentinel(val):
+        return True
+    if isinstance(val, str):
+        text = val.strip()
+        return not text or text == SQL_NULL_SENTINEL
+    return False
+
+
 def assert_sparse_upsert_has_pk(
     present: dict[str, Any],
     conflict_columns: list[str],
@@ -4296,12 +4351,7 @@ def assert_sparse_upsert_has_pk(
             f"{missing}; refuse silent invent (require binlog_row_image=FULL / "
             "REPLICA IDENTITY FULL)"
         )
-    nullish = [
-        c
-        for c in conflict_columns
-        if present.get(c) is None
-        or (isinstance(present.get(c), str) and str(present.get(c)).strip() == "")
-    ]
+    nullish = [c for c in conflict_columns if _is_nullish_conflict_key(present.get(c))]
     if nullish:
         raise ValueError(
             "sparse CDC upsert has null/empty primary-key column(s) "
@@ -4329,8 +4379,7 @@ def assert_dense_upsert_keys_present(
     for row in rows:
         if isinstance(row, dict):
             for c in cols:
-                val = row.get(c)
-                if val is None or (isinstance(val, str) and str(val).strip() == ""):
+                if _is_nullish_conflict_key(row.get(c)):
                     raise ValueError(
                         f"dense upsert refused null/empty conflict key {c!r} — "
                         "NULL-safe MERGE would mass-touch destination rows"
@@ -4342,12 +4391,11 @@ def assert_dense_upsert_keys_present(
             )
         for c, idx in zip(cols, idxs):
             val = row[idx] if idx < len(row) else None
-            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+            if _is_nullish_conflict_key(val):
                 raise ValueError(
                     f"dense upsert refused null/empty conflict key {c!r} — "
                     "NULL-safe MERGE would mass-touch destination rows"
                 )
-
 
 def partition_dense_upsert_rows(
     rows: list[Any],
