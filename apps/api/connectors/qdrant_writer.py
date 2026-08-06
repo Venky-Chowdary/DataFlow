@@ -153,8 +153,10 @@ def build_qdrant_points(
                 "policy": "quarantine",
             })
             continue
+        from services.cdc_identity import is_present_cdc_row_key
+
         raw_id = row.get("id")
-        if raw_id not in (None, ""):
+        if is_present_cdc_row_key(raw_id):
             point_id: str | None = cell_to_string(raw_id)
         else:
             source = cell_to_string(row.get("source_id", ""))

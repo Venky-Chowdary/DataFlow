@@ -157,7 +157,13 @@ def build_weaviate_objects(
                 "policy": "quarantine",
             })
             continue
-        raw_id = cell_to_string(row.get("id") or "")
+        from services.cdc_identity import is_present_cdc_row_key
+
+        raw_id_val = row.get("id")
+        if is_present_cdc_row_key(raw_id_val):
+            raw_id = cell_to_string(raw_id_val)
+        else:
+            raw_id = ""
         if not raw_id:
             source = cell_to_string(row.get("source_id", ""))
             content = str(row.get("content") or "")

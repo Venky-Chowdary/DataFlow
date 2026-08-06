@@ -173,8 +173,10 @@ def build_milvus_entities(
                 "policy": "quarantine",
             })
             continue
+        from services.cdc_identity import is_present_cdc_row_key
+
         raw_id = row.get("id")
-        if raw_id not in (None, ""):
+        if is_present_cdc_row_key(raw_id):
             raw_s = cell_to_string(raw_id)
             if len(raw_s) > 64:
                 # Keep original as metadata; use collision-resistant digest as entity id.

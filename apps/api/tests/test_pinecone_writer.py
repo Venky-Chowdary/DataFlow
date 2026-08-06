@@ -48,6 +48,27 @@ def test_build_pinecone_vectors_rejects_missing_embedding():
     assert any("missing" in (r.get("reason") or "").lower() or "refuse" in (r.get("reason") or "").lower() for r in rejected)
 
 
+def test_build_pinecone_vectors_sql_null_id_falls_back_not_sentinel():
+    """SQL NULL / sentinel must not become a literal Pinecone id."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    rows = [
+        {
+            "id": SQL_NULL_SENTINEL,
+            "content": "hello",
+            "source_id": "src-1",
+            "chunk_index": 0,
+            "embedding": [0.1, 0.2, 0.3],
+            "metadata": {},
+        }
+    ]
+    vectors, rejected = build_pinecone_vectors(rows, dimension=3)
+    assert not rejected
+    assert len(vectors) == 1
+    assert vectors[0]["id"] != SQL_NULL_SENTINEL
+    assert len(vectors[0]["id"]) == 64  # sha256 hex fallback
+
+
 def test_pinecone_probe_requires_host_and_key():
     ok, msg = probe_pinecone(host="", connection_string="", api_key="")
     assert not ok
