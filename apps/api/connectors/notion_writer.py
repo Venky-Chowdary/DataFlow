@@ -444,10 +444,62 @@ def write_mapped_rows(
         for col, val in row_dict.items():
             prop_type = properties.get(col.lower())
             if not prop_type:
-                warnings.append(f"row {i}: '{col}' does not exist in Notion database; skipped.")
+                msg = (
+                    f"row {i}: mapped column '{col}' does not exist in Notion "
+                    "database — quarantined (refuse silent skip)"
+                )
+                warnings.append(msg)
+                all_rejected.append({
+                    "row": i,
+                    "column": col,
+                    "target": col,
+                    "value": str(val)[:120] if val is not None else "",
+                    "reason": msg,
+                    "policy": policy,
+                })
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=table_name,
+                        target_schema=database_id,
+                        checksum=digest.hexdigest()[:32],
+                        chunks_completed=chunks,
+                        error=msg,
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings[:20],
+                        driver="notion",
+                    )
                 continue
             if prop_type in {"formula", "rollup", "created_by", "created_time", "last_edited_by", "last_edited_time", "files"}:
-                warnings.append(f"row {i}: '{col}' is read-only in Notion; skipped.")
+                msg = (
+                    f"row {i}: Notion property '{col}' is read-only ({prop_type}) "
+                    "— quarantined (refuse silent skip)"
+                )
+                warnings.append(msg)
+                all_rejected.append({
+                    "row": i,
+                    "column": col,
+                    "target": col,
+                    "value": str(val)[:120] if val is not None else "",
+                    "reason": msg,
+                    "policy": policy,
+                })
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=table_name,
+                        target_schema=database_id,
+                        checksum=digest.hexdigest()[:32],
+                        chunks_completed=chunks,
+                        error=msg,
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings[:20],
+                        driver="notion",
+                    )
                 continue
             try:
                 prop_value = _as_property_value(val, prop_type, col, warnings, i)

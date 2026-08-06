@@ -575,7 +575,7 @@ class PostgreSqlChangeStreamCdc:
             from services.cdc_incremental_snapshot import list_signals
 
             return any(
-                str(getattr(sig, "status", "")) in {"pending", "in_progress"}
+                str(getattr(sig, "status", "")) in {"pending", "running", "in_progress"}
                 for sig in list_signals(self.source_key)
             )
         except Exception as exc:

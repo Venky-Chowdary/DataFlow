@@ -267,7 +267,11 @@ def test_signal_table_execute_and_stop(tmp_path, monkeypatch) -> None:
         source_key="src:pg",
         signal_id="sig-1",
         signal_type="execute-snapshot",
-        data={"data-collections": ["public.orders"], "type": "incremental"},
+        data={
+            "data-collections": ["public.orders"],
+            "type": "incremental",
+            "primary_key": "id",
+        },
     )
     assert out and out["action"] == "execute-snapshot"
     assert out["created"][0]["table"] == "orders"
@@ -295,7 +299,7 @@ def test_signal_table_poll_tracks_processed_ids(tmp_path, monkeypatch) -> None:
             pass
 
         def fetchall(self):
-            return [("s1", "execute-snapshot", '{"table":"orders"}')]
+            return [("s1", "execute-snapshot", '{"table":"orders","primary_key":"id"}')]
 
         def __enter__(self):
             return self
@@ -492,6 +496,7 @@ def test_pg_heartbeat_advances_idle_slot_instead_of_emitting_wal() -> None:
     )
     cdc.slot_name = "df_slot"
     cdc._pending_ack_lsn = None
+    cdc.phase = "streaming"
     # No open incremental snapshot: that gate would refuse to advance.
     cdc._incremental_snapshot_open = lambda: False  # type: ignore[method-assign]
     cur = MagicMock()

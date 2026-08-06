@@ -59,7 +59,13 @@ def _normalize_redis_typed_doc(
             raw = coerce_binary_wire(out[col])
             out[col] = base64.b64encode(raw).decode("ascii") if raw is not None else None
         elif upper in {"BOOLEAN", "BOOL"}:
-            out[col] = bool(coerce_boolean_wire(out[col], as_int=False))
+            coerced = coerce_boolean_wire(out[col], as_int=False)
+            if not isinstance(coerced, bool):
+                raise ValueError(
+                    f"Redis BOOLEAN refused unrecognized value {out[col]!r} "
+                    "(refuse invent via bool())"
+                )
+            out[col] = coerced
     return out
 
 

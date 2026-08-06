@@ -76,3 +76,51 @@ def test_filter_stale_lsn_skips_none_incoming_when_prior_exists():
     assert lsn_is_newer(None, "0/1") is False
     assert lsn_is_newer("0/2", "0/1") is True
     assert lsn_is_newer("0/1", None) is True
+
+
+def test_es_redis_boolean_refuse_bool_invent():
+    from connectors.elasticsearch_writer import _to_es_value
+    from connectors.redis_writer import _normalize_redis_typed_doc
+
+    assert _to_es_value("false", "BOOLEAN") is False
+    assert _to_es_value("true", "BOOLEAN") is True
+    with pytest.raises(ValueError, match="BOOLEAN refused"):
+        _to_es_value("maybe", "BOOLEAN")
+    with pytest.raises(ValueError, match="BOOLEAN refused"):
+        _to_es_value("", "BOOLEAN")
+
+    assert _normalize_redis_typed_doc({"f": "no"}, ["f"], ["BOOLEAN"]) == {"f": False}
+    with pytest.raises(ValueError, match="BOOLEAN refused"):
+        _normalize_redis_typed_doc({"f": "maybe"}, ["f"], ["BOOLEAN"])
+    with pytest.raises(ValueError, match="BOOLEAN refused"):
+        _normalize_redis_typed_doc({"f": ""}, ["f"], ["BOOLEAN"])
+
+
+def test_request_incremental_snapshot_refuses_default_id():
+    from services.cdc_incremental_snapshot import request_incremental_snapshot
+
+    with pytest.raises(ValueError, match="primary_key"):
+        request_incremental_snapshot("src:pg", "orders")
+
+
+def test_cdc_signal_table_refuses_default_id():
+    from services.cdc_signal_table import apply_signal_row
+
+    with pytest.raises(ValueError, match="primary_key"):
+        apply_signal_row(
+            source_key="src:pg",
+            signal_id="s1",
+            signal_type="execute-snapshot",
+            data={"data-collections": ["orders"]},
+        )
+
+
+def test_oracle_logminer_refuses_default_id_invent():
+    from connectors.oracle_logminer import OracleLogMinerCdc
+
+    with pytest.raises(ValueError, match="primary_key"):
+        OracleLogMinerCdc({"username": "APP"}, table="ORDERS")
+    cdc = OracleLogMinerCdc(
+        {"username": "APP"}, table="ORDERS", primary_key="ORDER_ID"
+    )
+    assert cdc.primary_key == "ORDER_ID"

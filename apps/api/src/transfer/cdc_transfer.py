@@ -1037,8 +1037,14 @@ def _run_cdc_shared_multi_table(
     if len(tables) < 2:
         raise RuntimeError("shared multi-table CDC requires ≥2 tables")
 
+    from services.cdc_identity import require_cdc_primary_key
+
+    def _cdc_pk_str(raw: Any, table: str) -> str:
+        resolved = require_cdc_primary_key(raw, table=table)
+        return ",".join(resolved) if isinstance(resolved, list) else resolved
+
     primary_keys = {
-        (c.name or "").strip(): str(c.primary_key or "id")
+        (c.name or "").strip(): _cdc_pk_str(c.primary_key, (c.name or "").strip())
         for c in selected
         if (c.name or "").strip()
     }
@@ -1056,7 +1062,9 @@ def _run_cdc_shared_multi_table(
         stream_maps = raw.get("mappings")
         use_maps = stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
         stream_cfg[name] = {
-            "primary_key": str(contract.primary_key or primary_keys.get(name) or "id"),
+            "primary_key": _cdc_pk_str(
+                contract.primary_key or primary_keys.get(name), name
+            ),
             "cursor_field": str(contract.cursor_field or ""),
             "mappings": use_maps,
             "cursor_key": build_cursor_key(
@@ -1089,7 +1097,7 @@ def _run_cdc_shared_multi_table(
         cdc = PostgreSqlChangeStreamCdc(
             {**src_cfg, "job_id": job_id},
             table=tables,
-            primary_key=primary_keys.get(tables[0], "id"),
+            primary_key=primary_keys[tables[0]],
             primary_keys=primary_keys,
             cursor_key=shared_key,
             schema=src_cfg.get("schema") or default_schema_for("postgresql") or "public",
@@ -1103,7 +1111,7 @@ def _run_cdc_shared_multi_table(
         cdc = MySqlChangeStreamCdc(
             {**src_cfg, "job_id": job_id},
             table=tables,
-            primary_key=primary_keys.get(tables[0], "id"),
+            primary_key=primary_keys[tables[0]],
             primary_keys=primary_keys,
             columns=list(schema.keys()) or None,
             resume_token=shared_wm,
@@ -1118,7 +1126,7 @@ def _run_cdc_shared_multi_table(
         cdc = SqlServerNativeCdc(
             {**src_cfg, "job_id": job_id},
             table=tables,
-            primary_key=primary_keys.get(tables[0], "id"),
+            primary_key=primary_keys[tables[0]],
             primary_keys=primary_keys,
             schema=str(src_cfg.get("schema") or default_schema_for("sqlserver") or "dbo"),
             resume_token=shared_wm if isinstance(shared_wm, str) else (
@@ -1139,7 +1147,7 @@ def _run_cdc_shared_multi_table(
         cdc = OracleLogMinerCdc(
             {**src_cfg, "job_id": job_id},
             table=tables,
-            primary_key=primary_keys.get(tables[0], "id"),
+            primary_key=primary_keys[tables[0]],
             primary_keys=primary_keys,
             schema=str(
                 src_cfg.get("schema")

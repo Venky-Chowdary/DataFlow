@@ -2398,12 +2398,17 @@ class UniversalTransferEngine:
             if effective_sync_lower == "reverse_etl":
                 from services.reverse_etl import plan_activation
 
+                if not conflict_columns:
+                    raise ValueError(
+                        "reverse_etl requires primary_key for activation — "
+                        "refuse inventing default 'id'"
+                    )
                 plan = plan_activation(
                     destination_kind=request.destination.format or "",
                     object_name=request.destination.table
                     or request.destination.collection
                     or "",
-                    primary_key=conflict_columns or ["id"],
+                    primary_key=conflict_columns,
                     field_map={
                         str(m.get("source") or ""): str(
                             m.get("target") or m.get("source") or ""

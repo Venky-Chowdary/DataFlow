@@ -422,7 +422,7 @@ class OracleLogMinerCdc:
         cfg: dict[str, Any],
         *,
         table: str | list[str],
-        primary_key: str = "ID",
+        primary_key: str = "",
         primary_keys: dict[str, str] | None = None,
         schema: str = "",
         batch_size: int = 500,
@@ -430,6 +430,7 @@ class OracleLogMinerCdc:
         cursor_key: str = "",
     ) -> None:
         from services.cdc_multi_table import normalize_table_list, tables_digest
+        from services.cdc_identity import require_cdc_primary_keys_map
 
         self.cfg = cfg
         raw_tables = normalize_table_list(table)
@@ -438,16 +439,19 @@ class OracleLogMinerCdc:
         self.tables = [t.upper() for t in raw_tables]
         self.table = self.tables[0]
         self.schema = (schema or cfg.get("schema") or cfg.get("username") or "").upper()
-        self.primary_keys: dict[str, str] = {
-            t: str((primary_keys or {}).get(t) or (primary_keys or {}).get(t.lower()) or primary_key or "ID").upper()
-            for t in self.tables
-        }
-        # Also accept original-case keys from callers.
+        # Normalize caller keys to upper for Oracle identifiers.
+        normalized_pks: dict[str, Any] | None = None
         if primary_keys:
-            for k, v in primary_keys.items():
-                if k and v:
-                    self.primary_keys[str(k).upper()] = str(v).upper()
-        self.primary_key = self.primary_keys.get(self.table, (primary_key or "ID").upper())
+            normalized_pks = {
+                str(k).upper(): str(v).upper() for k, v in primary_keys.items() if k and v
+            }
+        mapped = require_cdc_primary_keys_map(
+            self.tables,
+            primary_key=(primary_key or "").upper() or None,
+            primary_keys=normalized_pks,
+        )
+        self.primary_keys = {t: str(v).upper() for t, v in mapped.items()}
+        self.primary_key = self.primary_keys[self.table]
         self.batch_size = max(1, int(batch_size or 500))
         self._shared = len(self.tables) > 1
         state = decode_logminer_token(resume_token)
@@ -685,7 +689,12 @@ class OracleLogMinerCdc:
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots."""
-        pk = (sig.primary_key or self.primary_key or "ID").upper()
+        pk = (sig.primary_key or self.primary_key or "").upper()
+        if not pk:
+            raise ValueError(
+                "Oracle LogMiner incremental snapshot requires primary_key — "
+                "refuse inventing default 'ID'"
+            )
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
         with self._conn() as conn:

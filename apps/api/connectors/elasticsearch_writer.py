@@ -54,7 +54,13 @@ def _to_es_value(value: Any, source_type: str) -> Any:
     if upper in {"BOOLEAN", "BOOL"}:
         from connectors.sql_bind import coerce_boolean_wire
 
-        return bool(coerce_boolean_wire(value, as_int=False))
+        coerced = coerce_boolean_wire(value, as_int=False)
+        if not isinstance(coerced, bool):
+            raise ValueError(
+                f"Elasticsearch BOOLEAN refused unrecognized value {value!r} "
+                "(refuse invent via bool())"
+            )
+        return coerced
     if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
         from connectors.sql_bind import coerce_uuid_wire
 

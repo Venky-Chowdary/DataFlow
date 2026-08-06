@@ -103,7 +103,7 @@ class SnapshotSignal:
     source_key: str
     table: str
     status: str = "pending"  # pending | running | completed | failed | cancelled
-    primary_key: str | list[str] = "id"
+    primary_key: str | list[str] = ""  # required via request path — refuse inventing "id"
     chunk_size: int = 1000
     last_pk: str = ""
     rows_snapshotted: int = 0
@@ -252,7 +252,7 @@ def request_incremental_snapshot(
     source_key: str,
     table: str,
     *,
-    primary_key: str | list[str] = "id",
+    primary_key: str | list[str] | None = None,
     chunk_size: int = 1000,
 ) -> SnapshotSignal:
     """Enqueue an incremental snapshot for ``table`` on ``source_key``."""
