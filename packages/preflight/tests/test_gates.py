@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PREFLIGHT_ROOT = Path(__file__).resolve().parents[1] / "src"
+_API_ROOT = Path(__file__).resolve().parents[3] / "apps" / "api"
+if str(_PREFLIGHT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PREFLIGHT_ROOT))
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
 from preflight import (
     ColumnMapping,
     ColumnSchema,
@@ -84,6 +94,62 @@ def test_g8_blocks_without_sample_rows():
     result = PreflightEngine().run(PreflightContext(plan=_happy_plan()))
     assert not result.passed
     assert any(b.gate_id.value == "g8_reconciliation" for b in result.blockers)
+
+
+def test_g8_blocks_url_empty_without_risk_contract():
+    """Empty cells under url transform hard-block G8 until Map remaps or contracts."""
+    from preflight.gates import gate_g8_reconciliation
+
+    plan = _happy_plan()
+    plan.mappings = [
+        ColumnMapping(source="image", target="image", confidence=0.9, transform="url"),
+    ]
+    plan.required_targets = ["image"]
+    plan.source.columns = [ColumnSchema(name="image", inferred_type="TEXT", samples=[""])]
+    plan.destination.target_columns = [
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+    result = gate_g8_reconciliation(
+        PreflightContext(plan=plan, sample_rows=[{"image": ""}, {"image": ""}])
+    )
+    assert result.status == GateStatus.BLOCK
+    assert "transform errors" in (result.message or "").lower()
+
+
+def test_g8_pass_url_empty_with_cast_and_continue_contract():
+    """Signed CAST_AND_CONTINUE: empty url cells hold out — G8 must not re-block Validate."""
+    from preflight.gates import gate_g8_reconciliation
+
+    plan = _happy_plan()
+    plan.mappings = [
+        ColumnMapping(
+            source="image",
+            target="image",
+            confidence=0.9,
+            transform="url",
+            fidelity="mutate",
+            risk_acknowledged=True,
+            risk_contract=make_clearing_risk_contract(
+                column="image",
+                source_type="TEXT",
+                destination_type="TEXT",
+                execution_policy="CAST_AND_CONTINUE",
+                reason="quarantine empty urls",
+            ),
+        ),
+    ]
+    plan.required_targets = ["image"]
+    plan.source.columns = [ColumnSchema(name="image", inferred_type="TEXT", samples=[""])]
+    plan.destination.target_columns = [
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+    result = gate_g8_reconciliation(
+        PreflightContext(plan=plan, sample_rows=[{"image": ""}, {"image": ""}])
+    )
+    assert result.status == GateStatus.PASS, result.message
+    details = result.details or {}
+    assert int(details.get("contracted_holdout_count") or 0) >= 1
+    assert details.get("contracted_holdouts")
 
 
 def test_g1_blocks_unparseable_file():

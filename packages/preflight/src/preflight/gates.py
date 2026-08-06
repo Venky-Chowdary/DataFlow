@@ -1807,6 +1807,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             return str(value)
 
     transform_errors: list[str] = []
+    contracted_holdouts: list[str] = []
     mapped_rows: list[dict[str, Any]] = []
     for row_idx, row in enumerate(sample_rows, start=1):
         mapped: dict[str, Any] = {}
@@ -1820,8 +1821,15 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 continue
             transformed, err = _apply_write_path_transform(raw_s, m.transform)
             if err:
-                transform_errors.append(f"row {row_idx} {m.source}→{m.target}: {err}")
-                mapped[m.target] = None
+                line = f"row {row_idx} {m.source}→{m.target}: {err}"
+                # Continue-policy Risk Contract matches write path: quarantine /
+                # hold out — do not hard-block Validate after the operator signed.
+                if _risk_cleared(m):
+                    contracted_holdouts.append(line)
+                    mapped[m.target] = None
+                else:
+                    transform_errors.append(line)
+                    mapped[m.target] = None
             else:
                 mapped[m.target] = transformed
         mapped_rows.append(mapped)
@@ -1833,9 +1841,15 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             start,
             {
                 "errors": transform_errors[:20],
+                "contracted_holdouts": contracted_holdouts[:20],
                 "source_rows": source_count,
                 "preview_only": True,
-                "note": "Write-path transform failed on sample — fix mapping before Run",
+                "note": (
+                    "Write-path transform failed on sample without a continue-policy "
+                    "Risk Contract — remap, clean cells, or Accept · cast & continue / "
+                    "quarantine on Map"
+                ),
+                "kind": "transform_errors",
             },
         )
 
@@ -2075,7 +2089,17 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "source_rows": source_count,
                     "target_rows": len(mapped_rows),
                     "preview_only": True,
-                    "note": "Pre-write write-path sample check — live Gate-8 checksum runs after load",
+                    "contracted_holdouts": contracted_holdouts[:20],
+                    "contracted_holdout_count": len(contracted_holdouts),
+                    "note": (
+                        "Pre-write write-path sample check — live Gate-8 checksum runs after load"
+                        + (
+                            f"; {len(contracted_holdouts)} cell(s) held out under "
+                            "continue-policy Risk Contract (quarantine on write)"
+                            if contracted_holdouts
+                            else ""
+                        )
+                    ),
                 },
                 evidence_scope(
                     kind="pre_write_reconciliation",

@@ -280,6 +280,73 @@ class CdcState:
     ddl_log: list[str] = field(default_factory=list)
     last_dest_summary: dict[str, Any] = field(default_factory=dict)
     last_checksum: str = ""
+    # Accumulate quarantine across CDC batches — never keep only the last batch.
+    accumulated_rejected_details: list[dict[str, Any]] = field(default_factory=list)
+    accumulated_rejected_rows: int = 0
+    accumulated_coerced_null_rows: int = 0
+
+
+def _merge_cdc_dest_summary(
+    state: CdcState,
+    dest_summary: dict[str, Any] | None,
+    *,
+    job_id: str = "",
+    destination: Any = None,
+) -> dict[str, Any]:
+    """Merge batch quarantine into CDC state and persist DLQ before watermark.
+
+    Soft-quarantine CDC must still advance (at-least-once + DLQ), but earlier
+    batches' rejected_details must not disappear when ``last_dest_summary`` is
+    overwritten.
+    """
+    incoming = dict(dest_summary or {})
+    new_details = [
+        dict(d) for d in (incoming.get("rejected_details") or []) if isinstance(d, dict)
+    ]
+    if new_details:
+        if not str(job_id or "").strip():
+            raise RuntimeError(
+                "CDC quarantine rows present but job_id is missing — refuse "
+                "watermark advance (cannot durable DLQ; rows cannot disappear)"
+            )
+        try:
+            from services.quarantine_dlq import persist_rejected_rows
+
+            persist_rejected_rows(
+                job_id=str(job_id),
+                rejected_details=new_details,
+                source="cdc_batch",
+                connector=str(
+                    getattr(destination, "format", None)
+                    or getattr(destination, "kind", None)
+                    or ""
+                ),
+            )
+            incoming["quarantine_cdc_durable"] = True
+            incoming["quarantine_durable"] = True
+        except Exception as qexc:
+            incoming["quarantine_durable"] = False
+            incoming["quarantine_dlq_error"] = str(qexc)[:300]
+            raise RuntimeError(
+                "CDC quarantine DLQ persist failed — refuse watermark advance "
+                f"(rows cannot disappear): {qexc}"
+            ) from qexc
+
+    state.accumulated_rejected_details.extend(new_details)
+    state.accumulated_rejected_rows += int(incoming.get("rejected_rows") or 0) or len(
+        new_details
+    )
+    state.accumulated_coerced_null_rows += int(incoming.get("coerced_null_rows") or 0)
+
+    merged = {**(state.last_dest_summary or {}), **incoming}
+    merged["rejected_details"] = list(state.accumulated_rejected_details)
+    merged["rejected_rows"] = int(state.accumulated_rejected_rows)
+    merged["coerced_null_rows"] = int(state.accumulated_coerced_null_rows)
+    merged["rejected_details_total"] = len(state.accumulated_rejected_details)
+    if incoming.get("quarantine_durable"):
+        merged["quarantine_dlq_persisted_count"] = len(state.accumulated_rejected_details)
+    state.last_dest_summary = merged
+    return merged
 
 
 def _records_to_matrix(records: list[dict[str, Any]], headers: list[str]) -> list[list[str]]:
@@ -1121,6 +1188,7 @@ def _run_cdc_shared_multi_table(
     chunk_idx = 0
     headers = list(schema.keys())
     last_summary: dict[str, Any] = {}
+    shared_accum = CdcState()  # quarantine accumulate across shared-reader batches
     original_dest_table = getattr(destination, "table", None)
     original_dest_collection = getattr(destination, "collection", None)
 
@@ -1238,7 +1306,12 @@ def _run_cdc_shared_multi_table(
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
         )
         if dest_summary:
-            last_summary = dest_summary
+            last_summary = _merge_cdc_dest_summary(
+                shared_accum,
+                dest_summary,
+                job_id=str(job_id or ""),
+                destination=destination,
+            )
         _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
 
         skip_ack = False
@@ -1295,6 +1368,10 @@ def _run_cdc_shared_multi_table(
                     "streams": list(stream_health.values()),
                     "cdc_delivery": "at-least-once",
                     "cdc_shared_reader": True,
+                    "rejected_details": list(
+                        (last_summary or {}).get("rejected_details") or []
+                    ),
+                    "rejected_rows": int((last_summary or {}).get("rejected_rows") or 0),
                     **_cdc_lag_fields(cdc),
                 },
             )
@@ -1944,7 +2021,12 @@ def _run_cdc_single_stream(
         state.deletes += deleted
         state.last_checksum = last_checksum or state.last_checksum
         if dest_summary:
-            state.last_dest_summary = dest_summary
+            dest_summary = _merge_cdc_dest_summary(
+                state,
+                dest_summary,
+                job_id=str(job_id or ""),
+                destination=destination,
+            )
 
         _refuse_cdc_advance_on_abort(dest_summary, validation_mode)
 
@@ -2055,6 +2137,15 @@ def _run_cdc_single_stream(
                         "deletes": state.deletes,
                         **lag_fields,
                     },
+                    "rejected_details": list(
+                        (state.last_dest_summary or {}).get("rejected_details") or []
+                    ),
+                    "rejected_rows": int(
+                        (state.last_dest_summary or {}).get("rejected_rows") or 0
+                    ),
+                    "coerced_null_rows": int(
+                        (state.last_dest_summary or {}).get("coerced_null_rows") or 0
+                    ),
                 },
             )
         return bool(change.total_changes)

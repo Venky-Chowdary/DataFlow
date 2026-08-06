@@ -163,8 +163,25 @@ def write_mapped_rows(
         dest_kind="redis",
         destination_pk_columns=list(conflict_columns or []) or None,
     )
-    from connectors.writer_common import reject_on_strict_policy
+    from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
 
+    tgt_types = [
+        str(
+            dest_types.get(c)
+            or (logical_types[i] if i < len(logical_types) else "")
+            or ""
+        )
+        for i, c in enumerate(target_cols)
+    ]
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="Redis",
+        mappings=list(mappings or []) or None,
+    )
     _map_abort = reject_on_strict_policy(policy, rejected_details, "Redis")
     if _map_abort or (errors and policy == "fail"):
         return WriteResult(

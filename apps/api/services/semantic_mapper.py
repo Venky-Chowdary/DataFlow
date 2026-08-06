@@ -1741,7 +1741,12 @@ def map_columns(
                 {
                     "source": source,
                     "target": candidate,
-                    "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
+                    "confidence": _calibrated_confidence(
+                        IDENTITY_PASSTHROUGH_CONFIDENCE,
+                        score_gap=0.0,
+                        requires_review=True,
+                        hard_cap=0.84,
+                    ),
                     "reasoning": (
                         "No type-compatible destination column — map to a new field "
                         f"(create/ADD as {dest_native}); do not coerce into incompatible DDL"
@@ -1882,6 +1887,19 @@ def _apply_create_new_risk_stamps(
                 requires_review=True,
                 hard_cap=0.88,
                 fidelity=str(row.get("fidelity") or ""),
+            )
+        elif strategy == "create_compatible_new":
+            # Existing-table ADD COLUMN invent must stay under auto-approve (~0.85).
+            row["requires_review"] = True
+            try:
+                base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
+            except (TypeError, ValueError):
+                base = IDENTITY_PASSTHROUGH_CONFIDENCE
+            row["confidence"] = _calibrated_confidence(
+                base,
+                score_gap=float(row.get("score_gap") or 0.0),
+                requires_review=True,
+                hard_cap=0.84,
             )
         elif strategy == "identity_passthrough":
             # Same semantic form, no risk stamps → keep high but not flat 0.99.

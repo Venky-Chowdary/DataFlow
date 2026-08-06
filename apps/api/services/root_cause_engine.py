@@ -218,6 +218,23 @@ def _is_fidelity_signal(
     # Missing Risk Contract is its own root — never "0 columns collapse fidelity".
     if _is_risk_contract_incomplete_signal(message, details, gate_id):
         return False
+    # G8 dry-run transform / identity / duplicate failures are not type-path
+    # fidelity collapse. ``image→image`` in the issue line must not trip the
+    # type-arrow regex into a false "Lossy / fidelity collapse" root.
+    if str(gate_id or "") == "g8_reconciliation":
+        kind = str(details.get("kind") or "").lower()
+        if kind in {"transform_errors", "duplicate_keys", "identity_transform"}:
+            return False
+        msg_l = (message or "").lower()
+        if (
+            "transform errors" in msg_l
+            or "duplicate target key" in msg_l
+            or "identity transform" in msg_l
+            or "identity mapping" in msg_l
+        ):
+            return False
+        # Only absorb G8 into fidelity when the gate itself stamped collapse.
+        return details.get("fidelity_collapse") is True
     if details.get("fidelity_collapse") is True:
         return True
     framing = details.get("framing") if isinstance(details.get("framing"), dict) else {}

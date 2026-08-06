@@ -1488,6 +1488,23 @@ def write_mapped_rows(
 
         if close_connection:
             close_quietly(conn)
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
+        if _final_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=written,
+                table_name=table_name,
+                target_schema=schema,
+                checksum="",
+                chunks_completed=chunks_completed or chunks,
+                error=_final_abort,
+                rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+                rejected_details=rejected_details,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                warnings=transform_errors,
+                load_method="copy" if use_copy else "insert",
+            )
         return WriteResult(
             ok=True,
             rows_written=written,
