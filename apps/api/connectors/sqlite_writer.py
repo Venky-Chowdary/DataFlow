@@ -390,6 +390,7 @@ def write_mapped_rows(
                 preserve_case=True,
                 dest_kind="sqlite",
                 destination_pk_columns=list(conflict_columns or []) or None,
+                destination_column_nullability=_kwargs.get("destination_column_nullability"),
             )
         )
         # Shared quarantine matrix — SQLite is PRODUCTION_SKU; never skip fit

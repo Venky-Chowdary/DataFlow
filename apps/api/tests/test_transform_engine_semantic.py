@@ -57,6 +57,7 @@ def test_apply_transform_currency():
     assert apply_transform("€100", "currency") == ("100", None)
     value, err = apply_transform("free", "currency")
     assert err is not None
+    assert value is None
 
 
 def test_apply_transform_percentage():

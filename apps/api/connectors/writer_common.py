@@ -73,6 +73,32 @@ def mapped_row_quarantine_values(row: Any, target_cols: list[str]) -> dict[str, 
     return out
 
 
+def omit_missing_fields(
+    pairs: Any,
+    *,
+    drop_empty: bool = True,
+) -> dict[str, Any]:
+    """Build a write payload omitting ``DF_MISSING`` (STOP_COLUMN / coerce_null).
+
+    SaaS/document writers must never serialize ``__DF_MISSING__`` as a live
+    property value. Empty strings are dropped when ``drop_empty`` (CRM upsert
+    class); pass ``drop_empty=False`` when empty is a meaningful clear.
+    """
+    from services.value_serializer import is_missing_sentinel
+
+    out: dict[str, Any] = {}
+    for item in pairs:
+        if not isinstance(item, (tuple, list)) or len(item) < 2:
+            continue
+        k, v = item[0], item[1]
+        if v is None or is_missing_sentinel(v):
+            continue
+        if drop_empty and str(v) == "":
+            continue
+        out[str(k)] = v
+    return out
+
+
 def project_quarantine_source_values(
     target_values: dict[str, Any],
     mappings: list[dict[str, Any]] | None,

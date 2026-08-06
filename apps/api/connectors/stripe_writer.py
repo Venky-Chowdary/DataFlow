@@ -55,11 +55,15 @@ def resolve_stripe_dest_types(
 
 def _row_id(row: dict[str, Any], conflict_columns: list[str] | None) -> str | None:
     """Return the Stripe object id if the row provides one."""
+    from services.value_serializer import is_missing_sentinel
+
     candidates = [c for c in (conflict_columns or []) if c]
     if not candidates:
         candidates = ["id"]
     for c in candidates:
         val = row.get(c)
+        if val is None or is_missing_sentinel(val):
+            continue
         if val:
             return str(val).strip() or None
     return None
@@ -174,11 +178,13 @@ def write_mapped_rows(
             row_dict = dict(zip(target_cols, row))
 
         record_id = _row_id(row_dict, conflict_columns) if mode in upsert_modes else None
-        payload = {
-            k: v
-            for k, v in row_dict.items()
-            if k not in ("id", "Id") and v is not None and str(v) != ""
-        }
+        from connectors.writer_common import omit_missing_fields
+
+        # STOP_COLUMN / coerce_null → DF_MISSING must omit, never leak the
+        # sentinel string into Stripe API payloads.
+        payload = omit_missing_fields(
+            ((k, v) for k, v in row_dict.items() if k not in ("id", "Id"))
+        )
 
         if record_id and mode in upsert_modes:
             url = f"{base}/v1/{obj}/{record_id}"

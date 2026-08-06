@@ -1219,7 +1219,8 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         target_string = st not in {SemanticType.CURRENCY, SemanticType.PERCENTAGE}
         converted = normalize_value_for_target(text, st, "decimal" if not target_string else "string")
         if not target_string and not isinstance(converted, Decimal):
-            return text, f"Invalid {transform}: {text!r}"
+            # Fail-closed: never invent the raw text as a "usable" currency/percentage.
+            return None, f"Invalid {transform}: {text!r}"
         if target_string:
             out = str(converted)
             # Explicit semantic transforms must fail-closed on garbage — never

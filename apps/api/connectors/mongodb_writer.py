@@ -205,6 +205,7 @@ def write_mapped_rows(
             preserve_case=True,
             dest_kind="mongodb",
             destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=_kwargs.get("destination_column_nullability"),
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
@@ -253,6 +254,12 @@ def write_mapped_rows(
         }
 
         def _to_bson(value: Any, stype: str, transform: str = "") -> Any:
+            from services.value_serializer import is_missing_sentinel
+
+            # Preserve DF_MISSING through coercion so sparse upsert can omit
+            # the field — never convert the sentinel into a live BSON value.
+            if is_missing_sentinel(value):
+                return value
             if value is None:
                 return None
             upper = stype.upper()

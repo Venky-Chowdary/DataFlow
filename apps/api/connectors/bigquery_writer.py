@@ -474,6 +474,7 @@ def write_mapped_rows(
     create_table: bool = True,
     **_kwargs: Any,
 ) -> WriteResult:
+    dest_nullability = _kwargs.get("destination_column_nullability")
     del username, password, ssl, warehouse, _kwargs
     from connectors.writer_common import resolve_writer_backfill
 
@@ -608,6 +609,7 @@ def write_mapped_rows(
             error_policy=policy,
             dest_kind="bigquery",
             destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=dest_nullability,
         )
         # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
         physical_schema = None

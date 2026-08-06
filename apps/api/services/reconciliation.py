@@ -4072,13 +4072,22 @@ def sample_compare_rows(
                     )
                 except Exception:
                     transform = m.get("transform")
+            # Sparse CDC / STOP_COLUMN / coerce_null: source DF_MISSING means
+            # omit-from-SET — skip compare (do not fingerprint as NULL).
+            # Destination DF_MISSING is a leak and must still mismatch.
+            from services.value_serializer import is_missing_sentinel
+
+            raw_src = src.get(src_col) if isinstance(src, dict) else None
+            if is_missing_sentinel(raw_src):
+                continue
+            raw_tgt = tgt.get(physical_tgt)
             src_val = _fingerprint(
-                src.get(src_col), transform=transform, tgt_col=tgt_col
+                raw_src, transform=transform, tgt_col=tgt_col
             )
             # Destination already applied bind at write — fingerprint without
             # re-transform so read-back bools/JSON match source write-path form.
             tgt_val = _fingerprint(
-                tgt.get(physical_tgt), transform=None, tgt_col=tgt_col
+                raw_tgt, transform=None, tgt_col=tgt_col
             )
             compared += 1
             if src_val != tgt_val:

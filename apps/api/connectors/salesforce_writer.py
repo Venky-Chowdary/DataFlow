@@ -596,7 +596,11 @@ def write_mapped_rows(
                     pairs = row.items()
                 else:
                     pairs = zip(target_cols, row)
-                rec = {k: v for k, v in pairs if v is not None and str(v) != ""}
+                from connectors.writer_common import omit_missing_fields
+
+                # STOP_COLUMN / coerce_null → DF_MISSING must omit, never leak
+                # "__DF_MISSING__" into Salesforce field values.
+                rec = omit_missing_fields(pairs)
                 rec.pop("attributes", None)
                 records.append(rec)
             if not records:

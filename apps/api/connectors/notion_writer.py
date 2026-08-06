@@ -225,6 +225,12 @@ def _as_property_value(
     row_idx: int,
 ) -> Any:
     """Map a single cell value into a Notion property object value."""
+    from services.value_serializer import is_missing_sentinel
+
+    # STOP_COLUMN / coerce_null → DF_MISSING: omit property (never write sentinel).
+    if value is None or is_missing_sentinel(value):
+        return None
+
     text = ""
     if value is not None:
         text = str(value)
@@ -421,6 +427,8 @@ def write_mapped_rows(
 
         notion_properties: dict[str, Any] = {}
         has_title = False
+        from services.value_serializer import is_missing_sentinel
+
         for col, val in row_dict.items():
             prop_type = properties.get(col.lower())
             if not prop_type:
@@ -432,7 +440,7 @@ def write_mapped_rows(
             prop_value = _as_property_value(val, prop_type, col, warnings, i)
             if prop_value is not None:
                 notion_properties[col] = prop_value
-                if prop_type == "title" and val is not None and str(val):
+                if prop_type == "title" and val is not None and not is_missing_sentinel(val) and str(val):
                     has_title = True
 
         if title_name and not has_title:
@@ -440,7 +448,9 @@ def write_mapped_rows(
             fallback_value = ""
             fallback_col = ""
             for col, val in row_dict.items():
-                if val is not None and str(val).strip():
+                if val is None or is_missing_sentinel(val):
+                    continue
+                if str(val).strip():
                     fallback_value = str(val).strip()
                     fallback_col = col
                     break

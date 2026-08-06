@@ -437,3 +437,114 @@ def test_sqlite_write_mapped_rows_sparse_roundtrip(tmp_path):
     conn.close()
     assert row == ("1", "new-note", "keep-me")
     assert result.checksum == readback
+
+
+def test_omit_missing_fields_drops_df_missing_sentinel():
+    from connectors.writer_common import omit_missing_fields
+
+    out = omit_missing_fields(
+        [("id", "1"), ("note", "keep"), ("extra", DF_MISSING_SENTINEL), ("empty", "")]
+    )
+    assert out == {"id": "1", "note": "keep"}
+    assert DF_MISSING_SENTINEL not in out.values()
+
+
+def test_sample_compare_skips_df_missing_omit_columns():
+    """Omit-from-SET columns must not fingerprint as NULL (false-green wipe risk)."""
+    from services.reconciliation import sample_compare_rows
+
+    result = sample_compare_rows(
+        [{"id": "1", "note": "new", "extra": DF_MISSING_SENTINEL}],
+        [{"id": "1", "note": "new", "extra": "prior-kept"}],
+        [
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+            {"source": "extra", "target": "extra"},
+        ],
+        sort_key="id",
+    )
+    assert result["passed"] is True
+    # Only id + note compared; extra skipped because source is DF_MISSING.
+    assert result["compared"] == 2
+    assert result["mismatches"] == []
+
+
+def test_sample_compare_fails_when_destination_leaks_df_missing():
+    """Read-back DF_MISSING is a sentinel leak — must not be skipped as omit."""
+    from services.reconciliation import sample_compare_rows
+
+    result = sample_compare_rows(
+        [{"id": "1", "note": "live"}],
+        [{"id": "1", "note": DF_MISSING_SENTINEL}],
+        [
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+        ],
+        sort_key="id",
+    )
+    assert result["passed"] is False
+    assert any(m.get("target") == "note" for m in result["mismatches"])
+
+
+def test_mongo_sparse_upsert_preserves_df_missing_through_decimal_coercion():
+    """Decimal _to_bson must not wrap DF_MISSING as Decimal128 (would leak / wipe)."""
+    from unittest.mock import patch
+
+    from connectors.mongodb_writer import write_mapped_rows
+
+    captured: list = []
+
+    class _Coll:
+        def find(self, *a, **k):
+            return []
+
+        def bulk_write(self, ops, ordered=False):
+            captured.extend(ops)
+
+    class _Db:
+        def __getitem__(self, name):
+            return _Coll()
+
+    class _Client:
+        def __getitem__(self, name):
+            return _Db()
+
+        def close(self):
+            return None
+
+    with patch("connectors.mongodb_common._mongo_client", return_value=_Client()):
+        result = write_mapped_rows(
+            host="localhost",
+            port=27017,
+            database="testdb",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["id", "amt"],
+            data_rows=[["1", DF_MISSING_SENTINEL]],
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 1},
+                {
+                    "source": "amt",
+                    "target": "amt",
+                    "confidence": 1,
+                    "transform": "decimal",
+                },
+            ],
+            column_types={"id": "string", "amt": "DECIMAL"},
+            create_table=True,
+            write_mode="upsert",
+            conflict_columns=["id"],
+        )
+    assert result.ok, result.error
+    assert len(captured) == 1
+    op = captured[0]
+    assert type(op).__name__ == "UpdateOne"
+    update = op._doc
+    assert "$set" in update
+    assert "amt" not in update["$set"]
+    assert DF_MISSING_SENTINEL not in update["$set"].values()
+    assert all(not hasattr(v, "to_decimal") for v in update["$set"].values())

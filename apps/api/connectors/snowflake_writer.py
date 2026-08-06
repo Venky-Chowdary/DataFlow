@@ -709,6 +709,7 @@ def write_mapped_rows(
     skip_session_setup: bool = False,
     **_kwargs: Any,
 ) -> WriteResult:
+    dest_nullability = _kwargs.get("destination_column_nullability")
     del port, ssl, _kwargs
     from connectors.writer_common import resolve_writer_backfill
 
@@ -804,6 +805,7 @@ def write_mapped_rows(
         error_policy=policy,
         dest_kind="snowflake",
         destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=dest_nullability,
     )
 
     # Size Snowflake NUMBER columns from the actual batch data only when Map

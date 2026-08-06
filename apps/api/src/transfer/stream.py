@@ -552,6 +552,12 @@ def _write_batch(
     job_id: str | None = None,
     skip_preflight: bool = False,
 ) -> tuple[int, str, dict]:
+    # Live dest nullability for write-time NOT NULL escalate (G3 / adapters parity).
+    dest_nullability = dict(
+        (getattr(dest, "extra", None) or {}).get("schema_nullability")
+        or (cfg.get("extra") or {}).get("schema_nullability")
+        or {}
+    )
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
         from connectors.write_resilience import build_write_batch_key
@@ -587,6 +593,7 @@ def _write_batch(
             connection=connection,
             close_connection=close_connection,
             connection_holder=connection_holder,
+            destination_column_nullability=dest_nullability,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -630,6 +637,7 @@ def _write_batch(
             ),
             file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+            destination_column_nullability=dest_nullability,
         )
         if not result.ok:
             _raise_write_failure(result, "MySQL batch write failed")
@@ -666,6 +674,7 @@ def _write_batch(
             auth_source=cfg.get("auth_source", ""),
             error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+            destination_column_nullability=dest_nullability,
         )
         if not result.ok:
             _raise_write_failure(result, "MongoDB batch write failed")
@@ -703,6 +712,7 @@ def _write_batch(
             auth_source=cfg.get("auth_source", ""),
             error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+            destination_column_nullability=dest_nullability,
         )
         if not result.ok:
             _raise_write_failure(result, "SQLite batch write failed")
@@ -745,6 +755,7 @@ def _write_batch(
             connection=connection,
             close_connection=close_connection,
             skip_session_setup=skip_session_setup,
+            destination_column_nullability=dest_nullability,
         )
         if not result.ok:
             _raise_write_failure(result, "Snowflake batch write failed")
@@ -778,6 +789,7 @@ def _write_batch(
             auth_source=cfg.get("auth_source", ""),
             error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+            destination_column_nullability=dest_nullability,
         )
         if not result.ok:
             _raise_write_failure(result, "BigQuery batch write failed")
@@ -828,6 +840,7 @@ def _write_batch(
             "create_table": create_table,
             "error_policy": error_policy,
             "on_checkpoint": lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
+            "destination_column_nullability": dest_nullability,
         }
         if dest_type == "redis":
             kwargs["write_mode"] = write_mode
@@ -902,6 +915,7 @@ def _write_batch(
                 table_name=table_name, file_batch_idx=chunk_idx
             ),
             file_batch_idx=chunk_idx,
+            destination_column_nullability=dest_nullability,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -932,6 +946,7 @@ def _write_batch(
             "column_types": column_types,
             "create_table": create_table,
             "error_policy": error_policy,
+            "destination_column_nullability": dest_nullability,
             "on_checkpoint": (
                 (lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r))
                 if on_checkpoint

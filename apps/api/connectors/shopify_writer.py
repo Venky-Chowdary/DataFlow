@@ -232,9 +232,13 @@ def write_mapped_rows(
 
         record_id = None
         if mode in upsert_modes:
+            from services.value_serializer import is_missing_sentinel
+
             candidates = list(conflict_columns or ["id"])
             for c in candidates:
                 val = row_dict.get(c)
+                if val is None or is_missing_sentinel(val):
+                    continue
                 if val:
                     record_id = str(val).strip() or None
                     break
@@ -247,7 +251,15 @@ def write_mapped_rows(
                 record_id = None
 
         update = mode in upsert_modes and bool(record_id)
-        payload = {singular: {k: v for k, v in row_dict.items() if k.lower() != "id"}}
+        from connectors.writer_common import omit_missing_fields
+
+        # STOP_COLUMN / coerce_null → DF_MISSING must omit, never leak the
+        # sentinel string into Shopify Admin REST payloads.
+        body = omit_missing_fields(
+            ((k, v) for k, v in row_dict.items() if k.lower() != "id"),
+            drop_empty=False,
+        )
+        payload = {singular: body}
         url = _make_url(shop_host, obj, record_id if update else None)
         method = "PUT" if update else "POST"
 
