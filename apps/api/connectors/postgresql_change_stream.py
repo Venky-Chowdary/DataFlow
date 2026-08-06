@@ -247,10 +247,11 @@ class PostgreSqlChangeStreamCdc:
         if not self.tables:
             raise ValueError("PostgreSQL CDC requires at least one table")
         self.table = self.tables[0]
-        self.primary_keys = {
-            t: str((primary_keys or {}).get(t) or primary_key or "id")
-            for t in self.tables
-        }
+        from services.cdc_identity import require_cdc_primary_keys_map
+
+        self.primary_keys = require_cdc_primary_keys_map(
+            self.tables, primary_key=primary_key, primary_keys=primary_keys
+        )
         self.primary_key = self.primary_keys[self.table]
         self.cursor_key = cursor_key
         self.columns = columns

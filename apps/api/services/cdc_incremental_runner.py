@@ -80,7 +80,12 @@ def interleave_incremental_snapshot(
         if sig is None:
             return
         window_id = f"{sig.id}:{uuid.uuid4().hex[:8]}"
-        win = SnapshotWindow(window_id=window_id, primary_key=sig.primary_key or "id")
+        from services.cdc_identity import require_cdc_primary_key
+
+        win = SnapshotWindow(
+            window_id=window_id,
+            primary_key=require_cdc_primary_key(sig.primary_key, table=table),
+        )
         try:
             win.open_window()
             rows, last_pk, done = fetch_chunk(sig)
@@ -115,7 +120,9 @@ def interleave_incremental_snapshot(
         for r in emitted:
             if not r.get("__deleted"):
                 continue
-            key = _pk_value(r, sig.primary_key or "id")
+            key = _pk_value(
+                r, require_cdc_primary_key(sig.primary_key, table=table)
+            )
             if key:
                 deletes.append(key)
         if inserts or deletes:

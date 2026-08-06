@@ -133,7 +133,12 @@ def request_snapshot_for_job(
     tbl = (table or ctx["table"] or "").strip()
     if not tbl:
         raise ValueError("table is required (job has no source table/collection)")
-    pk = (primary_key or ctx["primary_key"] or "id").strip() or "id"
+    pk = (primary_key or ctx["primary_key"] or "").strip()
+    if not pk:
+        raise ValueError(
+            "primary_key is required for CDC incremental snapshot — refuse "
+            "inventing default 'id'"
+        )
     sig = request_incremental_snapshot(
         ctx["source_key"],
         tbl,

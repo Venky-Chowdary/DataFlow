@@ -242,12 +242,15 @@ def _as_property_value(
         return {"rich_text": _rich_text_chunks(text)}
     if notion_type == "number":
         if text == "":
-            return {"number": None}
+            # Omit empty — never invent JSON null (destination wipe).
+            return None
         try:
             return {"number": float(text)}
-        except ValueError:
-            warnings.append(f"row {row_idx}: cannot coerce '{property_name}' to number")
-            return {"number": None}
+        except ValueError as exc:
+            raise ValueError(
+                f"Notion number property {property_name!r} refused {value!r} "
+                "(refuse silent NULL invent)"
+            ) from exc
     if notion_type == "url":
         return {"url": text or None}
     if notion_type == "email":
@@ -255,7 +258,15 @@ def _as_property_value(
     if notion_type == "phone_number":
         return {"phone_number": text or None}
     if notion_type == "checkbox":
-        return {"checkbox": bool(value) and text.lower() not in {"false", "0", "", "no"}}
+        from connectors.sql_bind import coerce_boolean_wire
+
+        coerced = coerce_boolean_wire(value)
+        if not isinstance(coerced, bool):
+            raise ValueError(
+                f"Notion checkbox {property_name!r} refused {value!r} "
+                "(refuse boolean invent)"
+            )
+        return {"checkbox": coerced}
     if notion_type == "select":
         return {"select": {"name": text} if text else None}
     if notion_type == "status":
@@ -438,7 +449,36 @@ def write_mapped_rows(
             if prop_type in {"formula", "rollup", "created_by", "created_time", "last_edited_by", "last_edited_time", "files"}:
                 warnings.append(f"row {i}: '{col}' is read-only in Notion; skipped.")
                 continue
-            prop_value = _as_property_value(val, prop_type, col, warnings, i)
+            try:
+                prop_value = _as_property_value(val, prop_type, col, warnings, i)
+            except ValueError as cell_exc:
+                msg = str(cell_exc)
+                detail = {
+                    "row": i,
+                    "column": col,
+                    "target": col,
+                    "value": str(val)[:120] if val is not None else "",
+                    "reason": msg,
+                    "policy": policy,
+                    "values": dict(row_dict),
+                }
+                all_rejected.append(detail)
+                warnings.append(msg)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=table_name,
+                        target_schema=database_id,
+                        checksum=digest.hexdigest()[:32],
+                        chunks_completed=chunks,
+                        error=msg,
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings[:20],
+                        driver="notion",
+                    )
+                continue
             if prop_value is not None:
                 notion_properties[col] = prop_value
                 if prop_type == "title" and val is not None and not is_missing_sentinel(val) and str(val):

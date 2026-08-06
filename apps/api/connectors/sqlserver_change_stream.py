@@ -85,7 +85,9 @@ class SqlServerChangeTrackingCdc:
         self.cfg = cfg
         self.table = table
         self.schema = schema or "dbo"
-        self.primary_key = primary_key or "id"
+        from services.cdc_identity import require_cdc_primary_key
+
+        self.primary_key = require_cdc_primary_key(primary_key, table=table)
         self.batch_size = max(1, int(batch_size or 500))
         self.columns = columns
         state = decode_sqlserver_resume_token(resume_token)

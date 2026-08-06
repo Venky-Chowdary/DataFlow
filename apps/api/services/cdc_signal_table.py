@@ -104,7 +104,11 @@ def apply_signal_row(
     stype = str(signal_type or "").strip().lower().replace("_", "-")
     payload = _parse_data(data)
     tables = _collections(payload) or ([default_table] if default_table else [])
-    pk = str(payload.get("primary_key") or payload.get("pk") or primary_key or "id")
+    pk = str(payload.get("primary_key") or payload.get("pk") or primary_key or "").strip()
+    if not pk:
+        raise ValueError(
+            "CDC signal primary_key required — refuse inventing default 'id'"
+        )
     chunk = int(payload.get("chunk_size") or payload.get("chunk-size") or 1000)
 
     if stype in {"execute-snapshot", "incremental", "execute-incremental-snapshot"}:

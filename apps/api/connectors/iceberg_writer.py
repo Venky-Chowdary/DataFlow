@@ -557,9 +557,26 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
             return False
         raise ValueError(f"cannot cast {value!r} to boolean")
     if pa.types.is_timestamp(arrow_type):
+        tz = getattr(arrow_type, "tz", None)
         if isinstance(value, datetime):
+            if tz and value.tzinfo is None:
+                raise ValueError(
+                    "Iceberg TIMESTAMPTZ refused naive datetime — provide "
+                    "offset/Z (refuse silent UTC invent)"
+                )
+            if not tz and value.tzinfo is not None:
+                # NTZ physical type: keep civil digits (Validate owns TZ→NTZ).
+                return value.replace(tzinfo=None)
             return value
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        if tz and parsed.tzinfo is None:
+            raise ValueError(
+                "Iceberg TIMESTAMPTZ refused naive datetime — provide "
+                "offset/Z (refuse silent UTC invent)"
+            )
+        if not tz and parsed.tzinfo is not None:
+            return parsed.replace(tzinfo=None)
+        return parsed
     if pa.types.is_date(arrow_type):
         if isinstance(value, datetime):
             return value.date()

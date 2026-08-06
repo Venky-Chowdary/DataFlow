@@ -241,10 +241,12 @@ def probe_sqlserver_retention(
             message="table is required for SQL Server retention probe.",
         )
     try:
+        from services.cdc_identity import require_cdc_primary_key
+
         cdc = SqlServerNativeCdc(
             {**cfg, "type": cfg.get("type") or "sqlserver"},
             table=table,
-            primary_key=str(cfg.get("primary_key") or "id"),
+            primary_key=require_cdc_primary_key(cfg.get("primary_key"), table=table),
             schema=schema or "dbo",
             cursor_key=ck or None,
         )

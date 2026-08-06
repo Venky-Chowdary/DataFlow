@@ -332,15 +332,44 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
                 return value  # leave raw; transform path should have rejected
             except json.JSONDecodeError:
                 return value
-        if ctype in {"text", "string", "varchar", "uuid", "binary"}:
+        if ctype in {"text", "string", "varchar", "uuid", "binary", ""}:
+            # Empty/unknown logical type: keep string — never invent int/bool/float
+            # via json.loads (object-store export type invent).
             return value
-        try:
-            def _reject2(name: str) -> None:
-                raise ValueError(f"non-finite JSON constant: {name}")
+        if ctype in {"boolean", "bool", "bit"}:
+            from connectors.sql_bind import coerce_boolean_wire
 
-            return json.loads(text, parse_constant=_reject2)
-        except (json.JSONDecodeError, ValueError):
+            coerced = coerce_boolean_wire(value)
+            if not isinstance(coerced, bool):
+                raise ValueError(
+                    f"JSON export BOOLEAN refused unrecognized value {value!r}"
+                )
+            return coerced
+        if ctype in {
+            "integer",
+            "int",
+            "bigint",
+            "smallint",
+            "tinyint",
+            "decimal",
+            "numeric",
+            "float",
+            "double",
+            "real",
+            "number",
+        }:
+            try:
+                def _reject_num(name: str) -> None:
+                    raise ValueError(f"non-finite JSON constant: {name}")
+
+                parsed = json.loads(text, parse_constant=_reject_num)
+            except (json.JSONDecodeError, ValueError):
+                return value
+            if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+                return parsed
             return value
+        # Unknown typed column: leave text — refuse schema invent.
+        return value
     return value
 
 
@@ -515,7 +544,9 @@ def filter_stale_lsn_rows(
         key = tuple(row[idx] for idx in conflict_idxs)
         incoming = row[lsn_idx]
         prior = existing.get(key)
-        if incoming is not None and compare_lsn(incoming, prior) <= 0:
+        # Align with lsn_is_newer: empty/None incoming must not overwrite a
+        # stamped destination row (at-least-once redelivery regress).
+        if not lsn_is_newer(incoming, prior):
             skipped += 1
             continue
         to_write.append(row)

@@ -1324,9 +1324,6 @@ def _to_sa_value(
                 return dt.replace(tzinfo=timezone.utc)
             return dt.astimezone(timezone.utc)
 
-        def _naive_utc(dt: datetime) -> datetime:
-            return _ensure_utc(dt).replace(tzinfo=None)
-
         if base == "DATE":
             if isinstance(coerced, datetime):
                 return coerced.date()
@@ -1352,8 +1349,10 @@ def _to_sa_value(
                 return tm
             return value
 
-        # DATETIME2 (SQL Server) / QuestDB are naive wall clocks; DATETIMEOFFSET /
-        # TIMESTAMPTZ carriers must keep aware UTC (never strip offset silently).
+        # DATETIME2 (SQL Server) / QuestDB / Oracle TIMESTAMP / ClickHouse DateTime
+        # are naive wall clocks. Never invent tzinfo=UTC on naive values — that
+        # silently shifts polarity for every generic_sql destination.
+        # TIMESTAMPTZ / DATETIMEOFFSET carriers must keep aware UTC (refuse naive).
         raw_lower = f"{logical or ''} {ddl_type or ''}".lower()
         is_tz_aware = (
             "timestamptz" in raw_lower
@@ -1362,14 +1361,27 @@ def _to_sa_value(
             or "timestamp with time zone" in raw_lower
             or "with local time zone" in raw_lower
         )
-        use_naive = not is_tz_aware and (
-            db_type in {"questdb", "sqlserver", "mssql"} or dialect_name == "mssql"
-        )
+        if is_tz_aware:
+            if isinstance(coerced, datetime):
+                if coerced.tzinfo is None:
+                    raise ValueError(
+                        f"generic SQL {ddl_type} refused naive datetime — provide "
+                        "offset/Z (refuse silent UTC invent)"
+                    )
+                return _ensure_utc(coerced)
+            if isinstance(coerced, date) and not isinstance(coerced, datetime):
+                raise ValueError(
+                    f"generic SQL {ddl_type} refused date-only value — provide "
+                    "a timezone-aware timestamp"
+                )
+            return value
+        # NTZ / DATETIME: keep civil digits; strip offset without astimezone.
         if isinstance(coerced, datetime):
-            return _naive_utc(coerced) if use_naive else _ensure_utc(coerced)
+            if coerced.tzinfo is not None:
+                return coerced.replace(tzinfo=None)
+            return coerced
         if isinstance(coerced, date) and not isinstance(coerced, datetime):
-            dt = datetime.combine(coerced, time())
-            return _naive_utc(dt) if use_naive else _ensure_utc(dt)
+            return datetime.combine(coerced, time())
         return value
 
     if t == LOGICAL_DECIMAL:
