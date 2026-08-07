@@ -608,10 +608,41 @@ def write_mapped_rows(
             bq_schema_field(bigquery, col, t) for col, t in zip(target_cols, logical_types)
         ]
         dataset_ref = f"{project_id}.{dataset_id}"
-        if not create_table:
-            try:
-                client.get_table(table_id)
-            except Exception as exc:
+        # Probe existence first — create_table=True + exists_ok must still
+        # rematerialize against live DDL when the table already exists.
+        # Only treat NotFound/404 as missing; permission/throttle fail closed.
+        table_existed = False
+        physical_schema = None
+        try:
+            physical_schema = list(client.get_table(table_id).schema)
+            table_existed = True
+        except Exception as probe_exc:
+            msg = str(probe_exc).lower()
+            exc_name = type(probe_exc).__name__.lower()
+            not_found = (
+                "404" in msg
+                or "not found" in msg
+                or "notfound" in exc_name
+                or "does not exist" in msg
+            )
+            if not not_found:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery table probe failed for {table_id!r} — refuse Map bind "
+                        f"without physical schema (empty→NULL invent risk): {probe_exc}"
+                    ),
+                )
+            physical_schema = None
+            table_existed = False
+
+        if not table_existed:
+            if not create_table:
                 return WriteResult(
                     ok=False,
                     rows_written=0,
@@ -621,15 +652,36 @@ def write_mapped_rows(
                     chunks_completed=0,
                     error=(
                         f"BigQuery table {table_id!r} is missing or inaccessible "
-                        f"and create_table is disabled: {exc}"
+                        "and create_table is disabled"
                     ),
                 )
-        else:
             existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
             if dataset_id not in existing_datasets:
                 client.create_dataset(bigquery.Dataset(dataset_ref))
             table = bigquery.Table(table_id, schema=schema_fields)
             client.create_table(table, exists_ok=True)
+            # Re-probe after exists_ok — concurrent/pre-existing tables must still
+            # overlay live DDL (probe race must not invent Map VARCHAR bind).
+            try:
+                physical_schema = list(client.get_table(table_id).schema)
+                table_existed = True
+            except Exception as post_exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery table {table_id!r} create/exists_ok succeeded but "
+                        f"physical schema re-probe failed — refuse Map bind: {post_exc}"
+                    ),
+                )
+        elif create_table:
+            # Table exists — ensure dataset path still works for backfill below;
+            # do not recreate with Map stamps (would invent carriers).
+            pass
 
         if backfill_new_fields:
             table = client.get_table(table_id)
@@ -642,29 +694,46 @@ def write_mapped_rows(
             if new_fields:
                 table.schema = list(table.schema) + new_fields
                 client.update_table(table, ["schema"])
+                # Refresh physical after additive evolve.
+                try:
+                    physical_schema = list(client.get_table(table_id).schema)
+                    table_existed = True
+                except Exception as refresh_exc:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=dataset_id,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"BigQuery physical schema refresh after backfill failed "
+                            f"for {table_id!r} — refuse Map bind: {refresh_exc}"
+                        ),
+                    )
 
-        # Existing table: load physical schema BEFORE map/transform so live types
-        # beat Map stamps (BOOLEAN→STRING invent cliff).
-        physical_schema = None
-        if not create_table:
+        # Existing / post-create table: physical schema BEFORE map/transform so
+        # live types beat Map stamps (BOOLEAN→STRING invent cliff).
+        if table_existed:
             from connectors.writer_common import require_physical_types_for_existing_table
 
-            try:
-                physical_schema = list(client.get_table(table_id).schema)
-            except Exception as schema_exc:
-                return WriteResult(
-                    ok=False,
-                    rows_written=0,
-                    table_name=table_name,
-                    target_schema=dataset_id,
-                    checksum="",
-                    chunks_completed=0,
-                    error=(
-                        f"BigQuery physical schema introspection failed for existing "
-                        f"table {table_id!r} — refuse silent Map VARCHAR bind "
-                        f"(empty→NULL invent risk): {schema_exc}"
-                    ),
-                )
+            if physical_schema is None:
+                try:
+                    physical_schema = list(client.get_table(table_id).schema)
+                except Exception as schema_exc:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=dataset_id,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"BigQuery physical schema introspection failed for existing "
+                            f"table {table_id!r} — refuse silent Map VARCHAR bind "
+                            f"(empty→NULL invent risk): {schema_exc}"
+                        ),
+                    )
             if not physical_schema:
                 return WriteResult(
                     ok=False,
@@ -725,7 +794,7 @@ def write_mapped_rows(
             destination_column_nullability=dest_nullability,
         )
         # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
-        if physical_schema is None and create_table:
+        if physical_schema is None:
             try:
                 physical_schema = list(client.get_table(table_id).schema)
             except Exception:

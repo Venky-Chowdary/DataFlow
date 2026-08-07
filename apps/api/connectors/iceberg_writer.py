@@ -270,6 +270,83 @@ def _write_types_from_schema(
     return out
 
 
+def _physical_carriers_from_arrow(arrow_schema: Any, pa_mod: Any) -> dict[str, str]:
+    """Map committed Arrow fields → logical carriers for rematerialize compare."""
+    physical: dict[str, str] = {}
+    names = list(getattr(arrow_schema, "names", []) or [])
+    for name in names:
+        carriers = _decimal_target_types_for_iceberg_write(
+            [name],
+            {},
+            arrow_schema=arrow_schema,
+            pa_mod=pa_mod,
+        )
+        if carriers:
+            physical[name] = carriers[0]
+            physical.setdefault(name.lower(), carriers[0])
+            physical.setdefault(name.upper(), carriers[0])
+    return physical
+
+
+def _iceberg_rematerialize_if_physical_differs(
+    *,
+    physical: dict[str, str],
+    dest_types: dict[str, str],
+    target_cols: list[str],
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
+    """Rebuild mapped rows from source when live DDL carriers differ from Map.
+
+    Returns ``(mapped_rows, transform_errors, rejected_details, live_dest_types)``
+    or ``None`` when carriers already match (caller keeps Map-built batch).
+    """
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    if not physical:
+        return None
+    live_dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=physical,
+        default="string",
+    )
+    carriers_differ = any(
+        str(dest_types.get(c) or "").strip().upper()
+        != str(live_dest_types.get(c) or "").strip().upper()
+        for c in target_cols
+    )
+    if not carriers_differ:
+        return None
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=policy,
+        dest_types=live_dest_types,
+        preserve_case=True,
+        dest_kind="iceberg",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    return (
+        mapped_rows,
+        list(transform_errors or []),
+        rejected_details,
+        live_dest_types,
+    )
+
+
 def _load_metadata(meta_path: Path) -> dict[str, Any] | None:
     if not meta_path.exists():
         return None
@@ -1006,55 +1083,15 @@ def _write_mapped_rows_pyiceberg(
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg', transform_errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table,
-            target_schema=target_schema,
-            checksum="",
-            chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_details=rejected_details,
-            driver="iceberg",
-        )
+    # Defer empty / strict abort until after physical load + rematerialize —
+    # Map INT/BOOL stamps can empty the batch while live STRING would keep rows.
 
-    if not mapped_rows:
-        _empty_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
-        if _empty_abort:
-            return WriteResult(
-                ok=False,
-                rows_written=0,
-                table_name=table,
-                target_schema=target_schema,
-                checksum="",
-                chunks_completed=0,
-                error=_empty_abort,
-                rejected_details=rejected_details,
-                rejected_rows=_rejected_row_count(
-                    data_rows, mapped_rows, rejected_details, policy
-                ),
-                driver="iceberg",
-            )
-        return WriteResult(
-            ok=True,
-            rows_written=0,
-            table_name=table,
-            target_schema=target_schema,
-            checksum="",
-            chunks_completed=1,
-            rejected_details=rejected_details,
-            rejected_rows=_rejected_row_count(
-                data_rows, mapped_rows, rejected_details, policy
-            ),
-            driver="iceberg",
-        )
-
+    table_existed = False
     try:
         catalog = load_catalog(endpoint)
         identifier = namespace + (table,)
         tbl = catalog.load_table(identifier)
+        table_existed = True
     except NoSuchTableError:
         if not create_table:
             return WriteResult(
@@ -1074,6 +1111,7 @@ def _write_mapped_rows_pyiceberg(
         arrow_types = [_logical_to_arrow_type(dest_types.get(c, "string"), pa) for c in target_cols]
         arrow_schema = pa.schema([(c, t) for c, t in zip(target_cols, arrow_types)])
         tbl = catalog.create_table(identifier, schema=arrow_schema)
+        table_existed = False
     except Exception as exc:
         return WriteResult(
             ok=False,
@@ -1102,6 +1140,72 @@ def _write_mapped_rows_pyiceberg(
 
     try:
         existing_arrow = tbl.schema().as_arrow()
+        # Rematerialize from source when committed Arrow carriers ≠ Map stamps
+        # (VARCHAR→int/date/decimal invent cliff — same class as PG/Snowflake).
+        if table_existed:
+            physical = _physical_carriers_from_arrow(existing_arrow, pa)
+            remat = _iceberg_rematerialize_if_physical_differs(
+                physical=physical,
+                dest_types=dest_types,
+                target_cols=target_cols,
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                column_types=column_types,
+                logical_types=target_types,
+                policy=policy,
+                conflict_columns=conflict_columns,
+                destination_column_nullability=destination_column_nullability,
+            )
+            if remat is not None:
+                mapped_rows, transform_errors, rejected_details, dest_types = remat
+
+        _map_abort = reject_on_strict_policy(
+            policy, rejected_details, "Iceberg", transform_errors
+        )
+        if _map_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=_map_abort,
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
+        if not mapped_rows:
+            _empty_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+            if _empty_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_empty_abort,
+                    rejected_details=rejected_details,
+                    rejected_rows=_rejected_row_count(
+                        data_rows, mapped_rows, rejected_details, policy
+                    ),
+                    driver="iceberg",
+                )
+            return WriteResult(
+                ok=True,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=1,
+                rejected_details=rejected_details,
+                rejected_rows=_rejected_row_count(
+                    data_rows, mapped_rows, rejected_details, policy
+                ),
+                driver="iceberg",
+            )
+
         arrow_types = [_logical_to_arrow_type(dest_types.get(c, "string"), pa) for c in target_cols]
         type_locked_warnings: list[str] = []
         new_fields: list[tuple[str, Any]] = []
@@ -1667,14 +1771,7 @@ def _write_mapped_rows_filesystem(
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Iceberg', transform_errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False, rows_written=0, table_name=table, target_schema=str(table_dir),
-            checksum="", chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_details=rejected_details, driver="iceberg",
-        )
+    # Defer strict abort until after committed-schema rematerialize.
 
     # Find current metadata version
     versions = sorted(meta_dir.glob("v*.metadata.json"))
@@ -1687,6 +1784,41 @@ def _write_mapped_rows_filesystem(
     # Always write Parquet/JSONL using committed field types — never diverge from
     # type_locked metadata (incoming dest_types may differ).
     write_types = _write_types_from_schema(schema_json, dest_types)
+    # Rematerialize when committed metadata carriers ≠ Map stamps.
+    if current_schema:
+        remat = _iceberg_rematerialize_if_physical_differs(
+            physical=write_types,
+            dest_types=dest_types,
+            target_cols=target_cols,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            column_types=column_types,
+            logical_types=target_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        )
+        if remat is not None:
+            mapped_rows, transform_errors, rejected_details, dest_types = remat
+            write_types = _write_types_from_schema(schema_json, dest_types)
+
+    _map_abort = reject_on_strict_policy(
+        policy, rejected_details, "Iceberg", transform_errors
+    )
+    if _map_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=_map_abort,
+            rejected_details=rejected_details,
+            driver="iceberg",
+        )
+
     # Fail-closed quarantine against committed schema — never let one overflow
     # row abort the whole Parquet/Arrow batch.
     mapped_rows = _apply_iceberg_write_quarantine(
