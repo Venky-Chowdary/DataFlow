@@ -55,26 +55,30 @@ def test_shopify_upsert_refuses_default_id_conflict_invent():
 def test_zendesk_upsert_refuses_default_id_conflict_invent():
     from connectors.zendesk_writer import write_mapped_rows
 
-    with patch("connectors.zendesk_writer.request") as req:
-        result = write_mapped_rows(
-            host="https://demo.zendesk.com",
-            table_name="tickets",
-            api_key="user@x.com:tok",
-            headers=["subject"],
-            data_rows=[["x"]],
-            mappings=[{"source": "subject", "target": "subject"}],
-            column_types={"subject": "VARCHAR"},
-            write_mode="upsert",
-            conflict_columns=[],
-            error_policy="fail",
-            port=0,
-            database="",
-            username="",
-            password="",
-            schema="",
-            connection_string="",
-            ssl=True,
-        )
+    with patch(
+        "connectors.zendesk.describe_fields",
+        return_value=[{"id": 1, "type": "text", "title": "Subject", "raw_title": "subject"}],
+    ):
+        with patch("connectors.zendesk_writer.request") as req:
+            result = write_mapped_rows(
+                host="https://demo.zendesk.com",
+                table_name="tickets",
+                api_key="user@x.com:tok",
+                headers=["subject"],
+                data_rows=[["x"]],
+                mappings=[{"source": "subject", "target": "subject"}],
+                column_types={"subject": "VARCHAR"},
+                write_mode="upsert",
+                conflict_columns=[],
+                error_policy="fail",
+                port=0,
+                database="",
+                username="",
+                password="",
+                schema="",
+                connection_string="",
+                ssl=True,
+            )
     assert result.ok is False
     assert "refuse inventing default 'id'" in (result.error or "")
     req.assert_not_called()
@@ -152,31 +156,39 @@ def test_shopify_upsert_refuses_secondary_conflict_as_id():
 def test_zendesk_upsert_refuses_secondary_conflict_as_id():
     from connectors.zendesk_writer import write_mapped_rows
 
-    with patch("connectors.zendesk_writer.request") as req:
-        result = write_mapped_rows(
-            host="https://demo.zendesk.com",
-            table_name="tickets",
-            api_key="user@x.com:tok",
-            headers=["id", "external_id"],
-            data_rows=[["", "99"]],
-            mappings=[
-                {"source": "id", "target": "id"},
-                {"source": "external_id", "target": "external_id"},
-            ],
-            column_types={"id": "VARCHAR", "external_id": "VARCHAR"},
-            write_mode="upsert",
-            conflict_columns=["id", "external_id"],
-            error_policy="fail",
-            port=0,
-            database="",
-            username="",
-            password="",
-            schema="",
-            connection_string="",
-            ssl=True,
-        )
+    with patch(
+        "connectors.zendesk.describe_fields",
+        return_value=[
+            {"id": 1, "type": "text", "title": "Id", "raw_title": "id"},
+            {"id": 2, "type": "text", "title": "External Id", "raw_title": "external_id"},
+        ],
+    ):
+        with patch("connectors.zendesk_writer.request") as req:
+            result = write_mapped_rows(
+                host="https://demo.zendesk.com",
+                table_name="tickets",
+                api_key="user@x.com:tok",
+                headers=["id", "external_id"],
+                data_rows=[["", "99"]],
+                mappings=[
+                    {"source": "id", "target": "id"},
+                    {"source": "external_id", "target": "external_id"},
+                ],
+                column_types={"id": "VARCHAR", "external_id": "VARCHAR"},
+                write_mode="upsert",
+                conflict_columns=["id", "external_id"],
+                error_policy="fail",
+                port=0,
+                database="",
+                username="",
+                password="",
+                schema="",
+                connection_string="",
+                ssl=True,
+            )
     assert result.ok is False
-    assert "missing numeric id" in (result.error or "").lower()
+    blob = f"{result.error or ''} {result.rejected_details!s}".lower()
+    assert "missing numeric id" in blob or "refuse create invent" in blob
     req.assert_not_called()
 
 
@@ -192,26 +204,33 @@ def test_hubspot_upsert_refuses_default_email_invent():
     from connectors.hubspot_writer import write_mapped_rows
     from unittest.mock import patch
 
-    with patch("connectors.hubspot_writer.request") as req:
-        result = write_mapped_rows(
-            host="api.hubapi.com",
-            table_name="contacts",
-            api_key="tok",
-            headers=["firstname"],
-            data_rows=[["Ada"]],
-            mappings=[{"source": "firstname", "target": "firstname"}],
-            column_types={"firstname": "VARCHAR"},
-            write_mode="upsert",
-            conflict_columns=[],
-            error_policy="fail",
-            port=0,
-            database="",
-            username="",
-            password="",
-            schema="",
-            connection_string="",
-            ssl=True,
-        )
+    with patch(
+        "connectors.hubspot.describe_properties",
+        return_value=[
+            {"name": "firstname", "type": "string", "fieldType": "text"},
+            {"name": "email", "type": "string", "fieldType": "text"},
+        ],
+    ):
+        with patch("connectors.hubspot_writer.request") as req:
+            result = write_mapped_rows(
+                host="api.hubapi.com",
+                table_name="contacts",
+                api_key="tok",
+                headers=["firstname"],
+                data_rows=[["Ada"]],
+                mappings=[{"source": "firstname", "target": "firstname"}],
+                column_types={"firstname": "VARCHAR"},
+                write_mode="upsert",
+                conflict_columns=[],
+                error_policy="fail",
+                port=0,
+                database="",
+                username="",
+                password="",
+                schema="",
+                connection_string="",
+                ssl=True,
+            )
     assert result.ok is False
     assert "refuse inventing default 'email'" in (result.error or "")
     req.assert_not_called()

@@ -4313,10 +4313,11 @@ def _stamp_thin_saas_write_carriers(
             )
             base_id = str(cfg.get("database") or "").strip()
             if access and base_id:
-                meta_fields = _fetch_table_fields(base_id, table, access) or []
-                for f in meta_fields:
-                    if isinstance(f, dict) and f.get("name"):
-                        live[str(f["name"])] = airtable_field_to_carrier(f)
+                meta_fields, meta_exc = _fetch_table_fields(base_id, table, access)
+                if meta_exc is None and meta_fields:
+                    for f in meta_fields:
+                        if isinstance(f, dict) and f.get("name"):
+                            live[str(f["name"])] = airtable_field_to_carrier(f)
         elif brand == "notion":
             from connectors.notion_writer import (
                 notion_property_to_carrier,
@@ -4333,9 +4334,15 @@ def _stamp_thin_saas_write_carriers(
             )
             db_id = _database_id(table or str(cfg.get("database") or ""))
             if access and db_id:
-                props = _fetch_database_properties(db_id, access)
+                props, options = _fetch_database_properties(db_id, access)
                 for name, typ in (props or {}).items():
-                    live[name] = notion_property_to_carrier(typ)
+                    live[name] = notion_property_to_carrier(
+                        typ,
+                        option_names=(
+                            (options or {}).get(str(name).lower())
+                            or (options or {}).get(name)
+                        ),
+                    )
     except Exception:
         live = {}
     if not live:

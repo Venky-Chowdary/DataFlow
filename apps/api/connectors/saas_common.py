@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any, NoReturn
 
 import requests
@@ -10,6 +11,100 @@ from services.error_handling import RetryBudget, with_retry
 from services.value_serializer import cell_to_string
 
 from connectors.base import ReadBatch
+
+
+@dataclass(frozen=True)
+class SaasDescribeGate:
+    """Outcome of live schema probe before Map bind (HubSpot/SF class)."""
+
+    ok: bool
+    error: str = ""
+    fields: list[Any] | None = None
+    warning: str = ""
+
+
+def gate_saas_describe(
+    *,
+    product: str,
+    object_name: str,
+    fields: list[Any] | None,
+    exc: BaseException | None,
+    target_cols: list[str],
+    studio_types: dict[str, Any] | None,
+    allow_empty_fields: bool = False,
+) -> SaasDescribeGate:
+    """Fail-closed when live schema is unavailable without Studio-typed Map.
+
+    Returns ``fields=None`` when the caller should fall back to Studio carriers
+    (never Map VARCHAR invent). ``allow_empty_fields`` is for probes that may
+    honestly return zero definitions (e.g. Shopify metafields on a bare object).
+    """
+    studio_live = isinstance(studio_types, dict) and bool(target_cols) and all(
+        str(studio_types.get(c) or "").strip() for c in target_cols if c
+    )
+    if exc is not None:
+        if is_auth_error(exc if isinstance(exc, Exception) else Exception(str(exc))):
+            return SaasDescribeGate(
+                ok=False,
+                error=(
+                    f"{product} schema Describe auth failed: {exc} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk)."
+                ),
+            )
+        if not studio_live:
+            return SaasDescribeGate(
+                ok=False,
+                error=(
+                    f"{product} schema Describe unavailable ({exc}) and Studio "
+                    "did not type all mapped fields — refuse Map VARCHAR bind "
+                    f"(empty→null invent risk) for {object_name!r}."
+                ),
+            )
+        return SaasDescribeGate(
+            ok=True,
+            fields=None,
+            warning=(
+                f"{product} schema Describe unavailable ({exc}); using "
+                "Studio-typed carriers only for this write"
+            ),
+        )
+    if fields is not None and len(fields) == 0 and not allow_empty_fields:
+        if not studio_live:
+            return SaasDescribeGate(
+                ok=False,
+                error=(
+                    f"{product} schema Describe returned no fields for "
+                    f"{object_name!r} — refuse Map VARCHAR bind "
+                    "(empty→null invent risk)."
+                ),
+            )
+        return SaasDescribeGate(
+            ok=True,
+            fields=None,
+            warning=(
+                f"{product} schema Describe returned no fields for "
+                f"{object_name!r}; using Studio-typed carriers only"
+            ),
+        )
+    if fields is None and not allow_empty_fields:
+        if not studio_live:
+            return SaasDescribeGate(
+                ok=False,
+                error=(
+                    f"{product} schema Describe returned no usable fields for "
+                    f"{object_name!r} — refuse Map VARCHAR bind "
+                    "(empty→null invent risk)."
+                ),
+            )
+        return SaasDescribeGate(
+            ok=True,
+            fields=None,
+            warning=(
+                f"{product} schema Describe missing for {object_name!r}; "
+                "using Studio-typed carriers only"
+            ),
+        )
+    return SaasDescribeGate(ok=True, fields=fields)
 
 
 def base_url(host: str, default: str) -> str:

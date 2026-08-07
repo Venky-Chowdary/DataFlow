@@ -267,7 +267,9 @@ def write_mapped_rows(
         mappings, column_types, preserve_case=True
     )
     policy = transform_error_policy(error_policy)
+    live_dest = _kwargs.get("destination_column_types")
     describe_fields: list[dict[str, Any]] | None = None
+    describe_exc: Exception | None = None
     try:
         from connectors.zendesk import describe_fields as zd_describe_fields
 
@@ -283,15 +285,47 @@ def write_mapped_rows(
             },
             obj,
         )
-    except Exception:
-        describe_fields = None
-    dest_types = resolve_zendesk_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        describe_fields=describe_fields,
+    except Exception as exc:
+        describe_exc = exc
+    from connectors.saas_common import gate_saas_describe
+
+    gate = gate_saas_describe(
+        product="Zendesk",
+        object_name=obj,
+        fields=describe_fields,
+        exc=describe_exc,
+        target_cols=target_cols,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
     )
+    if not gate.ok:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema=shop_host,
+            checksum="",
+            chunks_completed=0,
+            error=gate.error,
+            driver="zendesk",
+        )
+    describe_fields = gate.fields
+    if describe_fields:
+        dest_types = resolve_zendesk_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            logical_types=logical_types,
+            describe_fields=describe_fields,
+        )
+    else:
+        dest_types = resolve_mapping_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            logical_types=logical_types,
+            live_types=live_dest if isinstance(live_dest, dict) else None,
+            default="VARCHAR",
+        )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,

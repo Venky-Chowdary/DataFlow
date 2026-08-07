@@ -167,7 +167,24 @@ def write_mapped_rows(
             },
             obj,
         )
-    except Exception:
+    except Exception as exc:
+        low = str(exc).lower()
+        if is_auth_error(exc) or "auth/scope failed" in low:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema=shop_host,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Shopify metafield Describe auth failed: {exc} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk)."
+                ),
+                driver="shopify",
+            )
+        # Non-auth probe miss: core Admin carriers still resolve from
+        # shopify_live_types_for_columns — metafields stay Map/Studio only.
         metafield_defs = None
     dest_types = resolve_shopify_dest_types(
         target_cols,

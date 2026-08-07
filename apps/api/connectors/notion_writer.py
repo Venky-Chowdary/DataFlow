@@ -360,9 +360,33 @@ def write_mapped_rows(
             driver="notion",
         )
 
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
+    policy = transform_error_policy(error_policy)
+    properties: dict[str, str] = {}
+    property_options: dict[str, list[str]] = {}
+    describe_exc: Exception | None = None
     try:
-        properties, property_options = _fetch_database_properties(database_id, access_token)
+        properties, property_options = _fetch_database_properties(
+            database_id, access_token
+        )
     except Exception as exc:
+        describe_exc = exc
+    from connectors.saas_common import gate_saas_describe
+
+    # Notion page payloads need live property kinds (title vs rich_text vs
+    # select options). Studio VARCHAR cannot reconstruct those — never allow
+    # Studio-typed Map fallback for Notion writes.
+    gate = gate_saas_describe(
+        product="Notion",
+        object_name=table_name or database_id,
+        fields=list(properties.items()) if properties else ([] if describe_exc is None else None),
+        exc=describe_exc,
+        target_cols=target_cols,
+        studio_types=None,
+    )
+    if not gate.ok:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -370,15 +394,10 @@ def write_mapped_rows(
             target_schema=database_id,
             checksum="",
             chunks_completed=0,
-            error=f"Unable to read Notion database schema: {humanize_http_error(exc, 'notion')}",
+            error=gate.error
+            or f"Unable to read Notion database schema: {humanize_http_error(describe_exc, 'notion')}",
             driver="notion",
         )
-
-    title_name = _title_property(properties)
-    target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True
-    )
-    policy = transform_error_policy(error_policy)
     dest_types = resolve_notion_dest_types(
         target_cols,
         mappings,
@@ -387,6 +406,7 @@ def write_mapped_rows(
         properties=properties,
         property_options=property_options,
     )
+    title_name = _title_property(properties)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,

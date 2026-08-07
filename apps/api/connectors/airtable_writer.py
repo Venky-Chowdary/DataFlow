@@ -128,18 +128,22 @@ def _fetch_table_fields(
     base_id: str,
     table_name: str,
     access_token: str,
-) -> list[dict[str, Any]] | None:
-    """Live Meta schema when ``schema.bases:read`` is granted; else None."""
+) -> tuple[list[dict[str, Any]] | None, Exception | None]:
+    """Live Meta schema when ``schema.bases:read`` is granted.
+
+    Returns ``(fields, None)`` on success, ``(None, exc)`` on probe failure,
+    or ``([], None)`` when the base is readable but the table has no fields.
+    """
     url = f"https://{DEFAULT_HOST}/v0/meta/bases/{base_id}/tables"
     try:
         resp = request(method="GET", url=url, token=access_token, timeout=20)
         resp.raise_for_status()
         body = resp.json()
-    except Exception:
-        return None
+    except Exception as exc:
+        return None, exc
     tables = body.get("tables") if isinstance(body, dict) else None
     if not isinstance(tables, list):
-        return None
+        return None, RuntimeError("Airtable Meta tables payload missing")
     want = (table_name or "").strip().lower()
     for t in tables:
         if not isinstance(t, dict):
@@ -148,8 +152,12 @@ def _fetch_table_fields(
         tid = str(t.get("id") or "").strip()
         if name.lower() == want or tid.lower() == want:
             fields = t.get("fields")
-            return list(fields) if isinstance(fields, list) else None
-    return None
+            if isinstance(fields, list):
+                return list(fields), None
+            return [], None
+    return None, RuntimeError(
+        f"Airtable table {table_name!r} not found in base Meta schema"
+    )
 
 
 def resolve_airtable_dest_types(
@@ -276,15 +284,48 @@ def write_mapped_rows(
     )
     policy = transform_error_policy(error_policy)
     # Live Meta when PAT has schema.bases:read — typed DECIMAL/VARCHAR(n)
-    # before batch create invents bad cells (Airbyte/Fivetran class honesty).
-    meta_fields = _fetch_table_fields(base_id, table, access_token)
-    dest_types = resolve_airtable_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        meta_fields=meta_fields,
+    # before batch create invents bad cells (HubSpot/SF Describe class).
+    live_dest = _kwargs.get("destination_column_types")
+    meta_fields, meta_exc = _fetch_table_fields(base_id, table, access_token)
+    from connectors.saas_common import gate_saas_describe
+
+    gate = gate_saas_describe(
+        product="Airtable",
+        object_name=table,
+        fields=meta_fields,
+        exc=meta_exc,
+        target_cols=target_cols,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
     )
+    if not gate.ok:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=base_id,
+            checksum="",
+            chunks_completed=0,
+            error=gate.error,
+            driver="airtable",
+        )
+    meta_fields = gate.fields
+    if meta_fields:
+        dest_types = resolve_airtable_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            logical_types=logical_types,
+            meta_fields=meta_fields,
+        )
+    else:
+        dest_types = resolve_mapping_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            logical_types=logical_types,
+            live_types=live_dest if isinstance(live_dest, dict) else None,
+            default="VARCHAR",
+        )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
