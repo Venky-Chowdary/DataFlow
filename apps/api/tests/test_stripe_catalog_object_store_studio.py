@@ -31,6 +31,64 @@ def test_merge_stripe_catalog_allows_studio_typed_custom():
     assert live["custom_score"] == "INTEGER"
 
 
+def test_stripe_address_leaf_typed_not_soft_varchar():
+    """Documented address leaves get typed carriers; unknown leaves refuse."""
+    from connectors.saas_write_carriers import (
+        address_leaf_carrier,
+        merge_stripe_catalog_types,
+        stripe_live_types_for_columns,
+    )
+
+    assert address_leaf_carrier("address.country") == "VARCHAR(2)"
+    assert address_leaf_carrier("address_postal_code") == "VARCHAR(20)"
+    assert address_leaf_carrier("address.city") == "VARCHAR(255)"
+    assert address_leaf_carrier("address.line1") == "VARCHAR(255)"
+    assert address_leaf_carrier("address.line2") == "VARCHAR(255)"
+    assert address_leaf_carrier("billing_details.address.line1") == "VARCHAR(255)"
+    assert address_leaf_carrier("address.invented_leaf") is None
+
+    live = stripe_live_types_for_columns(
+        "customers",
+        ["email", "address.line1", "address.city", "address.country", "address.weird"],
+    )
+    assert live["address.line1"] == "VARCHAR(255)"
+    assert live["address.city"] == "VARCHAR(255)"
+    assert live["address.country"] == "VARCHAR(2)"
+    assert "address.weird" not in live
+
+    _merged, err = merge_stripe_catalog_types(
+        "customers",
+        ["email", "address.line1", "address.weird"],
+        studio_types=None,
+    )
+    assert err is not None
+    assert "address.weird" in err
+
+
+def test_shopify_default_address_leaves_catalogued():
+    """Shopify default_address.* must not Map-invent; typed leaves pass gate."""
+    from connectors.saas_write_carriers import merge_shopify_catalog_types
+
+    live, err = merge_shopify_catalog_types(
+        "customers",
+        ["email", "default_address.city", "default_address.country", "default_address.bogus"],
+        studio_types=None,
+    )
+    assert live.get("default_address.city") == "VARCHAR(255)"
+    assert live.get("default_address.country") == "VARCHAR(2)"
+    assert err is not None
+    assert "default_address.bogus" in err
+
+    live2, err2 = merge_shopify_catalog_types(
+        "customers",
+        ["email", "billing_address.zip", "shipping_address.province_code"],
+        studio_types=None,
+    )
+    assert err2 is None
+    assert live2["billing_address.zip"] == "VARCHAR(20)"
+    assert live2["shipping_address.province_code"] == "VARCHAR(16)"
+
+
 def test_stripe_writer_refuses_uncatalogued_map_varchar():
     from connectors.stripe_writer import write_mapped_rows
 

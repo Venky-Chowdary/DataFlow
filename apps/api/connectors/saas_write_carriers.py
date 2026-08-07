@@ -11,6 +11,74 @@ from __future__ import annotations
 from typing import Any
 
 # ---------------------------------------------------------------------------
+# Shared nested address leaves (Stripe Customer.address / Shopify
+# default_address / billing_address / shipping_address).
+# Only documented Admin/API leaves — never soft-VARCHAR invent for unknowns.
+# ---------------------------------------------------------------------------
+
+_ADDRESS_LEAF_CARRIERS: dict[str, str] = {
+    # Shopify Admin address shape
+    "address1": "VARCHAR(255)",
+    "address2": "VARCHAR(255)",
+    # Stripe Customer.address / PaymentMethod.billing_details.address
+    "line1": "VARCHAR(255)",
+    "line2": "VARCHAR(255)",
+    "city": "VARCHAR(255)",
+    "province": "VARCHAR(255)",
+    "province_code": "VARCHAR(16)",
+    "state": "VARCHAR(255)",
+    "state_code": "VARCHAR(16)",
+    "country": "VARCHAR(2)",
+    "country_code": "VARCHAR(2)",
+    "country_name": "VARCHAR(255)",
+    "zip": "VARCHAR(20)",
+    "postal_code": "VARCHAR(20)",
+    "phone": "VARCHAR(50)",
+    "company": "VARCHAR(255)",
+    "name": "VARCHAR(255)",
+    "first_name": "VARCHAR(255)",
+    "last_name": "VARCHAR(255)",
+    "latitude": "DECIMAL(10,7)",
+    "longitude": "DECIMAL(10,7)",
+}
+
+_ADDRESS_NEST_PREFIXES: tuple[str, ...] = (
+    "billing_details.address.",
+    "billing_details_address_",
+    "shipping_details.address.",
+    "shipping_details_address_",
+    "default_address.",
+    "default_address_",
+    "billing_address.",
+    "billing_address_",
+    "shipping_address.",
+    "shipping_address_",
+    "address.",
+    "address_",
+)
+
+
+def address_leaf_carrier(column: str) -> str | None:
+    """Return typed carrier for a flattened address leaf, or ``None`` if unknown.
+
+    Unknown leaves must NOT soft-bind VARCHAR — callers refuse Map invent unless
+    Studio provides ``destination_column_types``.
+    """
+    low = str(column or "").strip().lower()
+    if not low:
+        return None
+    leaf: str | None = None
+    # Longer prefixes first (default_address_ before address_).
+    for prefix in _ADDRESS_NEST_PREFIXES:
+        if low.startswith(prefix):
+            leaf = low[len(prefix) :]
+            break
+    if leaf is None:
+        return None
+    return _ADDRESS_LEAF_CARRIERS.get(leaf)
+
+
+# ---------------------------------------------------------------------------
 # Stripe — OpenAPI / API reference maximum lengths (customers, products, …)
 # ---------------------------------------------------------------------------
 
@@ -204,15 +272,10 @@ def stripe_live_types_for_columns(
         if low.startswith("metadata.") or low.startswith("metadata_"):
             live[col] = "VARCHAR(500)"
             continue
-        # Nested address leaves commonly flattened in Map.
-        if low.startswith("address.") or low.startswith("address_"):
-            leaf = low.split(".", 1)[-1].split("_", 1)[-1] if "." in low else low.replace("address_", "", 1)
-            if leaf == "country":
-                live[col] = "VARCHAR(2)"
-            elif leaf in {"postal_code", "zip"}:
-                live[col] = "VARCHAR(20)"
-            else:
-                live[col] = "VARCHAR(500)"
+        # Nested address leaves — typed documented leaves only (no soft invent).
+        addr = address_leaf_carrier(col)
+        if addr:
+            live[col] = addr
     return live
 
 
@@ -553,6 +616,11 @@ def shopify_live_types_for_columns(
         low = str(col).lower()
         if low in catalog:
             live[col] = catalog[low]
+            continue
+        # Flattened default_address / billing_address / shipping_address leaves.
+        addr = address_leaf_carrier(col)
+        if addr:
+            live[col] = addr
 
     for d in metafield_defs or []:
         if not isinstance(d, dict):
@@ -569,6 +637,9 @@ def shopify_live_types_for_columns(
                     max_v = int(float(str(v.get("value"))))
                 except (TypeError, ValueError):
                     max_v = None
+        if not typ.strip():
+            # Empty metafield type from Describe — do not invent VARCHAR(2048).
+            continue
         carrier = shopify_metafield_type_to_carrier(typ, max_validation=max_v)
         names = []
         if ns and key:
