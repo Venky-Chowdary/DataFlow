@@ -20,7 +20,6 @@ from connectors.saas_common import (
 )
 from connectors.saas_write_carriers import (
     merge_shopify_catalog_types,
-    shopify_live_types_for_columns,
 )
 from connectors.writer_common import (
     reject_on_strict_policy,
@@ -28,7 +27,6 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -46,23 +44,26 @@ def resolve_shopify_dest_types(
     object_type: str = "customers",
     metafield_defs: list[dict] | None = None,
     live_types: dict[str, str] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Prefer Admin core + live metafield definitions; else Map/source carriers."""
-    live = live_types
-    if live is None:
-        live = shopify_live_types_for_columns(
-            object_type,
-            target_cols,
-            metafield_defs=metafield_defs,
-        )
-    return resolve_mapping_dest_types(
+    """Prefer Admin core + live metafield definitions; never bare Map invent.
+
+    When catalog/metafields/Studio are in play, return covered carriers only —
+    never soft-fill gaps with Map ``VARCHAR`` (HubSpot/CRM resolve parity).
+    """
+    if live_types is not None:
+        return {
+            str(k): str(v)
+            for k, v in live_types.items()
+            if k and str(v or "").strip()
+        }
+    live, _err = merge_shopify_catalog_types(
+        object_type,
         target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=live,
-        default="VARCHAR",
+        metafield_defs=metafield_defs,
+        studio_types=studio_types,
     )
+    return {str(k): str(v) for k, v in live.items() if k and str(v or "").strip()}
 
 
 def _singular(table: str) -> str:
@@ -232,7 +233,7 @@ def write_mapped_rows(
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,

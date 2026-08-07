@@ -350,21 +350,35 @@ def resolve_snowflake_create_types(
 def _fetch_snowflake_column_types(
     cur: Any, schema: str, table_name: str
 ) -> dict[str, str]:
-    """Live Snowflake DATA_TYPE (+ NUMBER precision) for bind overlay."""
+    """Live Snowflake DATA_TYPE (+ NUMBER/VARCHAR typmod) for bind overlay."""
+    from services.schema_introspect import _sf_to_logical
+
     try:
         cur.execute(
             """
-            SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE
+            SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE,
+                   CHARACTER_MAXIMUM_LENGTH, DATETIME_PRECISION
             FROM information_schema.columns
             WHERE UPPER(table_schema) = UPPER(%s) AND UPPER(table_name) = UPPER(%s)
             """,
             (schema, table_name),
         )
         out: dict[str, str] = {}
-        for name, data_type, precision, scale in cur.fetchall():
-            ddl = str(data_type or "").upper()
-            if ddl == "NUMBER" and precision is not None:
-                ddl = f"NUMBER({int(precision)},{int(scale or 0)})"
+        for (
+            name,
+            data_type,
+            precision,
+            scale,
+            char_len,
+            dt_prec,
+        ) in cur.fetchall():
+            ddl = _sf_to_logical(
+                str(data_type or ""),
+                character_maximum_length=char_len,
+                numeric_precision=precision,
+                numeric_scale=scale,
+                datetime_precision=dt_prec,
+            )
             out[str(name)] = ddl
             out[str(name).upper()] = ddl
             out[str(name).lower()] = ddl

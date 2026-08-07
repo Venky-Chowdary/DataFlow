@@ -4446,12 +4446,47 @@ def overlay_physical_bind_types(
     OID, POINT, INET, …) always wins — Map JSON/INTEGER/GEOGRAPHY must not
     invent wrong bind polarity over live specialty. Typed physical (INT/BOOL/
     DECIMAL/JSON/…) always wins over Map stamps on existing tables.
+    Bounded physical ``VARCHAR(n)`` / ``CHAR(n)`` / ``NVARCHAR(n)`` always wins
+    over Map bare/unbounded/wider string stamps so overflow quarantine sees
+    live capacity (Airbyte catalog-width class).
     """
     from connectors.sql_temporal import is_temporal_ddl, sql_base_type
+    from services.ddl_compatibility import parse_varchar_width
     from services.type_system import (
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        is_unlimited_string_carrier,
+        normalize_logical_type,
         parse_enum_or_set_ordered_members,
+        parse_string_carrier_width,
         specialty_carrier_base,
     )
+
+    def _bounded_string_width(carrier: str) -> int | None:
+        return parse_string_carrier_width(carrier) or parse_varchar_width(carrier)
+
+    def _map_stamp_is_string_class(stamp: str) -> bool:
+        text = (stamp or "").strip()
+        if not text:
+            return True
+        if _bounded_string_width(text) is not None:
+            return True
+        if is_unlimited_string_carrier(text):
+            return True
+        base = sql_base_type(text)
+        if base in {
+            "VARCHAR",
+            "CHAR",
+            "NVARCHAR",
+            "NCHAR",
+            "CHARACTER",
+            "STRING",
+            "TEXT",
+            "CLOB",
+            "NCLOB",
+        }:
+            return True
+        return normalize_logical_type(text) in {LOGICAL_STRING, LOGICAL_TEXT}
 
     if not physical:
         return list(target_types)
@@ -4530,6 +4565,12 @@ def overlay_physical_bind_types(
         elif parse_enum_or_set_ordered_members(phys) is not None:
             # MySQL/PG closed ENUM('a','b') / SET('x','y') — Map VARCHAR must not
             # soft-bind open text over live domain (empty→null / ordinal invent).
+            out[i] = phys
+        elif _bounded_string_width(phys) is not None and _map_stamp_is_string_class(
+            out[i]
+        ):
+            # Live VARCHAR(n)/CHAR(n)/NVARCHAR(n)/STRING(n) beat Map bare VARCHAR
+            # / TEXT / wider stamps — overflow quarantine must see physical capacity.
             out[i] = phys
         elif (
             phys_base in typed_bases

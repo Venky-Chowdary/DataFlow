@@ -59,6 +59,18 @@ def test_generic_sql_hierarchyid_to_ltree():
     assert _to_sa_value("/1/2/", "HIERARCHYID", db_type="sqlserver") == "/1/2/"
 
 
+def test_logical_type_from_sa_preserves_string_width():
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _logical_type_from_sa
+
+    assert _logical_type_from_sa(sa.String(40)) == "VARCHAR(40)"
+    assert _logical_type_from_sa(sa.CHAR(8)) == "CHAR(8)"
+    assert _logical_type_from_sa(sa.Text()) == "TEXT"
+    # Unbounded String with no length stays logical string.
+    assert _logical_type_from_sa(sa.String()) == "string"
+
+
 def test_sa_type_and_overlay_preserve_hierarchyid_sql_variant():
     """Map VARCHAR must not stick over live HIERARCHYID / SQL_VARIANT DDL."""
     from connectors.generic_sql import _logical_type_from_sa, _sa_type_for_logical

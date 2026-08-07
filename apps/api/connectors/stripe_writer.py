@@ -25,7 +25,6 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -43,20 +42,24 @@ def resolve_stripe_dest_types(
     studio_types: dict[str, Any] | None = None,
     live_types: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Prefer Stripe OpenAPI catalog (+ Studio overlay); never bare Map invent."""
-    live = live_types
-    if live is None:
-        live, _err = merge_stripe_catalog_types(
-            object_type, target_cols, studio_types=studio_types
-        )
-    return resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=live,
-        default="VARCHAR",
+    """Prefer Stripe OpenAPI catalog (+ Studio overlay); never bare Map invent.
+
+    Always runs ``merge_stripe_catalog_types`` coverage (or trusts a pre-merged
+    ``live_types`` from the write path). Gaps are omitted — never soft-filled
+    with Map ``VARCHAR`` (HubSpot/CRM resolve parity).
+    """
+    if live_types is not None:
+        # Write path already gated merge — return covered carriers only.
+        return {
+            str(k): str(v)
+            for k, v in live_types.items()
+            if k and str(v or "").strip()
+        }
+    live, _err = merge_stripe_catalog_types(
+        object_type, target_cols, studio_types=studio_types
     )
+    # Covered carriers only — never Map VARCHAR invent for catalog gaps.
+    return {str(k): str(v) for k, v in live.items() if k and str(v or "").strip()}
 
 
 def _row_id(row: dict[str, Any], conflict_columns: list[str] | None) -> str | None:
@@ -170,7 +173,7 @@ def write_mapped_rows(
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,

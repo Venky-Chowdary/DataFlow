@@ -796,6 +796,29 @@ def _logical_type_from_sa(col_type: Any) -> str:
         return "time"
 
     if isinstance(col_type, (sa.String, sa.Text, sa.CHAR)):
+        # Preserve VARCHAR(n)/CHAR(n)/NVARCHAR(n) — bare "string" invents
+        # unbounded capacity over live typmod on existing-table overlay.
+        length = getattr(col_type, "length", None)
+        try:
+            n = int(length) if length is not None else None
+        except (TypeError, ValueError):
+            n = None
+        type_name = getattr(getattr(col_type, "__class__", None), "__name__", "").lower()
+        module = getattr(getattr(col_type, "__class__", None), "__module__", "").lower()
+        national = "nvarchar" in type_name or "nchar" in type_name or (
+            "mssql" in module and "national" in repr(col_type).lower()
+        )
+        if isinstance(col_type, sa.Text) and n is None:
+            return "TEXT"
+        if n is not None and n > 0:
+            if national:
+                prefix = "NCHAR" if "char" in type_name and "var" not in type_name else "NVARCHAR"
+                return f"{prefix}({n})"
+            if isinstance(col_type, sa.CHAR) or (
+                "char" in type_name and "var" not in type_name
+            ):
+                return f"CHAR({n})"
+            return f"VARCHAR({n})"
         return "string"
 
     # Fallback text matching for dialect-specific types not captured above

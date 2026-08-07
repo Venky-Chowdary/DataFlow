@@ -457,8 +457,8 @@ def test_pg_fetch_array_udt_not_scalar_int():
         physical,
     )
     assert overlaid[0] == "INTEGER[]"
-    # Soft string physical does not specialty-promote; array polarity is the cliff.
-    assert overlaid[1] == "TEXT"
+    # Bounded physical VARCHAR(n) beats Map TEXT soft invent.
+    assert overlaid[1] == "VARCHAR(40)"
 
 
 def test_merge_saas_live_types_studio_fills_partial_gap():

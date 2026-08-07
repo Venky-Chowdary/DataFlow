@@ -283,5 +283,25 @@ def test_overlay_promotes_mysql_enum_set_over_map_varchar():
     )
     assert overlaid[0].lower().startswith("enum(")
     assert overlaid[1].lower().startswith("set(")
-    # Soft string physical does not specialty-promote.
-    assert overlaid[2] == "VARCHAR"
+    # Bounded physical VARCHAR(n) beats Map bare VARCHAR.
+    assert overlaid[2].lower() == "varchar(40)"
+
+
+def test_overlay_promotes_bounded_varchar_over_map_soft_string():
+    from connectors.writer_common import overlay_physical_bind_types
+
+    overlaid = overlay_physical_bind_types(
+        ["a", "b", "c", "d"],
+        ["VARCHAR", "TEXT", "VARCHAR(500)", "INTEGER"],
+        {
+            "a": "VARCHAR(40)",
+            "b": "NVARCHAR(20)",
+            "c": "CHAR(8)",
+            "d": "VARCHAR(40)",
+        },
+    )
+    assert overlaid[0] == "VARCHAR(40)"
+    assert overlaid[1] == "NVARCHAR(20)"
+    assert overlaid[2] == "CHAR(8)"
+    # Non-string Map stamp must not be rewritten to VARCHAR.
+    assert overlaid[3] == "INTEGER"
