@@ -138,6 +138,42 @@ def test_kafka_writer_refuses_register_when_subject_exists_untyped():
     assert "live field types" in (result.error or "").lower()
 
 
+def test_kafka_writer_refuses_partial_registry_coverage():
+    """Subject exists with only some mapped fields typed — refuse Map invent."""
+    from connectors.kafka_writer import write_mapped_rows
+
+    with patch(
+        "connectors.kafka_writer._fetch_kafka_physical_types",
+        return_value=({"id": "VARCHAR"}, 55, True),
+    ), patch(
+        "connectors.confluent_schema_registry.register_json_schema",
+    ) as reg:
+        result = write_mapped_rows(
+            host="localhost",
+            port=9092,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="events",
+            headers=["id", "amount"],
+            data_rows=[["1", "9.99"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "amount", "target": "amount", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "amount": "VARCHAR"},
+            schema_registry_url="http://registry:8081",
+            create_table=True,
+        )
+    reg.assert_not_called()
+    assert result.ok is False
+    assert "amount" in (result.error or "").lower()
+    assert "refuse" in (result.error or "").lower()
+
+
 def json_schema_body() -> str:
     import json
 

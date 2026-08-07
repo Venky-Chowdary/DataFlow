@@ -147,3 +147,53 @@ def test_fetch_dynamo_sample_decimal_carrier():
     assert sample_ok is True
     assert physical.get("amount") == "DECIMAL"
     assert isinstance(Decimal("99.99"), Decimal)
+
+
+def test_dynamo_writer_refuses_partial_physical_coverage():
+    """Populated table + only key AttrDefs typed → refuse Map invent on amount."""
+    from unittest.mock import MagicMock, patch
+
+    from connectors.dynamodb_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+            "ItemCount": 5,
+        }
+    }
+    # Sample misses amount → partial physical (id only from AttrDefs path).
+    with (
+        patch("connectors.dynamodb_writer.boto3_client", return_value=client),
+        patch(
+            "connectors.dynamodb_writer._table_key_types",
+            return_value={"id": "S"},
+        ),
+        patch(
+            "connectors.dynamodb_writer._fetch_dynamo_physical_types",
+            return_value=({"id": "VARCHAR"}, True),
+        ),
+    ):
+        result = write_mapped_rows(
+            host="",
+            port=0,
+            database="test",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="payments",
+            headers=["id", "amount"],
+            data_rows=[["1", "9.99"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "amount", "target": "amount", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "amount": "VARCHAR"},
+            create_table=False,
+        )
+    assert result.ok is False
+    assert "amount" in (result.error or "").lower()
+    assert "refuse" in (result.error or "").lower()

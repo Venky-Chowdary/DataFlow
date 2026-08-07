@@ -375,6 +375,40 @@ def write_mapped_rows(
                     ),
                     driver="kafka",
                 )
+            # Partial Registry coverage: Studio may fill; else require_physical.
+            if mapped_data_cols and physical:
+                from connectors.writer_common import require_physical_types_for_existing_table
+
+                effective_physical = dict(physical)
+                if isinstance(live_dest, dict):
+                    for c in mapped_data_cols:
+                        if (
+                            effective_physical.get(c)
+                            or effective_physical.get(str(c).lower())
+                            or effective_physical.get(str(c).upper())
+                        ):
+                            continue
+                        st = str(live_dest.get(c) or "").strip()
+                        if st:
+                            effective_physical[c] = st
+                phys_err = require_physical_types_for_existing_table(
+                    table_existed=True,
+                    physical=effective_physical,
+                    dialect_label="Kafka Schema Registry",
+                    target_cols=mapped_data_cols,
+                )
+                if phys_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=topic,
+                        target_schema="",
+                        checksum="",
+                        chunks_completed=0,
+                        error=phys_err,
+                        driver="kafka",
+                    )
+                physical = effective_physical
             remat = _kafka_rematerialize_if_physical_differs(
                 physical=physical,
                 dest_types=dest_types,

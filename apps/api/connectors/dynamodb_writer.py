@@ -137,6 +137,7 @@ def _dynamo_rematerialize_if_physical_differs(
         column_types,
         logical_types=logical_types,
         live_types=physical,
+        default="VARCHAR",
     )
     carriers_differ = any(
         str(dest_types.get(c) or "").strip().upper()
@@ -483,6 +484,41 @@ def write_mapped_rows(
                 "Re-run destination schema introspect and retry."
             ),
         )
+
+    # Partial AttrDef/sample coverage: Studio may fill gaps; else require_physical
+    # (same bar as Mongo/ES — never soft-bind Map VARCHAR on missing attrs).
+    if mapped_data_cols and (item_count > 0 or item_count < 0):
+        from connectors.writer_common import require_physical_types_for_existing_table
+
+        effective_physical = dict(physical)
+        if isinstance(live_dest, dict):
+            for c in mapped_data_cols:
+                if (
+                    effective_physical.get(c)
+                    or effective_physical.get(str(c).lower())
+                    or effective_physical.get(str(c).upper())
+                ):
+                    continue
+                st = str(live_dest.get(c) or "").strip()
+                if st:
+                    effective_physical[c] = st
+        phys_err = require_physical_types_for_existing_table(
+            table_existed=True,
+            physical=effective_physical,
+            dialect_label="DynamoDB",
+            target_cols=mapped_data_cols,
+        )
+        if phys_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=host or "",
+                checksum="",
+                chunks_completed=0,
+                error=phys_err,
+            )
+        physical = effective_physical
 
     errors: list[str] = []
     rejected_details: list[dict] = []
