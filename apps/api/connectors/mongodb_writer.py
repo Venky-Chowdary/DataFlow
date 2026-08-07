@@ -38,6 +38,106 @@ logger = logging.getLogger(__name__)
 MONGO_WRITE_BATCH_SIZE = int(getenv_brand("MONGO_BATCH_SIZE", "1000"))
 
 
+def _fetch_mongo_physical_types(
+    coll: Any,
+    target_cols: list[str],
+    *,
+    sample_limit: int = 50,
+) -> dict[str, str]:
+    """Sample live BSON types for mapped fields (majority vote).
+
+    Empty collections return ``{}`` — Map stamps remain authoritative for create-new.
+    """
+    from services.schema_introspect import (
+        _finalize_mongodb_type,
+        _sample_logical_type,
+    )
+
+    wanted = {str(c) for c in target_cols if c}
+    if not wanted:
+        return {}
+    type_counts: dict[str, dict[str, int]] = {c: {} for c in wanted}
+    try:
+        for doc in coll.find().limit(int(sample_limit)):
+            if not isinstance(doc, dict):
+                continue
+            for key, val in doc.items():
+                if key not in wanted:
+                    continue
+                inferred = _sample_logical_type(val, key)
+                if not inferred or val is None:
+                    continue
+                tc = type_counts[key]
+                tc[inferred] = int(tc.get(inferred, 0)) + 1
+    except Exception:
+        logger.debug("Mongo physical type sample failed", exc_info=True)
+        return {}
+    physical: dict[str, str] = {}
+    for col, counts in type_counts.items():
+        if not counts:
+            continue
+        carrier = _finalize_mongodb_type(counts)
+        if carrier:
+            physical[col] = carrier
+            physical.setdefault(col.lower(), carrier)
+            physical.setdefault(col.upper(), carrier)
+    return physical
+
+
+def _mongo_rematerialize_if_physical_differs(
+    *,
+    physical: dict[str, str],
+    dest_types: dict[str, str],
+    target_cols: list[str],
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
+    """Rebuild mapped rows from source when live BSON carriers differ from Map."""
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    if not physical:
+        return None
+    live_dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=physical,
+    )
+    carriers_differ = any(
+        str(dest_types.get(c) or "").strip().upper()
+        != str(live_dest_types.get(c) or "").strip().upper()
+        for c in target_cols
+    )
+    if not carriers_differ:
+        return None
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=live_dest_types,
+        error_policy=policy,
+        preserve_case=True,
+        dest_kind="mongodb",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    return (
+        mapped_rows,
+        list(transform_errors or []),
+        rejected_details,
+        live_dest_types,
+    )
+
+
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "pymongo"
@@ -180,39 +280,107 @@ def write_mapped_rows(
         client = _mongo_client(conn_str)
 
         db = client[db_name]
-        if not create_table:
+        existing = set(db.list_collection_names(filter={"name": collection_name}))
+        collection_existed = collection_name in existing
+        if not create_table and not collection_existed:
             # Mongo creates collections on first write — deny-create must probe first.
-            existing = set(
-                db.list_collection_names(filter={"name": collection_name})
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection_name,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"MongoDB collection {collection_name!r} is missing "
+                    "and create_table is disabled"
+                ),
             )
-            if collection_name not in existing:
-                return WriteResult(
-                    ok=False,
-                    rows_written=0,
-                    table_name=collection_name,
-                    target_schema=db_name,
-                    checksum="",
-                    chunks_completed=0,
-                    error=(
-                        f"MongoDB collection {collection_name!r} is missing "
-                        "and create_table is disabled"
-                    ),
-                )
         coll = db[collection_name]
 
-        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=column_types,
-            dest_types=dest_types,
-            error_policy=policy,
-            preserve_case=True,
-            dest_kind="mongodb",
-            destination_pk_columns=list(conflict_columns or []) or None,
-            destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        )
+        # Existing collection: sample BSON carriers and rematerialize when they
+        # differ from Map/Studio stamps (VARCHAR→Decimal128 invent cliff).
+        if collection_existed:
+            physical = _fetch_mongo_physical_types(coll, target_cols)
+            if not physical:
+                # Empty sample on a non-empty / unknown-count collection — refuse
+                # Map-only bind unless Studio typed every mapped field.
+                try:
+                    doc_count = int(coll.estimated_document_count())
+                except Exception:
+                    try:
+                        doc_count = int(coll.count_documents({}))
+                    except Exception:
+                        doc_count = -1
+                mapped_data_cols = [c for c in target_cols if c and c != "_id"]
+                studio_live = isinstance(live_dest, dict) and all(
+                    str(live_dest.get(c) or "").strip() for c in mapped_data_cols
+                )
+                # Unknown count (-1) on existing collection: fail closed like SQL.
+                if (doc_count > 0 or doc_count < 0) and mapped_data_cols and not studio_live:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=collection_name,
+                        target_schema=db_name,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"MongoDB collection {collection_name!r} exists but "
+                            "live BSON types were unavailable for all mapped fields — "
+                            "refuse Map VARCHAR bind (empty→NULL invent risk). "
+                            "Re-run destination schema introspect and retry."
+                        ),
+                    )
+            remat = _mongo_rematerialize_if_physical_differs(
+                physical=physical,
+                dest_types=dest_types,
+                target_cols=target_cols,
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                column_types=column_types,
+                logical_types=logical_types,
+                policy=policy,
+                conflict_columns=conflict_columns,
+                destination_column_nullability=_kwargs.get(
+                    "destination_column_nullability"
+                ),
+            )
+            if remat is not None:
+                mapped_rows, transform_errors, rejected_details, dest_types = remat
+            else:
+                mapped_rows, transform_errors, rejected_details = (
+                    build_mapped_rows_with_details(
+                        headers=headers,
+                        data_rows=data_rows,
+                        mappings=mappings,
+                        target_cols=target_cols,
+                        column_types=column_types,
+                        dest_types=dest_types,
+                        error_policy=policy,
+                        preserve_case=True,
+                        dest_kind="mongodb",
+                        destination_pk_columns=list(conflict_columns or []) or None,
+                        destination_column_nullability=_kwargs.get(
+                            "destination_column_nullability"
+                        ),
+                    )
+                )
+        else:
+            mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                dest_types=dest_types,
+                error_policy=policy,
+                preserve_case=True,
+                dest_kind="mongodb",
+                destination_pk_columns=list(conflict_columns or []) or None,
+                destination_column_nullability=_kwargs.get("destination_column_nullability"),
+            )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
         tgt_types = [

@@ -22,6 +22,109 @@ from connectors.writer_common import (
 logger = logging.getLogger(__name__)
 
 
+def _fetch_es_physical_types(client: Any, index: str, target_cols: list[str]) -> dict[str, str]:
+    """Read committed index mapping → logical carriers for rematerialize.
+
+    ``get_mapping`` responses are keyed by concrete index names; aliases resolve
+    to those keys — never assume ``mapping[alias]`` exists.
+    """
+    from services.schema_introspect import _es_mapping_type
+
+    wanted = {str(c) for c in target_cols if c}
+    if not wanted:
+        return {}
+    try:
+        mapping = client.indices.get_mapping(index=index)
+    except Exception:
+        logger.debug("Elasticsearch get_mapping failed for %s", index, exc_info=True)
+        return {}
+    props: dict = {}
+    if isinstance(mapping, dict):
+        # Prefer exact name, then any concrete index body (alias → real index).
+        body = mapping.get(index)
+        if isinstance(body, dict):
+            props = (body.get("mappings") or {}).get("properties") or {}
+        if not props:
+            for _concrete, body in mapping.items():
+                if not isinstance(body, dict):
+                    continue
+                candidate = (body.get("mappings") or {}).get("properties") or {}
+                if candidate:
+                    props = candidate
+                    break
+    physical: dict[str, str] = {}
+    for name, info in (props or {}).items():
+        if name not in wanted:
+            continue
+        if not isinstance(info, dict):
+            info = {"type": "text"}
+        es_type = str(info.get("type") or "text")
+        if es_type == "nested":
+            carrier = "ARRAY<JSON>"
+        elif es_type == "object" or (not es_type and info.get("properties")):
+            carrier = "JSON"
+        else:
+            carrier = _es_mapping_type(es_type)
+        physical[name] = carrier
+        physical.setdefault(name.lower(), carrier)
+        physical.setdefault(name.upper(), carrier)
+    return physical
+
+
+def _es_rematerialize_if_physical_differs(
+    *,
+    physical: dict[str, str],
+    dest_types: dict[str, str],
+    target_cols: list[str],
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
+    """Rebuild mapped rows when live mapping carriers differ from Map stamps."""
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    if not physical:
+        return None
+    live_dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=physical,
+    )
+    carriers_differ = any(
+        str(dest_types.get(c) or "").strip().upper()
+        != str(live_dest_types.get(c) or "").strip().upper()
+        for c in target_cols
+    )
+    if not carriers_differ:
+        return None
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=live_dest_types,
+        preserve_case=True,
+        error_policy=policy,
+        dest_kind="elasticsearch",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    return (
+        mapped_rows,
+        list(transform_errors or []),
+        rejected_details,
+        live_dest_types,
+    )
+
+
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "elasticsearch-py"
@@ -213,68 +316,18 @@ def write_mapped_rows(
         logical_types=logical_types,
         live_types=live_dest if isinstance(live_dest, dict) else None,
     )
-    mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        preserve_case=True,
-        error_policy=policy,
-        dest_kind="elasticsearch",
-        destination_pk_columns=list(conflict_columns or []) or None,
-        destination_column_nullability=_kwargs.get("destination_column_nullability"),
-    )
-    from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
-
-    tgt_types = [
-        str(
-            dest_types.get(c)
-            or (logical_types[i] if i < len(logical_types) else "")
-            or ""
-        )
-        for i, c in enumerate(target_cols)
-    ]
-    mapped_rows = apply_write_quarantine_matrix(
-        mapped_rows,
-        target_cols,
-        tgt_types,
-        rejected_details,
-        policy,
-        dialect_label="Elasticsearch",
-        mappings=list(mappings or []) or None,
-    )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "Elasticsearch", errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=index,
-            target_schema=host or "localhost",
-            checksum="",
-            chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(errors[:3])}",
-            warnings=errors[:10],
-            rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
-            rejected_details=list(rejected_details),
-        )
+    # Defer map/quarantine until after index probe — rematerialize when live
+    # mapping carriers differ from Map/Studio stamps.
+    mapped_rows: list = []
+    errors: list = []
+    rejected_details: list = []
+    tgt_types: list[str] = []
 
     conflict = [c for c in (conflict_columns or []) if c]
     mode = (write_mode or "insert").lower()
     # Elasticsearch is key-addressed: auto-generated ids break idempotent retry /
     # upsert / CDC and hide collisions. Always require resolvable document identity.
     requires_identity = True
-    if conflict:
-        from connectors.writer_common import partition_dense_upsert_rows
-
-        mapped_rows = partition_dense_upsert_rows(
-            mapped_rows,
-            conflict,
-            target_cols=target_cols,
-            rejected_details=rejected_details,
-            policy=policy,
-        )
 
     client = _client(cfg)
     try:
@@ -299,6 +352,129 @@ def write_mapped_rows(
             client.indices.create(
                 index=index,
                 body={"settings": {"number_of_shards": 1, "number_of_replicas": 0}},
+            )
+
+        if index_exists:
+            physical = _fetch_es_physical_types(client, index, target_cols)
+            if not physical:
+                mapped_data_cols = [c for c in target_cols if c and c != "_id"]
+                studio_live = isinstance(live_dest, dict) and all(
+                    str(live_dest.get(c) or "").strip() for c in mapped_data_cols
+                )
+                # Mapped fields excluding _id meta — empty properties on typed index
+                # is a probe failure; refuse Map-only bind unless Studio typed all.
+                if mapped_data_cols and not studio_live:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=index,
+                        target_schema=host or "localhost",
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"Elasticsearch index {index!r} exists but live mapping "
+                            "types were unavailable for all mapped fields — refuse Map "
+                            "VARCHAR bind (empty→NULL invent risk). Re-run destination "
+                            "schema introspect and retry."
+                        ),
+                    )
+            remat = _es_rematerialize_if_physical_differs(
+                physical=physical,
+                dest_types=dest_types,
+                target_cols=target_cols,
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                column_types=column_types,
+                logical_types=logical_types,
+                policy=policy,
+                conflict_columns=conflict_columns,
+                destination_column_nullability=_kwargs.get(
+                    "destination_column_nullability"
+                ),
+            )
+            if remat is not None:
+                mapped_rows, errors, rejected_details, dest_types = remat
+            else:
+                mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                    target_cols=target_cols,
+                    column_types=column_types,
+                    dest_types=dest_types,
+                    preserve_case=True,
+                    error_policy=policy,
+                    dest_kind="elasticsearch",
+                    destination_pk_columns=list(conflict_columns or []) or None,
+                    destination_column_nullability=_kwargs.get(
+                        "destination_column_nullability"
+                    ),
+                )
+        else:
+            mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                dest_types=dest_types,
+                preserve_case=True,
+                error_policy=policy,
+                dest_kind="elasticsearch",
+                destination_pk_columns=list(conflict_columns or []) or None,
+                destination_column_nullability=_kwargs.get(
+                    "destination_column_nullability"
+                ),
+            )
+
+        from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
+
+        tgt_types = [
+            str(
+                dest_types.get(c)
+                or (logical_types[i] if i < len(logical_types) else "")
+                or ""
+            )
+            for i, c in enumerate(target_cols)
+        ]
+        mapped_rows = apply_write_quarantine_matrix(
+            mapped_rows,
+            target_cols,
+            tgt_types,
+            rejected_details,
+            policy,
+            dialect_label="Elasticsearch",
+            mappings=list(mappings or []) or None,
+        )
+        _map_abort = reject_on_strict_policy(
+            policy, rejected_details, "Elasticsearch", errors
+        )
+        if _map_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=index,
+                target_schema=host or "localhost",
+                checksum="",
+                chunks_completed=0,
+                error=_map_abort or f"Transform errors: {'; '.join(errors[:3])}",
+                warnings=errors[:10],
+                rejected_rows=len(
+                    {d.get("row") for d in rejected_details if d.get("row") is not None}
+                ),
+                rejected_details=list(rejected_details),
+            )
+
+        if conflict:
+            from connectors.writer_common import partition_dense_upsert_rows
+
+            mapped_rows = partition_dense_upsert_rows(
+                mapped_rows,
+                conflict,
+                target_cols=target_cols,
+                rejected_details=rejected_details,
+                policy=policy,
             )
 
         from elasticsearch.helpers import bulk

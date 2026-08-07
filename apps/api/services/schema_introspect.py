@@ -3396,7 +3396,7 @@ _MONGO_TYPE_ORDER = {
     "OBJECT": 9,
     "JSON": 9,
 }
-# Keep a typed inference when ≥85% of non-null samples agree (Airbyte-class
+# Keep a typed inference when ≥85% of non-null samples agree (industry ELT
 # majority vote). Below that, TEXT is safer than a false INTEGER/DATE.
 _MONGO_TYPED_MAJORITY = 0.85
 
