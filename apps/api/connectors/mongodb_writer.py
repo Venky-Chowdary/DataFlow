@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
-from services.brand_env import getenv_brand
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import InvalidOperation
 from typing import Any
 
-from services.value_serializer import json_default
+from services.brand_env import getenv_brand
 
 from connectors.writer_common import (
     CHUNK_SIZE,
@@ -70,22 +68,20 @@ def _connection_string(
 
 
 def _idempotent_insert_many(coll, docs: list[dict]) -> int:
-    """Insert documents, treating duplicate-key errors as already-present rows.
+    """Insert documents; duplicate-key errors count as already-present.
 
-    Every document without an explicit ``_id`` gets a deterministic content hash
-    as its primary key so retries and resumable chunks produce the same _id and
-    do not create duplicates.
+    Documents without ``_id`` are refused — never invent a content-hash PK
+    (silent identity invent collapses natural keys and hides collisions).
+    Map ``_id`` or use upsert with ``conflict_columns``.
     """
     from pymongo.errors import BulkWriteError
 
-    for doc in docs:
-        if "_id" not in doc:
-            id_input = json.dumps(
-                {k: v for k, v in doc.items() if k != "_id"},
-                sort_keys=True,
-                default=json_default,
-            )
-            doc["_id"] = hashlib.sha256(id_input.encode("utf-8")).hexdigest()
+    missing_id = [i for i, doc in enumerate(docs) if "_id" not in doc]
+    if missing_id:
+        raise ValueError(
+            f"MongoDB insert refused {len(missing_id)} document(s) without `_id` — "
+            "refuse content-hash PK invent (map `_id` or upsert with conflict_columns)"
+        )
 
     try:
         result = coll.insert_many(docs, ordered=False)

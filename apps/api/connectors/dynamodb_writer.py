@@ -323,6 +323,21 @@ def write_mapped_rows(
         )
 
     key_types = _table_key_types(client, table)
+    if not key_types:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"DynamoDB table {table!r} key schema unavailable — refuse PutItem "
+                "without HASH/RANGE identity (describe_table failed or empty KeySchema). "
+                "Re-check table name/permissions; never soft-skip key preflight."
+            ),
+            rejected_details=list(rejected_details),
+        )
 
     written = 0
     batch_size = 25
@@ -416,10 +431,23 @@ def write_mapped_rows(
                     # STOP_COLUMN / coerce_null omit — never PutItem the sentinel string.
                     if is_missing_sentinel(value):
                         continue
+                    # Wire coerce must use live dest_types (tgt_types), never Map-only
+                    # logical_types — VARCHAR stamp + live INTEGER invents empty strings.
+                    wire_type = tgt_types[i] if i < len(tgt_types) else logical_types[i]
                     value = _coerce_dynamo_cell(
-                        value, col=col, logical_type=logical_types[i], key_types=key_types
+                        value, col=col, logical_type=wire_type, key_types=key_types
                     )
-                    item[col] = _to_attr(value, logical_types[i])
+                    # HASH/RANGE encode type must match KeySchema S/N/B — never let a
+                    # live INTEGER stamp re-serialize a string key as AttributeValue N.
+                    if col in key_types:
+                        encode_type = {
+                            "S": "VARCHAR",
+                            "N": "DECIMAL",
+                            "B": "BINARY",
+                        }.get(key_types[col], wire_type)
+                    else:
+                        encode_type = wire_type
+                    item[col] = _to_attr(value, encode_type)
 
                 if sparse:
                     # BatchWrite PutItem replaces the whole item — sparse CDC /

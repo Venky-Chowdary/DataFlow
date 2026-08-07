@@ -314,7 +314,10 @@ def write_mapped_rows(
                 for i, value in enumerate(row):
                     if is_missing_sentinel(value):
                         continue
-                    source[target_cols[i]] = _to_es_value(value, logical_types[i])
+                    source[target_cols[i]] = _to_es_value(
+                        value,
+                        tgt_types[i] if i < len(tgt_types) else logical_types[i],
+                    )
             except (ValueError, TypeError) as cell_exc:
                 rejected_details.append({
                     "row": row_idx + 1,

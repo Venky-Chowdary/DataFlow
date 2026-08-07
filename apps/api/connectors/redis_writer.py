@@ -316,7 +316,7 @@ def write_mapped_rows(
             # DF_MISSING omit vs explicit SQL NULL → JSON null (no stale merge invent).
             doc = _redis_row_to_doc(target_cols, row)
             try:
-                doc = _normalize_redis_typed_doc(doc, target_cols, logical_types)
+                doc = _normalize_redis_typed_doc(doc, target_cols, tgt_types)
             except (ValueError, TypeError) as cell_exc:
                 msg = format_exception_message(cell_exc)
                 if policy == "fail":
