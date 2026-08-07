@@ -1,10 +1,13 @@
-"""Map Accept risk must survive Validate — MappingItem + integrity/coercion adapters.
+"""Map Migration Risk Contract must survive Validate — MappingItem + adapters.
 
-Regression: operators Accept risk on Map (TEXT→INTEGER fidelity collapse) then
-Validate still blocked because:
-  1) MappingItem stripped risk_acknowledged / fidelity on /preflight/run
+Regression: operators sign CAST_AND_CONTINUE on Map (TEXT→INTEGER fidelity
+collapse) then Validate still blocked because:
+  1) MappingItem stripped risk_contract / fidelity on /preflight/run
   2) FilePreflightContext adapters omitted those fields for G9 + coercion_report
-  3) coercion_probe forced severity=block on fidelity_collapse ignoring risk_ack
+  3) coercion_probe forced severity=block on fidelity_collapse ignoring contract
+
+Charter: boolean ``risk_acknowledged`` alone never clears — need a verified
+continue-policy Migration Risk Contract.
 """
 
 from __future__ import annotations
@@ -21,6 +24,19 @@ if str(_API_ROOT) not in sys.path:
 _PREFLIGHT_SRC = Path(__file__).resolve().parents[3] / "packages" / "preflight" / "src"
 if str(_PREFLIGHT_SRC) not in sys.path:
     sys.path.insert(0, str(_PREFLIGHT_SRC))
+
+
+def _cast_continue_contract(column: str = "country_auto_detected") -> dict:
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    return create_migration_risk_contract(
+        column=column,
+        source_type="TEXT COLLATE UTF8MB4_0900_AI_CI",
+        destination_type="INTEGER",
+        approved_by="ops@dataflow.app",
+        reason="TEXT→INTEGER intentional cast for country flag codes",
+        execution_policy="CAST_AND_CONTINUE",
+    ).to_dict()
 
 
 def test_mapping_item_preserves_risk_ack_and_fidelity():
@@ -46,6 +62,7 @@ def test_mapping_item_preserves_risk_ack_and_fidelity():
 def test_coercion_probe_warns_declared_collapse_when_risk_acked():
     from services.coercion_probe import analyze_coercion
 
+    contract = _cast_continue_contract()
     report = analyze_coercion(
         sample_rows=[
             {"country_auto_detected": "0"},
@@ -60,6 +77,7 @@ def test_coercion_probe_warns_declared_collapse_when_risk_acked():
                 "target_type": "INTEGER",
                 "create_new": True,
                 "risk_acknowledged": True,
+                "risk_contract": contract,
             }
         ],
         source_types={"country_auto_detected": "TEXT COLLATE UTF8MB4_0900_AI_CI"},
@@ -91,6 +109,8 @@ def test_coercion_probe_still_blocks_declared_collapse_without_ack():
                 "source_type": "TEXT COLLATE UTF8MB4_0900_AI_CI",
                 "target_type": "INTEGER",
                 "create_new": True,
+                # boolean ack alone must NOT clear (charter)
+                "risk_acknowledged": True,
             }
         ],
         source_types={"country_auto_detected": "TEXT COLLATE UTF8MB4_0900_AI_CI"},
@@ -105,7 +125,7 @@ def test_coercion_probe_still_blocks_declared_collapse_without_ack():
 
 
 def test_file_preflight_adapters_forward_risk_ack():
-    """Integrity + coercion_report must see Map Accept risk (plan path)."""
+    """Integrity + coercion_report must see signed Risk Contract (plan path)."""
     from preflight.models import (
         ColumnMapping,
         ColumnSchema,
@@ -116,6 +136,7 @@ def test_file_preflight_adapters_forward_risk_ack():
     from services.preflight_service import FilePreflightContext
 
     col = "country_auto_detected"
+    contract = _cast_continue_contract(col)
     plan = TransferPlan(
         source=SourceConfig(
             kind="database",
@@ -149,6 +170,7 @@ def test_file_preflight_adapters_forward_risk_ack():
                 create_new=True,
                 fidelity="lossy_cast",
                 risk_acknowledged=True,
+                risk_contract=contract,
             )
         ],
         sync_mode="full_refresh_append",
@@ -174,11 +196,12 @@ def test_file_preflight_adapters_forward_risk_ack():
 
 
 def test_run_file_preflight_honors_risk_ack_on_text_to_int():
-    """End-to-end: TEXT→INTEGER with risk_acknowledged must not leave G3/G4/G9 blocking."""
+    """End-to-end: TEXT→INTEGER with signed Risk Contract must not leave G3/G4/G9 blocking."""
     from services.preflight_service import run_file_preflight
 
     col = "country_auto_detected"
     src_type = "TEXT COLLATE UTF8MB4_0900_AI_CI"
+    contract = _cast_continue_contract(col)
     result = run_file_preflight(
         columns=[col],
         column_types={col: src_type},
@@ -194,6 +217,7 @@ def test_run_file_preflight_honors_risk_ack_on_text_to_int():
                 "fidelity": "lossy_cast",
                 "type_narrowing": True,
                 "risk_acknowledged": True,
+                "risk_contract": contract,
                 "user_override": True,
             }
         ],

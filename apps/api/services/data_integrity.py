@@ -77,17 +77,41 @@ def _check_coercion_safety(
         target_types=target_types,
         schema_policy=schema_policy,
         confidence_floor=floor,
+        validation_mode=validation_mode,
+        dest_db_type=dest_kind or "",
     )
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
-        # Schemaless destinations store values as-is; strict type coercion checks
-        # are not transfer blockers.
+        # Schemaless stores values as-is — skip ordinary type-coercion blockers.
+        # Pending Studio/Map stamp invent still blocks (Dynamo/ES/Redis writers
+        # refuse Map logical invent under partial Studio).
+        invent_blocks = [
+            i
+            for i in issues
+            if i.get("severity") == "block"
+            and (
+                "pending" in str(i.get("reason") or "").lower()
+                or not str(i.get("target_type") or "").strip()
+            )
+        ]
+        if invent_blocks:
+            return {
+                "check": "coercion_safety",
+                "passed": False,
+                "blocks_transfer": True,
+                "issues": invent_blocks[:20],
+                "warnings": [],
+            }
         return {
             "check": "coercion_safety",
             "passed": True,
             "blocks_transfer": False,
             "issues": [],
-            "warnings": [i["message"] for i in issues if i.get("severity") in {"warn", "block"}][:10],
+            "warnings": [
+                i.get("message") or i.get("reason") or ""
+                for i in issues
+                if i.get("severity") in {"warn", "block"}
+            ][:10],
         }
 
     # Declared VARCHAR→NUMBER is "lossy" on paper, but JSON/CSV files often store

@@ -588,8 +588,42 @@ def write_mapped_rows(
             ),
         )
 
-    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
+
+    # Partial Studio: never soft-fill quarantine carriers from Map logicals
+    # (empty→NULL invent on typed key/attr schemas) — ES/Redis parity.
+    if studio_err:
+        missing = [
+            c
+            for c in target_cols
+            if c and not str(dest_types.get(c) or "").strip()
+        ]
+        if missing:
+            sample = ", ".join(repr(c) for c in missing[:12])
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=host or "",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"DynamoDB mapped attribute(s) {sample} lack live carriers "
+                    "under partial Studio — refuse Map logical quarantine invent. "
+                    "Re-run destination schema introspect and retry."
+                ),
+                rejected_details=[],
+            )
+        tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
+    else:
+        tgt_types = [
+            str(
+                dest_types.get(c)
+                or (logical_types[i] if i < len(logical_types) else "")
+                or ""
+            )
+            for i, c in enumerate(target_cols)
+        ]
 
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
@@ -709,7 +743,23 @@ def write_mapped_rows(
                         continue
                     # Wire coerce must use live dest_types (tgt_types), never Map-only
                     # logical_types — VARCHAR stamp + live INTEGER invents empty strings.
-                    wire_type = tgt_types[i] if i < len(tgt_types) else logical_types[i]
+                    wire_type = (
+                        tgt_types[i]
+                        if i < len(tgt_types) and str(tgt_types[i] or "").strip()
+                        else (
+                            ""
+                            if studio_err
+                            else (
+                                logical_types[i] if i < len(logical_types) else ""
+                            )
+                        )
+                    )
+                    if studio_err and not str(wire_type or "").strip():
+                        raise ValueError(
+                            f"DynamoDB attribute {target_cols[i]!r} lacks live "
+                            "carrier under partial Studio — refuse Map logical "
+                            "wire invent"
+                        )
                     value = _coerce_dynamo_cell(
                         value, col=col, logical_type=wire_type, key_types=key_types
                     )

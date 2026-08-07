@@ -56,6 +56,26 @@ def validate_mapping_coercions(
             source_type=src_type,
             dest_db_type=dest_db_type,
         )
+        if not str(tgt_type or "").strip():
+            # Match-existing without live/Map stamp — refuse source invent green.
+            # Always block (even balanced/review) — G3/analyze_coercion parity;
+            # soft-pass would false-green partial Studio invent cliffs.
+            issues.append({
+                "source": src,
+                "target": tgt,
+                "source_type": src_type,
+                "target_type": "",
+                "lossy": True,
+                "severity": "block",
+                "reason": (
+                    "Destination type pending Studio/Map stamp — refuse "
+                    "source_type invent for coercion green-path."
+                ),
+                "message": (
+                    f"{src} ({src_type}) → {tgt} (pending Studio/Map stamp)"
+                ),
+            })
+            continue
         src_logical = normalize_logical_type(src_type)
         tgt_logical = normalize_logical_type(tgt_type)
         # Width-safe UUID / ObjectId wires are value-preserving create-new sinks

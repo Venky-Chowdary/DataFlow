@@ -277,6 +277,28 @@ def analyze_coercion(
             continue
         src_type = source_types.get(src, "VARCHAR")
         tgt_type = _target_type_for(m, dest_types, source_types, dest_db_type=dest_db_type)
+        if not str(tgt_type or "").strip():
+            # Match-existing without live/Map stamp — refuse source invent green.
+            entry = {
+                "source": src,
+                "target": str(m.get("target") or src),
+                "source_type": src_type,
+                "target_type": "",
+                "sampled": len(rows),
+                "ok": 0,
+                "nulls": 0,
+                "failed": 0,
+                "severity": "block",
+                "fidelity_collapse": True,
+                "suggested_fix": (
+                    f"Column '{src}': destination type pending Studio/Map stamp — "
+                    "refuse source_type invent. Re-run destination introspect or "
+                    "stamp Map target_type."
+                ),
+            }
+            columns.append(entry)
+            by_source[src] = entry
+            continue
         src_logical = normalize_logical_type(src_type)
         tgt_logical = normalize_logical_type(tgt_type)
 

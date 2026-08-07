@@ -573,10 +573,24 @@ def write_mapped_rows(
                 for i, value in enumerate(row):
                     if is_missing_sentinel(value):
                         continue
-                    source[target_cols[i]] = _to_es_value(
-                        value,
-                        tgt_types[i] if i < len(tgt_types) else logical_types[i],
+                    wire = (
+                        tgt_types[i]
+                        if i < len(tgt_types) and str(tgt_types[i] or "").strip()
+                        else (
+                            ""
+                            if studio_err
+                            else (
+                                logical_types[i] if i < len(logical_types) else ""
+                            )
+                        )
                     )
+                    if studio_err and not str(wire or "").strip():
+                        raise ValueError(
+                            f"Elasticsearch field {target_cols[i]!r} lacks live "
+                            "carrier under partial Studio — refuse Map logical "
+                            "wire invent"
+                        )
+                    source[target_cols[i]] = _to_es_value(value, wire)
             except (ValueError, TypeError) as cell_exc:
                 rejected_details.append({
                     "row": row_idx + 1,

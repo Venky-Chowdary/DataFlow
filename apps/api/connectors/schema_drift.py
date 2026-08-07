@@ -118,10 +118,11 @@ def _minimum_string_length_for(old_type: str) -> int | None:
     return None
 
 
-def is_wider_type(old_type: str, new_type: str) -> bool:
+def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     """True when new_type can hold all values of old_type without loss."""
     old_type = old_type or "VARCHAR"
     new_type = new_type or "VARCHAR"
+    dest_db = (dest_db or "").strip()
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
 
@@ -203,7 +204,7 @@ def is_wider_type(old_type: str, new_type: str) -> bool:
         return new_len >= min_len
 
     # Other cross-logical promotions rely on the type-system safe-promotion list.
-    return not is_lossy_coercion(old_type, new_type, dest_db="")
+    return not is_lossy_coercion(old_type, new_type, dest_db=dest_db)
 
 
 def _information_schema_type_to_str(
@@ -505,7 +506,7 @@ def widen_existing_columns_native(
         if col not in existing:
             continue
         existing_type = existing[col]
-        if not is_wider_type(existing_type, new_type):
+        if not is_wider_type(existing_type, new_type, dest_db=dialect):
             continue
         try:
             ddl = _build_widen_ddl(

@@ -2229,18 +2229,25 @@ def resolve_mapping_dest_types(
     ctypes = column_types or {}
     logical = list(logical_types or [])
     live = {str(k).lower(): str(v) for k, v in (live_types or {}).items() if k and v}
+    # By-target Map stamp — never index-zip mappings[i] onto target_cols[i]
+    # (omits / reorder mis-stamp invents wrong carriers).
+    from services.mapping_constraints import write_mappings
+
+    by_tgt: dict[str, dict] = {}
+    for mapping in write_mappings(list(maps)):
+        tgt = str(mapping.get("target") or "").strip()
+        if tgt and tgt not in by_tgt:
+            by_tgt[tgt] = mapping
+            by_tgt.setdefault(tgt.lower(), mapping)
     out: dict[str, str] = {}
     for i, col in enumerate(cols):
         live_hit = live.get(str(col).lower())
         if live_hit:
             out[col] = live_hit
             continue
-        mapped = ""
-        src = ""
-        if i < len(maps):
-            m = maps[i]
-            mapped = str(m.get("target_type") or m.get("dest_type") or "").strip()
-            src = str(m.get("source") or "")
+        m = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+        mapped = str(m.get("target_type") or m.get("dest_type") or "").strip()
+        src = str(m.get("source") or "")
         out[col] = (
             mapped
             or (logical[i] if i < len(logical) else "")

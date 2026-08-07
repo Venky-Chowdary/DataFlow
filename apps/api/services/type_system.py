@@ -5680,7 +5680,9 @@ def resolve_mapping_target_type(
 
     Create-new: stamped ``mapping["target_type"]`` is authoritative (writer
     intent) — never invent UUID→UUID green when the map stamped STRING.
-    Existing columns: live destination type wins, then stamped, then source.
+    Existing columns: live destination type wins, then Map stamp.
+    Never invent from ``source_type`` on match-existing (Map/proof parity —
+    partial Studio must not green Validate via source-as-dest).
     """
     types = target_types or {}
     tgt = str(mapping.get("target") or "").strip()
@@ -5710,7 +5712,9 @@ def resolve_mapping_target_type(
         if db:
             return create_new_mapping_target_type(src, db)
         return src
-    return live or stamped or src
+    # Match-existing: live → stamped. Empty = pending Studio/Map (callers must
+    # not soft-green via source invent).
+    return live or stamped
 
 
 

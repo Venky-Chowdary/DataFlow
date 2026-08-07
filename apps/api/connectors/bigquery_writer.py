@@ -621,15 +621,6 @@ def write_mapped_rows(
         )
         table_id = f"{project_id}.{dataset_id}.{table_name}"
 
-        # CREATE/ADD must honor Studio/live dest_types — never Map logical_types invent.
-        schema_fields = [
-            bq_schema_field(
-                bigquery,
-                col,
-                str(dest_types.get(col) or (logical_types[i] if i < len(logical_types) else "STRING")),
-            )
-            for i, col in enumerate(target_cols)
-        ]
         dataset_ref = f"{project_id}.{dataset_id}"
         # Probe existence first — create_table=True + exists_ok must still
         # rematerialize against live DDL when the table already exists.
@@ -689,6 +680,18 @@ def write_mapped_rows(
                         "and create_table is disabled"
                     ),
                 )
+            # Build CREATE schema only after refuse — Map logicals OK when Studio absent.
+            schema_fields = [
+                bq_schema_field(
+                    bigquery,
+                    col,
+                    str(
+                        dest_types.get(col)
+                        or (logical_types[i] if i < len(logical_types) else "STRING")
+                    ),
+                )
+                for i, col in enumerate(target_cols)
+            ]
             existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
             if dataset_id not in existing_datasets:
                 client.create_dataset(bigquery.Dataset(dataset_ref))
@@ -721,18 +724,23 @@ def write_mapped_rows(
             table = client.get_table(table_id)
             existing = {f.name for f in table.schema}
             new_fields = []
+            from services.mapping_constraints import write_mappings
+
+            by_tgt: dict[str, dict] = {}
+            for mapping in write_mappings(list(mappings or [])):
+                tgt = str(mapping.get("target") or "").strip()
+                if tgt and tgt not in by_tgt:
+                    by_tgt[tgt] = mapping
+                    by_tgt.setdefault(tgt.lower(), mapping)
             for i, col in enumerate(target_cols):
                 if col in existing:
                     continue
                 typ = str(dest_types.get(col) or "").strip()
                 if not typ:
-                    explicit = ""
-                    if i < len(mappings):
-                        explicit = str(
-                            mappings[i].get("target_type")
-                            or mappings[i].get("dest_type")
-                            or ""
-                        ).strip()
+                    mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+                    explicit = str(
+                        mapping.get("target_type") or mapping.get("dest_type") or ""
+                    ).strip()
                     # Partial Studio: explicit Map stamp OK; never invent from
                     # source/logical alone (generic_sql additive parity).
                     if explicit and (
@@ -872,6 +880,29 @@ def write_mapped_rows(
 
         # Rebuild CREATE/MERGE staging schema from final dest_types (post-backfill
         # + physical overlay) — never keep pre-backfill Map logical carriers.
+        # Partial Studio: refuse empty carriers instead of soft-binding STRING.
+        if studio_err:
+            missing = [
+                c
+                for c in target_cols
+                if c and not str(dest_types.get(c) or "").strip()
+            ]
+            if missing:
+                sample = ", ".join(repr(c) for c in missing[:12])
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery mapped field(s) {sample} lack live/Map carriers "
+                        "under partial Studio — refuse STRING staging invent. "
+                        "Re-run destination schema introspect or stamp Map "
+                        "target_type for additive columns."
+                    ),
+                )
         schema_fields = [
             bq_schema_field(
                 bigquery,

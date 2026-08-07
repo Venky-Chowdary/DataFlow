@@ -108,14 +108,20 @@ def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
 def classify_schema_change(
     old_schema: dict[str, Any] | None,
     new_schema: dict[str, Any] | None,
+    *,
+    dest_db: str = "",
 ) -> dict[str, Any]:
     """Classify a schema evolution as additive vs breaking.
 
     Additive: new nullable columns, widen types.
     Breaking: drop/rename/type-narrow/pk change / new NOT NULL columns.
+
+    ``dest_db`` threads dialect rules into widen/narrow (ARRAY→MySQL JSON is
+    representation, not false ``narrow_type``).
     """
     old_cols, old_null, old_pk = _unpack_schema(old_schema)
     new_cols, new_null, new_pk = _unpack_schema(new_schema)
+    dest_db = (dest_db or "").strip()
 
     additive: list[dict[str, Any]] = []
     breaking: list[dict[str, Any]] = []
@@ -137,7 +143,7 @@ def classify_schema_change(
             for d in list(remaining_dropped):
                 best: str | None = None
                 for a in remaining_added:
-                    if _is_type_narrow(old_cols[d], new_cols[a]):
+                    if _is_type_narrow(old_cols[d], new_cols[a], dest_db=dest_db):
                         continue
                     same = normalize_logical_type(old_cols[d]) == normalize_logical_type(
                         new_cols[a]
@@ -193,14 +199,14 @@ def classify_schema_change(
                     "new_type": new_t,
                 })
             continue
-        if _is_type_widen(old_t, new_t):
+        if _is_type_widen(old_t, new_t, dest_db=dest_db):
             additive.append({
                 "kind": "widen_type",
                 "column": col,
                 "old_type": old_t,
                 "new_type": new_t,
             })
-        elif _is_type_narrow(old_t, new_t):
+        elif _is_type_narrow(old_t, new_t, dest_db=dest_db):
             breaking.append({
                 "kind": "narrow_type",
                 "column": col,
@@ -263,6 +269,7 @@ def classify_from_column_maps(
     old_pk: list[str] | None = None,
     new_pk: list[str] | None = None,
     cursor_fields: list[str] | None = None,
+    dest_db: str = "",
 ) -> dict[str, Any]:
     """Classify evolution from flat column maps (plan revisions / live introspect)."""
     old_columns = list(old_columns or [])
@@ -272,6 +279,7 @@ def classify_from_column_maps(
     report = classify_schema_change(
         _schema_dict_from_flat(old_columns, old_types, primary_key=old_pk),
         _schema_dict_from_flat(new_columns, new_types, primary_key=new_pk),
+        dest_db=dest_db,
     )
     # Airbyte hard-break: cursor removed from source.
     cursors = [str(c).strip() for c in (cursor_fields or []) if str(c).strip()]
@@ -574,13 +582,22 @@ def detect_schema_drift(
                 resolve_mapping_target_type,
             )
 
+            dest_db = str(destination_db_type or dest_kind or "")
             tgt_type = resolve_mapping_target_type(
                 m,
                 target_types=target_schema,
                 source_type=str(src_type),
-                dest_db_type=str(destination_db_type or dest_kind or ""),
-            ) or ci_get(target_schema, tgt) or "VARCHAR"
-            dest_db = str(destination_db_type or dest_kind or "")
+                dest_db_type=dest_db,
+            ) or ci_get(target_schema, tgt) or ""
+            if not tgt_type:
+                type_mismatches.append({
+                    "source": src,
+                    "target": tgt,
+                    "source_type": str(src_type).upper(),
+                    "target_type": "",
+                    "reason": "pending_dest_type",
+                })
+                continue
             if not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
                 continue
 
@@ -620,6 +637,7 @@ def detect_schema_drift(
             old_pk=previous_primary_key,
             new_pk=live_primary_key,
             cursor_fields=cursor_fields,
+            dest_db=str(destination_db_type or dest_kind or ""),
         )
     elif source_changed and mapped_sources:
         still_present = [c for c in source_columns if c.lower() in mapped_sources]
