@@ -799,4 +799,44 @@ describe("destination schema honesty", () => {
     assert.equal(clearedHealth.ready, 1);
     assert.match(clearedHealth.headline, /ready/i);
   });
+
+  it("does not invent destType from source when Studio schema is partial", () => {
+    const editable = editableFromPipelineMappings(
+      [
+        {
+          source: "id",
+          target: "id",
+          confidence: 0.95,
+          transform: "none",
+          source_type: "INTEGER",
+          target_type: "INTEGER",
+        },
+        {
+          source: "note",
+          target: "note",
+          confidence: 0.9,
+          transform: "none",
+          source_type: "VARCHAR",
+          // no Map stamp — Studio also missing note
+        },
+      ],
+      [],
+      ["id", "note"],
+      0.75,
+      { id: "INTEGER" }, // partial Studio
+    );
+    assert.equal(editable[0].destType, "INTEGER");
+    assert.equal(editable[1].destType, undefined);
+    assert.equal(editable[1].requiresReview, true);
+
+    // Preflight must not re-invent VARCHAR stamp after Approve path.
+    const withExists = editable.map((m) => ({
+      ...m,
+      existsInDestination: true,
+      approved: true,
+    }));
+    const pf = buildPreflightMappings([], withExists);
+    assert.equal(pf[0].target_type, "INTEGER");
+    assert.equal(pf[1].target_type, undefined);
+  });
 });

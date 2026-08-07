@@ -1331,13 +1331,21 @@ export function buildPreflightMappings(
         user_override: Boolean(safe.riskAcknowledged) || (safe.approved && !enumBool && !mappingRequiresRiskAck(safe)),
         transform: omitted ? "omit" : uiTransformToEngine(safe.transform, safe.engineTransform),
         intentional_omit: omitted || undefined,
+        // Existing dest: never invent target_type from inferredType when Map
+        // left destType blank (partial Studio honesty — write path fail-closes).
+        // Create-new may still preview from inferredType / destType stamp.
         target_type: omitted
           ? undefined
-          : m.existsInDestination
-          ? (m.destType || safe.destType || safe.inferredType)
-          : (safe.destType || safe.inferredType),
+          : isCreateNew
+            ? (safe.destType || safe.inferredType)
+            : (m.destType || safe.destType || undefined),
         source_type: safe.inferredType,
-        requires_review: omitted ? false : Boolean((safe.requiresReview || enumBool) && !safe.approved),
+        requires_review: omitted
+          ? false
+          : Boolean(
+              (safe.requiresReview || enumBool || (!isCreateNew && !(m.destType || safe.destType)))
+              && !safe.approved,
+            ),
         score_gap: safe.scoreGap ?? 1,
         semantic_role: safe.semanticRole,
         create_new: isCreateNew,
@@ -1433,9 +1441,16 @@ export function editableFromPipelineMappings(
       (m.fidelity || "").trim().toLowerCase() || undefined,
       (m.transform || "").trim().toLowerCase() || undefined,
     );
-    const requiresReview = Boolean(m.requires_review) || pendingDest;
     const sourceType = m.source_type;
-    const destType = liveDestType || m.target_type || m.source_type;
+    // Partial Studio: destSchema loaded but this target missing → never invent
+    // destType from source_type (false-green Map before write fail-close).
+    const destSchemaLoaded = Object.keys(destSchema || {}).length > 0;
+    let destType = liveDestType || m.target_type || undefined;
+    if (!destType && (rowCreateNew || !destSchemaLoaded)) {
+      destType = m.source_type;
+    }
+    const destTypeGap = destSchemaLoaded && !destType && !rowCreateNew && !pendingDest;
+    const requiresReview = Boolean(m.requires_review) || pendingDest || destTypeGap;
     const specialty = isSpecialtyLogicalType(sourceType) || isSpecialtyLogicalType(destType);
     const structish = isStructLogicalType(sourceType) || isStructLogicalType(destType);
     const arrayish = isArrayLogicalType(sourceType) || isArrayLogicalType(destType);

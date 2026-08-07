@@ -2132,7 +2132,14 @@ def gate_additive_types_under_partial_studio(
     """
     if not studio_err:
         return list(target_types), None
-    out = list(target_types)
+    # Pad to target_cols length — deferred Map under partial Studio often leaves
+    # target_types=[] before rematerialize. Append-only stamping mis-zips ADD
+    # types onto the wrong columns (existing col gets the additive stamp).
+    out = [str(t or "") for t in list(target_types or [])]
+    if len(out) < len(target_cols or []):
+        out.extend([""] * (len(target_cols) - len(out)))
+    elif len(out) > len(target_cols or []):
+        out = out[: len(target_cols)]
     from services.mapping_constraints import write_mappings
 
     by_tgt: dict[str, dict] = {}
@@ -2161,10 +2168,7 @@ def gate_additive_types_under_partial_studio(
                 f"{product} additive column {col!r} Map target_type {explicit!r} "
                 "did not materialize to DDL — refuse Map VARCHAR ADD invent."
             )
-        if i < len(out):
-            out[i] = str(stamped)
-        else:
-            out.append(str(stamped))
+        out[i] = str(stamped)
     return out, None
 
 

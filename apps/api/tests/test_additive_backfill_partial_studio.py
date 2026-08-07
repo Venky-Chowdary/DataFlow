@@ -61,6 +61,43 @@ def test_gate_additive_noop_without_studio_err():
     assert types == ["INTEGER", "VARCHAR"]
 
 
+def test_gate_additive_pads_empty_types_under_deferred_map():
+    """Deferred Map leaves target_types=[] — stamps must land on additive index."""
+    types, err = gate_additive_types_under_partial_studio(
+        target_cols=["id", "note"],
+        target_types=[],  # PG/MySQL/SF under studio_err before rematerialize
+        existing={"id"},
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "INTEGER"},
+            {"source": "n", "target": "note", "target_type": "TEXT"},
+        ],
+        studio_err="partial",
+        product="PostgreSQL",
+        materialize_stamp=lambda s: f"STAMPED:{s}",
+    )
+    assert err is None
+    assert len(types) == 2
+    assert types[0] == ""  # existing — physical owns later
+    assert types[1] == "STAMPED:TEXT"
+
+
+def test_gate_additive_empty_types_refuses_unstamped():
+    types, err = gate_additive_types_under_partial_studio(
+        target_cols=["id", "note"],
+        target_types=[],
+        existing={"id"},
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "INTEGER"},
+            {"source": "n", "target": "note"},  # no stamp
+        ],
+        studio_err="partial",
+        product="MySQL",
+        materialize_stamp=lambda s: s,
+    )
+    assert err is not None
+    assert "note" in err.lower()
+
+
 def test_sqlite_backfill_refuses_partial_studio_without_stamp(tmp_path: Path):
     from connectors.sqlite_writer import write_mapped_rows
 

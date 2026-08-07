@@ -4664,17 +4664,27 @@ def write_mapped_rows(
                 live_dest_types.update(live_partial)
             # Partial Studio + backfill: additive cols need an explicit Map stamp
             # (operator-approved) — never invent from source DDL / bare string.
+            # Lookup by target name (mappings need not be index-aligned).
             if studio_err and backfill_new_fields:
+                from services.mapping_constraints import write_mappings
+
                 covered_fold = {str(c).lower() for c in covered_cols}
-                for i, col in enumerate(target_cols):
+                by_tgt: dict[str, dict] = {}
+                for mapping in write_mappings(list(mappings or [])):
+                    tgt = str(mapping.get("target") or "").strip()
+                    if tgt and tgt not in by_tgt:
+                        by_tgt[tgt] = mapping
+                        by_tgt.setdefault(tgt.lower(), mapping)
+                for col in target_cols:
                     if not col or str(col).lower() in covered_fold:
                         continue
                     if str(live_dest_types.get(col) or "").strip():
                         continue
-                    explicit = (
-                        mappings[i].get("target_type") if i < len(mappings) else None
-                    )
-                    if not str(explicit or "").strip():
+                    mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+                    explicit = str(
+                        mapping.get("target_type") or mapping.get("dest_type") or ""
+                    ).strip()
+                    if not explicit:
                         return WriteResult(
                             ok=False,
                             rows_written=0,
@@ -4860,9 +4870,43 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
 
+    # Partial Studio: never soft-bind logical "string" for empty carriers —
+    # rematerialize / additive Map stamp must have filled every mapped column.
+    if studio_err:
+        missing_carriers = [
+            c
+            for c in target_cols
+            if c and not str(target_column_types.get(c) or "").strip()
+        ]
+        if missing_carriers:
+            sample = ", ".join(repr(c) for c in missing_carriers[:12])
+            more = (
+                f" (+{len(missing_carriers) - 12} more)"
+                if len(missing_carriers) > 12
+                else ""
+            )
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"{_engine_label} mapped field(s) {sample}{more} lack live/"
+                    "Map carriers under partial Studio — refuse SA string bind "
+                    "invent. Re-run destination schema introspect or stamp Map "
+                    "target_type for additive columns."
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
+
     sa_col_types = {
         col: _sa_type_for_logical(
-            target_column_types.get(col, "string"), dialect_name, cfg.get("type", "")
+            str(target_column_types.get(col) or "string"),
+            dialect_name,
+            cfg.get("type", ""),
         )
         for col in target_cols
     }
@@ -4876,7 +4920,7 @@ def write_mapped_rows(
             try:
                 cells[col] = _to_sa_value(
                     row[i],
-                    target_column_types.get(col, "string"),
+                    str(target_column_types.get(col) or "string"),
                     sa_col_types.get(col),
                     dialect_name,
                     cfg.get("type", ""),
@@ -4946,7 +4990,7 @@ def write_mapped_rows(
             try:
                 cells[col] = _to_sa_value(
                     raw,
-                    target_column_types.get(col, "string"),
+                    str(target_column_types.get(col) or "string"),
                     sa_col_types.get(col),
                     dialect_name,
                     cfg.get("type", ""),

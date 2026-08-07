@@ -101,14 +101,35 @@ def mapping_fidelity(
         or mapping.get("inferred_type")
         or "VARCHAR"
     )
-    tgt_type = str(
+    stamp = str(
         declared_target_type
         or mapping.get("target_type")
         or mapping.get("dest_type")
-        or src_type
-    )
+        or ""
+    ).strip()
+    create_new = bool(mapping.get("create_new")) or str(
+        mapping.get("assignment_strategy") or ""
+    ) in {"identity_passthrough", "create_compatible_new"}
     transform = str(mapping.get("transform") or "none")
     t_fidelity = transform_fidelity(transform)
+    # Existing match without Map/Studio stamp: refuse source_type invent for a
+    # false-green preserve verdict (partial Studio honesty).
+    if not stamp and not create_new:
+        from services.conversion_contract import ConversionClass
+
+        return {
+            "verdict": "cast",
+            "reason": (
+                "Destination type pending Studio/Map stamp — refuse source_type "
+                "invent for fidelity (confirm live schema or stamp Map)."
+            ),
+            "type_narrowing": True,
+            "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+            "invents_capacity": False,
+            "requires_risk_contract": True,
+        }
+    tgt_type = stamp or src_type
 
     dest = (destination_db_type or "").strip().lower()
     if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
@@ -595,28 +616,50 @@ def _mapping_risks(
 def _schema_decision(mapping: dict, *, dest_mode: str, destination_db_type: str) -> str:
     tgt = mapping.get("target") or ""
     src_type = mapping.get("source_type") or "VARCHAR"
-    tgt_type = mapping.get("target_type") or mapping.get("dest_type") or src_type
-    # Prefer operator/pipeline target type for DDL display — preserve DECIMAL(p,s).
-    try:
-        from services.type_system import ddl_carrier_type
-
-        carrier = ddl_carrier_type(str(tgt_type or src_type))
-    except Exception:
-        carrier = str(tgt_type or src_type)
-    dest = (destination_db_type or "").strip().lower()
+    stamp = str(mapping.get("target_type") or mapping.get("dest_type") or "").strip()
     create_row = bool(mapping.get("create_new")) or str(
         mapping.get("assignment_strategy") or ""
     ) in {"identity_passthrough", "create_compatible_new", "pending_dest_schema"}
+    # Create-new / ADD may preview from source; MATCH existing must not invent
+    # a destination carrier from source_type when Map/Studio left a gap.
+    type_for_ddl = stamp or (src_type if (create_row or dest_mode == "create_new") else "")
+    try:
+        from services.type_system import ddl_carrier_type
+
+        carrier = ddl_carrier_type(str(type_for_ddl)) if type_for_ddl else ""
+    except Exception:
+        carrier = str(type_for_ddl or "")
+    dest = (destination_db_type or "").strip().lower()
     if dest_mode == "schema_pending" or str(mapping.get("assignment_strategy") or "") == "pending_dest_schema":
-        return f"PENDING destination schema for `{tgt}` ({carrier}) — confirm table before create-new"
+        if carrier:
+            return (
+                f"PENDING destination schema for `{tgt}` ({carrier}) — "
+                "confirm table before create-new"
+            )
+        return (
+            f"PENDING destination schema for `{tgt}` — "
+            "confirm table/types before create-new"
+        )
     if dest_mode == "create_new" or (create_row and mapping.get("exists_in_destination") is False):
-        native = ddl_type(dest, carrier) if dest else carrier
+        native = ddl_type(dest, carrier or src_type) if dest else (carrier or src_type)
         return f"CREATE column `{tgt}` as {native}"
     exists = mapping.get("exists_in_destination")
     if exists is False or create_row:
+        # Additive ADD on an existing table must carry Map stamp — never invent
+        # VARCHAR from source under partial Studio (write path refuse parity).
+        if not carrier:
+            return (
+                f"ADD new column `{tgt}` — Map target_type required "
+                "(refuse source_type invent under partial Studio)"
+            )
         native = ddl_type(dest, carrier) if dest else carrier
         return f"ADD new column `{tgt}` as {native} (not in introspected schema)"
-    return f"MATCH existing `{tgt}` ({carrier})"
+    if carrier:
+        return f"MATCH existing `{tgt}` ({carrier})"
+    return (
+        f"MATCH existing `{tgt}` — destination type pending Studio/Map stamp "
+        "(refuse source_type invent)"
+    )
 
 
 def _sample_preview_pair(mapping: dict) -> tuple[list[str], list[str]]:
@@ -885,22 +928,24 @@ def build_mapping_proof(
         breakdown = confidence_breakdown(m, evidence, display_conf)
         evidence = {**evidence, "confidence_breakdown": breakdown}
 
+        # Honest dest type: Map stamp / create-new may use source; match_existing
+        # / schema_pending without a stamp must not invent VARCHAR from source.
+        _stamp = str(m.get("target_type") or m.get("dest_type") or "").strip()
+        _create_new = bool(evidence.get("create_new")) or dest_mode == "create_new"
+        if _stamp:
+            display_tgt = _stamp
+        elif _create_new:
+            display_tgt = str(m.get("source_type") or "VARCHAR")
+        else:
+            display_tgt = ""
         rows.append({
             "source": m.get("source"),
             "target": m.get("target"),
             "source_type": m.get("source_type") or "VARCHAR",
-            "target_type": m.get("target_type") or m.get("dest_type") or m.get("source_type") or "VARCHAR",
+            "target_type": display_tgt,
             "dest_native_type": (
-                ddl_type(
-                    destination_db_type,
-                    str(
-                        m.get("target_type")
-                        or m.get("dest_type")
-                        or m.get("source_type")
-                        or "VARCHAR"
-                    ),
-                )
-                if destination_db_type
+                ddl_type(destination_db_type, display_tgt)
+                if destination_db_type and display_tgt
                 else None
             ),
             "transform": transform,
