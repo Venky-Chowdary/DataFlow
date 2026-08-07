@@ -242,14 +242,43 @@ def _has_collection(
     return bool(data)
 
 
-def _milvus_live_vector_dim(
+def _milvus_dtype_to_carrier(data_type: Any) -> str:
+    """Map Milvus field ``dataType`` to a Datawrap logical carrier.
+
+    Vector fields return ``""`` (not Map-bound). Unknown empty → ``""`` so
+    require_physical can refuse incomplete describe (never invent VARCHAR).
+    """
+    raw = str(data_type or "").strip()
+    if not raw:
+        return ""
+    u = raw.upper().replace(" ", "")
+    if "VECTOR" in u:
+        return ""
+    mapping = {
+        "VARCHAR": "VARCHAR",
+        "STRING": "TEXT",
+        "INT64": "BIGINT",
+        "INT32": "INTEGER",
+        "INT16": "SMALLINT",
+        "INT8": "SMALLINT",
+        "FLOAT": "FLOAT",
+        "DOUBLE": "DOUBLE",
+        "BOOL": "BOOLEAN",
+        "BOOLEAN": "BOOLEAN",
+        "JSON": "JSON",
+        "ARRAY": "ARRAY",
+    }
+    return mapping.get(u, u)
+
+
+def _milvus_describe_collection(
     session: Any,
     base_url: str,
     headers: dict[str, str],
     collection_name: str,
     db_name: str = "",
-) -> int | None:
-    """POST /collections/describe → FloatVector elementTypeParams.dim."""
+) -> tuple[dict[str, str], int | None]:
+    """POST /collections/describe → (non-vector field carriers, vector dim)."""
     payload: dict[str, Any] = {"collectionName": collection_name}
     if db_name:
         payload["dbName"] = db_name
@@ -261,32 +290,71 @@ def _milvus_live_vector_dim(
     )
     body = resp.json() if resp.content else {}
     if not _ok_response(body if isinstance(body, dict) else {}, resp.status_code):
-        return None
+        return {}, None
     data = body.get("data") if isinstance(body, dict) else None
     if not isinstance(data, dict):
-        return None
+        return {}, None
     fields = data.get("fields") or data.get("schema", {}).get("fields") or []
     if not isinstance(fields, list):
-        return None
+        return {}, None
+    carriers: dict[str, str] = {}
+    live_dim: int | None = None
     for field in fields:
         if not isinstance(field, dict):
             continue
-        dtype = str(field.get("dataType") or field.get("type") or "").upper()
-        if "VECTOR" not in dtype:
+        name = str(
+            field.get("fieldName") or field.get("name") or ""
+        ).strip()
+        dtype = field.get("dataType") or field.get("type") or ""
+        dtype_u = str(dtype).upper()
+        if "VECTOR" in dtype_u:
+            params = field.get("elementTypeParams") or field.get("params") or {}
+            if isinstance(params, dict):
+                raw = params.get("dim")
+                try:
+                    dim = int(raw) if raw is not None else 0
+                except (TypeError, ValueError):
+                    dim = 0
+                if dim > 0:
+                    live_dim = dim
             continue
-        params = field.get("elementTypeParams") or field.get("params") or {}
-        if not isinstance(params, dict):
+        if not name:
             continue
-        raw = params.get("dim")
-        if raw is None:
-            continue
-        try:
-            dim = int(raw)
-        except (TypeError, ValueError):
-            continue
-        if dim > 0:
-            return dim
-    return None
+        carrier = _milvus_dtype_to_carrier(dtype)
+        # Keep empty carriers so require_physical can refuse incomplete describe
+        # (never drop the field name and soft-skip the invent cliff).
+        carriers[name] = carrier
+        carriers.setdefault(name.lower(), carrier)
+        carriers.setdefault(name.upper(), carrier)
+    return carriers, live_dim
+
+
+def _milvus_live_vector_dim(
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection_name: str,
+    db_name: str = "",
+) -> int | None:
+    """POST /collections/describe → FloatVector elementTypeParams.dim."""
+    _carriers, dim = _milvus_describe_collection(
+        session, base_url, headers, collection_name, db_name=db_name
+    )
+    return dim
+
+
+def _milvus_live_field_types(
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection_name: str,
+    db_name: str = "",
+) -> dict[str, str]:
+    """Non-vector field carriers from POST /collections/describe."""
+    carriers, _dim = _milvus_describe_collection(
+        session, base_url, headers, collection_name, db_name=db_name
+    )
+    return carriers
 
 
 def _ensure_collection(
@@ -426,13 +494,121 @@ def write_mapped_rows(
     if db_name.lower() in {"", "test_db", "default", "public"}:
         db_name = ""
 
-    from connectors.writer_common import prepare_records_for_vector_write
+    from connectors.writer_common import (
+        prepare_records_for_vector_write,
+        require_physical_types_for_existing_table,
+    )
 
     pk_cols = list(
         _kwargs.get("destination_pk_columns")
         or _kwargs.get("conflict_columns")
         or []
     ) or None
+
+    # Probe live collection schema before Map bind (Weaviate/ES bar).
+    studio_live = _kwargs.get("destination_column_types")
+    live_field_types: dict[str, str] = {}
+    if isinstance(studio_live, dict):
+        live_field_types.update(
+            {str(k): str(v) for k, v in studio_live.items() if k and v}
+        )
+    mapped_targets = [
+        str(m.get("target") or m.get("source") or "").strip()
+        for m in (mappings or [])
+        if str(m.get("target") or m.get("source") or "").strip()
+    ]
+    if not mapped_targets:
+        mapped_targets = [str(h) for h in (headers or []) if h]
+    studio_typed_all = (
+        isinstance(studio_live, dict)
+        and bool(mapped_targets)
+        and all(str(studio_live.get(c) or "").strip() for c in mapped_targets)
+    )
+
+    token = _auth_token(api_key=api_key, username=username, password=password)
+    base_url = _base_url(host, port, ssl, connection_string)
+    collection_existed = False
+    cached_live_dim: int | None = None
+    try:
+        session = _requests_session()
+        hdrs = _headers(token)
+        collection_existed = _has_collection(
+            session, base_url, hdrs, collection, db_name=db_name
+        )
+        if collection_existed:
+            schema_types, cached_live_dim = _milvus_describe_collection(
+                session, base_url, hdrs, collection, db_name=db_name
+            )
+            if not schema_types and not studio_typed_all:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Milvus collection {collection!r} exists but live field "
+                        "types were unavailable — refuse Map VARCHAR bind "
+                        "(empty→null invent risk). Re-run schema introspect."
+                    ),
+                )
+            # Live schema wins over Studio for overlapping fields.
+            live_field_types.update(schema_types)
+            # Gate only fields already on the collection (additive Map cols
+            # become unused metadata — fixed schema enableDynamicField=False).
+            primary_existing = set(schema_types.keys())
+            mapped_existing = [
+                c
+                for c in mapped_targets
+                if c
+                and (
+                    c in primary_existing
+                    or str(c).lower() in primary_existing
+                    or str(c).upper() in primary_existing
+                )
+            ]
+            effective = dict(live_field_types)
+            if isinstance(studio_live, dict):
+                for c in mapped_existing:
+                    if (
+                        effective.get(c)
+                        or effective.get(str(c).lower())
+                        or effective.get(str(c).upper())
+                    ):
+                        continue
+                    st = str(studio_live.get(c) or "").strip()
+                    if st:
+                        effective[c] = st
+            if mapped_existing:
+                phys_err = require_physical_types_for_existing_table(
+                    table_existed=True,
+                    physical=effective,
+                    dialect_label="Milvus",
+                    target_cols=mapped_existing,
+                )
+                if phys_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=collection,
+                        target_schema=db_name,
+                        checksum="",
+                        chunks_completed=0,
+                        error=phys_err,
+                    )
+            live_field_types = effective
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=collection,
+            target_schema=db_name,
+            checksum="",
+            chunks_completed=0,
+            error=f"Milvus schema probe failed: {exc}",
+        )
+
     records, map_rejected, map_abort = prepare_records_for_vector_write(
         headers=headers,
         data_rows=data_rows,
@@ -445,7 +621,11 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="milvus",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        destination_column_types=_kwargs.get("destination_column_types"),
+        destination_column_types=(
+            live_field_types
+            if (collection_existed or studio_typed_all)
+            else None
+        ),
     )
     if map_abort:
         return WriteResult(
@@ -558,13 +738,11 @@ def write_mapped_rows(
     token = _auth_token(api_key=api_key, username=username, password=password)
     base_url = _base_url(host, port, ssl, connection_string)
     inserted = 0
+    rejected: list[dict[str, Any]] = list(map_rejected)
     try:
         session = _requests_session()
         hdrs = _headers(token)
-        collection_exists = _has_collection(
-            session, base_url, hdrs, collection, db_name=db_name
-        )
-        if not collection_exists:
+        if not collection_existed:
             if not create_table:
                 raise RuntimeError(
                     f"Milvus collection '{collection}' is missing and "
@@ -573,10 +751,13 @@ def write_mapped_rows(
             _ensure_collection(
                 session, base_url, hdrs, collection, dimension, db_name=db_name
             )
+            live_dim = None
         else:
-            live_dim = _milvus_live_vector_dim(
-                session, base_url, hdrs, collection, db_name=db_name
-            )
+            live_dim = cached_live_dim
+            if live_dim is None:
+                live_dim = _milvus_live_vector_dim(
+                    session, base_url, hdrs, collection, db_name=db_name
+                )
             if live_dim is None:
                 return WriteResult(
                     ok=False,

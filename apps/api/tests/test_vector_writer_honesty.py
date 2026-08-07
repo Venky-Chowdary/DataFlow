@@ -76,12 +76,20 @@ def test_qdrant_refuses_invented_dimension_384():
 def test_milvus_refuses_invented_dimension_384():
     from connectors.milvus_writer import write_mapped_rows
 
+    session = MagicMock()
+    # Create-new path: has-collection false so Map bind proceeds; dim still refused.
+    has_resp = MagicMock()
+    has_resp.status_code = 200
+    has_resp.content = b"{}"
+    has_resp.json.return_value = {"code": 0, "data": {"has": False}}
+    session.post.return_value = has_resp
+
     with patch(
         "connectors.milvus_writer.vectorize_records",
         return_value=[
             {"id": "a", "content": "hi", "embedding": None, "source_id": "1", "chunk_index": 0}
         ],
-    ), patch("connectors.milvus_writer._requests_session") as sess:
+    ), patch("connectors.milvus_writer._requests_session", return_value=session):
         result = write_mapped_rows(
             host="localhost",
             port=19530,
@@ -101,7 +109,6 @@ def test_milvus_refuses_invented_dimension_384():
         )
     assert result.ok is False
     assert "dimension" in (result.error or "").lower() or "embedding" in (result.error or "").lower()
-    sess.assert_not_called()
 
 
 def test_qdrant_surfaces_df_embed_error_reason():

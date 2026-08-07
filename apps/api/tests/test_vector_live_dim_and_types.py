@@ -144,6 +144,70 @@ def test_milvus_live_vector_dim_from_describe():
     )
 
 
+def test_milvus_existing_collection_partial_schema_refuses():
+    """Existing Milvus collection missing a mapped field carrier → require_physical."""
+    from connectors.milvus_writer import write_mapped_rows
+
+    session = MagicMock()
+
+    def _post(url, *args, **kwargs):
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.content = b"{}"
+        if "collections/has" in str(url):
+            resp.json.return_value = {"code": 0, "data": {"has": True}}
+        else:
+            # Describe returns only id — chunk_index exists on create schema but
+            # incomplete describe must refuse Map bind for that mapped field.
+            resp.json.return_value = {
+                "code": 0,
+                "data": {
+                    "fields": [
+                        {"fieldName": "id", "dataType": "VarChar"},
+                        {
+                            "fieldName": "vector",
+                            "dataType": "FloatVector",
+                            "elementTypeParams": {"dim": 3},
+                        },
+                        {"fieldName": "chunk_index", "dataType": ""},
+                    ]
+                },
+            }
+        return resp
+
+    session.post.side_effect = _post
+
+    with patch("connectors.milvus_writer._requests_session", return_value=session):
+        result = write_mapped_rows(
+            host="localhost",
+            port=19530,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="chunks",
+            headers=["id", "chunk_index"],
+            data_rows=[["1", "0"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {
+                    "source": "chunk_index",
+                    "target": "chunk_index",
+                    "target_type": "VARCHAR",
+                },
+            ],
+            column_types={"id": "VARCHAR", "chunk_index": "VARCHAR"},
+            api_key="key",
+            create_table=True,
+            error_policy="quarantine",
+        )
+    assert result.ok is False
+    assert "chunk_index" in (result.error or "").lower()
+    assert "refuse" in (result.error or "").lower()
+
+
 def test_weaviate_live_property_types():
     from connectors.weaviate_writer import _weaviate_live_property_types
 
