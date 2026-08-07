@@ -100,8 +100,12 @@ def _kafka_rematerialize_if_physical_differs(
     policy: Any,
     conflict_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
+    force_remap: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
-    """Rebuild mapped rows when live Registry carriers differ from Map stamps."""
+    """Rebuild mapped rows when live Registry carriers differ from Map stamps.
+
+    ``force_remap`` covers deferred Map under partial Studio (invent risk).
+    """
     from connectors.writer_common import rematerialize_live_dest_types
 
     # Live Registry∩Studio carriers only — never soft-fill Map VARCHAR for gaps
@@ -116,7 +120,7 @@ def _kafka_rematerialize_if_physical_differs(
         != str(live_dest_types.get(c) or "").strip().upper()
         for c in target_cols
     )
-    if not carriers_differ:
+    if not carriers_differ and not force_remap:
         return None
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
@@ -410,6 +414,7 @@ def write_mapped_rows(
                         driver="kafka",
                     )
                 physical = effective_physical
+            _force_remap = bool(studio_err)
             remat = _kafka_rematerialize_if_physical_differs(
                 physical=physical,
                 dest_types=dest_types,
@@ -424,9 +429,24 @@ def write_mapped_rows(
                 destination_column_nullability=_kwargs.get(
                     "destination_column_nullability"
                 ),
+                force_remap=_force_remap,
             )
             if remat is not None:
                 mapped_rows, transform_errors, rejected_details, dest_types = remat
+            elif _force_remap:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema=host or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Kafka Schema Registry live carriers incomplete for "
+                        "mapped fields — refuse Map VARCHAR rematerialize invent. "
+                        "Re-run destination schema introspect and retry."
+                    ),
+                )
             else:
                 mapped_rows, transform_errors, rejected_details = (
                     build_mapped_rows_with_details(

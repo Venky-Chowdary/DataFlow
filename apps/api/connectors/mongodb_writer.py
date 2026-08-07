@@ -99,8 +99,12 @@ def _mongo_rematerialize_if_physical_differs(
     policy: Any,
     conflict_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
+    force_remap: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
-    """Rebuild mapped rows from source when live BSON carriers differ from Map."""
+    """Rebuild mapped rows from source when live BSON carriers differ from Map.
+
+    ``force_remap`` covers deferred Map under partial Studio (empty / invent risk).
+    """
     from connectors.writer_common import rematerialize_live_dest_types
 
     live_dest_types = rematerialize_live_dest_types(
@@ -113,7 +117,7 @@ def _mongo_rematerialize_if_physical_differs(
         != str(live_dest_types.get(c) or "").strip().upper()
         for c in target_cols
     )
-    if not carriers_differ:
+    if not carriers_differ and not force_remap:
         return None
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
@@ -379,6 +383,7 @@ def write_mapped_rows(
                         error=phys_err,
                     )
                 physical = effective_physical
+            _force_remap = bool(studio_err)
             remat = _mongo_rematerialize_if_physical_differs(
                 physical=physical,
                 dest_types=dest_types,
@@ -393,9 +398,24 @@ def write_mapped_rows(
                 destination_column_nullability=_kwargs.get(
                     "destination_column_nullability"
                 ),
+                force_remap=_force_remap,
             )
             if remat is not None:
                 mapped_rows, transform_errors, rejected_details, dest_types = remat
+            elif _force_remap:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection_name,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "MongoDB live BSON incomplete for mapped fields — "
+                        "refuse Map VARCHAR rematerialize invent. Re-run "
+                        "destination schema introspect and retry."
+                    ),
+                )
             else:
                 mapped_rows, transform_errors, rejected_details = (
                     build_mapped_rows_with_details(

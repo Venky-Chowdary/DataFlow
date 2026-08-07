@@ -89,8 +89,12 @@ def _es_rematerialize_if_physical_differs(
     policy: Any,
     conflict_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
+    force_remap: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
-    """Rebuild mapped rows when live mapping carriers differ from Map stamps."""
+    """Rebuild mapped rows when live mapping carriers differ from Map stamps.
+
+    ``force_remap`` covers deferred Map under partial Studio (invent risk).
+    """
     from connectors.writer_common import rematerialize_live_dest_types
 
     live_dest_types = rematerialize_live_dest_types(
@@ -103,7 +107,7 @@ def _es_rematerialize_if_physical_differs(
         != str(live_dest_types.get(c) or "").strip().upper()
         for c in target_cols
     )
-    if not carriers_differ:
+    if not carriers_differ and not force_remap:
         return None
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
@@ -416,6 +420,7 @@ def write_mapped_rows(
                         chunks_completed=0,
                         error=phys_err,
                     )
+            _force_remap = bool(studio_err)
             remat = _es_rematerialize_if_physical_differs(
                 physical=effective_physical if effective_physical else physical,
                 dest_types=dest_types,
@@ -430,9 +435,24 @@ def write_mapped_rows(
                 destination_column_nullability=_kwargs.get(
                     "destination_column_nullability"
                 ),
+                force_remap=_force_remap,
             )
             if remat is not None:
                 mapped_rows, errors, rejected_details, dest_types = remat
+            elif _force_remap:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=index,
+                    target_schema=host or "localhost",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Elasticsearch live mapping incomplete for mapped fields — "
+                        "refuse Map VARCHAR rematerialize invent. Re-run "
+                        "destination schema introspect and retry."
+                    ),
+                )
             else:
                 mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
                     headers=headers,

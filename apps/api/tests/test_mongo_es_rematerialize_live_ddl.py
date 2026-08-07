@@ -68,6 +68,26 @@ def test_mongo_no_rematerialize_when_carriers_match():
     )
 
 
+def test_mongo_force_remap_when_carriers_match_partial_studio():
+    from connectors.mongodb_writer import _mongo_rematerialize_if_physical_differs
+
+    batch = _mongo_rematerialize_if_physical_differs(
+        physical={"amount": "DECIMAL"},
+        dest_types={"amount": "DECIMAL"},
+        target_cols=["amount"],
+        headers=["amount"],
+        data_rows=[["12.50"]],
+        mappings=[{"source": "amount", "target": "amount", "target_type": "VARCHAR"}],
+        column_types={"amount": "VARCHAR"},
+        logical_types=["VARCHAR"],
+        policy="quarantine",
+        force_remap=True,
+    )
+    assert batch is not None
+    _rows, _errs, _rej, live = batch
+    assert "DECIMAL" in str(live.get("amount") or "").upper()
+
+
 def test_fetch_mongo_physical_types_majority_vote():
     from connectors.mongodb_writer import _fetch_mongo_physical_types
 
@@ -134,6 +154,26 @@ def test_es_rematerialize_refuses_map_varchar_gap_fill():
         policy="quarantine",
     )
     assert batch is None
+
+
+def test_es_force_remap_when_carriers_match_partial_studio():
+    from connectors.elasticsearch_writer import _es_rematerialize_if_physical_differs
+
+    batch = _es_rematerialize_if_physical_differs(
+        physical={"qty": "INTEGER"},
+        dest_types={"qty": "INTEGER"},
+        target_cols=["qty"],
+        headers=["qty"],
+        data_rows=[["12"]],
+        mappings=[{"source": "qty", "target": "qty", "target_type": "VARCHAR"}],
+        column_types={"qty": "VARCHAR"},
+        logical_types=["VARCHAR"],
+        policy="quarantine",
+        force_remap=True,
+    )
+    assert batch is not None
+    _rows, _errs, _rej, live = batch
+    assert "INT" in str(live.get("qty") or "").upper()
 
 
 def test_fetch_es_physical_types_from_mapping():

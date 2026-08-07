@@ -46,6 +46,26 @@ def test_kafka_rematerialize_refuses_map_varchar_gap_fill():
     assert batch is None
 
 
+def test_kafka_force_remap_when_carriers_match_partial_studio():
+    from connectors.kafka_writer import _kafka_rematerialize_if_physical_differs
+
+    batch = _kafka_rematerialize_if_physical_differs(
+        physical={"qty": "INTEGER"},
+        dest_types={"qty": "INTEGER"},
+        target_cols=["qty"],
+        headers=["qty"],
+        data_rows=[["7"]],
+        mappings=[{"source": "qty", "target": "qty", "target_type": "VARCHAR"}],
+        column_types={"qty": "VARCHAR"},
+        logical_types=["VARCHAR"],
+        policy="quarantine",
+        force_remap=True,
+    )
+    assert batch is not None
+    _rows, _errs, _rej, live = batch
+    assert "INT" in str(live.get("qty") or "").upper()
+
+
 def test_kafka_schemaless_refuses_partial_studio():
     """Schemaless topic + partial Studio — fail-closed, no Map VARCHAR invent."""
     from connectors.kafka_writer import write_mapped_rows
