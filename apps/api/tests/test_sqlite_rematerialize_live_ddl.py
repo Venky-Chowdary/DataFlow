@@ -57,3 +57,32 @@ def test_sqlite_rematerialize_when_pragma_real_vs_map_varchar(tmp_path: Path):
         conn.close()
     assert len(rows) == 1
     assert float(rows[0][0]) == pytest.approx(12.5)
+
+
+def test_sqlite_create_new_refuses_partial_studio(tmp_path: Path):
+    """Create-new SQLite + partial Studio — refuse Map VARCHAR invent."""
+    from connectors.sqlite_writer import write_mapped_rows
+
+    db = tmp_path / "partial_studio.db"
+    result = write_mapped_rows(
+        host="",
+        port=0,
+        database=str(db),
+        username="",
+        password="",
+        schema="main",
+        connection_string="",
+        ssl=False,
+        table_name="orders",
+        headers=["id", "qty"],
+        data_rows=[["1", "7"]],
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "VARCHAR"},
+            {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+        ],
+        column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+        create_table=True,
+        destination_column_types={"id": "INTEGER"},
+    )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()

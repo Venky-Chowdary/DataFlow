@@ -421,15 +421,16 @@ def write_mapped_rows(
     table_name = sanitize_identifier(table_name, preserve_case=True)
     table_quoted = quote_sql_identifier(table_name)
     # Prefer Studio-probed live DDL over Map stamps (BOOLEAN→TEXT invent cliff).
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types")
-    dest_types = resolve_mapping_dest_types(
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        live_types=live_dest if isinstance(live_dest, dict) else None,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="SQLite",
     )
     target_types = [
         sqlite_type(dest_types.get(c, logical_types[i])) for i, c in enumerate(target_cols)
@@ -514,6 +515,20 @@ def write_mapped_rows(
             logger.debug("sqlite physical column introspection failed", exc_info=True)
             table_existed = not create_table
             physical = {}
+
+        # Create-new: partial Studio must not soft-bind Map VARCHAR.
+        if not table_existed and studio_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or "main",
+                checksum="",
+                chunks_completed=0,
+                error=studio_err,
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
 
         overlay_err = require_physical_types_for_existing_table(
             table_existed=table_existed,

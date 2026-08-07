@@ -77,6 +77,34 @@ def test_iceberg_rematerialize_overlays_existing_with_additive_map_cols():
     assert len(mapped_rows) + len(rejected) >= 1
 
 
+def test_iceberg_filesystem_create_new_refuses_partial_studio(tmp_path):
+    """Create-new filesystem Iceberg + partial Studio — refuse Map invent."""
+    from connectors.iceberg_writer import _write_mapped_rows_filesystem
+
+    result = _write_mapped_rows_filesystem(
+        host="",
+        port=0,
+        database=str(tmp_path / "warehouse"),
+        username="",
+        password="",
+        schema="demo",
+        connection_string="",
+        ssl=False,
+        table_name="orders",
+        headers=["id", "qty"],
+        data_rows=[["1", "7"]],
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "string"},
+            {"source": "qty", "target": "qty", "target_type": "string"},
+        ],
+        column_types={"id": "string", "qty": "string"},
+        create_table=True,
+        destination_column_types={"id": "long"},
+    )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()
+
+
 def test_physical_carriers_from_arrow_decimal():
     pa = pytest.importorskip("pyarrow")
     from connectors.iceberg_writer import _physical_carriers_from_arrow

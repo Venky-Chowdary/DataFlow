@@ -1087,18 +1087,18 @@ def _write_mapped_rows_pyiceberg(
                 error=str(exc),
                 driver="iceberg",
             )
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = None
     if isinstance(endpoint, dict):
         live_dest = endpoint.get("destination_column_types") or endpoint.get("schema_types")
-    dest_types = resolve_mapping_dest_types(
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=target_types,
-        live_types=live_dest if isinstance(live_dest, dict) else None,
-        default="string",
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="Iceberg",
     )
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
@@ -1136,6 +1136,18 @@ def _write_mapped_rows_pyiceberg(
                     f"Iceberg table {target_schema} does not exist and "
                     "create_table is disabled"
                 ),
+                driver="iceberg",
+            )
+        # Create-new: partial Studio must not soft-bind Map string invent.
+        if studio_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=studio_err,
                 driver="iceberg",
             )
         ensure_namespace(catalog, namespace)
@@ -1820,16 +1832,16 @@ def _write_mapped_rows_filesystem(
                 error=str(exc),
                 driver="iceberg",
             )
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types") or _kwargs.get("schema_types")
-    dest_types = resolve_mapping_dest_types(
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=target_types,
-        live_types=live_dest if isinstance(live_dest, dict) else None,
-        default="string",
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="Iceberg",
     )
     policy = transform_error_policy(error_policy)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
@@ -1853,6 +1865,19 @@ def _write_mapped_rows_filesystem(
     current_schema = (current_meta or {}).get("schemas", [{}])[-1] if current_meta else None
     if current_meta and "schema" in current_meta and not current_schema:
         current_schema = current_meta.get("schema")
+
+    # Create-new metadata: partial Studio must not soft-bind Map string invent.
+    if current_schema is None and studio_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=studio_err,
+            driver="iceberg",
+        )
 
     schema_json, evolve_notes = _evolve_schema(current_schema, target_cols, dest_types)
     # Always write Parquet/JSONL using committed field types — never diverge from

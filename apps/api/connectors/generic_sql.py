@@ -4307,6 +4307,21 @@ def write_mapped_rows(
         for k, v in (live_dest.items() if isinstance(live_dest, dict) else [])
         if k and v
     }
+    studio_err: str | None = None
+    if isinstance(live_dest, dict) and live_dest:
+        from connectors.saas_common import merge_saas_live_types
+
+        _studio_only, studio_err = merge_saas_live_types(
+            {
+                str(k): str(v).strip()
+                for k, v in live_dest.items()
+                if k and str(v or "").strip()
+            },
+            list(target_cols or []),
+            studio_types=None,
+            product=(cfg.get("type") or "SQL").strip() or "SQL",
+        )
+        del _studio_only
     live_locked: set[str] = set()
     for i, col in enumerate(target_cols):
         live_hit = live_fold.get(str(col).lower())
@@ -4316,6 +4331,9 @@ def write_mapped_rows(
             )
             target_column_types[col] = derived
             live_locked.add(col)
+            continue
+        # Partial Studio: do not Map-fill gaps — rematerialize or create-new refuse.
+        if studio_err:
             continue
         explicit = mappings[i].get("target_type") if i < len(mappings) else None
         source_type = (
@@ -4334,64 +4352,72 @@ def write_mapped_rows(
         # never invent DOUBLE under skip_preflight (IEEE fidelity cliff).
         target_column_types[col] = derived
 
+    # Partial Studio: probe existence before Map≡ALTER / CREATE invent.
+    if studio_err:
+        try:
+            _insp = sa.inspect(engine)
+            _exists = bool(_insp.has_table(table_name, schema=schema_name))
+        except Exception:
+            _exists = not create_table
+        if not _exists:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=studio_err,
+            )
+        # Existing table: leave gaps empty for rematerialize — never Map-fill.
+        for col in target_cols:
+            target_column_types.setdefault(col, "")
+
     # Map≡ALTER: source DDL may propose a wider type; explicit Map stamps are a
     # hard ceiling (same helper as PostgreSQL / MySQL writers). Overflow cells
     # quarantine on write — never silent ALTER past the approved mapping.
     # Live-locked columns stay physical — widen must not erase Studio probe.
+    # Skip entirely when partial Studio (gaps must come from live DDL rematerialize).
     from connectors.writer_common import desired_types_honoring_map_stamps
 
-    ceiling_types = [target_column_types[col] for col in target_cols]
-    candidate_by_col: dict[str, str] = {}
-    for i, col in enumerate(target_cols):
-        if col in explicit_stamps or col in live_locked:
-            continue
-        mapping_source = mappings[i].get("source_type") if i < len(mappings) else None
-        catalog_source = (
-            column_types.get(mappings[i].get("source")) if i < len(mappings) else None
-        )
-        source_type = _source_ddl_for_widen(mapping_source, catalog_source) or "string"
-        source_ddl = (
-            materialize_dest_ddl(dest_db, source_type) if dest_db else source_type
-        )
-        candidate_by_col[col] = source_ddl
+    if not studio_err:
+        ceiling_types = [target_column_types[col] for col in target_cols]
+        candidate_by_col: dict[str, str] = {}
+        for i, col in enumerate(target_cols):
+            if col in explicit_stamps or col in live_locked:
+                continue
+            mapping_source = mappings[i].get("source_type") if i < len(mappings) else None
+            catalog_source = (
+                column_types.get(mappings[i].get("source")) if i < len(mappings) else None
+            )
+            source_type = _source_ddl_for_widen(mapping_source, catalog_source) or "string"
+            source_ddl = (
+                materialize_dest_ddl(dest_db, source_type) if dest_db else source_type
+            )
+            candidate_by_col[col] = source_ddl
 
-    desired_list, alter_refusals = desired_types_honoring_map_stamps(
-        target_cols=target_cols,
-        current_target_types=ceiling_types,
-        mappings=mappings,
-        candidate_by_col=candidate_by_col,
-        preserve_case=True,
-        explicit_columns=explicit_stamps | live_locked,
-    )
-    if alter_refusals:
-        logger.info(
-            "generic_sql Map≡ALTER refusals (stamp ceiling): %s", alter_refusals
+        desired_list, alter_refusals = desired_types_honoring_map_stamps(
+            target_cols=target_cols,
+            current_target_types=ceiling_types,
+            mappings=mappings,
+            candidate_by_col=candidate_by_col,
+            preserve_case=True,
+            explicit_columns=explicit_stamps | live_locked,
         )
-    for i, col in enumerate(target_cols):
-        if col in live_locked:
-            continue
-        new_typ = desired_list[i]
-        old_typ = target_column_types[col]
-        target_column_types[col] = new_typ
-        if col not in explicit_stamps and new_typ != old_typ and i < len(mappings):
-            mappings[i] = {**mappings[i], "target_type": new_typ}
+        if alter_refusals:
+            logger.info(
+                "generic_sql Map≡ALTER refusals (stamp ceiling): %s", alter_refusals
+            )
+        for i, col in enumerate(target_cols):
+            if col in live_locked:
+                continue
+            new_typ = desired_list[i]
+            old_typ = target_column_types[col]
+            target_column_types[col] = new_typ
+            if col not in explicit_stamps and new_typ != old_typ and i < len(mappings):
+                mappings[i] = {**mappings[i], "target_type": new_typ}
 
     policy = transform_error_policy(error_policy)
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        error_policy=policy,
-        dest_types=target_column_types,
-        preserve_case=True,
-        dest_kind=str(dest_db or type or "sql").lower(),
-        # Upsert conflict cols / dest PK — full composite for quarantine replay identity.
-        destination_pk_columns=list(conflict_columns or []) or None,
-        destination_column_nullability=_kwargs.get("destination_column_nullability"),
-    )
-    _tgt_types_pre = [str(target_column_types.get(c, "") or "") for c in target_cols]
     # Engine-honest dialect labels (Databricks/Delta via generic_sql share this path).
     _engine_label = {
         "databricks": "Databricks",
@@ -4405,41 +4431,76 @@ def write_mapped_rows(
     }.get(dest_db, dest_db.title() if dest_db else "SQL")
     from connectors.writer_common import apply_write_quarantine_matrix
 
-    mapped_rows = apply_write_quarantine_matrix(
-        mapped_rows,
-        target_cols,
-        _tgt_types_pre,
-        rejected_details,
-        policy,
-        dialect_label=_engine_label,
-        mappings=mappings,
-        dest_db=dest_db or "",
-    )
-    _tgt_types = _tgt_types_pre
+    # Partial Studio: defer Map materialize + strict abort until live DDL
+    # rematerialize (empty→Map VARCHAR noise must not fail batches that succeed
+    # against physical carriers). Create-new already refused above.
+    mapped_rows: list[tuple] = []
+    transform_errors: list[str] = []
+    rejected_details: list[dict] = []
     sparse_rows: list[tuple] = []
-    rows_for_checksum: list[tuple] = list(mapped_rows)
-    if write_mode == "upsert" and conflict_columns:
-        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-    # Dense INSERT/MERGE: absent schemaless fields → SQL NULL (sparse keeps sentinel).
-    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
-
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'SQL', transform_errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table_name,
-            target_schema=schema or database,
-            checksum="",
-            chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_rows=_rejected_row_count(
-                data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+    rows_for_checksum: list[tuple] = []
+    _tgt_types: list[str] = [
+        str(target_column_types.get(c, "") or "") for c in target_cols
+    ]
+    if not studio_err:
+        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            error_policy=policy,
+            dest_types=target_column_types,
+            preserve_case=True,
+            dest_kind=str(dest_db or type or "sql").lower(),
+            # Upsert conflict cols / dest PK — full composite for quarantine replay identity.
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=_kwargs.get(
+                "destination_column_nullability"
             ),
-            rejected_details=rejected_details,
-            warnings=transform_errors,
         )
+        _tgt_types = [str(target_column_types.get(c, "") or "") for c in target_cols]
+        mapped_rows = apply_write_quarantine_matrix(
+            mapped_rows,
+            target_cols,
+            _tgt_types,
+            rejected_details,
+            policy,
+            dialect_label=_engine_label,
+            mappings=mappings,
+            dest_db=dest_db or "",
+        )
+        rows_for_checksum = list(mapped_rows)
+        if write_mode == "upsert" and conflict_columns:
+            mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+        # Dense INSERT/MERGE: absent schemaless fields → SQL NULL (sparse keeps sentinel).
+        mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
+        _map_abort = reject_on_strict_policy(
+            policy, rejected_details, "SQL", transform_errors
+        )
+        if _map_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=_map_abort
+                or f"Transform errors: {'; '.join(transform_errors[:3])}",
+                rejected_rows=_rejected_row_count(
+                    data_rows,
+                    mapped_rows,
+                    rejected_details,
+                    policy,
+                    sparse_rows=sparse_rows,
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
+
+    # Built after rematerialize when live carriers differ — see rebuild below.
     table_obj = _build_table_for_write(
         engine,
         table_name,
@@ -4493,6 +4554,19 @@ def write_mapped_rows(
                     f"{table_name!r} — refuse Map VARCHAR bind (empty→NULL invent "
                     "risk). Re-check grants / information_schema and retry."
                 ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
+        # Create-new: partial Studio must not soft-bind Map VARCHAR.
+        if not table_existed and studio_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=studio_err,
                 rejected_details=rejected_details,
                 warnings=transform_errors,
             )
@@ -4585,16 +4659,47 @@ def write_mapped_rows(
             live_dest_types = dict(target_column_types or {})
             if live_partial:
                 live_dest_types.update(live_partial)
+            # Partial Studio + backfill: Map-fill additive cols not on physical
+            # (Iceberg/PG parity — existing rematerialize; new cols keep Map stamps).
+            if studio_err and backfill_new_fields:
+                covered_fold = {str(c).lower() for c in covered_cols}
+                for i, col in enumerate(target_cols):
+                    if not col or str(col).lower() in covered_fold:
+                        continue
+                    if str(live_dest_types.get(col) or "").strip():
+                        continue
+                    explicit = (
+                        mappings[i].get("target_type") if i < len(mappings) else None
+                    )
+                    source_type = (
+                        column_types.get(mappings[i]["source"])
+                        if i < len(mappings)
+                        else None
+                    )
+                    derived = (
+                        materialize_dest_ddl(dest_db, explicit or source_type or "string")
+                        if dest_db
+                        else (explicit or source_type or "string")
+                    )
+                    live_dest_types[col] = derived
             carriers_differ = bool(covered_cols) and any(
                 str(target_column_types.get(c) or "").strip().upper()
                 != str(live_dest_types.get(c) or "").strip().upper()
                 for c in covered_cols
             )
+            types_changed = carriers_differ or any(
+                str(target_column_types.get(c) or "").strip().upper()
+                != str(live_dest_types.get(c) or "").strip().upper()
+                for c in target_cols
+            )
             target_column_types = live_dest_types
             _tgt_overlaid = [
                 str(target_column_types.get(c, "") or "") for c in target_cols
             ]
-            if carriers_differ:
+            # Rematerialize when live carriers differ, or first Map pass was deferred
+            # under partial Studio (empty→VARCHAR noise must not own the batch).
+            need_remap = carriers_differ or (bool(studio_err) and not mapped_rows)
+            if need_remap:
                 # Rematerialize from source against live DDL — matrix-only on
                 # already-coerced Map cells still invents empty→NULL / polarity.
                 mapped_rows, transform_errors, rejected_details = (
@@ -4653,6 +4758,18 @@ def write_mapped_rows(
                         mappings=mappings,
                         dest_db=dest_db or "",
                     )
+            # SQLAlchemy Column types must match post-rematerialize carriers —
+            # stale Map VARCHAR table_obj risks silent driver coercion.
+            if types_changed or need_remap:
+                table_obj = _build_table_for_write(
+                    engine,
+                    table_name,
+                    schema_name,
+                    target_cols,
+                    target_column_types,
+                    db_type=cfg.get("type", ""),
+                    conflict_columns=conflict_columns,
+                )
             _late_abort = reject_on_strict_policy(
                 policy, rejected_details, "SQL", transform_errors
             )
