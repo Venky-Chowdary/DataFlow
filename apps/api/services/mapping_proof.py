@@ -406,7 +406,9 @@ def _mapping_risks(
                 ),
             })
 
-    if is_nested_document_collapse and is_nested_document_collapse(src_type, tgt_type):
+    if is_nested_document_collapse and is_nested_document_collapse(
+        src_type, tgt_type, dest_db=dest
+    ):
         risks.append({
             "code": "nested_document_collapse",
             "severity": "warn",

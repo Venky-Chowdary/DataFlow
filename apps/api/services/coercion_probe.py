@@ -726,7 +726,9 @@ def analyze_coercion(
         )
         framing = None
         if structural_preserve:
-            nested_to_doc = is_nested_document_collapse(src_type, tgt_type)
+            nested_to_doc = is_nested_document_collapse(
+                src_type, tgt_type, dest_db=dest_db_type
+            )
             nested_shape_loss = is_nested_shape_collapse(
                 src_type, tgt_type, dest_db=dest_db_type
             )

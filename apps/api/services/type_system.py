@@ -1720,18 +1720,74 @@ def document_domain_would_invent(source_type: str, target_type: str) -> bool:
     return src in {LOGICAL_STRING, LOGICAL_TEXT}
 
 
-def is_nested_document_collapse(source_type: str, target_type: str) -> bool:
+def array_to_native_document_wire_preserved(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when ARRAY→JSON/VARIANT/CLOB matches create-new for ``dest_db``.
+
+    Mongo/document arrays have no relational element DDL. On MySQL the intentional
+    sink is native JSON; on PG bare ARRAY → JSONB. That is a **representation**
+    wire (values preserved), not a precision collapse.
+
+    Typed ``ARRAY<T>`` → opaque JSON on engines that stamp native ``T[]`` /
+    ``ARRAY<T>`` (PostgreSQL, BigQuery, Snowflake) remains a document collapse —
+    the operator should prefer the typed array DDL.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_ARRAY:
+        return False
+    if not is_dialect_native_document_wire(target_type, dest_db=dest_db):
+        return False
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if not db:
+        # Fail closed without destination — keep ARRAY→JSON as collapse.
+        return False
+    try:
+        stamped = ddl_type(db, source_type)
+    except Exception:
+        return False
+    # Dialect can emit native typed arrays — JSON sink drops T[] polarity.
+    if normalize_logical_type(stamped) == LOGICAL_ARRAY:
+        return False
+    if not is_dialect_native_document_wire(stamped, dest_db=db):
+        return False
+    s_log = normalize_logical_type(stamped)
+    t_log = normalize_logical_type(target_type)
+    if s_log == LOGICAL_JSON:
+        return t_log == LOGICAL_JSON
+    # Text LOB document wires (SQL Server NVARCHAR(MAX), Oracle CLOB, …).
+    return t_log in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+def is_nested_document_collapse(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True when STRUCT/MAP/ARRAY collapses into opaque JSON/VARIANT or text.
 
     Airbyte Destinations V2 often stores objects as JSON — that is valid but is
     **not** field/element DDL fidelity. Operators must see it (G3 warn/block).
     Nested→VARCHAR/TEXT is the same field-DDL collapse (serialized document).
+
+    Exception: ARRAY → dialect create-new document wire (MySQL JSON, bare PG
+    JSONB, …) is representation-preserving — see
+    :func:`array_to_native_document_wire_preserved`.
     """
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
     if src not in {LOGICAL_STRUCT, LOGICAL_MAP, LOGICAL_ARRAY}:
         return False
-    return tgt in {LOGICAL_JSON, LOGICAL_STRING, LOGICAL_TEXT}
+    if tgt not in {LOGICAL_JSON, LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    if src == LOGICAL_ARRAY and array_to_native_document_wire_preserved(
+        source_type, target_type, dest_db=dest_db
+    ):
+        return False
+    return True
 
 
 def nested_struct_fields_incompatible(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
@@ -1786,7 +1842,7 @@ def nested_struct_fields_incompatible(source_type: str, target_type: str, *, des
             if nested_struct_fields_incompatible(src_t, tgt_t, dest_db=dest_db):
                 return True
             continue
-        if is_nested_document_collapse(src_t, tgt_t):
+        if is_nested_document_collapse(src_t, tgt_t, dest_db=dest_db):
             return True
         if src_l == tgt_l:
             # Same family — still catch IEEE/time/TZ collapse when helpers exist.
@@ -1845,7 +1901,7 @@ def nested_array_elements_incompatible(source_type: str, target_type: str, *, de
 def is_nested_shape_collapse(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
     """Fielded nested shape lost: document / STRUCT / MAP / ARRAY element collapse."""
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
-    if is_nested_document_collapse(source_type, target_type):
+    if is_nested_document_collapse(source_type, target_type, dest_db=dest_db):
         return True
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
@@ -7530,8 +7586,13 @@ def case_fold_polarity_invent(source_type: str, target_type: str) -> bool:
     )
     if not src_declares and not tgt_declares:
         return False
-    # Inventing CI / CITEXT on the target from a CS source.
-    if tgt_ci and not src_ci:
+    # CITEXT invent from open text is always polarity invent.
+    if specialty_carrier_base(target_type) == "CITEXT" and not src_ci:
+        return True
+    # Inventing CI on the target from an *explicitly* CS-collated source.
+    # Uncollated source (Mongo/NoSQL VARCHAR) → dest platform CI is dialect
+    # default wire — not invent (mirrors CI→bare normalize above).
+    if tgt_ci and not src_ci and src_declares:
         return True
     # Dropping CITEXT specialty into bare CS text — real polarity loss.
     if specialty_carrier_base(source_type) == "CITEXT" and not tgt_ci:
@@ -7546,6 +7607,7 @@ def accent_polarity_invent(source_type: str, target_type: str) -> bool:
     """True when mapping invents or explicitly drops accent-insensitive equality.
 
     Source AI collation → bare create-new TEXT is dialect strip, not invent.
+    Uncollated source → dest AI collation is platform default wire, not invent.
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
@@ -7558,8 +7620,10 @@ def accent_polarity_invent(source_type: str, target_type: str) -> bool:
         return False
     src_ai = is_accent_insensitive_collation(source_type)
     tgt_ai = is_accent_insensitive_collation(target_type)
-    # Invent AI on an explicitly collated target.
+    # Invent AI only when the source declared a non-AI (accent-sensitive) collation.
     if tgt_ai and not src_ai:
+        if not parse_collation(source_type):
+            return False
         return True
     # Drop AI only when the target declares an accent-sensitive collation.
     if src_ai and not tgt_ai and parse_collation(target_type):
@@ -8264,6 +8328,11 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
     # VECTOR(n) â†’ ARRAY<FLOAT> lakehouse create-new wire â€” not embedding invent.
     if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
         return False
+    # ARRAY â†’ dialect create-new JSON/VARIANT/CLOB wire â€” representation, not lossy.
+    if array_to_native_document_wire_preserved(
+        source_type, target_type, dest_db=dest_db
+    ):
+        return False
     # JSON â†’ dialect-native document wire (CLOB/NVARCHAR(MAX)/JSONB/â€¦) â€” not lossy.
     if src == LOGICAL_JSON and is_dialect_native_document_wire(
         target_type, dest_db=dest_db
@@ -8275,7 +8344,7 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         return True
     # Fielded STRUCT/MAP â†’ opaque JSON/VARIANT is intentional on many warehouses
     # (Airbyte V2) but is still a field-DDL collapse â€” treat as lossy so G3 surfaces it.
-    if is_nested_document_collapse(source_type, target_type):
+    if is_nested_document_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if timezone_aware_would_collapse_to_string(source_type, target_type):
         return True
