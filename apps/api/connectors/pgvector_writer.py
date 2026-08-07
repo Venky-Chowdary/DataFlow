@@ -105,6 +105,90 @@ def _exec_schema_table(cur: Any, schema: str, table_name: str, dimension: int) -
     )
 
 
+def _pgvector_gate_existing_physical(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    ssl: bool,
+    schema: str,
+    table_name: str,
+    mapped_targets: list[str],
+    studio_live: dict[str, Any] | None,
+    studio_typed_all: bool,
+) -> tuple[bool, dict[str, str] | None, str | None]:
+    """Probe existing pgvector table DDL before Map bind.
+
+    Returns ``(table_existed, destination_column_types|None, error|None)``.
+    """
+    from connectors.postgresql_writer import _fetch_pg_column_types
+    from connectors.writer_common import require_physical_types_for_existing_table
+
+    sch = schema or "public"
+    live: dict[str, str] = {}
+    if isinstance(studio_live, dict):
+        live.update({str(k): str(v) for k, v in studio_live.items() if k and v})
+
+    conn = get_connection(
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password,
+        connection_string=connection_string,
+        ssl=ssl,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f"{sch}.{table_name}",))
+            existed = cur.fetchone()[0] is not None
+            if not existed:
+                return False, (live if studio_typed_all else None), None
+            physical = _fetch_pg_column_types(cur, sch, table_name)
+            if not physical and not studio_typed_all:
+                return True, None, (
+                    f"pgvector table {sch}.{table_name} exists but live column "
+                    "types were unavailable — refuse Map VARCHAR bind "
+                    "(empty→NULL invent risk). Re-check grants."
+                )
+            live.update(physical)
+            # Existing table: gate every mapped scalar column (ES/Mongo/Weaviate
+            # bar) — partial information_schema must not leave Map VARCHAR invent
+            # gaps. embedding is dim-gated separately.
+            mapped_existing = [
+                c
+                for c in mapped_targets
+                if c and str(c).lower() != "embedding"
+            ]
+            effective = dict(live)
+            if isinstance(studio_live, dict):
+                for c in mapped_existing:
+                    if (
+                        effective.get(c)
+                        or effective.get(str(c).lower())
+                        or effective.get(str(c).upper())
+                    ):
+                        continue
+                    st = str(studio_live.get(c) or "").strip()
+                    if st:
+                        effective[c] = st
+            if mapped_existing:
+                phys_err = require_physical_types_for_existing_table(
+                    table_existed=True,
+                    physical=effective,
+                    dialect_label="pgvector",
+                    target_cols=mapped_existing,
+                )
+                if phys_err:
+                    return True, None, phys_err
+            return True, effective, None
+    finally:
+        conn.close()
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -154,6 +238,43 @@ def write_mapped_rows(
         or _kwargs.get("conflict_columns")
         or []
     ) or None
+    studio_live = _kwargs.get("destination_column_types")
+    mapped_targets = [
+        str(m.get("target") or m.get("source") or "").strip()
+        for m in (mappings or [])
+        if str(m.get("target") or m.get("source") or "").strip()
+    ]
+    if not mapped_targets:
+        mapped_targets = [str(h) for h in (headers or []) if h]
+    studio_typed_all = (
+        isinstance(studio_live, dict)
+        and bool(mapped_targets)
+        and all(str(studio_live.get(c) or "").strip() for c in mapped_targets)
+    )
+    _existed, gated_types, gate_err = _pgvector_gate_existing_physical(
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password,
+        connection_string=connection_string,
+        ssl=ssl,
+        schema=schema or "public",
+        table_name=table_name,
+        mapped_targets=mapped_targets,
+        studio_live=studio_live if isinstance(studio_live, dict) else None,
+        studio_typed_all=studio_typed_all,
+    )
+    if gate_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "public",
+            checksum="",
+            chunks_completed=0,
+            error=gate_err,
+        )
     records, map_rejected, map_abort = prepare_records_for_vector_write(
         headers=headers,
         data_rows=data_rows,
@@ -166,7 +287,7 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="pgvector",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        destination_column_types=_kwargs.get("destination_column_types"),
+        destination_column_types=gated_types,
     )
     if map_abort:
         return WriteResult(

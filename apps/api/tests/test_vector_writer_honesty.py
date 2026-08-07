@@ -138,7 +138,12 @@ def test_pgvector_all_embed_rejected_is_not_ok():
     fake_conn = MagicMock()
     fake_cur = MagicMock()
     fake_conn.cursor.return_value.__enter__.return_value = fake_cur
-    fake_cur.fetchone.return_value = ["public.t"]  # table exists
+    # Gate probe + write probe: table exists; dim probe returns vector(2).
+    fake_cur.fetchone.side_effect = [
+        ("public.t",),  # to_regclass (gate)
+        ("public.t",),  # to_regclass (write, create_table=False)
+        ("vector(2)",),  # format_type embedding dim
+    ]
     with patch(
         "connectors.pgvector_writer.vectorize_records",
         return_value=[
@@ -161,6 +166,14 @@ def test_pgvector_all_embed_rejected_is_not_ok():
     ), patch(
         "connectors.pgvector_writer.get_connection",
         return_value=fake_conn,
+    ), patch(
+        "connectors.postgresql_writer._fetch_pg_column_types",
+        return_value={
+            "id": "TEXT",
+            "content": "TEXT",
+            "chunk_index": "INTEGER",
+            "source_id": "TEXT",
+        },
     ), patch(
         "services.vector_embedding.resolve_embedding_dimension",
         return_value=(2, None),

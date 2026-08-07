@@ -208,6 +208,53 @@ def test_milvus_existing_collection_partial_schema_refuses():
     assert "refuse" in (result.error or "").lower()
 
 
+def test_pgvector_existing_table_partial_physical_refuses():
+    """Existing pgvector table with incomplete live DDL → require_physical refuse."""
+    from connectors.pgvector_writer import write_mapped_rows
+
+    cur = MagicMock()
+    # to_regclass → table exists
+    cur.fetchone.return_value = ("public.chunks",)
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value = cur
+    conn.cursor.return_value.__exit__.return_value = False
+
+    with (
+        patch("connectors.pgvector_writer.get_connection", return_value=conn),
+        patch(
+            "connectors.postgresql_writer._fetch_pg_column_types",
+            return_value={"id": "TEXT"},  # chunk_index missing → invent cliff
+        ),
+    ):
+        result = write_mapped_rows(
+            host="localhost",
+            port=5432,
+            database="db",
+            username="u",
+            password="p",
+            schema="public",
+            connection_string="",
+            ssl=False,
+            table_name="chunks",
+            headers=["id", "chunk_index"],
+            data_rows=[["1", "0"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {
+                    "source": "chunk_index",
+                    "target": "chunk_index",
+                    "target_type": "VARCHAR",
+                },
+            ],
+            column_types={"id": "VARCHAR", "chunk_index": "VARCHAR"},
+            create_table=True,
+            error_policy="quarantine",
+        )
+    assert result.ok is False
+    assert "chunk_index" in (result.error or "").lower()
+    assert "refuse" in (result.error or "").lower()
+
+
 def test_weaviate_live_property_types():
     from connectors.weaviate_writer import _weaviate_live_property_types
 
