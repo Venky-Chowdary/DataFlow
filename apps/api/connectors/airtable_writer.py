@@ -100,9 +100,29 @@ def airtable_field_to_carrier(field: dict[str, Any]) -> str:
         return f"VARCHAR({_AIRTABLE_CELL_CHARS})"
     if ftype == "barcode":
         return "VARCHAR(512)"
-    # Attachments / collaborators / links / formula / rollup / lookup — wire
-    # as unbounded text; writer still sends JSON cell shapes when present.
-    return "VARCHAR"
+    # Structured Meta payloads — JSON polarity (never invent open VARCHAR).
+    if ftype in {
+        "multipleAttachments",
+        "multipleRecordLinks",
+        "multipleCollaborators",
+        "singleCollaborator",
+        "createdBy",
+        "lastModifiedBy",
+    }:
+        return "JSON"
+    # Computed / opaque / unknown Admin types — refuse soft VARCHAR invent;
+    # merge_saas_live_types fails closed unless Studio types the column.
+    if ftype in {
+        "formula",
+        "rollup",
+        "lookup",
+        "multipleLookupValues",
+        "button",
+    }:
+        return ""
+    if not ftype:
+        return ""
+    return ""
 
 
 def _airtable_choice_names(options: dict[str, Any]) -> list[str]:
@@ -317,6 +337,7 @@ def write_mapped_rows(
             name = str(f.get("name") or "").strip()
             if name:
                 live[name] = airtable_field_to_carrier(f)
+        live = {k: v for k, v in live.items() if str(v or "").strip()}
         from connectors.saas_common import merge_saas_live_types
 
         dest_types, cov_err = merge_saas_live_types(

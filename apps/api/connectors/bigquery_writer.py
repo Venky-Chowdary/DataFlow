@@ -188,11 +188,12 @@ def resolve_bigquery_decimal_target_types(
     logical_types: list[str],
     table_schema: list[Any] | None = None,
 ) -> list[str]:
-    """Prefer physical SchemaField (p,s / max_length); else Map/ddl wire.
+    """Prefer physical SchemaField (p,s / max_length / REPEATED); else Map/ddl wire.
 
     After Map≡CREATE, physical NUMERIC/BIGNUMERIC fields carry the approved
     ``(p,s)``. Quarantine must gate on that stamp (or mapped ddl) so append
-    paths never silently overflow into streaming/load errors.
+    paths never silently overflow into streaming/load errors. REPEATED fields
+    must rematerialize as ``ARRAY<T>`` — never scalar INT/STRING invent.
     """
     by_name: dict[str, Any] = {}
     if table_schema:
@@ -207,31 +208,11 @@ def resolve_bigquery_decimal_target_types(
     for col, logical in zip(target_cols, logical_types):
         field = by_name.get(col) or by_name.get(str(col).lower()) or by_name.get(str(col).upper())
         if field is not None:
-            ftype = str(getattr(field, "field_type", "") or "").upper()
-            if ftype in {"NUMERIC", "BIGNUMERIC", "DECIMAL"}:
-                precision = getattr(field, "precision", None)
-                scale = getattr(field, "scale", None)
-                if precision is not None and scale is not None:
-                    out.append(f"{ftype}({int(precision)},{int(scale)})")
-                else:
-                    out.append(ftype)
+            carrier = _bigquery_physical_field_carrier(field)
+            if carrier:
+                out.append(carrier)
                 continue
-            if ftype == "STRING":
-                max_len = getattr(field, "max_length", None)
-                if max_len is not None and int(max_len) > 0:
-                    out.append(f"STRING({int(max_len)})")
-                else:
-                    out.append("STRING")
-                continue
-            if ftype == "BYTES":
-                max_len = getattr(field, "max_length", None)
-                if max_len is not None and int(max_len) > 0:
-                    out.append(f"BYTES({int(max_len)})")
-                else:
-                    out.append("BYTES")
-                continue
-            out.append(ftype or bq_type(logical))
-            continue
+            # Empty field_type on live schema — never invent STRING; use Map ddl.
         # No physical field yet — legalize Map stamp to BQ wire for quarantine.
         fp = _bq_fixed_point_spec(logical)
         if fp is not None and fp[0] != "STRING" and fp[1] is not None and fp[2] is not None:
@@ -241,6 +222,40 @@ def resolve_bigquery_decimal_target_types(
         else:
             out.append(materialize_dest_ddl("bigquery", logical))
     return out
+
+
+def _bigquery_physical_field_carrier(field: Any) -> str:
+    """Live SchemaField → bind carrier; REPEATED becomes ARRAY<T>; empty type refuses."""
+    ftype = str(getattr(field, "field_type", "") or "").upper().strip()
+    if not ftype:
+        return ""
+    mode = str(getattr(field, "mode", "") or "").upper().strip()
+    if ftype in {"NUMERIC", "BIGNUMERIC", "DECIMAL"}:
+        precision = getattr(field, "precision", None)
+        scale = getattr(field, "scale", None)
+        if precision is not None and scale is not None:
+            base = f"{ftype}({int(precision)},{int(scale)})"
+        else:
+            base = ftype
+    elif ftype == "STRING":
+        max_len = getattr(field, "max_length", None)
+        if max_len is not None and int(max_len) > 0:
+            base = f"STRING({int(max_len)})"
+        else:
+            base = "STRING"
+    elif ftype == "BYTES":
+        max_len = getattr(field, "max_length", None)
+        if max_len is not None and int(max_len) > 0:
+            base = f"BYTES({int(max_len)})"
+        else:
+            base = "BYTES"
+    elif ftype in {"RECORD", "STRUCT"}:
+        base = "STRUCT"
+    else:
+        base = ftype
+    if mode == "REPEATED" and not base.upper().startswith("ARRAY<"):
+        return f"ARRAY<{base}>"
+    return base
 
 
 def build_bigquery_merge_sql(
@@ -748,16 +763,31 @@ def write_mapped_rows(
                         "Re-check dataset/table permissions and retry."
                     ),
                 )
-            physical_map = {
-                str(getattr(f, "name", "") or ""): str(
-                    getattr(f, "field_type", "") or "STRING"
+            physical_map = {}
+            for f in physical_schema:
+                name = str(getattr(f, "name", "") or "")
+                if not name:
+                    continue
+                carrier = _bigquery_physical_field_carrier(f)
+                if not carrier:
+                    continue
+                physical_map[name] = carrier
+                physical_map[name.lower()] = carrier
+                physical_map[name.upper()] = carrier
+            if not physical_map:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery physical schema empty for existing table {table_id!r} — "
+                        "refuse silent Map VARCHAR bind (empty→NULL invent risk). "
+                        "Re-check dataset/table permissions and retry."
+                    ),
                 )
-                for f in physical_schema
-                if getattr(f, "name", None)
-            }
-            for name, ftype in list(physical_map.items()):
-                physical_map.setdefault(name.lower(), ftype)
-                physical_map.setdefault(name.upper(), ftype)
             overlay_err = require_physical_types_for_existing_table(
                 table_existed=True,
                 physical=physical_map,
@@ -990,7 +1020,15 @@ def write_mapped_rows(
             records_for_bigquery,
         )
 
-        bq_types = [bq_type(t) for t in logical_types]
+        # Prefer live/quarantine carriers (ARRAY<T> for REPEATED) over Map stamps —
+        # bq_type() strips to SchemaField names and would invent scalar STRING wire.
+        bq_types = []
+        for t in decimal_target_types:
+            raw = str(t or "").strip()
+            if raw.upper().startswith("ARRAY<") or raw.upper().startswith("STRUCT"):
+                bq_types.append(raw)
+            else:
+                bq_types.append(bq_type(raw))
         total = len(mapped_rows)
         chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
         written = 0

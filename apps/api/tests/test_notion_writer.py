@@ -70,6 +70,7 @@ def test_notion_writer_creates_page(mapped_data):
         result = notion_writer.write_mapped_rows(
             table_name="db123",
             api_key="secret_xxx",
+            write_mode="insert",
             **mapped_data,
         )
 
@@ -117,6 +118,7 @@ def test_notion_writer_updates_page(mapped_data):
             table_name="db123",
             api_key="secret_xxx",
             write_mode="update",
+            conflict_columns=["id"],
             **data,
         )
 
@@ -126,7 +128,8 @@ def test_notion_writer_updates_page(mapped_data):
     assert "v1/pages/page-123" in patch_call.kwargs["url"]
 
 
-def test_notion_writer_skips_read_only_property():
+def test_notion_writer_refuses_formula_map_without_studio():
+    """Formula is not a writable carrier — refuse Map VARCHAR invent at gate."""
     from connectors import notion_writer
 
     schema_resp = _mock_response({
@@ -135,12 +138,11 @@ def test_notion_writer_skips_read_only_property():
             "Computed": {"type": "formula"},
         }
     })
-    page_resp = _mock_response({"id": "page-123"})
 
     def _fake_request(*, method, url, **kwargs):
         if "databases/" in url:
             return schema_resp
-        return page_resp
+        raise AssertionError("must not write when formula column is uncatalogued")
 
     data = {
         "headers": ["name", "computed"],
@@ -158,8 +160,10 @@ def test_notion_writer_skips_read_only_property():
             **data,
         )
 
-    assert result.ok
-    assert "read-only" in " ".join(result.warnings).lower()
+    assert result.ok is False
+    assert result.error
+    assert "Computed" in (result.error or "")
+    assert "Map VARCHAR" in (result.error or "") or "refuse" in (result.error or "").lower()
 
 
 def test_notion_empty_url_email_phone_date_omit_not_null_wipe():

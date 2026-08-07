@@ -110,7 +110,17 @@ def notion_property_to_carrier(
         return "VARCHAR(10000)"
     if t == "relation":
         return "VARCHAR(4000)"
-    return "VARCHAR"
+    if t in {"created_time", "last_edited_time"}:
+        return "TIMESTAMPTZ"
+    if t == "unique_id":
+        return "VARCHAR(64)"
+    # Structured / people / files — JSON polarity (not open VARCHAR invent).
+    if t in {"people", "files", "created_by", "last_edited_by", "place"}:
+        return "JSON"
+    # Computed / unknown property kinds — refuse soft VARCHAR; Studio gate.
+    if t in {"formula", "rollup", "verification", "button"} or not t:
+        return ""
+    return ""
 
 
 def resolve_notion_dest_types(
@@ -405,12 +415,19 @@ def write_mapped_rows(
         for name, typ in properties.items()
         if name and typ
     }
+    live = {k: v for k, v in live.items() if str(v or "").strip()}
     from connectors.saas_common import merge_saas_live_types
 
-    # Notion page payloads need live property kinds — no Studio VARCHAR invent.
+    # Page id routes the write when it is not a live Notion property.
+    # Conflict keys that ARE live properties keep Describe carriers (not VARCHAR(64)).
+    live_l = {str(k).lower() for k in live}
+    routing = {str(c).lower() for c in (conflict_columns or []) if c}
+    routing.add("id")
+    routing_only = {c for c in routing if c not in live_l}
+    property_cols = [c for c in target_cols if c and str(c).lower() not in routing_only]
     dest_types, cov_err = merge_saas_live_types(
         live,
-        target_cols,
+        property_cols,
         studio_types=None,
         product="Notion",
     )
@@ -425,6 +442,10 @@ def write_mapped_rows(
             error=cov_err,
             driver="notion",
         )
+    for col in target_cols:
+        if col and str(col).lower() in routing_only and col not in dest_types:
+            # Notion page UUID routing — not a property width invent.
+            dest_types[col] = "VARCHAR(64)"
     title_name = _title_property(properties)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,

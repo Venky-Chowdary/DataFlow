@@ -339,6 +339,128 @@ def test_merge_saas_live_types_partial_describe_refuses_missing():
     assert "Amount" not in merged
 
 
+def test_crm_unknown_meta_types_refuse_varchar_invent():
+    """Airtable/Notion/Salesforce unknown Meta types must not soft-bind VARCHAR."""
+    from connectors.airtable_writer import airtable_field_to_carrier
+    from connectors.notion_writer import notion_property_to_carrier
+    from connectors.salesforce_writer import salesforce_field_to_carrier
+    from connectors.saas_common import merge_saas_live_types
+
+    assert airtable_field_to_carrier({"type": "formula"}) == ""
+    assert airtable_field_to_carrier({"type": "brandNewAirtableType"}) == ""
+    assert airtable_field_to_carrier({"type": "multipleAttachments"}) == "JSON"
+    assert notion_property_to_carrier("formula") == ""
+    assert notion_property_to_carrier("people") == "JSON"
+    assert salesforce_field_to_carrier({"type": "anytype"}) == "JSON"
+    assert salesforce_field_to_carrier({"type": "brand_new_soap_type"}) == ""
+
+    live, err = merge_saas_live_types(
+        {
+            "Name": airtable_field_to_carrier({"type": "singleLineText"}),
+            "Score": airtable_field_to_carrier({"type": "formula"}),
+        },
+        ["Name", "Score"],
+        studio_types=None,
+        product="Airtable",
+    )
+    assert err is not None
+    assert "Score" in err
+    live2, err2 = merge_saas_live_types(
+        {"Name": airtable_field_to_carrier({"type": "singleLineText"})},
+        ["Name", "Score"],
+        studio_types={"Score": "INTEGER"},
+        product="Airtable",
+    )
+    assert err2 is None
+    assert live2["Score"] == "INTEGER"
+
+
+def test_bigquery_repeated_physical_carrier_and_overlay():
+    from types import SimpleNamespace
+
+    from connectors.bigquery_writer import (
+        _bigquery_physical_field_carrier,
+        resolve_bigquery_decimal_target_types,
+    )
+    from connectors.writer_common import overlay_physical_bind_types
+
+    tags = SimpleNamespace(
+        name="tags", field_type="STRING", mode="REPEATED", max_length=None
+    )
+    nums = SimpleNamespace(
+        name="nums",
+        field_type="INTEGER",
+        mode="REPEATED",
+        precision=None,
+        scale=None,
+    )
+    assert _bigquery_physical_field_carrier(tags) == "ARRAY<STRING>"
+    assert _bigquery_physical_field_carrier(nums) == "ARRAY<INTEGER>"
+    assert _bigquery_physical_field_carrier(
+        SimpleNamespace(name="x", field_type="", mode="NULLABLE")
+    ) == ""
+
+    types = resolve_bigquery_decimal_target_types(
+        ["tags", "nums"],
+        ["VARCHAR", "VARCHAR"],
+        [tags, nums],
+    )
+    assert types == ["ARRAY<STRING>", "ARRAY<INTEGER>"]
+
+    overlaid = overlay_physical_bind_types(
+        ["tags"],
+        ["VARCHAR"],
+        {"tags": "ARRAY<STRING>"},
+    )
+    assert overlaid == ["ARRAY<STRING>"]
+
+
+def test_bigquery_records_use_array_carrier_not_map_scalar():
+    """REPEATED live carriers must reach records_for_bigquery as ARRAY<T>."""
+    from connectors.warehouse_temporal import (
+        bigquery_repeated_element,
+        records_for_bigquery,
+    )
+
+    assert bigquery_repeated_element("ARRAY<STRING>") == "STRING"
+    assert bigquery_repeated_element("STRING") is None
+    rec = records_for_bigquery(
+        [(["a", "b"],)],
+        ["tags"],
+        ["ARRAY<STRING>"],
+    )[0]
+    assert isinstance(rec["tags"], list)
+    assert rec["tags"] == ["a", "b"]
+
+
+def test_pg_fetch_array_udt_not_scalar_int():
+    """``_INT4`` information_schema udt must become INTEGER[] not INTEGER."""
+    from connectors.postgresql_writer import _fetch_pg_column_types
+    from connectors.writer_common import overlay_physical_bind_types
+
+    class _Cur:
+        def execute(self, *_a, **_k):
+            return None
+
+        def fetchall(self):
+            return [
+                ("ids", "ARRAY", "_int4", None, None, None),
+                ("label", "character varying", "varchar", 40, None, None),
+            ]
+
+    physical = _fetch_pg_column_types(_Cur(), "public", "t")
+    assert physical["ids"] == "INTEGER[]"
+    assert physical["label"] == "VARCHAR(40)"
+    overlaid = overlay_physical_bind_types(
+        ["ids", "label"],
+        ["VARCHAR", "TEXT"],
+        physical,
+    )
+    assert overlaid[0] == "INTEGER[]"
+    # Soft string physical does not specialty-promote; array polarity is the cliff.
+    assert overlaid[1] == "TEXT"
+
+
 def test_merge_saas_live_types_studio_fills_partial_gap():
     from connectors.saas_common import merge_saas_live_types
 

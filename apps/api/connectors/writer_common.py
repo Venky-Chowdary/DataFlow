@@ -4524,9 +4524,14 @@ def overlay_physical_bind_types(
         elif specialty_carrier_base(phys):
             # Live HSTORE/OID/POINT/INET/… beat Map JSON/INTEGER/GEOGRAPHY stamps.
             out[i] = phys
-        elif phys_base in typed_bases:
+        elif (
+            phys_base in typed_bases
+            or phys_base.endswith("[]")
+            or phys_base.startswith("ARRAY")
+        ):
             # Live typed physical beats Map DECIMAL≠INT / BOOL≠INT invent,
-            # and Map VARCHAR → DATE/INT/BOOL (empty→NULL refuse path).
+            # and Map VARCHAR → DATE/INT/BOOL / ARRAY (empty→NULL refuse path).
+            # ``INTEGER[]`` survives sql_base_type as ``INTEGER[]`` (not ARRAY).
             out[i] = phys
     return out
 

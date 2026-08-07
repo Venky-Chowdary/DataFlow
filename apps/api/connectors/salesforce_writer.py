@@ -213,7 +213,6 @@ def salesforce_field_to_carrier(field: dict[str, Any]) -> str:
         "url",
         "encryptedstring",
         "combobox",
-        "anytype",
         "datacategorygroupreference",
         "junctionidlist",
     }:
@@ -221,8 +220,8 @@ def salesforce_field_to_carrier(field: dict[str, Any]) -> str:
             return f"VARCHAR({length_n})"
         return "VARCHAR"
 
-    # Compound address / geolocation — structured JSON envelope (not invent VARCHAR).
-    if ftype in {"address", "location", "complexvalue"}:
+    # Compound address / geolocation / polymorphic anyType — structured envelope.
+    if ftype in {"address", "location", "complexvalue", "anytype"}:
         return "JSON"
 
     if ftype in {"double", "currency", "percent", "number"}:
@@ -245,7 +244,8 @@ def salesforce_field_to_carrier(field: dict[str, Any]) -> str:
         return "TIME"
     if ftype == "base64":
         return "BINARY"
-    return "VARCHAR"
+    # Unknown SOAP type — refuse soft VARCHAR invent (Studio / remap required).
+    return ""
 
 
 def resolve_salesforce_dest_types(
@@ -575,6 +575,7 @@ def write_mapped_rows(
             name = str(f.get("name") or "").strip()
             if name:
                 live[name] = salesforce_field_to_carrier(f)
+        live = {k: v for k, v in live.items() if str(v or "").strip()}
         from connectors.saas_common import merge_saas_live_types
 
         dest_types, cov_err = merge_saas_live_types(

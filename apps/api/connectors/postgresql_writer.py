@@ -164,26 +164,57 @@ def _fetch_pg_column_types(cursor: Any, schema: str, table_name: str) -> dict[st
             (schema, table_name),
         )
         out: dict[str, str] = {}
+        _udt_scalar = {
+            "INT2": "SMALLINT",
+            "INT4": "INTEGER",
+            "INT8": "BIGINT",
+            "FLOAT4": "REAL",
+            "FLOAT8": "DOUBLE PRECISION",
+            "BOOL": "BOOLEAN",
+            "UUID": "UUID",
+            "JSON": "JSON",
+            "JSONB": "JSONB",
+            "TEXT": "TEXT",
+            "VARCHAR": "VARCHAR",
+            "BPCHAR": "CHAR",
+            "NAME": "NAME",
+            "OID": "OID",
+            "INET": "INET",
+            "CIDR": "CIDR",
+            "MACADDR": "MACADDR",
+            "MACADDR8": "MACADDR8",
+            "BYTEA": "BYTEA",
+            "XML": "XML",
+            "HSTORE": "HSTORE",
+            "LTREE": "LTREE",
+        }
         for name, data_type, udt_name, char_len, precision, scale in cursor.fetchall():
             udt = str(udt_name or "").upper()
             data = str(data_type or "").upper()
-            if udt in {"INT2", "INT4", "INT8", "FLOAT4", "FLOAT8", "BOOL", "UUID", "JSON", "JSONB"}:
-                ddl = {
-                    "INT2": "SMALLINT",
-                    "INT4": "INTEGER",
-                    "INT8": "BIGINT",
-                    "FLOAT4": "REAL",
-                    "FLOAT8": "DOUBLE PRECISION",
-                    "BOOL": "BOOLEAN",
-                }.get(udt, udt)
-            elif data in {"DATE", "TIME", "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE",
-                          "TIMESTAMP WITH TIME ZONE", "TIME WITHOUT TIME ZONE",
-                          "TIME WITH TIME ZONE"}:
+            # Array udts are ``_INT4`` / ``_TEXT`` — never invent scalar INT4 over
+            # live INTEGER[] (Map VARCHAR rematerialize polarity cliff).
+            if data == "ARRAY" or udt.startswith("_"):
+                elem_udt = udt[1:] if udt.startswith("_") else udt
+                elem = _udt_scalar.get(elem_udt, elem_udt or "TEXT")
+                ddl = f"{elem}[]"
+            elif data in {"CHARACTER VARYING", "VARCHAR"} and char_len:
+                ddl = f"VARCHAR({int(char_len)})"
+            elif data in {"CHARACTER", "CHAR"} and char_len:
+                ddl = f"CHAR({int(char_len)})"
+            elif udt in _udt_scalar:
+                ddl = _udt_scalar[udt]
+            elif data in {
+                "DATE",
+                "TIME",
+                "TIMESTAMP",
+                "TIMESTAMP WITHOUT TIME ZONE",
+                "TIMESTAMP WITH TIME ZONE",
+                "TIME WITHOUT TIME ZONE",
+                "TIME WITH TIME ZONE",
+            }:
                 ddl = data
             elif data in {"NUMERIC", "DECIMAL"} and precision is not None:
                 ddl = f"NUMERIC({int(precision)},{int(scale or 0)})"
-            elif data in {"CHARACTER VARYING", "VARCHAR"} and char_len:
-                ddl = f"VARCHAR({int(char_len)})"
             else:
                 ddl = udt or data
             key = str(name)
