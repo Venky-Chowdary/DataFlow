@@ -30,6 +30,116 @@ from connectors.writer_common import (
 logger = logging.getLogger(__name__)
 
 
+def _fetch_kafka_physical_types(
+    registry_url: str,
+    topic: str,
+    target_cols: list[str],
+) -> tuple[dict[str, str], int | None, bool]:
+    """Probe Schema Registry for live subject carriers + schema id.
+
+    Returns ``(physical, schema_id, subject_exists)``.
+    Missing subject (HTTP 404) → ``({}, None, False)``.
+    Auth/other probe failures raise ``SchemaRegistryError`` (fail-closed).
+    """
+    from connectors.confluent_schema_registry import (
+        SchemaRegistryError,
+        fetch_latest_subject_schema,
+        schema_map_from_registry_doc,
+    )
+
+    subjects = [f"{topic}-value", topic]
+    saw_404 = False
+    for subject in subjects:
+        try:
+            doc = fetch_latest_subject_schema(registry_url, subject)
+        except SchemaRegistryError as exc:
+            msg = str(exc).lower()
+            # Only HTTP 404 counts as absent — never treat auth bodies as missing.
+            if "http 404" in msg or "returned http 404" in msg:
+                saw_404 = True
+                continue
+            raise
+        schema_map = schema_map_from_registry_doc(doc)
+        physical: dict[str, str] = {}
+        wanted = {str(c) for c in target_cols if c}
+        lower_map = {str(k).lower(): str(v) for k, v in schema_map.items() if k and v}
+        for col in target_cols:
+            hit = schema_map.get(col) or lower_map.get(str(col).lower())
+            if not hit:
+                continue
+            physical[col] = hit
+            physical.setdefault(col.lower(), hit)
+            physical.setdefault(col.upper(), hit)
+        # Keep unmapped registry fields for case aliases when wanted is empty.
+        if not wanted:
+            for name, carrier in schema_map.items():
+                physical[name] = carrier
+                physical.setdefault(name.lower(), carrier)
+                physical.setdefault(name.upper(), carrier)
+        schema_id = int(doc.get("id") or 0) or None
+        return (
+            physical,
+            schema_id if schema_id and schema_id > 0 else None,
+            True,
+        )
+    if saw_404:
+        return {}, None, False
+    return {}, None, False
+
+
+def _kafka_rematerialize_if_physical_differs(
+    *,
+    physical: dict[str, str],
+    dest_types: dict[str, str],
+    target_cols: list[str],
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
+    """Rebuild mapped rows when live Registry carriers differ from Map stamps."""
+    if not physical:
+        return None
+    live_dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=physical,
+        default="VARCHAR",
+    )
+    carriers_differ = any(
+        str(dest_types.get(c) or "").strip().upper()
+        != str(live_dest_types.get(c) or "").strip().upper()
+        for c in target_cols
+    )
+    if not carriers_differ:
+        return None
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=policy,
+        dest_types=live_dest_types,
+        preserve_case=True,
+        dest_kind="kafka",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    return (
+        mapped_rows,
+        list(transform_errors or []),
+        rejected_details,
+        live_dest_types,
+    )
+
+
 def _bootstrap(host: str, port: int, connection_string: str) -> str:
     if connection_string and "://" not in connection_string and "," in connection_string:
         return connection_string.strip()
@@ -195,6 +305,7 @@ def write_mapped_rows(
         mappings, column_types, preserve_case=True
     )
     policy = transform_error_policy(error_policy)
+    live_dest = _kwargs.get("destination_column_types")
     # JSON wire still serializes via json_default, but quarantine must catch
     # DECIMAL/BOOLEAN/BINARY/VARCHAR(n) unfit before produce invents bad events
     # (Schema Registry + compaction consumers assume typed fidelity).
@@ -203,21 +314,178 @@ def write_mapped_rows(
         mappings,
         column_types,
         logical_types=logical_types,
+        live_types=live_dest if isinstance(live_dest, dict) else None,
         default="VARCHAR",
     )
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        error_policy=policy,
-        dest_types=dest_types,
-        preserve_case=True,
-        dest_kind="kafka",
-        destination_pk_columns=list(conflict_columns or []) or None,
-        destination_column_nullability=_kwargs.get("destination_column_nullability"),
+
+    registry = (
+        schema_registry_url
+        or str(_kwargs.get("registry_url") or "")
+        or (connection_string if "http" in (connection_string or "") else "")
     )
+    registered_schema_id: int | None = None
+    transform_errors: list[str] = []
+    rejected_details: list[dict] = []
+
+    if registry.startswith("http"):
+        from connectors.confluent_schema_registry import (
+            SchemaRegistryError,
+            register_json_schema,
+        )
+
+        try:
+            physical, live_schema_id, subject_exists = _fetch_kafka_physical_types(
+                registry, topic, target_cols
+            )
+        except SchemaRegistryError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=topic,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                driver="kafka",
+            )
+
+        mapped_data_cols = [c for c in target_cols if c]
+        studio_live = isinstance(live_dest, dict) and all(
+            str(live_dest.get(c) or "").strip() for c in mapped_data_cols
+        )
+        if subject_exists:
+            # Live subject wins — never register Map-invented schema over it.
+            if (
+                mapped_data_cols
+                and not physical
+                and not studio_live
+            ):
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Kafka Schema Registry subject for topic {topic!r} exists "
+                        "but live field types were unavailable for mapped columns — "
+                        "refuse Map VARCHAR bind / register invent. Re-run destination "
+                        "schema introspect and retry."
+                    ),
+                    driver="kafka",
+                )
+            remat = _kafka_rematerialize_if_physical_differs(
+                physical=physical,
+                dest_types=dest_types,
+                target_cols=target_cols,
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                column_types=column_types,
+                logical_types=logical_types,
+                policy=policy,
+                conflict_columns=conflict_columns,
+                destination_column_nullability=_kwargs.get(
+                    "destination_column_nullability"
+                ),
+            )
+            if remat is not None:
+                mapped_rows, transform_errors, rejected_details, dest_types = remat
+            else:
+                mapped_rows, transform_errors, rejected_details = (
+                    build_mapped_rows_with_details(
+                        headers=headers,
+                        data_rows=data_rows,
+                        mappings=mappings,
+                        target_cols=target_cols,
+                        column_types=column_types,
+                        error_policy=policy,
+                        dest_types=dest_types,
+                        preserve_case=True,
+                        dest_kind="kafka",
+                        destination_pk_columns=list(conflict_columns or []) or None,
+                        destination_column_nullability=_kwargs.get(
+                            "destination_column_nullability"
+                        ),
+                    )
+                )
+            registered_schema_id = live_schema_id
+        else:
+            # Subject missing — Map/Studio carriers authoritative for first register.
+            if mapped_data_cols and not studio_live and not create_table:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Kafka Schema Registry subject for topic {topic!r} is "
+                        "missing and create_table is disabled — refuse Map "
+                        "VARCHAR register invent. Enable create or register the "
+                        "subject first."
+                    ),
+                    driver="kafka",
+                )
+            mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                error_policy=policy,
+                dest_types=dest_types,
+                preserve_case=True,
+                dest_kind="kafka",
+                destination_pk_columns=list(conflict_columns or []) or None,
+                destination_column_nullability=_kwargs.get(
+                    "destination_column_nullability"
+                ),
+            )
+            schema_obj = {
+                "type": "object",
+                "properties": {
+                    c: _json_schema_property_for_logical(
+                        dest_types.get(c)
+                        or (logical_types[i] if i < len(logical_types) else "string")
+                    )
+                    for i, c in enumerate(target_cols)
+                },
+            }
+            try:
+                registered_schema_id = register_json_schema(
+                    registry, f"{topic}-value", json.dumps(schema_obj)
+                )
+            except SchemaRegistryError as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=str(exc),
+                    driver="kafka",
+                )
+    else:
+        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            error_policy=policy,
+            dest_types=dest_types,
+            preserve_case=True,
+            dest_kind="kafka",
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=_kwargs.get(
+                "destination_column_nullability"
+            ),
+        )
+
     tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
@@ -236,40 +504,6 @@ def write_mapped_rows(
             error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details, driver="kafka",
         )
-
-    registry = (
-        schema_registry_url
-        or str(_kwargs.get("registry_url") or "")
-        or (connection_string if "http" in (connection_string or "") else "")
-    )
-    registered_schema_id: int | None = None
-    if registry.startswith("http"):
-        from connectors.confluent_schema_registry import (
-            SchemaRegistryError,
-            register_json_schema,
-        )
-
-        schema_obj = {
-            "type": "object",
-            "properties": {
-                c: _json_schema_property_for_logical(
-                    dest_types.get(c)
-                    or (logical_types[i] if i < len(logical_types) else "string")
-                )
-                for i, c in enumerate(target_cols)
-            },
-        }
-        try:
-            registered_schema_id = register_json_schema(
-                registry, f"{topic}-value", json.dumps(schema_obj)
-            )
-        except SchemaRegistryError as exc:
-            return WriteResult(
-                ok=False, rows_written=0, table_name=topic, target_schema="",
-                checksum="", chunks_completed=0,
-                error=str(exc),
-                driver="kafka",
-            )
 
     try:
         producer = _producer(

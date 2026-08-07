@@ -107,8 +107,12 @@ def test_register_json_schema_fail_closed_on_http_error():
 
 def test_kafka_writer_aborts_when_registry_register_fails():
     from connectors.kafka_writer import write_mapped_rows
+    from connectors.confluent_schema_registry import SchemaRegistryError
 
     with patch(
+        "connectors.kafka_writer._fetch_kafka_physical_types",
+        return_value=({}, None, False),
+    ), patch(
         "connectors.confluent_schema_registry.register_json_schema",
         side_effect=SchemaRegistryError("register failed"),
     ):
@@ -127,6 +131,7 @@ def test_kafka_writer_aborts_when_registry_register_fails():
             mappings=[{"source": "id", "target": "id", "transform": "none"}],
             column_types={"id": "string"},
             schema_registry_url="http://registry:8081",
+            create_table=True,
         )
     assert result.ok is False
     assert "register failed" in (result.error or "")
