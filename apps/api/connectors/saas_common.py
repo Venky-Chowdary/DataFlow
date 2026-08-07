@@ -23,6 +23,65 @@ class SaasDescribeGate:
     warning: str = ""
 
 
+def merge_saas_live_types(
+    live_types: dict[str, str],
+    target_cols: list[str],
+    *,
+    studio_types: dict[str, Any] | None = None,
+    product: str = "SaaS",
+) -> tuple[dict[str, str], str | None]:
+    """Live∩Studio coverage gate after a successful (possibly partial) Describe.
+
+    Stripe/Shopify catalog merges refuse Map ``VARCHAR`` invent when a mapped
+    column is absent from documented carriers. CRM Meta/Describe must do the
+    same: HTTP 200 with a non-empty but incomplete field list must not soft-bind
+    missing mapped targets (empty→null / overflow invent on reverse-ETL write).
+
+    Returns ``(merged, None)`` when every mapped column has a live carrier or a
+    Studio-typed destination carrier. Otherwise ``(partial, error)``.
+    """
+    live = live_types if isinstance(live_types, dict) else {}
+    live_by_lower: dict[str, tuple[str, str]] = {}
+    for key, typ in live.items():
+        name = str(key or "").strip()
+        carrier = str(typ or "").strip()
+        if not name or not carrier:
+            continue
+        live_by_lower.setdefault(name.lower(), (name, carrier))
+
+    studio = studio_types if isinstance(studio_types, dict) else {}
+    studio_l = {
+        str(k).lower(): str(v).strip()
+        for k, v in studio.items()
+        if k and str(v or "").strip()
+    }
+
+    merged: dict[str, str] = {}
+    missing: list[str] = []
+    for col in target_cols:
+        if not col:
+            continue
+        hit = live_by_lower.get(str(col).lower())
+        if hit:
+            merged[col] = hit[1]
+            continue
+        st = studio_l.get(str(col).lower())
+        if st:
+            merged[col] = st
+            continue
+        missing.append(col)
+    if missing:
+        sample = ", ".join(repr(c) for c in missing[:12])
+        more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+        return merged, (
+            f"{product} live schema is missing mapped field(s) {sample}{more} — "
+            "refuse Map VARCHAR invent (empty→null / overflow risk). Remap to "
+            "fields present on the live object or provide Studio "
+            "destination_column_types for every mapped column."
+        )
+    return merged, None
+
+
 def gate_saas_describe(
     *,
     product: str,

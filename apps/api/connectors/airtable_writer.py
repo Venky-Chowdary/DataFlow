@@ -310,22 +310,52 @@ def write_mapped_rows(
         )
     meta_fields = gate.fields
     if meta_fields:
-        dest_types = resolve_airtable_dest_types(
+        live: dict[str, str] = {}
+        for f in meta_fields:
+            if not isinstance(f, dict):
+                continue
+            name = str(f.get("name") or "").strip()
+            if name:
+                live[name] = airtable_field_to_carrier(f)
+        from connectors.saas_common import merge_saas_live_types
+
+        dest_types, cov_err = merge_saas_live_types(
+            live,
             target_cols,
-            mappings,
-            column_types,
-            logical_types=logical_types,
-            meta_fields=meta_fields,
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="Airtable",
         )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=base_id,
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="airtable",
+            )
     else:
-        dest_types = resolve_mapping_dest_types(
+        from connectors.saas_common import merge_saas_live_types
+
+        dest_types, cov_err = merge_saas_live_types(
+            {},
             target_cols,
-            mappings,
-            column_types,
-            logical_types=logical_types,
-            live_types=live_dest if isinstance(live_dest, dict) else None,
-            default="VARCHAR",
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="Airtable",
         )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=base_id,
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="airtable",
+            )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,

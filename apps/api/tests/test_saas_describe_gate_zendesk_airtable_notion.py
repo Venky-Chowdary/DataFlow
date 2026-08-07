@@ -322,3 +322,241 @@ def test_notion_stamp_passes_select_option_names():
     )
     assert "Open" in carrier and "Closed" in carrier
     assert notion_property_to_carrier("select").startswith("VARCHAR")
+
+
+def test_merge_saas_live_types_partial_describe_refuses_missing():
+    from connectors.saas_common import merge_saas_live_types
+
+    merged, err = merge_saas_live_types(
+        {"Name": "VARCHAR(80)"},
+        ["Name", "Amount"],
+        studio_types=None,
+        product="Salesforce",
+    )
+    assert err is not None
+    assert "Amount" in err
+    assert "Name" in merged
+    assert "Amount" not in merged
+
+
+def test_merge_saas_live_types_studio_fills_partial_gap():
+    from connectors.saas_common import merge_saas_live_types
+
+    merged, err = merge_saas_live_types(
+        {"Name": "VARCHAR(80)"},
+        ["Name", "Amount"],
+        studio_types={"Amount": "DECIMAL(18,2)"},
+        product="Salesforce",
+    )
+    assert err is None
+    assert merged["Name"] == "VARCHAR(80)"
+    assert merged["Amount"] == "DECIMAL(18,2)"
+
+
+def test_hubspot_partial_describe_refuses_unmapped_invent():
+    from connectors.hubspot_writer import write_mapped_rows
+
+    with patch(
+        "connectors.hubspot.describe_properties",
+        return_value=[{"name": "email", "type": "string", "fieldType": "text"}],
+    ):
+        result = write_mapped_rows(
+            host="api.hubapi.com",
+            port=443,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=True,
+            table_name="contacts",
+            headers=["email", "custom_prop"],
+            data_rows=[["a@b.com", "x"]],
+            mappings=[
+                {"source": "email", "target": "email", "target_type": "VARCHAR"},
+                {
+                    "source": "custom_prop",
+                    "target": "custom_prop",
+                    "target_type": "VARCHAR",
+                },
+            ],
+            column_types={"email": "VARCHAR", "custom_prop": "VARCHAR"},
+            api_key="pat-xxx",
+            error_policy="quarantine",
+            write_mode="insert",
+        )
+    assert result.ok is False
+    assert "custom_prop" in (result.error or "")
+    assert "refuse" in (result.error or "").lower()
+
+
+def test_hubspot_partial_describe_studio_gap_allows():
+    from connectors.hubspot_writer import write_mapped_rows
+
+    with (
+        patch(
+            "connectors.hubspot.describe_properties",
+            return_value=[{"name": "email", "type": "string", "fieldType": "text"}],
+        ),
+        patch(
+            "connectors.hubspot_writer.request",
+            side_effect=RuntimeError("stop-after-bind"),
+        ),
+    ):
+        result = write_mapped_rows(
+            host="api.hubapi.com",
+            port=443,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=True,
+            table_name="contacts",
+            headers=["email", "custom_prop"],
+            data_rows=[["a@b.com", "x"]],
+            mappings=[
+                {"source": "email", "target": "email", "target_type": "VARCHAR"},
+                {
+                    "source": "custom_prop",
+                    "target": "custom_prop",
+                    "target_type": "VARCHAR",
+                },
+            ],
+            column_types={"email": "VARCHAR", "custom_prop": "VARCHAR"},
+            api_key="pat-xxx",
+            error_policy="quarantine",
+            write_mode="insert",
+            destination_column_types={
+                "email": "VARCHAR(65536)",
+                "custom_prop": "VARCHAR(256)",
+            },
+        )
+    # Coverage gate passed; write fails later on mocked HTTP — not invent refuse.
+    assert "refuse Map VARCHAR invent" not in (result.error or "")
+    assert "missing mapped field" not in (result.error or "").lower()
+
+
+def test_airtable_partial_meta_refuses_missing_field():
+    from connectors.airtable_writer import write_mapped_rows
+
+    with patch(
+        "connectors.airtable_writer._fetch_table_fields",
+        return_value=([{"name": "Name", "type": "singleLineText"}], None),
+    ):
+        result = write_mapped_rows(
+            host="api.airtable.com",
+            port=443,
+            database="appXXX",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=True,
+            table_name="Contacts",
+            headers=["Name", "Email"],
+            data_rows=[["Ada", "a@b.com"]],
+            mappings=[
+                {"source": "Name", "target": "Name", "target_type": "VARCHAR"},
+                {"source": "Email", "target": "Email", "target_type": "VARCHAR"},
+            ],
+            column_types={"Name": "VARCHAR", "Email": "VARCHAR"},
+            api_key="patXXX",
+            error_policy="quarantine",
+        )
+    assert result.ok is False
+    assert "Email" in (result.error or "")
+    assert "refuse" in (result.error or "").lower()
+
+
+def test_salesforce_partial_describe_refuses_missing_field():
+    from connectors.salesforce_writer import write_mapped_rows
+
+    with patch(
+        "connectors.salesforce.describe_sobject",
+        return_value=[
+            {
+                "name": "Name",
+                "type": "string",
+                "length": 80,
+                "createable": True,
+                "updateable": True,
+            }
+        ],
+    ):
+        result = write_mapped_rows(
+            host="https://example.my.salesforce.com",
+            port=443,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=True,
+            table_name="Account",
+            headers=["Name", "Amount"],
+            data_rows=[["Acme", "10"]],
+            mappings=[
+                {"source": "Name", "target": "Name", "target_type": "VARCHAR"},
+                {"source": "Amount", "target": "Amount", "target_type": "VARCHAR"},
+            ],
+            column_types={"Name": "VARCHAR", "Amount": "VARCHAR"},
+            api_key="sess",
+            error_policy="quarantine",
+            write_mode="insert",
+        )
+    assert result.ok is False
+    assert "Amount" in (result.error or "")
+    assert "refuse" in (result.error or "").lower()
+
+
+def test_notion_partial_properties_refuse_missing():
+    from connectors.notion_writer import write_mapped_rows
+
+    with patch(
+        "connectors.notion_writer._fetch_database_properties",
+        return_value=({"Title": "title"}, {}),
+    ):
+        result = write_mapped_rows(
+            host="api.notion.com",
+            port=443,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=True,
+            table_name="0123456789abcdef0123456789abcdef",
+            headers=["Title", "Status"],
+            data_rows=[["Hello", "Open"]],
+            mappings=[
+                {"source": "Title", "target": "Title", "target_type": "VARCHAR"},
+                {"source": "Status", "target": "Status", "target_type": "VARCHAR"},
+            ],
+            column_types={"Title": "VARCHAR", "Status": "VARCHAR"},
+            api_key="secret_xxx",
+            error_policy="quarantine",
+            write_mode="insert",
+        )
+    assert result.ok is False
+    assert "Status" in (result.error or "")
+    assert "refuse" in (result.error or "").lower()
+
+
+def test_zendesk_studio_overrides_system_seed_carriers():
+    """Describe-omitted subject must bind Studio length, not hardcoded seed."""
+    from connectors.saas_common import merge_saas_live_types
+    from connectors.zendesk_writer import _zendesk_system_seed_carriers
+
+    seeds = _zendesk_system_seed_carriers(["subject", "custom_field"])
+    assert "subject" in seeds
+    fallback = dict(seeds)
+    fallback["subject"] = "VARCHAR(120)"
+    merged, err = merge_saas_live_types(
+        {},
+        ["subject"],
+        studio_types=fallback,
+        product="Zendesk",
+    )
+    assert err is None
+    assert merged["subject"] == "VARCHAR(120)"

@@ -115,15 +115,37 @@ def zendesk_field_to_carrier(field: dict[str, Any]) -> str:
     return f"VARCHAR({_ZENDESK_TEXT_CHARS})"
 
 
-def resolve_zendesk_dest_types(
+def _zendesk_system_seed_carriers(target_cols: list[str]) -> dict[str, str]:
+    """Documented ticket/user system columns when Describe omits them."""
+    from services.type_system import format_enum_domain_carrier
+
+    out: dict[str, str] = {}
+    for col in target_cols:
+        if not col:
+            continue
+        low = str(col).lower()
+        if low == "subject":
+            out[col] = f"VARCHAR({_ZENDESK_SUBJECT_CHARS})"
+        elif low in {"description", "comment", "body"}:
+            out[col] = f"VARCHAR({_ZENDESK_COMMENT_CHARS})"
+        elif low == "status":
+            out[col] = format_enum_domain_carrier(_ZENDESK_STATUS_VALUES)
+        elif low == "priority":
+            out[col] = format_enum_domain_carrier(_ZENDESK_PRIORITY_VALUES)
+        elif low in {"type", "ticket_type"}:
+            out[col] = format_enum_domain_carrier(_ZENDESK_TYPE_VALUES)
+        elif low in {"email", "name"}:
+            out[col] = "VARCHAR(255)"
+    return out
+
+
+def _zendesk_live_carriers(
     target_cols: list[str],
-    mappings: list[dict],
-    column_types: dict[str, str],
+    describe_fields: list[dict[str, Any]] | None,
     *,
-    logical_types: list[str] | None = None,
-    describe_fields: list[dict[str, Any]] | None = None,
+    include_seeds: bool = True,
 ) -> dict[str, str]:
-    """Prefer live Zendesk field schema; else Map/source carriers."""
+    """Live Describe carriers; optional system seeds (never Map VARCHAR invent)."""
     live: dict[str, str] = {}
     for f in describe_fields or []:
         if not isinstance(f, dict):
@@ -133,27 +155,24 @@ def resolve_zendesk_dest_types(
             if key is None or key == "":
                 continue
             live[str(key)] = carrier
-    # Well-known system columns when Describe is partial / scoped out.
-    known = {str(k).lower() for k in live}
-    from services.type_system import format_enum_domain_carrier
+    if include_seeds:
+        for col, carrier in _zendesk_system_seed_carriers(target_cols).items():
+            if str(col).lower() in {str(k).lower() for k in live}:
+                continue
+            live[col] = carrier
+    return live
 
-    for col in target_cols:
-        low = str(col).lower()
-        if low in known:
-            continue
-        if low == "subject":
-            live[col] = f"VARCHAR({_ZENDESK_SUBJECT_CHARS})"
-        elif low in {"description", "comment", "body"}:
-            live[col] = f"VARCHAR({_ZENDESK_COMMENT_CHARS})"
-        elif low == "status":
-            live[col] = format_enum_domain_carrier(_ZENDESK_STATUS_VALUES)
-        elif low == "priority":
-            live[col] = format_enum_domain_carrier(_ZENDESK_PRIORITY_VALUES)
-        elif low in {"type", "ticket_type"}:
-            live[col] = format_enum_domain_carrier(_ZENDESK_TYPE_VALUES)
-        elif low in {"email", "name"}:
-            live[col] = "VARCHAR(255)"
-        known.add(low)
+
+def resolve_zendesk_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str],
+    *,
+    logical_types: list[str] | None = None,
+    describe_fields: list[dict[str, Any]] | None = None,
+) -> dict[str, str]:
+    """Prefer live Zendesk field schema; else Map/source carriers."""
+    live = _zendesk_live_carriers(target_cols, describe_fields, include_seeds=True)
     return resolve_mapping_dest_types(
         target_cols,
         mappings,
@@ -309,22 +328,32 @@ def write_mapped_rows(
             driver="zendesk",
         )
     describe_fields = gate.fields
-    if describe_fields:
-        dest_types = resolve_zendesk_dest_types(
-            target_cols,
-            mappings,
-            column_types,
-            logical_types=logical_types,
-            describe_fields=describe_fields,
-        )
-    else:
-        dest_types = resolve_mapping_dest_types(
-            target_cols,
-            mappings,
-            column_types,
-            logical_types=logical_types,
-            live_types=live_dest if isinstance(live_dest, dict) else None,
-            default="VARCHAR",
+    # Live Describe only. System seeds fill Studio gaps — never override Studio.
+    live = _zendesk_live_carriers(target_cols, describe_fields, include_seeds=False)
+    seeds = _zendesk_system_seed_carriers(target_cols)
+    studio = live_dest if isinstance(live_dest, dict) else {}
+    fallback: dict[str, Any] = dict(seeds)
+    for key, typ in studio.items():
+        if key and str(typ or "").strip():
+            fallback[str(key)] = str(typ).strip()
+    from connectors.saas_common import merge_saas_live_types
+
+    dest_types, cov_err = merge_saas_live_types(
+        live,
+        target_cols,
+        studio_types=fallback,
+        product="Zendesk",
+    )
+    if cov_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema=shop_host,
+            checksum="",
+            chunks_completed=0,
+            error=cov_err,
+            driver="zendesk",
         )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,

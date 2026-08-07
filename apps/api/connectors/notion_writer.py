@@ -398,14 +398,33 @@ def write_mapped_rows(
             or f"Unable to read Notion database schema: {humanize_http_error(describe_exc, 'notion')}",
             driver="notion",
         )
-    dest_types = resolve_notion_dest_types(
+    live = {
+        name: notion_property_to_carrier(
+            typ, option_names=property_options.get(str(name).lower()) or property_options.get(name)
+        )
+        for name, typ in properties.items()
+        if name and typ
+    }
+    from connectors.saas_common import merge_saas_live_types
+
+    # Notion page payloads need live property kinds — no Studio VARCHAR invent.
+    dest_types, cov_err = merge_saas_live_types(
+        live,
         target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        properties=properties,
-        property_options=property_options,
+        studio_types=None,
+        product="Notion",
     )
+    if cov_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=database_id,
+            checksum="",
+            chunks_completed=0,
+            error=cov_err,
+            driver="notion",
+        )
     title_name = _title_property(properties)
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,

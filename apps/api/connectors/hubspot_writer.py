@@ -430,25 +430,53 @@ def write_mapped_rows(
         describe_props = None
 
     if describe_props:
-        dest_types = resolve_hubspot_dest_types(
+        live: dict[str, str] = {}
+        for p in describe_props:
+            if not isinstance(p, dict):
+                continue
+            name = str(p.get("name") or "").strip()
+            if name:
+                live[name] = hubspot_property_to_carrier(p)
+        from connectors.saas_common import merge_saas_live_types
+
+        dest_types, cov_err = merge_saas_live_types(
+            live,
             target_cols,
-            mappings,
-            column_types,
-            logical_types=logical_types,
-            describe_props=describe_props,
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="HubSpot",
         )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="hubspot",
+            )
     else:
         # Studio-typed fallback only after Describe failed non-auth / empty.
-        from connectors.writer_common import resolve_mapping_dest_types
+        from connectors.saas_common import merge_saas_live_types
 
-        dest_types = resolve_mapping_dest_types(
+        dest_types, cov_err = merge_saas_live_types(
+            {},
             target_cols,
-            mappings,
-            column_types,
-            logical_types=logical_types,
-            live_types=live_dest if isinstance(live_dest, dict) else None,
-            default="VARCHAR",
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="HubSpot",
         )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="hubspot",
+            )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,

@@ -570,22 +570,50 @@ def write_mapped_rows(
             driver="salesforce",
         )
     if describe_fields:
-        dest_types = resolve_salesforce_dest_types(
-            target_cols,
-            mappings,
-            column_types,
-            describe_fields=describe_fields,
-        )
-    else:
-        from connectors.writer_common import resolve_mapping_dest_types
+        live: dict[str, str] = {}
+        for f in describe_fields:
+            name = str(f.get("name") or "").strip()
+            if name:
+                live[name] = salesforce_field_to_carrier(f)
+        from connectors.saas_common import merge_saas_live_types
 
-        dest_types = resolve_mapping_dest_types(
+        dest_types, cov_err = merge_saas_live_types(
+            live,
             target_cols,
-            mappings,
-            column_types,
-            live_types=live_dest if isinstance(live_dest, dict) else None,
-            default="VARCHAR",
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="Salesforce",
         )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="salesforce",
+            )
+    else:
+        from connectors.saas_common import merge_saas_live_types
+
+        dest_types, cov_err = merge_saas_live_types(
+            {},
+            target_cols,
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="Salesforce",
+        )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="salesforce",
+            )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
