@@ -1442,12 +1442,13 @@ def bare_decimal_is_unbounded(*, dest_db: str = "") -> bool:
     """True when dialect bare DECIMAL/NUMERIC/NUMBER is unconstrained.
 
     PostgreSQL: ``NUMERIC`` / ``DECIMAL`` without (p,s) stores arbitrary precision
-    (implementation limits). MySQL bare DECIMAL invents ``DECIMAL(10,0)``;
-    Snowflake bare NUMBER invents ``NUMBER(38,0)``; SQL Server bare DECIMAL
-    invents ``DECIMAL(18,0)``. Unknown dest stays conservative (not unbounded).
+    (implementation limits). Oracle bare ``NUMBER`` is likewise unconstrained.
+    MySQL bare DECIMAL invents ``DECIMAL(10,0)``; Snowflake bare NUMBER invents
+    ``NUMBER(38,0)``; SQL Server bare DECIMAL invents ``DECIMAL(18,0)``.
+    Unknown dest stays conservative (not unbounded).
     """
     db = _normalize_dest_db(dest_db) if dest_db else ""
-    return db == "postgresql"
+    return db in {"postgresql", "oracle", "oracledb"}
 
 
 def bare_decimal_platform_default(

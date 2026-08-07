@@ -743,6 +743,13 @@ def test_document_nested_decimal_bare_wave16():
     assert decimal_params_would_narrow(
         "DECIMAL(38,15)", "NUMERIC", dest_db="bigquery"
     ) is True
+    # Oracle bare NUMBER is unconstrained — proven (p,s) widens (PG-class).
+    assert decimal_params_would_narrow(
+        "DECIMAL(38,15)", "NUMBER", dest_db="oracle"
+    ) is False
+    assert is_precision_collapse_coercion(
+        "DECIMAL(38,15)", "NUMBER", dest_db="oracle"
+    ) is False
 
 
 def test_year_invent_geometry_pad_nested_wave15():

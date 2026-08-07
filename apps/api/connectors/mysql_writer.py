@@ -234,6 +234,132 @@ def _open_mysql(
     return conn
 
 
+@dataclass
+class _MysqlMaterializedBatch:
+    mapped_rows: list[tuple]
+    sparse_rows: list[tuple]
+    transform_errors: list[str]
+    rejected_details: list
+    target_types: list[str]
+    rows_for_checksum: list[tuple]
+
+
+def _mysql_materialize_mapped_batch(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> _MysqlMaterializedBatch:
+    """Map + quarantine against ``dest_types`` (call again after live DDL overlay)."""
+    target_types = [
+        mysql_type(dest_types.get(c, logical_types[i])) for i, c in enumerate(target_cols)
+    ]
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        error_policy=policy,
+        preserve_case=True,
+        dest_kind="mysql",
+        destination_pk_columns=list(destination_pk_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    mapped_rows = quarantine_currency_markers_into_numeric(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_decimals(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL DECIMAL",
+        dest_db="mysql",
+    )
+    mapped_rows = quarantine_unfit_years(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_booleans(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_temporals(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_specialty_types(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_integers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL INTEGER",
+    )
+    mapped_rows = quarantine_unfit_bitstrings(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_binaries(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL VARBINARY",
+    )
+    mapped_rows = quarantine_unfit_enum_set(
+        mapped_rows, target_cols, logical_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_strings(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL VARCHAR",
+    )
+    mapped_rows = quarantine_unfit_json(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="MySQL JSON",
+    )
+    sparse_rows: list[tuple] = []
+    rows_for_checksum: list[tuple] = list(mapped_rows)
+    if write_mode == "upsert" and conflict_columns:
+        from connectors.writer_common import split_dense_sparse_rows
+
+        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+        if DF_LSN_COL in target_cols:
+            mapped_rows = dedupe_rows_by_pk_and_lsn(
+                mapped_rows, conflict_columns, target_cols
+            )
+        else:
+            mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+    return _MysqlMaterializedBatch(
+        mapped_rows=mapped_rows,
+        sparse_rows=sparse_rows,
+        transform_errors=list(transform_errors or []),
+        rejected_details=rejected_details,
+        target_types=target_types,
+        rows_for_checksum=rows_for_checksum,
+    )
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -345,104 +471,30 @@ def write_mapped_rows(
         logical_types=logical_types,
         live_types=live_dest if isinstance(live_dest, dict) else None,
     )
-    # Quarantine carriers must match transform dest_types — never Map-only.
-    target_types = [mysql_type(dest_types.get(c, logical_types[i])) for i, c in enumerate(target_cols)]
     policy = transform_error_policy(error_policy)
 
     # Map before opening a socket so public proxies are not idle during transform.
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+    # When Studio did not pass live DDL, physical overlay below rematerializes.
+    _batch = _mysql_materialize_mapped_batch(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
         dest_types=dest_types,
-        error_policy=policy,
-        preserve_case=True,
-        dest_kind="mysql",
-        # Upsert conflict cols / dest PK — full composite for quarantine replay identity.
+        logical_types=logical_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    # Fail-closed DECIMAL(p,s) fit — never silently truncate/round into target.
-    mapped_rows = quarantine_currency_markers_into_numeric(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_decimals(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL DECIMAL",
-        dest_db="mysql",
-    )
-    mapped_rows = quarantine_unfit_years(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_booleans(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_temporals(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_specialty_types(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_integers(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL INTEGER",
-    )
-    mapped_rows = quarantine_unfit_bitstrings(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_binaries(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL VARBINARY",
-    )
-    mapped_rows = quarantine_unfit_enum_set(
-        mapped_rows, target_cols, logical_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_strings(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL VARCHAR",
-    )
-    # MySQL has no ARRAY type: arrays and documents both land in JSON, so the
-    # JSON gate is what keeps a malformed document from degrading into text.
-    mapped_rows = quarantine_unfit_json(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL JSON",
-    )
-    sparse_rows: list[tuple] = []
-    rows_for_checksum: list[tuple] = list(mapped_rows)
-    if write_mode == "upsert" and conflict_columns:
-        from connectors.writer_common import split_dense_sparse_rows
-
-        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-
-    if write_mode == "upsert" and conflict_columns:
-        if DF_LSN_COL in target_cols:
-            mapped_rows = dedupe_rows_by_pk_and_lsn(
-                mapped_rows, conflict_columns, target_cols
-            )
-        else:
-            mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+    mapped_rows = _batch.mapped_rows
+    sparse_rows = _batch.sparse_rows
+    transform_errors = _batch.transform_errors
+    rejected_details = _batch.rejected_details
+    target_types = _batch.target_types
+    rows_for_checksum = _batch.rows_for_checksum
 
     rejected_rows = _rejected_row_count(
         data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
@@ -535,7 +587,8 @@ def write_mapped_rows(
     )
 
     def _run_setup(cursor) -> None:
-        nonlocal target_types, converted_rows
+        nonlocal target_types, converted_rows, dest_types
+        nonlocal mapped_rows, sparse_rows, transform_errors, rejected_details, rows_for_checksum
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="mysql")
         if create_table:
@@ -638,9 +691,47 @@ def write_mapped_rows(
         if overlay_err:
             raise RuntimeError(overlay_err)
         if physical:
-            target_types = overlay_physical_bind_types(
-                target_cols, target_types, physical
+            live_dest_types = resolve_mapping_dest_types(
+                target_cols,
+                mappings,
+                column_types,
+                logical_types=logical_types,
+                live_types=physical,
             )
+            carriers_differ = any(
+                str(dest_types.get(c) or "").strip().upper()
+                != str(live_dest_types.get(c) or "").strip().upper()
+                for c in target_cols
+            )
+            if carriers_differ:
+                # Rematerialize from source against live DDL (PG-class invent fix).
+                dest_types = live_dest_types
+                _batch = _mysql_materialize_mapped_batch(
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                    target_cols=target_cols,
+                    column_types=column_types,
+                    dest_types=dest_types,
+                    logical_types=logical_types,
+                    policy=policy,
+                    conflict_columns=conflict_columns,
+                    write_mode=write_mode,
+                    destination_pk_columns=list(conflict_columns or []) or None,
+                    destination_column_nullability=_kwargs.get(
+                        "destination_column_nullability"
+                    ),
+                )
+                mapped_rows = _batch.mapped_rows
+                sparse_rows = _batch.sparse_rows
+                transform_errors = _batch.transform_errors
+                rejected_details = _batch.rejected_details
+                target_types = _batch.target_types
+                rows_for_checksum = _batch.rows_for_checksum
+            else:
+                target_types = overlay_physical_bind_types(
+                    target_cols, target_types, physical
+                )
 
         bound = bind_sql_mapped_rows_with_quarantine(
             mapped_rows,

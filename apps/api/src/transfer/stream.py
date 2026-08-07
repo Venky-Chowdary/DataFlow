@@ -558,6 +558,15 @@ def _write_batch(
         or (cfg.get("extra") or {}).get("schema_nullability")
         or {}
     )
+    # Live dest DDL from Studio probe — writers prefer this over Map stamps
+    # (adapters parity; invent cliff when stream omitted schema_types).
+    dest_column_types = dict(
+        (getattr(dest, "extra", None) or {}).get("schema_types")
+        or (cfg.get("extra") or {}).get("schema_types")
+        or (getattr(dest, "extra", None) or {}).get("destination_column_types")
+        or (cfg.get("extra") or {}).get("destination_column_types")
+        or {}
+    )
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
         from connectors.write_resilience import build_write_batch_key
@@ -594,6 +603,7 @@ def _write_batch(
             close_connection=close_connection,
             connection_holder=connection_holder,
             destination_column_nullability=dest_nullability,
+            destination_column_types=dest_column_types,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -638,6 +648,7 @@ def _write_batch(
             file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
+            destination_column_types=dest_column_types,
         )
         if not result.ok:
             _raise_write_failure(result, "MySQL batch write failed")
@@ -675,6 +686,7 @@ def _write_batch(
             error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
+            destination_column_types=dest_column_types,
         )
         if not result.ok:
             _raise_write_failure(result, "MongoDB batch write failed")
@@ -713,6 +725,7 @@ def _write_batch(
             error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
+            destination_column_types=dest_column_types,
         )
         if not result.ok:
             _raise_write_failure(result, "SQLite batch write failed")
@@ -756,6 +769,7 @@ def _write_batch(
             close_connection=close_connection,
             skip_session_setup=skip_session_setup,
             destination_column_nullability=dest_nullability,
+            destination_column_types=dest_column_types,
         )
         if not result.ok:
             _raise_write_failure(result, "Snowflake batch write failed")
@@ -790,6 +804,7 @@ def _write_batch(
             error_policy=error_policy,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
+            destination_column_types=dest_column_types,
         )
         if not result.ok:
             _raise_write_failure(result, "BigQuery batch write failed")
@@ -841,6 +856,7 @@ def _write_batch(
             "error_policy": error_policy,
             "on_checkpoint": lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             "destination_column_nullability": dest_nullability,
+            "destination_column_types": dest_column_types,
         }
         if dest_type == "redis":
             kwargs["write_mode"] = write_mode
@@ -916,6 +932,7 @@ def _write_batch(
             ),
             file_batch_idx=chunk_idx,
             destination_column_nullability=dest_nullability,
+            destination_column_types=dest_column_types,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -947,6 +964,7 @@ def _write_batch(
             "create_table": create_table,
             "error_policy": error_policy,
             "destination_column_nullability": dest_nullability,
+            "destination_column_types": dest_column_types,
             "on_checkpoint": (
                 (lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r))
                 if on_checkpoint

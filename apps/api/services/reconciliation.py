@@ -595,12 +595,13 @@ def reconcile(
         )
         extra_note = ""
         if allow_extra_rows and target_rows > expected_rows:
+            written_hint = int(expected_rows) if expected_rows else 0
             extra_note = (
                 f" Destination has {target_rows - expected_rows} extra row(s) "
                 "(append/upsert into a non-empty table); whole-table digests are "
                 "not comparable. Use overwrite/truncate for a clean load, or "
-                "upsert with a primary key — this is not proof the 30 written "
-                "rows are wrong."
+                "upsert with a primary key — this is not proof the "
+                f"{written_hint} written row(s) are wrong."
             )
         sample_note = ""
         if sample_ok:
