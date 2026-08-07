@@ -439,12 +439,25 @@ def _normalize_shopify_object(object_type: str) -> str:
     return aliases.get(obj, obj)
 
 
+# Admin REST identity + common leaves present on every resource payload.
+_SHOPIFY_COMMON: dict[str, str] = {
+    "id": "VARCHAR(64)",
+    "admin_graphql_api_id": "VARCHAR(255)",
+    "created_at": "TIMESTAMPTZ",
+    "updated_at": "TIMESTAMPTZ",
+}
+
+
 def shopify_core_field_carriers(object_type: str = "customers") -> dict[str, str]:
     """Return documented Shopify Admin core-field carriers for a resource."""
     key = _normalize_shopify_object(object_type)
-    out = dict(_SHOPIFY_BY_OBJECT.get(key) or {})
-    if not out and key.endswith("s"):
-        out = dict(_SHOPIFY_BY_OBJECT.get(key[:-1]) or {})
+    out = dict(_SHOPIFY_COMMON)
+    out.update(_SHOPIFY_BY_OBJECT.get(key) or {})
+    if len(out) == len(_SHOPIFY_COMMON) and key.endswith("s"):
+        out.update(_SHOPIFY_BY_OBJECT.get(key[:-1]) or {})
+    # Product Map often flattens variant sku onto the product object.
+    if key == "products":
+        out.setdefault("sku", f"VARCHAR({_SHOPIFY_SINGLE_LINE})")
     return out
 
 
@@ -565,3 +578,49 @@ def shopify_live_types_for_columns(
         for name in names:
             live[name] = carrier
     return live
+
+
+def merge_shopify_catalog_types(
+    object_type: str,
+    target_cols: list[str],
+    *,
+    metafield_defs: list[dict[str, Any]] | None = None,
+    studio_types: dict[str, Any] | None = None,
+) -> tuple[dict[str, str], str | None]:
+    """Admin catalog∩metafield∩Studio gate (Stripe-class Map invent refuse).
+
+    Every mapped column must hit Admin core, a live metafield definition, or
+    Studio ``destination_column_types`` — never soft-bind Map VARCHAR.
+    """
+    live = shopify_live_types_for_columns(
+        object_type, target_cols, metafield_defs=metafield_defs
+    )
+    live_l = {str(k).lower(): str(v) for k, v in live.items() if k and v}
+    studio = studio_types if isinstance(studio_types, dict) else {}
+    studio_l = {
+        str(k).lower(): str(v).strip()
+        for k, v in studio.items()
+        if k and str(v or "").strip()
+    }
+    merged = dict(live)
+    missing: list[str] = []
+    for col in target_cols:
+        if not col:
+            continue
+        if live_l.get(str(col).lower()):
+            continue
+        st = studio_l.get(str(col).lower())
+        if st:
+            merged[col] = st
+            continue
+        missing.append(col)
+    if missing:
+        sample = ", ".join(repr(c) for c in missing[:12])
+        more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+        return merged, (
+            f"Shopify Admin catalog has no carrier for mapped field(s) "
+            f"{sample}{more} — refuse Map VARCHAR invent (empty→null / "
+            "overflow risk). Map documented Admin fields, refresh metafield "
+            "Describe, or provide Studio destination_column_types."
+        )
+    return merged, None

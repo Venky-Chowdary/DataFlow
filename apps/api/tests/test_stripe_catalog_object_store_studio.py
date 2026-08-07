@@ -134,3 +134,29 @@ def test_object_store_dest_types_fall_back_to_map_without_studio():
         destination_column_types=None,
     )
     assert "VARCHAR" in str(dest.get("note") or "").upper()
+
+
+def test_merge_shopify_catalog_refuses_uncatalogued_without_studio():
+    from connectors.saas_write_carriers import merge_shopify_catalog_types
+
+    _live, err = merge_shopify_catalog_types(
+        "customers",
+        ["email", "invented_metafield"],
+        metafield_defs=[],
+        studio_types=None,
+    )
+    assert err is not None
+    assert "invented_metafield" in err
+
+
+def test_merge_shopify_catalog_allows_studio_typed_custom():
+    from connectors.saas_write_carriers import merge_shopify_catalog_types
+
+    live, err = merge_shopify_catalog_types(
+        "customers",
+        ["email", "custom_score"],
+        metafield_defs=[],
+        studio_types={"custom_score": "INTEGER"},
+    )
+    assert err is None
+    assert live["custom_score"] == "INTEGER"

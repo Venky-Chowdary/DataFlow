@@ -18,7 +18,10 @@ from connectors.saas_common import (
     request,
     token,
 )
-from connectors.saas_write_carriers import shopify_live_types_for_columns
+from connectors.saas_write_carriers import (
+    merge_shopify_catalog_types,
+    shopify_live_types_for_columns,
+)
 from connectors.writer_common import (
     reject_on_strict_policy,
     WriteResult,
@@ -42,13 +45,16 @@ def resolve_shopify_dest_types(
     logical_types: list[str] | None = None,
     object_type: str = "customers",
     metafield_defs: list[dict] | None = None,
+    live_types: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Prefer Admin core + live metafield definitions; else Map/source carriers."""
-    live = shopify_live_types_for_columns(
-        object_type,
-        target_cols,
-        metafield_defs=metafield_defs,
-    )
+    live = live_types
+    if live is None:
+        live = shopify_live_types_for_columns(
+            object_type,
+            target_cols,
+            metafield_defs=metafield_defs,
+        )
     return resolve_mapping_dest_types(
         target_cols,
         mappings,
@@ -186,6 +192,24 @@ def write_mapped_rows(
         # Non-auth probe miss: core Admin carriers still resolve from
         # shopify_live_types_for_columns — metafields stay Map/Studio only.
         metafield_defs = None
+    live_dest = _kwargs.get("destination_column_types")
+    catalog_live, catalog_err = merge_shopify_catalog_types(
+        obj,
+        target_cols,
+        metafield_defs=metafield_defs,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+    )
+    if catalog_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema=shop_host,
+            checksum="",
+            chunks_completed=0,
+            error=catalog_err,
+            driver="shopify",
+        )
     dest_types = resolve_shopify_dest_types(
         target_cols,
         mappings,
@@ -193,6 +217,7 @@ def write_mapped_rows(
         logical_types=logical_types,
         object_type=obj,
         metafield_defs=metafield_defs,
+        live_types=catalog_live,
     )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,

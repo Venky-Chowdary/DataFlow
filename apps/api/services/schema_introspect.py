@@ -4490,29 +4490,12 @@ def _introspect_zendesk(**kwargs: Any) -> dict[str, Any]:
 
         fields = describe_fields(cfg, table) or []
     except Exception as exc:
-        # Soft catalog of system fields when Describe is scoped out.
-        from connectors.zendesk_writer import resolve_zendesk_dest_types
-
-        seed = ["subject", "description", "email", "name", "status", "priority"]
-        live = resolve_zendesk_dest_types(seed, [], {}, describe_fields=None)
-        columns = [
-            {
-                "name": n,
-                "inferred_type": live.get(n, "VARCHAR"),
-                "nullable": True,
-                "data_type": live.get(n, "VARCHAR"),
-                "label": n,
-            }
-            for n in seed
-        ]
+        # Fail closed — never invent seed VARCHAR carriers as saas_typed truth.
         return {
-            "ok": True,
-            "columns": columns,
-            "tables": [table],
-            "schema": table,
-            "certification": "planned_typed_read",
-            "saas_typed": True,
-            "warning": f"{type(exc).__name__}: {exc}",
+            "ok": False,
+            "error": f"{type(exc).__name__}: {exc}",
+            "columns": [],
+            "tables": [],
         }
 
     seen: set[str] = set()
@@ -4536,20 +4519,15 @@ def _introspect_zendesk(**kwargs: Any) -> dict[str, Any]:
                 }
             )
     if not columns:
-        from connectors.zendesk_writer import resolve_zendesk_dest_types
-
-        seed = ["subject", "description", "email", "name"]
-        live = resolve_zendesk_dest_types(seed, [], {}, describe_fields=None)
-        columns = [
-            {
-                "name": n,
-                "inferred_type": live.get(n, "VARCHAR"),
-                "nullable": True,
-                "data_type": live.get(n, "VARCHAR"),
-                "label": n,
-            }
-            for n in seed
-        ]
+        return {
+            "ok": False,
+            "error": (
+                f"Zendesk schema Describe returned no fields for {table!r} — "
+                "refuse Map VARCHAR invent (empty→null invent risk)."
+            ),
+            "columns": [],
+            "tables": [table],
+        }
     return {
         "ok": True,
         "columns": columns,

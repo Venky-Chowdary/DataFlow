@@ -376,14 +376,29 @@ def write_mapped_rows(
                         "refuse Map VARCHAR bind (empty→NULL invent risk)."
                     ),
                 )
-            if not physical:
-                mapped_data_cols = [c for c in target_cols if c and c != "_id"]
-                studio_live = isinstance(live_dest, dict) and all(
-                    str(live_dest.get(c) or "").strip() for c in mapped_data_cols
+            mapped_data_cols = [c for c in target_cols if c and c != "_id"]
+            # Partial mapping must not leave Map VARCHAR on missing props
+            # (dynamic mapping invent). Studio may fill gaps; else require_physical.
+            from connectors.writer_common import require_physical_types_for_existing_table
+
+            effective_physical = dict(physical)
+            if isinstance(live_dest, dict):
+                for c in mapped_data_cols:
+                    if effective_physical.get(c) or effective_physical.get(
+                        str(c).lower()
+                    ) or effective_physical.get(str(c).upper()):
+                        continue
+                    st = str(live_dest.get(c) or "").strip()
+                    if st:
+                        effective_physical[c] = st
+            if mapped_data_cols:
+                phys_err = require_physical_types_for_existing_table(
+                    table_existed=True,
+                    physical=effective_physical,
+                    dialect_label="Elasticsearch",
+                    target_cols=mapped_data_cols,
                 )
-                # Mapped fields excluding _id meta — empty properties on typed index
-                # is a probe failure; refuse Map-only bind unless Studio typed all.
-                if mapped_data_cols and not studio_live:
+                if phys_err:
                     return WriteResult(
                         ok=False,
                         rows_written=0,
@@ -391,15 +406,10 @@ def write_mapped_rows(
                         target_schema=host or "localhost",
                         checksum="",
                         chunks_completed=0,
-                        error=(
-                            f"Elasticsearch index {index!r} exists but live mapping "
-                            "types were unavailable for all mapped fields — refuse Map "
-                            "VARCHAR bind (empty→NULL invent risk). Re-run destination "
-                            "schema introspect and retry."
-                        ),
+                        error=phys_err,
                     )
             remat = _es_rematerialize_if_physical_differs(
-                physical=physical,
+                physical=effective_physical if effective_physical else physical,
                 dest_types=dest_types,
                 target_cols=target_cols,
                 headers=headers,

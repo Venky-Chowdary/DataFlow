@@ -319,22 +319,37 @@ def write_mapped_rows(
                         "refuse Map VARCHAR bind (empty→NULL invent risk)."
                     ),
                 )
-            if not physical:
-                # Empty sample on a non-empty / unknown-count collection — refuse
-                # Map-only bind unless Studio typed every mapped field.
+            mapped_data_cols = [c for c in target_cols if c and c != "_id"]
+            try:
+                doc_count = int(coll.estimated_document_count())
+            except Exception:
                 try:
-                    doc_count = int(coll.estimated_document_count())
+                    doc_count = int(coll.count_documents({}))
                 except Exception:
-                    try:
-                        doc_count = int(coll.count_documents({}))
-                    except Exception:
-                        doc_count = -1
-                mapped_data_cols = [c for c in target_cols if c and c != "_id"]
-                studio_live = isinstance(live_dest, dict) and all(
-                    str(live_dest.get(c) or "").strip() for c in mapped_data_cols
+                    doc_count = -1
+            # Empty collection: Map stamps OK for first fill. Non-empty / unknown
+            # count: every mapped field needs BSON sample or Studio carrier
+            # (partial sample must not leave Map VARCHAR invent gaps).
+            if mapped_data_cols and (doc_count > 0 or doc_count < 0):
+                from connectors.writer_common import require_physical_types_for_existing_table
+
+                effective_physical = dict(physical)
+                if isinstance(live_dest, dict):
+                    for c in mapped_data_cols:
+                        if effective_physical.get(c) or effective_physical.get(
+                            str(c).lower()
+                        ) or effective_physical.get(str(c).upper()):
+                            continue
+                        st = str(live_dest.get(c) or "").strip()
+                        if st:
+                            effective_physical[c] = st
+                phys_err = require_physical_types_for_existing_table(
+                    table_existed=True,
+                    physical=effective_physical,
+                    dialect_label="MongoDB",
+                    target_cols=mapped_data_cols,
                 )
-                # Unknown count (-1) on existing collection: fail closed like SQL.
-                if (doc_count > 0 or doc_count < 0) and mapped_data_cols and not studio_live:
+                if phys_err:
                     return WriteResult(
                         ok=False,
                         rows_written=0,
@@ -342,13 +357,9 @@ def write_mapped_rows(
                         target_schema=db_name,
                         checksum="",
                         chunks_completed=0,
-                        error=(
-                            f"MongoDB collection {collection_name!r} exists but "
-                            "live BSON types were unavailable for all mapped fields — "
-                            "refuse Map VARCHAR bind (empty→NULL invent risk). "
-                            "Re-run destination schema introspect and retry."
-                        ),
+                        error=phys_err,
                     )
+                physical = effective_physical
             remat = _mongo_rematerialize_if_physical_differs(
                 physical=physical,
                 dest_types=dest_types,
