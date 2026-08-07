@@ -40,7 +40,7 @@ export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: 
   { id: "time_iso", label: "Time → ISO", detail: "Parse time-of-day values" },
   { id: "hash_pii", label: "Hash PII", detail: "One-way hash for sensitive fields" },
   { id: "cast_integer", label: "Cast integer", detail: "Coerce to whole number (no fractional scale)" },
-  { id: "cast_number", label: "Cast decimal", detail: "Coerce to precise numeric / DECIMAL" },
+  { id: "cast_number", label: "Parse decimal", detail: "Numeric write guard — unparseable cells quarantine (not precision invent)" },
   { id: "cast_boolean", label: "Cast boolean", detail: "Coerce to true/false" },
   { id: "parse_json", label: "Parse JSON", detail: "Normalize JSON / ARRAY / STRUCT payloads" },
   { id: "binary", label: "Binary / base64", detail: "Preserve bytes as base64-safe wire form" },
