@@ -519,7 +519,21 @@ def write_mapped_rows(
             table_existed=table_existed,
             physical=physical,
             dialect_label="SQLite",
-            target_cols=target_cols,
+            # With backfill, ADD COLUMN runs later — only require carriers for
+            # columns already on the table (PG/MySQL fetch physical post-ALTER).
+            target_cols=(
+                [
+                    c
+                    for c in target_cols
+                    if c
+                    and (
+                        c in physical
+                        or str(c).lower() in {str(k).lower() for k in physical}
+                    )
+                ]
+                if (table_existed and backfill_new_fields)
+                else target_cols
+            ),
         )
         if overlay_err:
             return WriteResult(
@@ -534,20 +548,56 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
         if physical:
-            live_dest_types = resolve_mapping_dest_types(
-                target_cols,
-                mappings,
-                column_types,
-                logical_types=logical_types,
-                live_types=physical,
+            from connectors.writer_common import rematerialize_live_dest_types
+
+            # Overlay live carriers for existing columns; additive Map cols keep
+            # Map stamps until ALTER ADD COLUMN (schema-evolution parity).
+            covered_cols: list[str] = []
+            covered_physical: dict[str, str] = {}
+            for c in target_cols or []:
+                if not c:
+                    continue
+                hit = (
+                    physical.get(c)
+                    or physical.get(str(c).lower())
+                    or physical.get(str(c).upper())
+                )
+                if hit and str(hit).strip():
+                    covered_cols.append(c)
+                    covered_physical[c] = str(hit).strip()
+            live_partial = (
+                rematerialize_live_dest_types(
+                    covered_physical, covered_cols, product="SQLite"
+                )
+                if covered_cols
+                else None
             )
-            carriers_differ = any(
+            if covered_cols and live_partial is None:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "main",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "SQLite live DDL incomplete for existing mapped columns — "
+                        "refuse Map VARCHAR rematerialize invent. Re-run "
+                        "destination schema introspect and retry."
+                    ),
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
+            live_dest_types = dict(dest_types or {})
+            if live_partial:
+                live_dest_types.update(live_partial)
+            carriers_differ = bool(covered_cols) and any(
                 str(dest_types.get(c) or "").strip().upper()
                 != str(live_dest_types.get(c) or "").strip().upper()
-                for c in target_cols
+                for c in covered_cols
             )
             if carriers_differ:
-                # Rematerialize from source against live DDL (PG/MySQL-class invent fix).
+                # Rematerialize from source against live DDL (no Map VARCHAR invent).
                 dest_types = live_dest_types
                 target_types = [
                     sqlite_type(dest_types.get(c, logical_types[i]))

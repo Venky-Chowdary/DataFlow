@@ -1517,13 +1517,27 @@ def write_mapped_rows(
                     warnings=transform_errors,
                 )
             if physical:
-                live_dest_types = resolve_mapping_dest_types(
-                    target_cols,
-                    mappings,
-                    column_types,
-                    logical_types=logical_types,
-                    live_types=physical,
+                from connectors.writer_common import rematerialize_live_dest_types
+
+                live_dest_types = rematerialize_live_dest_types(
+                    physical, list(target_cols or []), product="PostgreSQL"
                 )
+                if live_dest_types is None:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            "PostgreSQL live DDL incomplete for mapped columns — "
+                            "refuse Map VARCHAR rematerialize invent. Re-run "
+                            "destination schema introspect and retry."
+                        ),
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
                 carriers_differ = any(
                     str(dest_types.get(c) or "").strip().upper()
                     != str(live_dest_types.get(c) or "").strip().upper()

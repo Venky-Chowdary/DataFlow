@@ -691,20 +691,24 @@ def write_mapped_rows(
         if overlay_err:
             raise RuntimeError(overlay_err)
         if physical:
-            live_dest_types = resolve_mapping_dest_types(
-                target_cols,
-                mappings,
-                column_types,
-                logical_types=logical_types,
-                live_types=physical,
+            from connectors.writer_common import rematerialize_live_dest_types
+
+            live_dest_types = rematerialize_live_dest_types(
+                physical, list(target_cols or []), product="MySQL"
             )
+            if live_dest_types is None:
+                raise RuntimeError(
+                    "MySQL live DDL incomplete for mapped columns — refuse Map "
+                    "VARCHAR rematerialize invent. Re-run destination schema "
+                    "introspect and retry."
+                )
             carriers_differ = any(
                 str(dest_types.get(c) or "").strip().upper()
                 != str(live_dest_types.get(c) or "").strip().upper()
                 for c in target_cols
             )
             if carriers_differ:
-                # Rematerialize from source against live DDL (PG-class invent fix).
+                # Rematerialize from source against live DDL (no Map VARCHAR invent).
                 dest_types = live_dest_types
                 _batch = _mysql_materialize_mapped_batch(
                     headers=headers,
