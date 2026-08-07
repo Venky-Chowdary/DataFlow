@@ -59,6 +59,14 @@ def test_dynamo_empty_key_types_fail_closed(monkeypatch):
     from connectors import dynamodb_writer as dw
 
     client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+            "ItemCount": 0,
+        }
+    }
+    client.scan.return_value = {"Items": []}
     with patch("connectors.dynamodb_writer.boto3_client", return_value=client), patch(
         "connectors.dynamodb_writer._ensure_table"
     ), patch(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Callable
@@ -17,6 +18,152 @@ from connectors.writer_common import (
     row_checksum,
     transform_error_policy,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _fetch_dynamo_physical_types(
+    client: Any,
+    table: str,
+    target_cols: list[str],
+    *,
+    sample_limit: int = 50,
+) -> tuple[dict[str, str], bool]:
+    """Live carriers from AttributeDefinitions + item sample (majority vote).
+
+    Returns ``(physical, sample_ok)``. ``sample_ok`` is False when a non-key
+    sample was required and Scan failed — callers must fail-closed on populated
+    tables rather than Map-VARCHAR bind inventing empty→NULL on live N/BOOL.
+    """
+    from connectors.dynamodb_reader import _ddb_attr_type
+    from services.schema_introspect import (
+        _finalize_mongodb_type,
+        _sample_logical_type,
+    )
+
+    wanted = {str(c) for c in target_cols if c}
+    if not wanted:
+        return {}, True
+    physical: dict[str, str] = {}
+    try:
+        info = client.describe_table(TableName=table)["Table"]
+    except Exception:
+        logger.debug("Dynamo describe_table failed for physical types", exc_info=True)
+        return {}, False
+
+    for attr in info.get("AttributeDefinitions") or []:
+        name = str(attr.get("AttributeName") or "")
+        if not name or name not in wanted:
+            continue
+        carrier = _ddb_attr_type(str(attr.get("AttributeType") or "S"))
+        physical[name] = carrier
+        physical.setdefault(name.lower(), carrier)
+        physical.setdefault(name.upper(), carrier)
+
+    type_counts: dict[str, dict[str, int]] = {
+        c: {} for c in wanted if c not in physical
+    }
+    sample_ok = True
+    if type_counts:
+        try:
+            from boto3.dynamodb.types import TypeDeserializer
+
+            deser = TypeDeserializer()
+            resp = client.scan(TableName=table, Limit=int(sample_limit))
+            for raw in resp.get("Items") or []:
+                if not isinstance(raw, dict):
+                    continue
+                for key, wire in raw.items():
+                    if key not in type_counts:
+                        continue
+                    try:
+                        val = deser.deserialize(wire)
+                    except Exception:  # nosec B112
+                        logger.debug(
+                            "Dynamo sample deserialize skipped for %s",
+                            key,
+                            exc_info=True,
+                        )
+                        continue
+                    if val is None:
+                        continue
+                    if isinstance(val, Decimal):
+                        inferred = "DECIMAL"
+                    elif isinstance(val, set):
+                        inferred = "ARRAY"
+                    else:
+                        inferred = _sample_logical_type(val, key)
+                    if not inferred:
+                        continue
+                    tc = type_counts[key]
+                    tc[inferred] = int(tc.get(inferred, 0)) + 1
+        except Exception:
+            logger.debug("Dynamo physical type sample failed", exc_info=True)
+            sample_ok = False
+
+    for col, counts in type_counts.items():
+        if not counts:
+            continue
+        carrier = _finalize_mongodb_type(counts)
+        if carrier:
+            physical[col] = carrier
+            physical.setdefault(col.lower(), carrier)
+            physical.setdefault(col.upper(), carrier)
+    return physical, sample_ok
+
+
+def _dynamo_rematerialize_if_physical_differs(
+    *,
+    physical: dict[str, str],
+    dest_types: dict[str, str],
+    target_cols: list[str],
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
+    """Rebuild mapped rows when live Dynamo carriers differ from Map stamps."""
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    if not physical:
+        return None
+    live_dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=physical,
+    )
+    carriers_differ = any(
+        str(dest_types.get(c) or "").strip().upper()
+        != str(live_dest_types.get(c) or "").strip().upper()
+        for c in target_cols
+    )
+    if not carriers_differ:
+        return None
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=live_dest_types,
+        preserve_case=True,
+        error_policy=policy,
+        dest_kind="dynamodb",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    return (
+        mapped_rows,
+        list(transform_errors or []),
+        rejected_details,
+        live_dest_types,
+    )
 
 
 @dataclass
@@ -271,47 +418,11 @@ def write_mapped_rows(
         logical_types=logical_types,
         live_types=live_dest if isinstance(live_dest, dict) else None,
     )
-    mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        preserve_case=True,
-        error_policy=policy,
-        dest_kind="dynamodb",
-        destination_pk_columns=list(conflict_columns or []) or None,
-        destination_column_nullability=_kwargs.get("destination_column_nullability"),
-    )
-    tgt_types = [str(dest_types.get(c, logical_types[i] if i < len(logical_types) else "VARCHAR") or "VARCHAR") for i, c in enumerate(target_cols)]
-    from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
 
-    mapped_rows = apply_write_quarantine_matrix(
-        mapped_rows,
-        target_cols,
-        tgt_types,
-        rejected_details,
-        policy,
-        dialect_label="DynamoDB",
-        mappings=mappings,
-    )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "DynamoDB", errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table,
-            target_schema=host or "",
-            checksum="",
-            chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(errors[:3])}",
-            warnings=errors[:10],
-            rejected_rows=len({d["row"] for d in rejected_details}),
-            rejected_details=list(rejected_details),
-        )
-
+    # Connect + describe before Map bind — AttributeDefinitions / sample must
+    # win over Studio VARCHAR stamps (empty→NULL invent on live N/BOOL attrs).
     client = boto3_client("dynamodb", cfg)
+
     if create_table:
         _ensure_table(
             client,
@@ -336,6 +447,107 @@ def write_mapped_rows(
                 "without HASH/RANGE identity (describe_table failed or empty KeySchema). "
                 "Re-check table name/permissions; never soft-skip key preflight."
             ),
+            rejected_details=[],
+        )
+
+    # Always probe live carriers after KeySchema is confirmed (do not gate on a
+    # prior describe blip — create-new still rematerializes from AttrDefs).
+    physical, sample_ok = _fetch_dynamo_physical_types(client, table, target_cols)
+    try:
+        item_count = int(
+            client.describe_table(TableName=table)["Table"].get("ItemCount", 0) or 0
+        )
+    except Exception:
+        item_count = -1
+    mapped_data_cols = [c for c in target_cols if c]
+    studio_live = isinstance(live_dest, dict) and all(
+        str(live_dest.get(c) or "").strip() for c in mapped_data_cols
+    )
+    # Populated / unknown item count + failed non-key sample → refuse Map-only.
+    if (
+        (item_count > 0 or item_count < 0)
+        and mapped_data_cols
+        and not studio_live
+        and (not sample_ok or not physical)
+    ):
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"DynamoDB table {table!r} exists but live attribute types were "
+                "unavailable — refuse Map VARCHAR bind (empty→NULL invent risk). "
+                "Re-run destination schema introspect and retry."
+            ),
+        )
+
+    errors: list[str] = []
+    rejected_details: list[dict] = []
+    remat = _dynamo_rematerialize_if_physical_differs(
+        physical=physical,
+        dest_types=dest_types,
+        target_cols=target_cols,
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        column_types=column_types,
+        logical_types=logical_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
+    )
+    if remat is not None:
+        mapped_rows, errors, rejected_details, dest_types = remat
+    else:
+        mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            preserve_case=True,
+            error_policy=policy,
+            dest_kind="dynamodb",
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=_kwargs.get(
+                "destination_column_nullability"
+            ),
+        )
+
+    tgt_types = [
+        str(
+            dest_types.get(c, logical_types[i] if i < len(logical_types) else "VARCHAR")
+            or "VARCHAR"
+        )
+        for i, c in enumerate(target_cols)
+    ]
+    from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
+
+    mapped_rows = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        tgt_types,
+        rejected_details,
+        policy,
+        dialect_label="DynamoDB",
+        mappings=mappings,
+    )
+    _map_abort = reject_on_strict_policy(policy, rejected_details, "DynamoDB", errors)
+    if _map_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=_map_abort or f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
         )
 

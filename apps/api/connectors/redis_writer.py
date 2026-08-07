@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Any, Callable
 
 from services.error_handling import format_exception_message
@@ -24,6 +26,160 @@ from connectors.writer_common import (
     sanitize_identifier,
     transform_error_policy,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _fetch_redis_physical_types(
+    client: Any,
+    prefix: str,
+    target_cols: list[str],
+    *,
+    sample_limit: int = 50,
+) -> tuple[dict[str, str], int]:
+    """Sample existing JSON docs under ``prefix:*`` for live carriers.
+
+    Returns ``(physical, docs_sampled)``. Empty keyspace or non-JSON values
+    yield ``docs_sampled == 0`` — callers fail-closed when keys exist but no
+    JSON docs could be typed.
+    """
+    from services.schema_introspect import (
+        _finalize_mongodb_type,
+        _sample_logical_type,
+    )
+
+    wanted = {str(c) for c in target_cols if c}
+    if not wanted:
+        return {}, 0
+    pattern = f"{prefix}:*"
+    type_counts: dict[str, dict[str, int]] = {c: {} for c in wanted}
+    sampled = 0
+    cursor = 0
+    try:
+        while sampled < int(sample_limit):
+            cursor, keys = client.scan(
+                cursor=cursor,
+                match=pattern,
+                count=min(32, max(1, int(sample_limit) - sampled)),
+            )
+            for key in keys or []:
+                if sampled >= int(sample_limit):
+                    break
+                raw = client.get(key)
+                if not raw:
+                    continue
+                try:
+                    if isinstance(raw, (bytes, bytearray)):
+                        raw = raw.decode("utf-8")
+                    doc = json.loads(raw)
+                except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(doc, dict):
+                    continue
+                sampled += 1
+                for key_name, val in doc.items():
+                    if key_name not in type_counts or val is None:
+                        continue
+                    if isinstance(val, Decimal):
+                        inferred = "DECIMAL"
+                    else:
+                        inferred = _sample_logical_type(val, key_name)
+                    if not inferred:
+                        continue
+                    tc = type_counts[key_name]
+                    tc[inferred] = int(tc.get(inferred, 0)) + 1
+            if int(cursor) == 0:
+                break
+    except Exception:
+        logger.debug("Redis physical type sample failed", exc_info=True)
+        return {}, -1
+
+    physical: dict[str, str] = {}
+    for col, counts in type_counts.items():
+        if not counts:
+            continue
+        carrier = _finalize_mongodb_type(counts)
+        if carrier:
+            physical[col] = carrier
+            physical.setdefault(col.lower(), carrier)
+            physical.setdefault(col.upper(), carrier)
+    return physical, sampled
+
+
+def _redis_rematerialize_if_physical_differs(
+    *,
+    physical: dict[str, str],
+    dest_types: dict[str, str],
+    target_cols: list[str],
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
+    """Rebuild mapped rows when live Redis JSON carriers differ from Map stamps."""
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    if not physical:
+        return None
+    live_dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=physical,
+    )
+    carriers_differ = any(
+        str(dest_types.get(c) or "").strip().upper()
+        != str(live_dest_types.get(c) or "").strip().upper()
+        for c in target_cols
+    )
+    if not carriers_differ:
+        return None
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=live_dest_types,
+        preserve_case=True,
+        error_policy=policy,
+        dest_kind="redis",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    return (
+        mapped_rows,
+        list(transform_errors or []),
+        rejected_details,
+        live_dest_types,
+    )
+
+
+def _redis_prefix_key_count_hint(client: Any, prefix: str, *, probe: int = 8) -> int:
+    """Return >0 when any ``prefix:*`` key exists; 0 if empty; -1 on probe failure.
+
+    Redis SCAN may return a non-zero cursor with an empty key batch — loop until
+    cursor wraps or a key is found so we never treat a populated keyspace as empty.
+    """
+    try:
+        cursor = 0
+        for _ in range(64):
+            cursor, keys = client.scan(
+                cursor=cursor, match=f"{prefix}:*", count=int(probe)
+            )
+            if keys:
+                return len(keys)
+            if int(cursor) == 0:
+                return 0
+        # Budget exhausted without cursor wrap — unknown, fail closed.
+        return -1
+    except Exception:
+        return -1
 
 
 @dataclass
@@ -229,19 +385,98 @@ def write_mapped_rows(
         logical_types=logical_types,
         live_types=live_dest if isinstance(live_dest, dict) else None,
     )
-    mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        preserve_case=True,
-        error_policy=policy,
-        dest_kind="redis",
-        destination_pk_columns=list(conflict_columns or []) or None,
-        destination_column_nullability=_kwargs.get("destination_column_nullability"),
+
+    # Connect before Map bind — sample existing JSON docs under prefix so live
+    # INTEGER/BOOL carriers win over Map VARCHAR (empty→null invent cliff).
+    client = _redis_client(cfg)
+    key_hint = _redis_prefix_key_count_hint(client, prefix)
+    errors: list[str] = []
+    rejected_details: list[dict] = []
+    mapped_data_cols = [c for c in target_cols if c]
+    studio_live = isinstance(live_dest, dict) and all(
+        str(live_dest.get(c) or "").strip() for c in mapped_data_cols
     )
+    if key_hint < 0 and mapped_data_cols and not studio_live:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=prefix,
+            target_schema=f"db{database or 0}",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                f"Redis prefix {prefix!r} keyspace probe failed — refuse Map "
+                "VARCHAR bind without live JSON types (empty→null invent risk). "
+                "Re-check Redis connectivity and retry."
+            ),
+        )
+    if key_hint > 0:
+        physical, docs_sampled = _fetch_redis_physical_types(client, prefix, target_cols)
+        if docs_sampled <= 0 and mapped_data_cols and not studio_live:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=prefix,
+                target_schema=f"db{database or 0}",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Redis prefix {prefix!r} has existing keys but live JSON "
+                    "types were unavailable — refuse Map VARCHAR bind "
+                    "(empty→null invent risk). Re-run destination schema "
+                    "introspect and retry."
+                ),
+            )
+        remat = _redis_rematerialize_if_physical_differs(
+            physical=physical,
+            dest_types=dest_types,
+            target_cols=target_cols,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            column_types=column_types,
+            logical_types=logical_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            destination_column_nullability=_kwargs.get(
+                "destination_column_nullability"
+            ),
+        )
+        if remat is not None:
+            mapped_rows, errors, rejected_details, dest_types = remat
+        else:
+            mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                dest_types=dest_types,
+                preserve_case=True,
+                error_policy=policy,
+                dest_kind="redis",
+                destination_pk_columns=list(conflict_columns or []) or None,
+                destination_column_nullability=_kwargs.get(
+                    "destination_column_nullability"
+                ),
+            )
+    else:
+        mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            preserve_case=True,
+            error_policy=policy,
+            dest_kind="redis",
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=_kwargs.get(
+                "destination_column_nullability"
+            ),
+        )
+
     from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
 
     tgt_types = [
@@ -301,7 +536,6 @@ def write_mapped_rows(
             rejected_details=rejected_details,
             policy=policy,
         )
-    client = _redis_client(cfg)
     try:
         # Full-refresh overwrite must replace the destination keyspace once per job,
         # not once per chunk. Only the first chunk clears stale keys.
