@@ -137,6 +137,9 @@ def _zendesk_system_seed_carriers(target_cols: list[str]) -> dict[str, str]:
             out[col] = format_enum_domain_carrier(_ZENDESK_TYPE_VALUES)
         elif low in {"email", "name"}:
             out[col] = "VARCHAR(255)"
+        elif low == "id":
+            # Ticket / user primary key — documented integer id wire.
+            out[col] = "INTEGER"
     return out
 
 
@@ -307,6 +310,14 @@ def write_mapped_rows(
     )
     policy = transform_error_policy(error_policy)
     live_dest = _kwargs.get("destination_column_types")
+    # Documented system carriers count as Studio-class for the Describe gate
+    # (subject/priority/id…) — never Map invent, but do not block when Meta is down.
+    seeds = _zendesk_system_seed_carriers(target_cols)
+    studio_for_gate: dict[str, Any] = dict(seeds)
+    if isinstance(live_dest, dict):
+        for key, typ in live_dest.items():
+            if key and str(typ or "").strip():
+                studio_for_gate[str(key)] = str(typ).strip()
     describe_fields: list[dict[str, Any]] | None = None
     describe_exc: Exception | None = None
     try:
@@ -334,7 +345,7 @@ def write_mapped_rows(
         fields=describe_fields,
         exc=describe_exc,
         target_cols=target_cols,
-        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        studio_types=studio_for_gate if studio_for_gate else None,
     )
     if not gate.ok:
         return WriteResult(
@@ -350,7 +361,6 @@ def write_mapped_rows(
     describe_fields = gate.fields
     # Live Describe only. System seeds fill Studio gaps — never override Studio.
     live = _zendesk_live_carriers(target_cols, describe_fields, include_seeds=False)
-    seeds = _zendesk_system_seed_carriers(target_cols)
     studio = live_dest if isinstance(live_dest, dict) else {}
     fallback: dict[str, Any] = dict(seeds)
     for key, typ in studio.items():
@@ -388,7 +398,7 @@ def write_mapped_rows(
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,

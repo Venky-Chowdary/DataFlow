@@ -104,14 +104,25 @@ def _kafka_rematerialize_if_physical_differs(
     """Rebuild mapped rows when live Registry carriers differ from Map stamps."""
     if not physical:
         return None
-    live_dest_types = resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=physical,
-        default="VARCHAR",
+    from connectors.saas_common import merge_saas_live_types
+
+    # Live Registry∩Studio carriers only — never soft-fill Map VARCHAR for gaps
+    # (require_physical already fail-closed on existing subjects).
+    live_map = {
+        str(k): str(v)
+        for k, v in physical.items()
+        if k and str(v or "").strip()
+    }
+    live_dest_types, cov_err = merge_saas_live_types(
+        live_map,
+        list(target_cols or []),
+        studio_types=None,
+        product="Kafka Schema Registry",
     )
+    if cov_err:
+        # Incomplete live map — refuse rematerialize-via-Map invent; caller must
+        # have fail-closed at require_physical.
+        return None
     carriers_differ = any(
         str(dest_types.get(c) or "").strip().upper()
         != str(live_dest_types.get(c) or "").strip().upper()
@@ -306,23 +317,34 @@ def write_mapped_rows(
     )
     policy = transform_error_policy(error_policy)
     live_dest = _kwargs.get("destination_column_types")
-    # JSON wire still serializes via json_default, but quarantine must catch
-    # DECIMAL/BOOLEAN/BINARY/VARCHAR(n) unfit before produce invents bad events
-    # (Schema Registry + compaction consumers assume typed fidelity).
-    dest_types = resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=live_dest if isinstance(live_dest, dict) else None,
-        default="VARCHAR",
-    )
-
     registry = (
         schema_registry_url
         or str(_kwargs.get("registry_url") or "")
         or (connection_string if "http" in (connection_string or "") else "")
     )
+    # JSON wire still serializes via json_default, but quarantine must catch
+    # DECIMAL/BOOLEAN/BINARY/VARCHAR(n) unfit before produce invents bad events
+    # (Schema Registry + compaction consumers assume typed fidelity).
+    studio_err: str | None = None
+    if isinstance(live_dest, dict) and live_dest:
+        from connectors.saas_common import merge_saas_live_types
+
+        dest_types, studio_err = merge_saas_live_types(
+            {},
+            list(target_cols or []),
+            studio_types=live_dest,
+            product="Kafka",
+        )
+    else:
+        dest_types = resolve_mapping_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            logical_types=logical_types,
+            live_types=None,
+            default="VARCHAR",
+        )
+
     registered_schema_id: int | None = None
     transform_errors: list[str] = []
     rejected_details: list[dict] = []
@@ -447,6 +469,18 @@ def write_mapped_rows(
             registered_schema_id = live_schema_id
         else:
             # Subject missing — Map/Studio carriers authoritative for first register.
+            # Partial Studio must not soft-fill Map/logical VARCHAR for gaps.
+            if studio_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=studio_err,
+                    driver="kafka",
+                )
             if mapped_data_cols and not studio_live and not create_table:
                 return WriteResult(
                     ok=False,
@@ -504,6 +538,18 @@ def write_mapped_rows(
                     driver="kafka",
                 )
     else:
+        # Schemaless JSON topic — partial Studio must not soft-bind Map VARCHAR.
+        if studio_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=topic,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=studio_err,
+                driver="kafka",
+            )
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
             headers=headers,
             data_rows=data_rows,
@@ -520,7 +566,7 @@ def write_mapped_rows(
             ),
         )
 
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,

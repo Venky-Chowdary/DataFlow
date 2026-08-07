@@ -25,6 +25,95 @@ def test_kafka_rematerialize_when_registry_integer_vs_map_varchar():
     assert len(mapped_rows) + len(rejected) >= 1
 
 
+def test_kafka_rematerialize_refuses_map_varchar_gap_fill():
+    """Incomplete Registry map must not soft-invent Map VARCHAR for gaps."""
+    from connectors.kafka_writer import _kafka_rematerialize_if_physical_differs
+
+    batch = _kafka_rematerialize_if_physical_differs(
+        physical={"id": "INTEGER"},
+        dest_types={"id": "VARCHAR", "amount": "VARCHAR"},
+        target_cols=["id", "amount"],
+        headers=["id", "amount"],
+        data_rows=[["1", "9.99"]],
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "VARCHAR"},
+            {"source": "amount", "target": "amount", "target_type": "VARCHAR"},
+        ],
+        column_types={"id": "VARCHAR", "amount": "VARCHAR"},
+        logical_types=["VARCHAR", "VARCHAR"],
+        policy="quarantine",
+    )
+    assert batch is None
+
+
+def test_kafka_schemaless_refuses_partial_studio():
+    """Schemaless topic + partial Studio — fail-closed, no Map VARCHAR invent."""
+    from connectors.kafka_writer import write_mapped_rows
+
+    with patch("connectors.kafka_writer._producer") as prod:
+        mock_prod = prod.return_value
+        mock_prod.send.return_value.get.return_value = None
+        result = write_mapped_rows(
+            host="localhost",
+            port=9092,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="events",
+            headers=["id", "amount"],
+            data_rows=[["1", "9.99"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "amount", "target": "amount", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "amount": "VARCHAR"},
+            destination_column_types={"id": "INTEGER"},
+            create_table=True,
+        )
+    prod.assert_not_called()
+    assert result.ok is False
+    assert "amount" in (result.error or "").lower()
+
+
+def test_kafka_registry_first_register_refuses_partial_studio():
+    """Missing subject + create_table + partial Studio — refuse Map invent."""
+    from connectors.kafka_writer import write_mapped_rows
+
+    with patch(
+        "connectors.kafka_writer._fetch_kafka_physical_types",
+        return_value=({}, None, False),
+    ), patch(
+        "connectors.confluent_schema_registry.register_json_schema",
+    ) as reg:
+        result = write_mapped_rows(
+            host="localhost",
+            port=9092,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="events",
+            headers=["id", "amount"],
+            data_rows=[["1", "9.99"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "amount", "target": "amount", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "amount": "VARCHAR"},
+            destination_column_types={"id": "INTEGER"},
+            schema_registry_url="http://registry:8081",
+            create_table=True,
+        )
+    reg.assert_not_called()
+    assert result.ok is False
+    assert "amount" in (result.error or "").lower()
+
+
 def test_logical_from_json_schema_decimal_media_type():
     from connectors.confluent_schema_registry import _logical_from_json_schema_prop
 

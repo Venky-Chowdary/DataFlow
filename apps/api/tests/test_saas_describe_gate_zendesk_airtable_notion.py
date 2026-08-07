@@ -52,6 +52,7 @@ def test_gate_saas_describe_empty_with_studio_allows_fallback():
 
 
 def test_zendesk_describe_failure_refuses_map_only():
+    """Custom (non-seeded) field + Describe down → refuse Map invent."""
     from connectors.zendesk_writer import write_mapped_rows
 
     with patch(
@@ -62,12 +63,16 @@ def test_zendesk_describe_failure_refuses_map_only():
             host="https://acme.zendesk.com",
             table_name="tickets",
             api_key="tok",
-            headers=["subject"],
+            headers=["cf_custom_note"],
             data_rows=[["help"]],
             mappings=[
-                {"source": "subject", "target": "subject", "target_type": "VARCHAR"}
+                {
+                    "source": "cf_custom_note",
+                    "target": "cf_custom_note",
+                    "target_type": "VARCHAR",
+                }
             ],
-            column_types={"subject": "VARCHAR"},
+            column_types={"cf_custom_note": "VARCHAR"},
             write_mode="insert",
             port=443,
             database="",
@@ -84,9 +89,49 @@ def test_zendesk_describe_failure_refuses_map_only():
 
 
 def test_zendesk_empty_describe_refuses_map_only():
+    """Custom (non-seeded) field + empty Describe → refuse Map invent."""
     from connectors.zendesk_writer import write_mapped_rows
 
     with patch("connectors.zendesk.describe_fields", return_value=[]):
+        result = write_mapped_rows(
+            host="https://acme.zendesk.com",
+            table_name="tickets",
+            api_key="tok",
+            headers=["cf_custom_note"],
+            data_rows=[["help"]],
+            mappings=[
+                {
+                    "source": "cf_custom_note",
+                    "target": "cf_custom_note",
+                    "target_type": "VARCHAR",
+                }
+            ],
+            column_types={"cf_custom_note": "VARCHAR"},
+            write_mode="insert",
+            port=443,
+            database="",
+            username="user@ex.com",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=True,
+        )
+    assert result.ok is False
+    assert "no fields" in (result.error or "").lower()
+
+
+def test_zendesk_describe_down_allows_system_seed_carriers():
+    """Documented system columns may write when Describe is down (seed carriers)."""
+    from connectors.zendesk_writer import write_mapped_rows
+
+    with patch(
+        "connectors.zendesk.describe_fields",
+        side_effect=RuntimeError("timeout"),
+    ), patch("connectors.zendesk_writer.request") as mock_req:
+        resp = type("R", (), {})()
+        resp.json = lambda: {"ticket": {"id": 1, "subject": "help"}}
+        resp.raise_for_status = lambda: None
+        mock_req.return_value = resp
         result = write_mapped_rows(
             host="https://acme.zendesk.com",
             table_name="tickets",
@@ -106,8 +151,8 @@ def test_zendesk_empty_describe_refuses_map_only():
             connection_string="",
             ssl=True,
         )
-    assert result.ok is False
-    assert "no fields" in (result.error or "").lower()
+    assert result.ok is True
+    assert result.rows_written == 1
 
 
 def test_airtable_describe_auth_fail_closed():
