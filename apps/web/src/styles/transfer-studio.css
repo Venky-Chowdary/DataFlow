@@ -6223,10 +6223,17 @@ th.df2-type-string .df2-type-badge {
   max-height: min(52vh, 520px);
   min-height: 220px;
 }
-.df2-live-log.is-collapsible.is-collapsed {
-  min-height: 0;
-  max-height: none;
+.df2-live-log.is-collapsible.is-collapsed,
+.df2-live-log.is-collapsed {
+  min-height: 0 !important;
+  max-height: none !important;
+  height: auto !important;
+  flex: 0 0 auto !important;
   box-shadow: 0 -2px 12px rgba(15, 23, 42, 0.08);
+}
+.df2-theater-v3-log-section:has(.df2-live-log.is-collapsed) {
+  flex: 0 0 auto !important;
+  min-height: 0 !important;
 }
 .df2-live-log.is-jobs {
   min-height: 280px;
@@ -6234,10 +6241,19 @@ th.df2-type-string .df2-type-badge {
   border-radius: 0;
   border: 0;
 }
+.df2-live-log.is-jobs.is-collapsed {
+  min-height: 0 !important;
+  max-height: none !important;
+}
 .df2-live-log.is-result {
   min-height: 160px;
   max-height: min(40vh, 360px);
   border-radius: 8px;
+}
+.df2-live-log.is-result.is-collapsed {
+  min-height: 0 !important;
+  max-height: none !important;
+  height: auto !important;
 }
 
 .df2-live-log-head {

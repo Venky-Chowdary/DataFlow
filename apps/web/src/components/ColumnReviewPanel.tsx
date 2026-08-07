@@ -566,6 +566,30 @@ export function ColumnReviewPanel({
               <strong>New destination table</strong>
               {" — create-new fields; types will CREATE on first write"}
               {destType ? ` with ${destType}-native DDL` : ""}.
+              {mappings.filter(
+                (m) =>
+                  m.createNew
+                  && (m.fidelity || "").toLowerCase() === "preserve"
+                  && !mappingRequiresRiskAck(m)
+                  && !isIntentionalOmit(m),
+              ).length >= 3 && (
+                <>
+                  {" "}
+                  <strong>
+                    {mappings.filter(
+                      (m) =>
+                        m.createNew
+                        && (m.fidelity || "").toLowerCase() === "preserve"
+                        && !mappingRequiresRiskAck(m)
+                        && !isIntentionalOmit(m),
+                    ).length}{" "}
+                    equivalent
+                  </strong>
+                  {" mappings (lossless type path) — use "}
+                  <strong>Approve eligible</strong>
+                  {" once; no Risk Contract required."}
+                </>
+              )}
               {mappings.some((m) => hasCreateNewTypeRisk(m)) && (
                 <>
                   {" "}

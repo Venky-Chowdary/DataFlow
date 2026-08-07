@@ -83,21 +83,46 @@ def _normalize(name: str) -> str:
     return re.sub(r"_+", "_", s).strip("_")
 
 
+# Roles that short/substring token hits often false-positive on metric names
+# (e.g. "state" in "State Legitimacy", "id" inside "idps").
+_WEAK_LEXICON_ROLES = frozenset({
+    "state_code", "identifier", "status", "region_code", "quantity",
+})
+
+
 def _role_from_name(name: str) -> tuple[str | None, float]:
     norm = _normalize(name)
-    tokens = norm.split("_")
+    tokens = [t for t in norm.split("_") if t]
+    token_set = set(tokens)
     best_role: str | None = None
     best_score = 0.0
 
     for role, aliases in SEMANTIC_ROLES.items():
         for alias in aliases:
             alias_norm = _normalize(alias)
+            if not alias_norm:
+                continue
             if norm == alias_norm:
                 return role, 0.98
-            if alias_norm in tokens or norm.endswith(alias_norm) or alias_norm in norm:
-                score = 0.88 if len(alias_norm) > 3 else 0.75
-                if score > best_score:
-                    best_role, best_score = role, score
+            # Short aliases (id, st, …) must be whole tokens — never substring
+            # ("id" inside "idps", "st" inside "first").
+            if len(alias_norm) <= 3:
+                if alias_norm in token_set:
+                    score = 0.75
+                else:
+                    continue
+            elif (
+                alias_norm in token_set
+                or norm.endswith("_" + alias_norm)
+                or norm.startswith(alias_norm + "_")
+            ):
+                score = 0.88
+            elif alias_norm in norm and len(alias_norm) > 4:
+                score = 0.8
+            else:
+                continue
+            if score > best_score:
+                best_role, best_score = role, score
     return best_role, best_score
 
 
@@ -148,7 +173,15 @@ def analyze_column(name: str, inferred_type: str = "VARCHAR", samples: list[str]
     role_name, name_conf = _role_from_name(name)
     role_sample, sample_conf = _role_from_samples(samples, inferred_type)
 
-    if role_sample and sample_conf > name_conf:
+    # Numeric metric samples beat weak lexicon (FSI "P1: State Legitimacy" ≠ state_code).
+    if (
+        role_sample == "numeric_value"
+        and sample_conf >= 0.66
+        and role_name in _WEAK_LEXICON_ROLES
+        and name_conf < 0.98
+    ):
+        role, confidence, source = "numeric_value", max(sample_conf, 0.82), "value_pattern"
+    elif role_sample and sample_conf > name_conf:
         role, confidence, source = role_sample, sample_conf, "value_pattern"
     elif role_name:
         role, confidence, source = role_name, name_conf, "header_lexicon"

@@ -1934,17 +1934,30 @@ def _apply_create_new_risk_stamps(
                 hard_cap=0.84,
             )
         elif strategy == "identity_passthrough":
-            # Projected CREATE is not dest-proven — stay under auto-approve floor.
-            row["requires_review"] = True
-            try:
-                base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
-            except (TypeError, ValueError):
-                base = IDENTITY_PASSTHROUGH_CONFIDENCE
-            row["confidence"] = _calibrated_confidence(
-                base,
-                score_gap=float(row.get("score_gap") or 0.0),
-                requires_review=True,
-                hard_cap=0.84,
-            )
+            fid = str(row.get("fidelity") or "").strip().lower()
+            # Equivalent create-new (preserve) — high type certainty, still not
+            # silent Ready: UI Approve / Approve-eligible; no Risk Contract spam.
+            if fid in {"preserve", "lossless"}:
+                row["requires_review"] = False
+                row["mapping_class"] = "equivalent_create_new"
+                try:
+                    base = float(row.get("confidence") or 0.95)
+                except (TypeError, ValueError):
+                    base = 0.95
+                row["confidence"] = round(min(0.97, max(base, 0.95)), 3)
+            else:
+                # Projected CREATE with cast/mutate risk — stay under G4 floor.
+                row["requires_review"] = True
+                try:
+                    base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
+                except (TypeError, ValueError):
+                    base = IDENTITY_PASSTHROUGH_CONFIDENCE
+                row["confidence"] = _calibrated_confidence(
+                    base,
+                    score_gap=float(row.get("score_gap") or 0.0),
+                    requires_review=True,
+                    hard_cap=0.84,
+                    fidelity=fid,
+                )
         out.append(row)
     return out

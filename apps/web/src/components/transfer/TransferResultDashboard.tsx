@@ -763,7 +763,7 @@ export function TransferResultDashboard({
         </div>
       )}
 
-      <section className="df2-job-log-panel is-result is-open" aria-label="Job event log">
+      <section className="df2-job-log-panel is-result" aria-label="Job event log">
         <LiveEventLog
           lines={eventLog}
           variant="result"

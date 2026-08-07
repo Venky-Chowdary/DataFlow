@@ -207,17 +207,23 @@ def mapping_fidelity(
     if t_fidelity == "lossy_cast":
         from services.conversion_contract import ConversionClass
 
+        # Type path already proven non-lossy above. Typed parse (decimal/integer/…)
+        # is a quarantine guard for dirty cells — not precision invent. Create-new
+        # and same-family carriers are equivalent (preserve), so Map does not spam
+        # Review/Risk Contract on Excel DECIMAL → Postgres NUMERIC.
         return {
-            "verdict": "cast",
+            "verdict": "preserve",
             "reason": (
-                f"Parsed via '{transform}'; the type path holds, but unparseable "
-                "values are quarantined rather than written."
+                f"{src_type} → {tgt_type} is equivalent"
+                f"{' (create-new)' if create_new else ''}; "
+                f"'{transform}' parse guards quarantine unparseable cells only."
             ),
             "type_narrowing": False,
             "transform_fidelity": t_fidelity,
-            "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+            "conversion_class": ConversionClass.LOSSLESS.value,
             "invents_capacity": False,
             "requires_risk_contract": False,
+            "parse_guard": transform,
         }
     from services.conversion_contract import ConversionClass
 

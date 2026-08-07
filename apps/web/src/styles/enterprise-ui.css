@@ -5241,16 +5241,39 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin: 0 18px 12px;
   border: 1px solid #1e293b;
   border-radius: 12px;
-  min-height: 200px;
+  min-height: 0;
   max-height: min(42vh, 420px);
   padding: 0;
+  flex: 0 0 auto;
 }
 
 .df2-job-log-panel.is-result .df2-live-log {
   flex: 1 1 auto;
   border: 0;
   border-radius: 12px;
-  min-height: 200px;
+  min-height: 0;
+  max-height: min(42vh, 420px);
+}
+
+/* Collapsed Job log — header + hint only; never reserve expanded shell height */
+.df2-job-log-panel.is-result:has(.df2-live-log.is-collapsed),
+.df2-result-dashboard > .df2-job-log-panel.is-result:has(.df2-live-log.is-collapsed) {
+  min-height: 0 !important;
+  max-height: none !important;
+  height: auto !important;
+  flex: 0 0 auto !important;
+}
+
+.df2-job-log-panel.is-result .df2-live-log.is-collapsed,
+.df2-job-log-panel.is-result .df2-live-log.is-collapsible.is-collapsed {
+  min-height: 0 !important;
+  max-height: none !important;
+  height: auto !important;
+  flex: 0 0 auto !important;
+}
+
+.df2-job-log-panel.is-result:has(.df2-live-log.is-open) .df2-live-log.is-open {
+  min-height: 160px;
   max-height: min(42vh, 420px);
 }
 
@@ -6156,10 +6179,14 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-result-dashboard > .df2-job-log-panel.is-result {
   flex: 0 0 auto !important;
   margin: 0 var(--df-result-pad-x) 12px !important;
-  min-height: 140px !important;
-  max-height: 220px !important;
+  min-height: 0 !important;
+  max-height: none !important;
   width: auto !important;
   box-sizing: border-box !important;
+}
+
+.df2-result-dashboard > .df2-job-log-panel.is-result:has(.df2-live-log.is-open) {
+  max-height: 220px !important;
 }
 
 .df2-result-actions {
