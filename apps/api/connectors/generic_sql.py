@@ -4417,26 +4417,38 @@ def write_mapped_rows(
                 target_column_types.get(c, "string") for c in target_cols
             ]
             overlaid = overlay_physical_bind_types(target_cols, type_list, physical)
+            carriers_differ = any(
+                str(type_list[i] or "").strip().upper()
+                != str(overlaid[i] or "").strip().upper()
+                for i in range(len(target_cols))
+            )
             for col, typ in zip(target_cols, overlaid):
                 target_column_types[col] = typ
-            # Re-quarantine on physical DDL — Map VARCHAR empties that survived
-            # pre-overlay must refuse against live DATE/INT/FLOAT/BOOL.
             _tgt_overlaid = [
                 target_column_types.get(c, "string") for c in target_cols
             ]
-            mapped_rows = apply_write_quarantine_matrix(
-                mapped_rows,
-                target_cols,
-                _tgt_overlaid,
-                rejected_details,
-                policy,
-                dialect_label=_engine_label,
-                mappings=mappings,
-                dest_db=dest_db or "",
-            )
-            if sparse_rows:
-                sparse_rows = apply_write_quarantine_matrix(
-                    sparse_rows,
+            if carriers_differ:
+                # Rematerialize from source against live DDL — matrix-only on
+                # already-coerced Map cells still invents empty→NULL / polarity.
+                mapped_rows, transform_errors, rejected_details = (
+                    build_mapped_rows_with_details(
+                        headers=headers,
+                        data_rows=data_rows,
+                        mappings=mappings,
+                        target_cols=target_cols,
+                        column_types=column_types,
+                        error_policy=policy,
+                        dest_types=target_column_types,
+                        preserve_case=True,
+                        dest_kind=str(dest_db or type or "sql").lower(),
+                        destination_pk_columns=list(conflict_columns or []) or None,
+                        destination_column_nullability=_kwargs.get(
+                            "destination_column_nullability"
+                        ),
+                    )
+                )
+                mapped_rows = apply_write_quarantine_matrix(
+                    mapped_rows,
                     target_cols,
                     _tgt_overlaid,
                     rejected_details,
@@ -4445,6 +4457,35 @@ def write_mapped_rows(
                     mappings=mappings,
                     dest_db=dest_db or "",
                 )
+                sparse_rows = []
+                if write_mode == "upsert" and conflict_columns:
+                    mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+                mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
+                rows_for_checksum = list(mapped_rows)
+            else:
+                # Re-quarantine on physical DDL — Map VARCHAR empties that survived
+                # pre-overlay must refuse against live DATE/INT/FLOAT/BOOL.
+                mapped_rows = apply_write_quarantine_matrix(
+                    mapped_rows,
+                    target_cols,
+                    _tgt_overlaid,
+                    rejected_details,
+                    policy,
+                    dialect_label=_engine_label,
+                    mappings=mappings,
+                    dest_db=dest_db or "",
+                )
+                if sparse_rows:
+                    sparse_rows = apply_write_quarantine_matrix(
+                        sparse_rows,
+                        target_cols,
+                        _tgt_overlaid,
+                        rejected_details,
+                        policy,
+                        dialect_label=_engine_label,
+                        mappings=mappings,
+                        dest_db=dest_db or "",
+                    )
             _late_abort = reject_on_strict_policy(
                 policy, rejected_details, "SQL", transform_errors
             )

@@ -71,6 +71,199 @@ def sf_type(inferred: str) -> str:
     return materialize_dest_ddl("snowflake", inferred)
 
 
+@dataclass
+class _SfMaterializedBatch:
+    mapped_rows: list[tuple]
+    sparse_rows: list[tuple]
+    transform_errors: list[str]
+    rejected_details: list
+    target_types: list[str]
+    dest_types: dict[str, str]
+    rows_for_checksum: list[tuple]
+
+
+def _sf_materialize_mapped_batch(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    live_dest_types: dict[str, str] | None = None,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> _SfMaterializedBatch:
+    """Map + quarantine against ``dest_types`` (call again after live DDL overlay)."""
+    from connectors.writer_common import (
+        normalize_temporal_cells,
+        quarantine_currency_markers_into_numeric,
+        quarantine_unfit_arrays,
+        quarantine_unfit_binaries,
+        quarantine_unfit_bitstrings,
+        quarantine_unfit_booleans,
+        quarantine_unfit_enum_set,
+        quarantine_unfit_integers,
+        quarantine_unfit_json,
+        quarantine_unfit_specialty_types,
+        quarantine_unfit_strings,
+        quarantine_unfit_temporals,
+        quarantine_unfit_years,
+    )
+
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        error_policy=policy,
+        dest_kind="snowflake",
+        destination_pk_columns=list(destination_pk_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    sized_logical = [dest_types.get(c, logical_types[i]) for i, c in enumerate(target_cols)]
+    target_types = resolve_snowflake_create_types(sized_logical, mapped_rows)
+    if isinstance(live_dest_types, dict) and live_dest_types:
+        live_fold = {str(k).lower(): str(v) for k, v in live_dest_types.items() if k and v}
+        for i, col in enumerate(target_cols):
+            hit = live_fold.get(str(col).lower())
+            if hit:
+                target_types[i] = sf_type(hit)
+    mapped_rows = _quarantine_unfit_decimals(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_currency_markers_into_numeric(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_years(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_booleans(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_temporals(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_specialty_types(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_integers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake INTEGER",
+    )
+    mapped_rows = quarantine_unfit_bitstrings(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_binaries(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake BINARY",
+    )
+    mapped_rows = quarantine_unfit_enum_set(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_strings(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake VARCHAR",
+    )
+    mapped_rows = quarantine_unfit_arrays(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake",
+    )
+    mapped_rows = quarantine_unfit_json(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Snowflake VARIANT",
+    )
+    mapped_rows = normalize_temporal_cells(
+        mapped_rows, target_types, target_cols, engine="snowflake"
+    )
+    return _SfMaterializedBatch(
+        mapped_rows=mapped_rows,
+        sparse_rows=[],
+        transform_errors=list(transform_errors or []),
+        rejected_details=rejected_details,
+        target_types=target_types,
+        dest_types=dict(dest_types),
+        rows_for_checksum=list(mapped_rows),
+    )
+
+
+def _sf_rematerialize_if_physical_differs(
+    *,
+    physical: dict[str, str],
+    dest_types: dict[str, str],
+    target_cols: list[str],
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    destination_column_nullability: Any = None,
+) -> _SfMaterializedBatch | None:
+    """Rebuild from source when live DDL carriers differ from Map stamps."""
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    if not physical:
+        return None
+    live_dest_types = resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        live_types=physical,
+    )
+    carriers_differ = any(
+        str(dest_types.get(c) or "").strip().upper()
+        != str(live_dest_types.get(c) or "").strip().upper()
+        for c in target_cols
+    )
+    if not carriers_differ:
+        return None
+    return _sf_materialize_mapped_batch(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=live_dest_types,
+        logical_types=logical_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        live_dest_types=physical,
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+
+
 def _is_fakesnow_connection(conn: Any) -> bool:
     """Return True for the local fakesnow emulator — it does not support PUT/COPY."""
     return (
@@ -911,118 +1104,29 @@ def write_mapped_rows(
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
 
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+    _batch = _sf_materialize_mapped_batch(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
         dest_types=dest_types,
-        error_policy=policy,
-        dest_kind="snowflake",
+        logical_types=logical_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        live_dest_types=live_dest_types if isinstance(live_dest_types, dict) else None,
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=dest_nullability,
     )
-
-    # Size Snowflake NUMBER columns from the actual batch data only when Map
-    # did not stamp an explicit DECIMAL/NUMBER(p,s). Prefer integer capacity
-    # over fractional digits so NUMBER(38,s) never under-fits bare DECIMAL.
-    sized_logical = [dest_types.get(c, logical_types[i]) for i, c in enumerate(target_cols)]
-    target_types = resolve_snowflake_create_types(sized_logical, mapped_rows)
-    # Live physical columns beat create-sizing invent (existing table path).
-    if isinstance(live_dest_types, dict) and live_dest_types:
-        live_fold = {str(k).lower(): str(v) for k, v in live_dest_types.items() if k and v}
-        for i, col in enumerate(target_cols):
-            hit = live_fold.get(str(col).lower())
-            if hit:
-                target_types[i] = sf_type(hit)
-    mapped_rows = _quarantine_unfit_decimals(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    from connectors.writer_common import (
-        normalize_temporal_cells,
-        quarantine_currency_markers_into_numeric,
-        quarantine_unfit_arrays,
-        quarantine_unfit_binaries,
-        quarantine_unfit_bitstrings,
-        quarantine_unfit_booleans,
-        quarantine_unfit_enum_set,
-        quarantine_unfit_integers,
-        quarantine_unfit_json,
-        quarantine_unfit_specialty_types,
-        quarantine_unfit_strings,
-        quarantine_unfit_temporals,
-        quarantine_unfit_years,
-    )
-
-    mapped_rows = quarantine_currency_markers_into_numeric(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_years(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_booleans(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_temporals(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_specialty_types(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_integers(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="Snowflake INTEGER",
-    )
-    mapped_rows = quarantine_unfit_bitstrings(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_binaries(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="Snowflake BINARY",
-    )
-    mapped_rows = quarantine_unfit_enum_set(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_strings(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="Snowflake VARCHAR",
-    )
-    mapped_rows = quarantine_unfit_arrays(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="Snowflake",
-    )
-    mapped_rows = quarantine_unfit_json(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="Snowflake VARIANT",
-    )
-    # Destination-native temporal normalize (ISO-Z → TIMESTAMP_NTZ wall clock).
-    mapped_rows = normalize_temporal_cells(
-        mapped_rows, target_types, target_cols, engine="snowflake"
-    )
-
+    mapped_rows = _batch.mapped_rows
+    transform_errors = _batch.transform_errors
+    rejected_details = _batch.rejected_details
+    target_types = _batch.target_types
+    dest_types = _batch.dest_types
+    rows_for_checksum = _batch.rows_for_checksum
     sparse_rows: list[tuple] = []
-    rows_for_checksum: list[tuple] = list(mapped_rows)
+
     try:
         conflict = resolve_conflict_targets(conflict_columns, target_cols)
     except ValueError as exc:
@@ -1293,9 +1397,39 @@ def write_mapped_rows(
                         rejected_details=rejected_details,
                         warnings=transform_errors,
                     )
-                target_types = _overlay_snowflake_physical_bind_types(
-                    target_cols, target_types, physical
+                _re = _sf_rematerialize_if_physical_differs(
+                    physical=physical,
+                    dest_types=dest_types,
+                    target_cols=target_cols,
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                    column_types=column_types,
+                    logical_types=logical_types,
+                    policy=policy,
+                    conflict_columns=conflict,
+                    write_mode=write_mode,
+                    destination_column_nullability=dest_nullability,
                 )
+                if _re is not None:
+                    dest_types = _re.dest_types
+                    mapped_rows = _re.mapped_rows
+                    transform_errors = _re.transform_errors
+                    rejected_details = _re.rejected_details
+                    target_types = _re.target_types
+                    rows_for_checksum = _re.rows_for_checksum
+                    if write_mode == "upsert" and conflict:
+                        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+                        if DF_LSN_COL in target_cols:
+                            mapped_rows = dedupe_rows_by_pk_and_lsn(
+                                mapped_rows, conflict, target_cols
+                            )
+                        else:
+                            mapped_rows = dedupe_rows(mapped_rows, conflict, target_cols)
+                else:
+                    target_types = _overlay_snowflake_physical_bind_types(
+                        target_cols, target_types, physical
+                    )
 
                 if sparse_rows:
                     sparse_rows = bind_sql_mapped_rows_with_quarantine(
@@ -1384,9 +1518,47 @@ def write_mapped_rows(
                         rejected_details=rejected_details,
                         warnings=transform_errors,
                     )
-                target_types = _overlay_snowflake_physical_bind_types(
-                    target_cols, target_types, physical
+                _re = _sf_rematerialize_if_physical_differs(
+                    physical=physical,
+                    dest_types=dest_types,
+                    target_cols=target_cols,
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                    column_types=column_types,
+                    logical_types=logical_types,
+                    policy=policy,
+                    conflict_columns=conflict_columns,
+                    write_mode=write_mode,
+                    destination_column_nullability=dest_nullability,
                 )
+                if _re is not None:
+                    dest_types = _re.dest_types
+                    mapped_rows = _re.mapped_rows
+                    transform_errors = _re.transform_errors
+                    rejected_details = _re.rejected_details
+                    target_types = _re.target_types
+                    rows_for_checksum = _re.rows_for_checksum
+                else:
+                    target_types = _overlay_snowflake_physical_bind_types(
+                        target_cols, target_types, physical
+                    )
+                _late_abort = reject_on_strict_policy(
+                    policy, rejected_details, "Snowflake", transform_errors
+                )
+                if _late_abort:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=_late_abort,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
+                total = len(mapped_rows)
                 load_method = _load_rows_into_table(
                     cur,
                     table_name,
