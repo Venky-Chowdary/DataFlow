@@ -1902,6 +1902,7 @@ def prepare_records_for_vector_write(
     contract_primary_key: str | None = None,
     label: str = "vector",
     destination_column_nullability: dict[str, bool] | None = None,
+    destination_column_types: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
     """Apply Map transforms + Risk Contracts before embedding/upsert.
 
@@ -1935,6 +1936,16 @@ def prepare_records_for_vector_write(
         target_cols = list(headers)
         source_for_target = list(headers)
         dest_types = {h: (column_types or {}).get(h, "string") for h in target_cols}
+
+    live = destination_column_types or {}
+    if live:
+        dest_types = resolve_mapping_dest_types(
+            target_cols,
+            list(mappings or []),
+            column_types,
+            live_types=live if isinstance(live, dict) else None,
+            default="VARCHAR",
+        )
 
     mapped, _errors, rejected = build_mapped_rows_with_details(
         headers=headers,

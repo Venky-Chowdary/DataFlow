@@ -51,6 +51,30 @@ def _headers(api_key: str) -> dict[str, str]:
     return headers
 
 
+def _qdrant_live_vector_size(collection_info: dict[str, Any]) -> int | None:
+    """Extract configured vector size from GET /collections/{name} JSON."""
+    result = collection_info.get("result") if isinstance(collection_info, dict) else None
+    if not isinstance(result, dict):
+        result = collection_info if isinstance(collection_info, dict) else {}
+    config = result.get("config") if isinstance(result, dict) else None
+    params = (config or {}).get("params") if isinstance(config, dict) else None
+    vectors = (params or {}).get("vectors") if isinstance(params, dict) else None
+    if isinstance(vectors, dict):
+        # Named vectors: take first size; unnamed: {"size": N, "distance": ...}.
+        if "size" in vectors:
+            try:
+                return int(vectors["size"])
+            except (TypeError, ValueError):
+                return None
+        for _name, spec in vectors.items():
+            if isinstance(spec, dict) and "size" in spec:
+                try:
+                    return int(spec["size"])
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "requests"
@@ -248,6 +272,8 @@ def write_mapped_rows(
         stream_contracts=_kwargs.get("stream_contracts"),
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="qdrant",
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        destination_column_types=_kwargs.get("destination_column_types"),
     )
     if map_abort:
         return WriteResult(
@@ -368,12 +394,61 @@ def write_mapped_rows(
         exists = session.get(
             f"{base_url}/collections/{collection}", headers=hdrs, timeout=10
         )
-        if exists.status_code != 200:
-            if not create_table:
-                raise RuntimeError(
-                    f"Qdrant collection '{collection}' is missing and "
-                    "create_table is disabled"
+        if exists.status_code == 200:
+            try:
+                live_dim = _qdrant_live_vector_size(exists.json())
+            except Exception:
+                live_dim = None
+            if live_dim is None:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Qdrant collection {collection!r} exists but live vector "
+                        "size was unavailable — refuse upsert with source-only "
+                        "dimension (silent dim invent / reject risk). Re-check "
+                        "collection config and retry."
+                    ),
+                    rejected_details=list(rejected),
+                    rejected_rows=len(rejected),
                 )
+            if int(live_dim) != int(dimension):
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Qdrant collection {collection!r} vector size is "
+                        f"{live_dim}, but embeddings are dimension {dimension} — "
+                        "refuse silent truncate/pad invent. Use a matching model "
+                        "or a new collection."
+                    ),
+                    rejected_details=list(rejected)
+                    + [
+                        {
+                            "row": "",
+                            "column": "embedding",
+                            "target": "vector",
+                            "value": f"source={dimension} live={live_dim}",
+                            "reason": "vector dimension mismatch",
+                            "policy": "fail",
+                        }
+                    ],
+                    rejected_rows=len(rejected) + 1,
+                )
+        elif not create_table:
+            raise RuntimeError(
+                f"Qdrant collection '{collection}' is missing and "
+                "create_table is disabled"
+            )
+        else:
             _ensure_collection(session, base_url, collection, dimension, hdrs)
 
         batch_size = 100

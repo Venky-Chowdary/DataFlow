@@ -118,6 +118,8 @@ def write_mapped_rows(
         stream_contracts=_kwargs.get("stream_contracts"),
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="pgvector",
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        destination_column_types=_kwargs.get("destination_column_types"),
     )
     if map_abort:
         return WriteResult(
