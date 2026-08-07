@@ -1450,6 +1450,39 @@ def bare_decimal_is_unbounded(*, dest_db: str = "") -> bool:
     return db == "postgresql"
 
 
+def bare_decimal_platform_default(
+    target_type: str = "",
+    *,
+    dest_db: str = "",
+) -> tuple[int, int] | None:
+    """Platform ``(p, s)`` invented when DECIMAL/NUMBER/NUMERIC is bare.
+
+    Returns ``None`` when the dialect is unbounded (Postgres) or unknown — callers
+    must fail-closed (treat as narrow) rather than invent a widen.
+    """
+    if bare_decimal_is_unbounded(dest_db=dest_db):
+        return None
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if not db:
+        return None
+    upper = strip_identity_qualifier(target_type).upper().replace(" ", "")
+    if db == "mysql":
+        return 10, 0
+    if db == "snowflake":
+        return 38, 0
+    if db == "sqlserver":
+        return 18, 0
+    if db == "redshift":
+        # Amazon Redshift: DECIMAL without precision/scale → DECIMAL(18,0).
+        return 18, 0
+    if db == "bigquery":
+        if upper.startswith("BIGNUMERIC") or upper.startswith("BIGDECIMAL"):
+            return 76, 38
+        # NUMERIC / DECIMAL default capacity is (38, 9).
+        return 38, 9
+    return None
+
+
 def decimal_params_would_narrow(
     source_type: str,
     target_type: str,
@@ -1463,8 +1496,10 @@ def decimal_params_would_narrow(
     ``decimal→decimal`` must not soft-pass when params narrow.
 
     Dialect note: Postgres bare ``DECIMAL``/``NUMERIC`` is unbounded — proven
-    ``DECIMAL(38,15) → DECIMAL`` is a widen, not a collapse. MySQL/Snowflake/
-    SQL Server bare stamps invent a default (p,s) and remain collapse.
+    ``DECIMAL(38,15) → DECIMAL`` is a widen, not a collapse. Other engines
+    invent platform defaults (MySQL ``10,0`` / Snowflake ``38,0`` / SQL Server
+    ``18,0`` / BigQuery NUMERIC ``38,9``) — compare against those defaults so
+    equal-or-wider capacity is not a false ``narrow_type`` block.
     """
     if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
         return False
@@ -1479,10 +1514,13 @@ def decimal_params_would_narrow(
         return False
     if tp is None and ts is None:
         # Proven (p,s) → bare DECIMAL: Postgres unconstrained NUMERIC is a widen;
-        # other engines invent platform defaults (MySQL 10,0 / SF 38,0 / MSSQL 18,0).
+        # other engines invent platform defaults — resolve then compare.
         if bare_decimal_is_unbounded(dest_db=dest_db):
             return False
-        return True
+        defaults = bare_decimal_platform_default(target_type, dest_db=dest_db)
+        if defaults is None:
+            return True
+        tp, ts = defaults
     if ss is not None and ts is not None and ts < ss:
         return True
     if sp is not None and tp is not None:

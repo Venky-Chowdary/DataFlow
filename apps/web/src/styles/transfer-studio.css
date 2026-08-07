@@ -769,50 +769,47 @@
 
 .df2-wizard-studio .df2-wizard-line {
   flex: 1 1 auto;
-  height: 3px;
-  min-width: 10px;
-  max-width: 48px;
-  margin: 0 clamp(4px, 0.8vw, 10px);
-  border-radius: 999px;
+  height: 1px;
+  min-width: 12px;
+  max-width: 56px;
+  margin: 0 clamp(6px, 1vw, 12px);
+  border-radius: 0;
   background: #e2e8f0;
-  transition: background 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: background 0.3s ease;
 }
 
 .df2-wizard-studio .df2-wizard-line.done {
-  background: linear-gradient(90deg, #059669, #0f766e);
+  background: #0f766e;
 }
 
 .df2-wizard-studio .df2-wizard-step {
-  gap: 5px;
-  padding: 3px clamp(6px, 1vw, 10px);
-  border-radius: 8px;
-  transition: background 0.25s ease, transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  transition: background 0.2s ease;
 }
 
 .df2-wizard-studio .df2-wizard-step.active {
-  background: rgba(15, 118, 110, 0.1);
-  transform: scale(1.02);
+  background: #f0fdfa;
+  transform: none;
 }
 
 .df2-wizard-studio .df2-wizard-step.done:not(:disabled):hover {
-  transform: translateY(-1px);
+  transform: none;
+  background: #f8fafc;
 }
 
 .df2-wizard-studio .df2-wizard-num {
   width: var(--df-stepper-node);
   height: var(--df-stepper-node);
   font-size: 12px;
-  transition: box-shadow 0.3s ease, background 0.3s ease;
+  border-radius: 6px;
+  transition: background 0.2s ease, border-color 0.2s ease;
 }
 
 .df2-wizard-studio .df2-wizard-step.active .df2-wizard-num {
-  animation: df2-step-glow 2.2s ease-in-out infinite;
-  box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.16);
-}
-
-@keyframes df2-step-glow {
-  0%, 100% { box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.14); }
-  50% { box-shadow: 0 0 0 7px rgba(15, 118, 110, 0.06); }
+  animation: none;
+  box-shadow: none;
 }
 
 .df2-wizard-studio .df2-wizard-label {
@@ -878,19 +875,21 @@
 .df2-wizard-compact .df2-wizard-line {
   flex: 0 0 clamp(12px, 2vw, 28px);
   min-width: 12px;
-  height: 2px;
+  height: 1px;
   margin: 0 4px;
+  border-radius: 0;
+  background: #e2e8f0;
 }
 
 .df2-wizard-compact .df2-wizard-step {
   gap: 6px;
   padding: 4px 8px;
-  border-radius: 999px;
-  transition: background 0.2s ease, transform 0.2s ease;
+  border-radius: 6px;
+  transition: background 0.2s ease;
 }
 
 .df2-wizard-compact .df2-wizard-step.active {
-  background: rgba(15, 118, 110, 0.1);
+  background: #f0fdfa;
 }
 
 .df2-wizard-compact .df2-wizard-num {
@@ -2273,17 +2272,54 @@ th.df2-type-string .df2-type-badge {
   min-width: 0;
 }
 
-.df2-dest-mode-row .df2-filter-bar,
-.df2-dest-mode-row [role="tablist"] {
+.df2-dest-mode-toggle {
+  display: inline-flex;
   flex: 1 1 auto;
   min-width: 0;
+  padding: 2px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  gap: 2px;
+}
+
+.df2-dest-mode-btn {
+  flex: 1 1 0;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #64748b;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-dest-mode-btn:hover {
+  color: #0f172a;
+}
+
+.df2-dest-mode-btn.active {
+  background: #fff;
+  color: #0f766e;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 
 .df2-dest-toolbar .df2-dest-advanced-btn {
   flex: 0 0 auto;
-  height: 32px;
+  height: 34px;
   align-self: center;
   white-space: nowrap;
+}
+
+.df2-dest-export-select {
+  width: 100%;
+  max-width: 280px;
 }
 
 /* Destination ? Connectors-style left catalog / right details */
@@ -2325,8 +2361,17 @@ th.df2-type-string .df2-type-badge {
   border-right: 1px solid #e8edf3;
 }
 
+.df2-dest-step-left > .df2-dest-toolbar {
+  flex-shrink: 0;
+}
+
 .df2-dest-step-right {
   overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-left: 4px;
+  padding-right: 2px;
 }
 
 .df2-dest-connector-search {
@@ -2501,10 +2546,6 @@ th.df2-type-string .df2-type-badge {
   }
 }
 
-.df2-dest-step-right {
-  padding-left: 4px;
-}
-
 .df2-dest-right-empty {
   margin: 0;
   padding: 20px 16px;
@@ -2514,15 +2555,30 @@ th.df2-type-string .df2-type-badge {
   color: #64748b;
   font-size: 13px;
   line-height: 1.45;
+  flex-shrink: 0;
 }
 
 .df2-dest-step .df2-dest-sync-summary {
-  margin-top: auto;
+  margin-top: 0;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 0;
 }
 
 .df2-dest-step .df2-dest-schema-preview,
 .df2-dest-step .df2-plan-callout {
   margin-top: 0;
+  flex-shrink: 0;
+  position: relative;
+  z-index: 0;
+}
+
+.df2-dest-step .df2-dest-section,
+.df2-dest-step .df2-connector-hint,
+.df2-dest-step .df2-dest-right-section {
+  flex-shrink: 0;
+  position: relative;
+  z-index: 0;
 }
 
 .df2-dest-manual-grid {
@@ -9689,7 +9745,7 @@ button.df2-vd-assist-toggle:focus-visible {
 
 .df2-page-transfer-studio .df2-dest-step-layout {
   display: grid !important;
-  grid-template-columns: minmax(260px, 38%) minmax(0, 1fr) !important;
+  grid-template-columns: minmax(280px, 40%) minmax(0, 1fr) !important;
   gap: 12px 16px !important;
   flex: 1 1 0 !important;
   min-height: 0 !important;
@@ -9701,7 +9757,7 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-page-transfer-studio .df2-dest-step-right {
   display: flex !important;
   flex-direction: column !important;
-  gap: 8px !important;
+  gap: 12px !important;
   min-width: 0 !important;
   min-height: 0 !important;
   overflow-x: hidden !important;
@@ -9712,140 +9768,126 @@ button.df2-vd-assist-toggle:focus-visible {
   overflow-y: hidden !important;
   padding-right: 10px !important;
   border-right: 1px solid #e8edf3 !important;
+  gap: 8px !important;
 }
 
 .df2-page-transfer-studio .df2-dest-step-right {
   overflow-y: auto !important;
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step .df2-dest-sync-summary {
+  margin-top: 0 !important;
+  flex-shrink: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step .df2-plan-callout,
+.df2-page-transfer-studio .df2-dest-step .df2-dest-schema-preview,
+.df2-page-transfer-studio .df2-dest-step .df2-dest-target-fields {
+  flex-shrink: 0 !important;
+  margin-top: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-picker {
   display: flex !important;
   flex-direction: column !important;
-  gap: 10px !important;
+  gap: 8px !important;
   margin: 0 !important;
   min-height: 0 !important;
   flex: 1 1 auto !important;
-  position: static !important;
+  overflow: hidden !important;
 }
 
-.df2-page-transfer-studio .df2-dest-picker-section {
-  display: flex !important;
-  flex-direction: column !important;
+.df2-page-transfer-studio .df2-dest-picker-toolbar {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) auto !important;
   gap: 6px !important;
-  margin: 0 !important;
-  padding: 0 !important;
-  position: static !important;
-  min-width: 0 !important;
-  min-height: 0 !important;
+  flex-shrink: 0 !important;
+  align-items: center !important;
 }
 
-/* Connections section owns the left-rail scroll; engines stay compact below. */
-.df2-page-transfer-studio .df2-dest-picker-section:first-child {
-  flex: 1 1 auto !important;
-  min-height: 0 !important;
-}
-
-.df2-page-transfer-studio .df2-dest-picker-engines {
-  flex: 0 0 auto !important;
-}
-
-.df2-page-transfer-studio .df2-dest-picker-section + .df2-dest-picker-section {
-  padding-top: 12px !important;
-  border-top: 1px solid #eef2f7 !important;
-}
-
-.df2-page-transfer-studio .df2-dest-picker-section-head {
-  display: flex !important;
-  flex-direction: column !important;
-  align-items: stretch !important;
-  gap: 6px !important;
-  margin: 0 !important;
-  position: static !important;
-}
-
-.df2-page-transfer-studio .df2-dest-picker-section-title {
-  display: flex !important;
-  flex-direction: column !important;
-  gap: 2px !important;
-  min-width: 0 !important;
-}
-
-.df2-page-transfer-studio .df2-dest-picker-section-title .df2-label-hint {
-  margin: 0 !important;
-  text-transform: none !important;
-  letter-spacing: 0 !important;
-  font-weight: 500 !important;
-  font-size: 12px !important;
-  color: #64748b !important;
-}
-
-.df2-page-transfer-studio .df2-dest-picker-section-head .df2-filter-bar {
-  width: 100% !important;
-  max-width: 100% !important;
-  height: 32px !important;
-  min-height: 32px !important;
-}
-
-.df2-page-transfer-studio .df2-dest-connector-search {
+.df2-page-transfer-studio .df2-dest-picker-toolbar .df2-dest-connector-search {
   display: flex !important;
   align-items: center !important;
   gap: 8px !important;
-  height: 32px !important;
-  min-height: 32px !important;
+  height: 34px !important;
+  min-height: 34px !important;
   margin: 0 !important;
   padding: 0 10px !important;
   border: 1px solid #e2e8f0 !important;
   border-radius: 8px !important;
   background: #fff !important;
-  position: static !important;
+  min-width: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-picker-toolbar .df2-dest-connector-search input {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  font-size: 13px !important;
+  color: #0f172a !important;
+}
+
+.df2-page-transfer-studio .df2-dest-type-filter {
+  margin: 0 !important;
   flex-shrink: 0 !important;
 }
 
+.df2-page-transfer-studio .df2-dest-type-filter select {
+  height: 34px !important;
+  max-width: 132px !important;
+  padding: 0 8px !important;
+  border: 1px solid #e2e8f0 !important;
+  border-radius: 8px !important;
+  background: #fff !important;
+  font-size: 12.5px !important;
+  color: #334155 !important;
+  box-sizing: border-box !important;
+}
+
+/* Connection list is the primary left-rail surface — always scrollable. */
 .df2-page-transfer-studio .df2-dest-connector-list {
   display: flex !important;
   flex-direction: column !important;
-  gap: 4px !important;
+  gap: 5px !important;
   margin: 0 !important;
-  padding: 0 2px 0 0 !important;
-  position: static !important;
-  box-shadow: none !important;
-  min-width: 0 !important;
-  /* Single scrollbar for connections — fills leftover left-rail height. */
+  padding: 0 2px 2px 0 !important;
   flex: 1 1 auto !important;
-  max-height: none !important;
-  min-height: 0 !important;
+  min-height: 180px !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
   overscroll-behavior: contain !important;
   -webkit-overflow-scrolling: touch !important;
 }
 
+.df2-page-transfer-studio .df2-dest-picker.is-custom-engine .df2-dest-connector-list {
+  min-height: 140px !important;
+  flex: 1 1 55% !important;
+}
+
 .df2-page-transfer-studio .df2-dest-connector-card {
   display: grid !important;
   grid-template-columns: 22px minmax(0, 1fr) auto !important;
-  grid-template-rows: auto !important;
   align-items: center !important;
   column-gap: 8px !important;
-  row-gap: 0 !important;
   width: 100% !important;
-  max-width: 100% !important;
   min-width: 0 !important;
-  min-height: 40px !important;
-  height: auto !important;
+  min-height: 44px !important;
   margin: 0 !important;
-  padding: 7px 10px !important;
+  padding: 8px 10px !important;
   border: 1px solid #e2e8f0 !important;
   border-radius: 8px !important;
   background: #fff !important;
   box-shadow: none !important;
   position: relative !important;
-  float: none !important;
-  inset: auto !important;
-  transform: none !important;
   box-sizing: border-box !important;
   text-align: left !important;
   cursor: pointer !important;
   overflow: hidden !important;
+  flex-shrink: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card:hover {
@@ -9863,7 +9905,6 @@ button.df2-vd-assist-toggle:focus-visible {
   justify-content: center !important;
   width: 22px !important;
   height: 22px !important;
-  flex-shrink: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card-text {
@@ -9878,12 +9919,9 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-page-transfer-studio .df2-dest-connector-card-meta {
   display: block !important;
   width: 100% !important;
-  min-width: 0 !important;
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   white-space: nowrap !important;
-  text-transform: none !important;
-  letter-spacing: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card-name {
@@ -9903,77 +9941,75 @@ button.df2-vd-assist-toggle:focus-visible {
   font-weight: 700 !important;
   text-transform: uppercase !important;
   color: #059669 !important;
-  white-space: nowrap !important;
 }
 
-.df2-page-transfer-studio .df2-dest-engine-toolbar {
-  display: flex !important;
-  flex-direction: row !important;
-  flex-wrap: wrap !important;
-  align-items: center !important;
-  justify-content: space-between !important;
-  gap: 6px 10px !important;
+.df2-page-transfer-studio .df2-dest-picker-empty {
   margin: 0 !important;
-  position: static !important;
+  flex-shrink: 0 !important;
 }
 
-.df2-page-transfer-studio .df2-dest-engine-search {
-  display: inline-flex !important;
+/* Compact engine panel — never covers the connection list. */
+.df2-page-transfer-studio .df2-dest-engine-panel {
+  flex: 0 0 auto !important;
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 8px !important;
+  margin: 0 !important;
+  padding: 10px !important;
+  border: 1px solid #e8edf3 !important;
+  border-radius: 10px !important;
+  background: #f8fafc !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-panel-head {
+  display: flex !important;
   align-items: center !important;
-  gap: 6px !important;
-  flex: 1 1 140px !important;
-  max-width: 220px !important;
-  min-width: 120px !important;
-  height: 30px !important;
-  padding: 0 8px !important;
+  gap: 8px !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-panel-head > .df2-label {
+  flex-shrink: 0 !important;
+  margin: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-select-wrap {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  margin: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-select {
+  width: 100% !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  padding: 0 10px !important;
   border: 1px solid #e2e8f0 !important;
   border-radius: 8px !important;
   background: #fff !important;
-  position: static !important;
-}
-
-.df2-page-transfer-studio .df2-dest-engine-search input {
-  flex: 1 1 auto !important;
-  min-width: 0 !important;
-  border: 0 !important;
-  outline: 0 !important;
-  background: transparent !important;
-  font-size: 12.5px !important;
+  font-size: 13px !important;
   color: #0f172a !important;
+  box-sizing: border-box !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-grid {
   display: grid !important;
   grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
-  gap: 6px !important;
+  gap: 5px !important;
   margin: 0 !important;
-  padding: 0 !important;
-  position: static !important;
-  box-shadow: none !important;
-  min-width: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-tile {
   display: inline-flex !important;
   align-items: center !important;
-  gap: 6px !important;
+  gap: 5px !important;
   width: 100% !important;
-  max-width: 100% !important;
   min-width: 0 !important;
-  min-height: 34px !important;
-  height: 34px !important;
-  margin: 0 !important;
-  padding: 0 10px !important;
+  height: 32px !important;
+  padding: 0 8px !important;
   border: 1px solid #e2e8f0 !important;
-  border-radius: 8px !important;
+  border-radius: 6px !important;
   background: #fff !important;
-  box-shadow: none !important;
-  position: relative !important;
-  float: none !important;
-  inset: auto !important;
-  transform: none !important;
-  box-sizing: border-box !important;
-  font-size: 12px !important;
+  font-size: 11.5px !important;
   font-weight: 600 !important;
   color: #334155 !important;
   cursor: pointer !important;
@@ -9985,8 +10021,6 @@ button.df2-vd-assist-toggle:focus-visible {
   overflow: hidden !important;
   text-overflow: ellipsis !important;
   white-space: nowrap !important;
-  text-transform: none !important;
-  letter-spacing: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-tile:hover {
@@ -9999,30 +10033,29 @@ button.df2-vd-assist-toggle:focus-visible {
   color: #0f766e !important;
 }
 
-.df2-page-transfer-studio .df2-dest-engine-more {
+.df2-page-transfer-studio .df2-dest-engine-search {
   display: flex !important;
-  flex-direction: column !important;
-  gap: 4px !important;
-  margin: 0 !important;
-  position: static !important;
-  min-width: 0 !important;
-}
-
-.df2-page-transfer-studio .df2-dest-engine-more > .df2-label {
-  margin: 0 !important;
-}
-
-.df2-page-transfer-studio .df2-dest-engine-select {
-  width: 100% !important;
-  min-height: 34px !important;
-  height: 34px !important;
-  padding: 0 10px !important;
+  align-items: center !important;
+  gap: 6px !important;
+  height: 30px !important;
+  padding: 0 8px !important;
   border: 1px solid #e2e8f0 !important;
-  border-radius: 8px !important;
+  border-radius: 6px !important;
   background: #fff !important;
-  font-size: 13px !important;
-  color: #0f172a !important;
-  box-sizing: border-box !important;
+  margin: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-search input {
+  flex: 1 1 auto !important;
+  min-width: 0 !important;
+  border: 0 !important;
+  outline: 0 !important;
+  background: transparent !important;
+  font-size: 12px !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-selected-hint {
+  margin: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-right-empty {
@@ -10037,7 +10070,7 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 
 .df2-page-transfer-studio .df2-dest-step .df2-dest-sync-summary {
-  margin-top: auto !important;
+  margin-top: 0 !important;
   flex-shrink: 0 !important;
   padding: 8px 10px !important;
 }

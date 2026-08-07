@@ -597,7 +597,10 @@ def reconcile(
         if allow_extra_rows and target_rows > expected_rows:
             extra_note = (
                 f" Destination has {target_rows - expected_rows} extra row(s) "
-                "(append/upsert); whole-table digests are not comparable."
+                "(append/upsert into a non-empty table); whole-table digests are "
+                "not comparable. Use overwrite/truncate for a clean load, or "
+                "upsert with a primary key — this is not proof the 30 written "
+                "rows are wrong."
             )
         sample_note = ""
         if sample_ok:

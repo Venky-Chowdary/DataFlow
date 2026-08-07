@@ -7,8 +7,6 @@ import { ConnectorSelect } from "../components/ui/ConnectorSelect";
 import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTiles";
 import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
-import { FilterTabs } from "../components/ui/FilterTabs";
-import { FilterBar } from "../components/ui/FilterBar";
 import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
@@ -5040,48 +5038,62 @@ export function TransferPage({
                 <div className="df2-field df2-dest-mode-field">
                   <label className="df2-label">Mode</label>
                   <div className="df2-dest-mode-row">
-                    <FilterBar ariaLabel="Destination mode">
-                      <FilterTabs
-                        ariaLabel="Destination mode"
-                        value={destKindMode}
-                        onChange={(mode) => {
-                          setDestKindMode(mode);
+                    <div className="df2-dest-mode-toggle" role="tablist" aria-label="Destination mode">
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={destKindMode === "database"}
+                        className={`df2-dest-mode-btn${destKindMode === "database" ? " active" : ""}`}
+                        onClick={() => {
+                          setDestKindMode("database");
                           resetRouteForDestinationChange();
                         }}
-                        items={[
-                          { id: "database", label: "Database / Warehouse" },
-                          { id: "file_export", label: "File Export" },
-                        ]}
-                      />
-                    </FilterBar>
+                      >
+                        Database
+                      </button>
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={destKindMode === "file_export"}
+                        className={`df2-dest-mode-btn${destKindMode === "file_export" ? " active" : ""}`}
+                        onClick={() => {
+                          setDestKindMode("file_export");
+                          resetRouteForDestinationChange();
+                        }}
+                      >
+                        File export
+                      </button>
+                    </div>
                     <Button
                       size="sm"
                       variant="ghost"
-                  className="df2-dest-advanced-btn"
-                  onClick={() => setAdvancedOpen(true)}
-                  leadingIcon={<DtIcon name="settings" size={14} />}
-                  title="Advanced settings — sync mode, primary key, cursor, and write policies"
-                >
-                  Advanced
-                </Button>
+                      className="df2-dest-advanced-btn"
+                      onClick={() => setAdvancedOpen(true)}
+                      leadingIcon={<DtIcon name="settings" size={14} />}
+                      title="Advanced settings — sync mode, primary key, cursor, and write policies"
+                    >
+                      Advanced
+                    </Button>
                   </div>
                 </div>
               </div>
 
               {destKindMode === "file_export" ? (
-                <div className="df2-field">
-                  <label className="df2-label">Export Format</label>
-                  <FilterBar ariaLabel="Export format">
-                    <FilterTabs
-                      ariaLabel="Export format"
-                      value={exportFormat}
-                      onChange={(format) => {
-                        setExportFormat(format);
-                        setTransferPlan(null);
-                      }}
-                      items={liveExportFormats.map((f) => ({ id: f.id, label: f.label }))}
-                    />
-                  </FilterBar>
+                <div className="df2-field df2-dest-export-format">
+                  <label className="df2-label" htmlFor="dest-export-format">Export format</label>
+                  <select
+                    id="dest-export-format"
+                    className="df2-input df2-dest-export-select"
+                    value={exportFormat}
+                    onChange={(e) => {
+                      setExportFormat(e.target.value);
+                      setTransferPlan(null);
+                    }}
+                  >
+                    {liveExportFormats.map((f) => (
+                      <option key={f.id} value={f.id}>{f.label}</option>
+                    ))}
+                  </select>
                 </div>
               ) : (
                 <DestinationPicker

@@ -702,8 +702,9 @@ def test_document_nested_decimal_bare_wave16():
     assert is_lossy_coercion("MAP", "MAP<STRING,INT>") is True
     assert is_lossy_coercion("MAP<STRING,INT>", "MAP") is True
 
-    # Unknown/MySQL dest: bare DECIMAL invents platform default — collapse.
+    # Unknown dest: bare DECIMAL stays fail-closed collapse.
     assert decimal_params_would_narrow("DECIMAL(38,10)", "DECIMAL") is True
+    # MySQL bare DECIMAL invents (10,0) — proven wide (p,s) narrows.
     assert decimal_params_would_narrow(
         "DECIMAL(38,10)", "DECIMAL", dest_db="mysql"
     ) is True
@@ -718,6 +719,30 @@ def test_document_nested_decimal_bare_wave16():
     assert is_precision_collapse_coercion(
         "DECIMAL(38,15)", "NUMERIC", dest_db="postgresql"
     ) is False
+    # Snowflake bare NUMBER → (38,0): equal capacity widens; fractional scale narrows.
+    assert decimal_params_would_narrow(
+        "DECIMAL(38,0)", "NUMBER", dest_db="snowflake"
+    ) is False
+    assert decimal_params_would_narrow(
+        "DECIMAL(10,2)", "NUMBER", dest_db="snowflake"
+    ) is True
+    # SQL Server bare DECIMAL → (18,0): DECIMAL(10,0) widens; DECIMAL(20,0) narrows.
+    assert decimal_params_would_narrow(
+        "DECIMAL(10,0)", "DECIMAL", dest_db="sqlserver"
+    ) is False
+    assert decimal_params_would_narrow(
+        "DECIMAL(20,0)", "DECIMAL", dest_db="mssql"
+    ) is True
+    # BigQuery bare NUMERIC → (38,9): DECIMAL(10,2) widens; DECIMAL(38,15) scale-narrows.
+    assert decimal_params_would_narrow(
+        "DECIMAL(10,2)", "NUMERIC", dest_db="bigquery"
+    ) is False
+    assert is_precision_collapse_coercion(
+        "DECIMAL(10,2)", "NUMERIC", dest_db="bigquery"
+    ) is False
+    assert decimal_params_would_narrow(
+        "DECIMAL(38,15)", "NUMERIC", dest_db="bigquery"
+    ) is True
 
 
 def test_year_invent_geometry_pad_nested_wave15():

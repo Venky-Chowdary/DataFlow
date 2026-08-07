@@ -594,6 +594,220 @@ def pg_type(inferred: str, engine: str = "postgresql") -> str:
     return materialize_dest_ddl(db, inferred)
 
 
+@dataclass
+class _PgMaterializedBatch:
+    """Map + quarantine + bind output for Postgres/Redshift writes."""
+
+    mapped_rows: list[tuple]
+    sparse_rows: list[tuple]
+    transform_errors: list[str]
+    rejected_details: list
+    target_types: list[str]
+    bind_types: list[str]
+    rows_for_checksum: list[tuple]
+
+
+def _pg_materialize_mapped_batch(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    engine: str,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> _PgMaterializedBatch:
+    """Build mapped rows against ``dest_types`` then quarantine/bind.
+
+    Call again after live DDL overlay so Map stamps cannot coerce before
+    physical types win (BQ-class reorder — existing-table invent cliff).
+    """
+    target_types = [
+        pg_type(dest_types.get(c, logical_types[i]), engine=engine)
+        for i, c in enumerate(target_cols)
+    ]
+    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        error_policy=policy,
+        preserve_case=True,
+        dest_kind="postgresql",
+        destination_pk_columns=list(destination_pk_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+    mapped_rows = quarantine_currency_markers_into_numeric(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    _decimal_dest = (
+        "redshift"
+        if engine.startswith("redshift") or engine in {"amazon_redshift", "redshift_serverless"}
+        else "postgresql"
+    )
+    mapped_rows = quarantine_unfit_decimals(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=(
+            "PostgreSQL NUMERIC" if _decimal_dest == "postgresql" else "Redshift NUMERIC"
+        ),
+        dest_db=_decimal_dest,
+    )
+    mapped_rows = quarantine_unfit_years(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_booleans(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_temporals(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_specialty_types(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_integers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="PostgreSQL INTEGER",
+    )
+    mapped_rows = quarantine_unfit_bitstrings(
+        mapped_rows, target_cols, target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_binaries(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="PostgreSQL BYTEA",
+    )
+    mapped_rows = quarantine_unfit_enum_set(
+        mapped_rows, target_cols, logical_types, rejected_details, policy
+    )
+    string_dialect = (
+        "Redshift VARCHAR"
+        if engine in {"redshift", "amazon_redshift", "redshift_serverless"}
+        else "PostgreSQL VARCHAR"
+    )
+    mapped_rows = quarantine_unfit_strings(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=string_dialect,
+    )
+    mapped_rows = quarantine_unfit_arrays(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label="Redshift" if _decimal_dest == "redshift" else "PostgreSQL",
+        dest_db=_decimal_dest,
+    )
+    mapped_rows = quarantine_unfit_json(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=string_dialect.split()[0] + " JSON",
+    )
+    sparse_rows: list[tuple] = []
+    rows_for_checksum: list[tuple] = list(mapped_rows)
+    if write_mode == "upsert" and conflict_columns:
+        from connectors.writer_common import split_dense_sparse_rows
+
+        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+
+    if write_mode == "upsert" and conflict_columns:
+        if DF_LSN_COL in target_cols:
+            mapped_rows = dedupe_rows_by_pk_and_lsn(
+                mapped_rows, conflict_columns, target_cols
+            )
+        else:
+            mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+
+    if any(t == "BYTEA" for t in target_types):
+        from connectors.sql_bind import coerce_binary_wire
+        from services.value_serializer import is_missing_sentinel
+
+        bytea_positions = [i for i, t in enumerate(target_types) if t == "BYTEA"]
+
+        def _coerce_bytea_row(row: tuple) -> tuple:
+            row_list = list(row)
+            for idx in bytea_positions:
+                val = row_list[idx]
+                if is_missing_sentinel(val) or val is None:
+                    continue
+                row_list[idx] = coerce_binary_wire(val)
+            return tuple(row_list)
+
+        mapped_rows = [_coerce_bytea_row(row) for row in mapped_rows]
+        sparse_rows = [_coerce_bytea_row(row) for row in sparse_rows]
+
+    from services.type_system import parse_enum_or_set_ordered_members
+
+    def _bind_ddl(idx: int) -> str:
+        logical = logical_types[idx] if idx < len(logical_types) else ""
+        target = target_types[idx] if idx < len(target_types) else ""
+        if logical and parse_enum_or_set_ordered_members(logical) is not None:
+            return logical
+        logical_u = (logical or "").strip().upper()
+        if logical_u in {"ROWVERSION", "HIERARCHYID", "SQL_VARIANT", "ROWID", "UROWID"}:
+            return logical
+        return target or logical
+
+    bind_types = [_bind_ddl(i) for i in range(len(target_cols))]
+    mapped_rows = bind_sql_mapped_rows_with_quarantine(
+        mapped_rows,
+        target_cols,
+        bind_types,
+        rejected_details,
+        policy,
+        engine="postgresql",
+        dialect_label="PostgreSQL",
+        mappings=mappings,
+    )
+    sparse_rows = bind_sql_mapped_rows_with_quarantine(
+        sparse_rows,
+        target_cols,
+        bind_types,
+        rejected_details,
+        policy,
+        engine="postgresql",
+        dialect_label="PostgreSQL",
+        mappings=mappings,
+    )
+    from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
+    return _PgMaterializedBatch(
+        mapped_rows=mapped_rows,
+        sparse_rows=sparse_rows,
+        transform_errors=list(transform_errors or []),
+        rejected_details=rejected_details,
+        target_types=target_types,
+        bind_types=bind_types,
+        rows_for_checksum=rows_for_checksum,
+    )
+
+
 def _copy_text_value(value: Any) -> str:
     from services.value_serializer import is_missing_sentinel
 
@@ -939,191 +1153,32 @@ def write_mapped_rows(
         logical_types=logical_types,
         live_types=live_dest if isinstance(live_dest, dict) else None,
     )
-    # Quarantine carriers must match transform dest_types — never Map-only.
-    target_types = [
-        pg_type(dest_types.get(c, logical_types[i]), engine=engine)
-        for i, c in enumerate(target_cols)
-    ]
     policy = transform_error_policy(error_policy)
 
     # Map before opening a socket so public proxies are not idle during transform.
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+    # When Studio did not pass live DDL, physical overlay below rematerializes.
+    _batch = _pg_materialize_mapped_batch(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
         dest_types=dest_types,
-        error_policy=policy,
-        preserve_case=True,
-        dest_kind="postgresql",
-        # Upsert conflict cols / dest PK — full composite for quarantine replay identity.
+        logical_types=logical_types,
+        policy=policy,
+        engine=engine,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    mapped_rows = quarantine_currency_markers_into_numeric(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    # Fail-closed NUMERIC/DECIMAL(p,s) fit — never silently truncate/round into target.
-    # dest_db from engine string (not port 5439 heuristic — real PG can use 5439).
-    _decimal_dest = (
-        "redshift"
-        if engine.startswith("redshift") or engine in {"amazon_redshift", "redshift_serverless"}
-        else "postgresql"
-    )
-    mapped_rows = quarantine_unfit_decimals(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="PostgreSQL NUMERIC" if _decimal_dest == "postgresql" else "Redshift NUMERIC",
-        dest_db=_decimal_dest,
-    )
-    mapped_rows = quarantine_unfit_years(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_booleans(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_temporals(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_specialty_types(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_integers(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="PostgreSQL INTEGER",
-    )
-    mapped_rows = quarantine_unfit_bitstrings(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_binaries(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="PostgreSQL BYTEA",
-    )
-    mapped_rows = quarantine_unfit_enum_set(
-        mapped_rows, target_cols, logical_types, rejected_details, policy
-    )
-    string_dialect = (
-        "Redshift VARCHAR"
-        if engine in {"redshift", "amazon_redshift", "redshift_serverless"}
-        else "PostgreSQL VARCHAR"
-    )
-    mapped_rows = quarantine_unfit_strings(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label=string_dialect,
-    )
-    mapped_rows = quarantine_unfit_arrays(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="Redshift" if _decimal_dest == "redshift" else "PostgreSQL",
-        dest_db=_decimal_dest,
-    )
-    mapped_rows = quarantine_unfit_json(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label=string_dialect.split()[0] + " JSON",
-    )
-    sparse_rows: list[tuple] = []
-    rows_for_checksum: list[tuple] = list(mapped_rows)
-    if write_mode == "upsert" and conflict_columns:
-        from connectors.writer_common import split_dense_sparse_rows
-
-        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-
-    if write_mode == "upsert" and conflict_columns:
-        if DF_LSN_COL in target_cols:
-            mapped_rows = dedupe_rows_by_pk_and_lsn(
-                mapped_rows, conflict_columns, target_cols
-            )
-        else:
-            mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
-
-    if any(t == "BYTEA" for t in target_types):
-        from connectors.sql_bind import coerce_binary_wire
-        from services.value_serializer import is_missing_sentinel
-
-        bytea_positions = [i for i, t in enumerate(target_types) if t == "BYTEA"]
-
-        def _coerce_bytea_row(row: tuple) -> tuple:
-            row_list = list(row)
-            for idx in bytea_positions:
-                val = row_list[idx]
-                if is_missing_sentinel(val) or val is None:
-                    continue
-                # Airbyte/Fivetran class: base64 → bytes; never invent UTF-8 payload.
-                row_list[idx] = coerce_binary_wire(val)
-            return tuple(row_list)
-
-        mapped_rows = [_coerce_bytea_row(row) for row in mapped_rows]
-        sparse_rows = [_coerce_bytea_row(row) for row in sparse_rows]
-
-    # ISO-8601 / CSV timestamps → Python datetime so COPY/INSERT never send raw "…Z".
-    # Boolean/JSON wire: Mongo cell_to_string ("true"/"false", JSON text, "") must
-    # match MySQL's shared sql_bind path — never leave string bools for BOOLEAN.
-    # Empty INT/FLOAT/DECIMAL must quarantine (never invent SQL NULL on upsert wipe).
-    from services.type_system import parse_enum_or_set_ordered_members
-
-    # Wave 64: normalize every column through SSOT — ENUM/SET use logical
-    # carriers (domain + SET→list for TEXT[]), other columns use target DDL.
-
-    def _bind_ddl(idx: int) -> str:
-        logical = logical_types[idx] if idx < len(logical_types) else ""
-        target = target_types[idx] if idx < len(target_types) else ""
-        if logical and parse_enum_or_set_ordered_members(logical) is not None:
-            return logical
-        # ROWVERSION / HIERARCHYID carriers must bind via logical polarity
-        # (binary concurrency / slash→ltree) even when target DDL is BYTEA/LTREE.
-        logical_u = (logical or "").strip().upper()
-        if logical_u in {"ROWVERSION", "HIERARCHYID", "SQL_VARIANT", "ROWID", "UROWID"}:
-            return logical
-        return target or logical
-
-    bind_types = [_bind_ddl(i) for i in range(len(target_cols))]
-    mapped_rows = bind_sql_mapped_rows_with_quarantine(
-        mapped_rows,
-        target_cols,
-        bind_types,
-        rejected_details,
-        policy,
-        engine="postgresql",
-        dialect_label="PostgreSQL",
-        mappings=mappings,
-    )
-    sparse_rows = bind_sql_mapped_rows_with_quarantine(
-        sparse_rows,
-        target_cols,
-        bind_types,
-        rejected_details,
-        policy,
-        engine="postgresql",
-        dialect_label="PostgreSQL",
-        mappings=mappings,
-    )
-    # Dense INSERT/COPY: absent schemaless fields → SQL NULL (sparse keeps sentinel).
-    from connectors.writer_common import materialize_missing_as_null_for_dense_write
-
-    mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
+    mapped_rows = _batch.mapped_rows
+    sparse_rows = _batch.sparse_rows
+    transform_errors = _batch.transform_errors
+    rejected_details = _batch.rejected_details
+    target_types = _batch.target_types
+    bind_types = _batch.bind_types
+    rows_for_checksum = _batch.rows_for_checksum
 
     rejected_rows = _rejected_row_count(
         data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
@@ -1408,11 +1463,9 @@ def write_mapped_rows(
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
                     _reconnect()
 
-            # Map VARCHAR + live DATE/INT must refuse empty at bind — overlay
-            # physical DDL then re-quarantine (early bind used Map stamps only).
-            # Do NOT re-import bind_sql_mapped_rows_with_quarantine here — a late
-            # local import makes the name UnboundLocal for the whole function and
-            # breaks the early Map-stamp bind (MySQL→Postgres client failure).
+            # Live DDL must win over Map stamps before values are coerced.
+            # Rematerialize map/quarantine when physical carriers differ (BQ-class).
+            # Do NOT late-import bind_sql_mapped_rows_with_quarantine — UnboundLocal.
             physical = _fetch_pg_column_types(cur, schema, table_name)
             overlay_err = require_physical_types_for_existing_table(
                 table_existed=table_existed,
@@ -1433,36 +1486,77 @@ def write_mapped_rows(
                     warnings=transform_errors,
                 )
             if physical:
-                bind_types = overlay_physical_bind_types(
-                    target_cols, bind_types, physical
-                )
-                target_types = list(bind_types)
-                mapped_rows = bind_sql_mapped_rows_with_quarantine(
-                    mapped_rows,
+                live_dest_types = resolve_mapping_dest_types(
                     target_cols,
-                    bind_types,
-                    rejected_details,
-                    policy,
-                    engine="postgresql",
-                    dialect_label="PostgreSQL",
-                    mappings=mappings,
+                    mappings,
+                    column_types,
+                    logical_types=logical_types,
+                    live_types=physical,
                 )
-                sparse_rows = bind_sql_mapped_rows_with_quarantine(
-                    sparse_rows,
-                    target_cols,
-                    bind_types,
-                    rejected_details,
-                    policy,
-                    engine="postgresql",
-                    dialect_label="PostgreSQL",
-                    mappings=mappings,
+                carriers_differ = any(
+                    str(dest_types.get(c) or "").strip().upper()
+                    != str(live_dest_types.get(c) or "").strip().upper()
+                    for c in target_cols
                 )
-                from connectors.writer_common import (
-                    materialize_missing_as_null_for_dense_write,
-                )
+                if carriers_differ:
+                    dest_types = live_dest_types
+                    _batch = _pg_materialize_mapped_batch(
+                        headers=headers,
+                        data_rows=data_rows,
+                        mappings=mappings,
+                        target_cols=target_cols,
+                        column_types=column_types,
+                        dest_types=dest_types,
+                        logical_types=logical_types,
+                        policy=policy,
+                        engine=engine,
+                        conflict_columns=conflict_columns,
+                        write_mode=write_mode,
+                        destination_pk_columns=list(conflict_columns or []) or None,
+                        destination_column_nullability=_kwargs.get(
+                            "destination_column_nullability"
+                        ),
+                    )
+                    mapped_rows = _batch.mapped_rows
+                    sparse_rows = _batch.sparse_rows
+                    transform_errors = _batch.transform_errors
+                    rejected_details = _batch.rejected_details
+                    target_types = _batch.target_types
+                    bind_types = _batch.bind_types
+                    rows_for_checksum = _batch.rows_for_checksum
+                else:
+                    bind_types = overlay_physical_bind_types(
+                        target_cols, bind_types, physical
+                    )
+                    target_types = list(bind_types)
+                    mapped_rows = bind_sql_mapped_rows_with_quarantine(
+                        mapped_rows,
+                        target_cols,
+                        bind_types,
+                        rejected_details,
+                        policy,
+                        engine="postgresql",
+                        dialect_label="PostgreSQL",
+                        mappings=mappings,
+                    )
+                    sparse_rows = bind_sql_mapped_rows_with_quarantine(
+                        sparse_rows,
+                        target_cols,
+                        bind_types,
+                        rejected_details,
+                        policy,
+                        engine="postgresql",
+                        dialect_label="PostgreSQL",
+                        mappings=mappings,
+                    )
+                    from connectors.writer_common import (
+                        materialize_missing_as_null_for_dense_write,
+                    )
 
-                mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
-                rows_for_checksum = list(mapped_rows)
+                    mapped_rows = materialize_missing_as_null_for_dense_write(
+                        mapped_rows
+                    )
+                    rows_for_checksum = list(mapped_rows)
                 _phys_abort = reject_on_strict_policy(
                     policy, rejected_details, "PostgreSQL", transform_errors
                 )
