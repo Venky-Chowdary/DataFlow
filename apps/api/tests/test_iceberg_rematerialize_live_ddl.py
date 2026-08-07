@@ -52,6 +52,74 @@ def test_iceberg_no_rematerialize_when_carriers_match():
     assert batch is None
 
 
+def test_iceberg_force_remap_when_carriers_match_deferred_studio():
+    """Partial Studio defer: force rematerialize even when carriers already match."""
+    from connectors.iceberg_writer import _iceberg_rematerialize_if_physical_differs
+
+    batch = _iceberg_rematerialize_if_physical_differs(
+        physical={"qty": "INT"},
+        dest_types={"qty": "INT"},
+        target_cols=["qty"],
+        headers=["qty"],
+        data_rows=[["12"], ["not-an-int"]],
+        mappings=[{"source": "qty", "target": "qty", "target_type": "VARCHAR"}],
+        column_types={"qty": "VARCHAR"},
+        logical_types=["VARCHAR"],
+        policy="quarantine",
+        force_remap=True,
+    )
+    assert batch is not None
+    mapped_rows, _errs, rejected, live = batch
+    assert "INT" in str(live.get("qty") or "").upper()
+    assert len(mapped_rows) + len(rejected) >= 1
+
+
+def test_iceberg_force_remap_refuses_unstamped_additive_under_partial_studio():
+    """force_remap + additive col without Map stamp → None (caller fail-closes)."""
+    from connectors.iceberg_writer import _iceberg_rematerialize_if_physical_differs
+
+    batch = _iceberg_rematerialize_if_physical_differs(
+        physical={"qty": "INT"},
+        dest_types={"qty": "INT"},  # partial — note absent
+        target_cols=["qty", "note"],
+        headers=["qty", "note"],
+        data_rows=[["12", "hello"]],
+        mappings=[
+            {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            {"source": "note", "target": "note"},  # no stamp
+        ],
+        column_types={"qty": "VARCHAR", "note": "VARCHAR"},
+        logical_types=["VARCHAR", "VARCHAR"],
+        policy="quarantine",
+        force_remap=True,
+    )
+    assert batch is None
+
+
+def test_iceberg_force_remap_keeps_stamped_additive_under_partial_studio():
+    from connectors.iceberg_writer import _iceberg_rematerialize_if_physical_differs
+
+    batch = _iceberg_rematerialize_if_physical_differs(
+        physical={"qty": "INT"},
+        dest_types={"qty": "INT"},
+        target_cols=["qty", "note"],
+        headers=["qty", "note"],
+        data_rows=[["12", "hello"]],
+        mappings=[
+            {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            {"source": "note", "target": "note", "target_type": "string"},
+        ],
+        column_types={"qty": "VARCHAR", "note": "VARCHAR"},
+        logical_types=["VARCHAR", "VARCHAR"],
+        policy="quarantine",
+        force_remap=True,
+    )
+    assert batch is not None
+    _rows, _errs, _rej, live = batch
+    assert "INT" in str(live.get("qty") or "").upper()
+    assert str(live.get("note") or "").lower() in {"string", "varchar", "text"}
+
+
 def test_iceberg_rematerialize_overlays_existing_with_additive_map_cols():
     """Additive Map columns keep Map stamps; live existing cols rematerialize."""
     from connectors.iceberg_writer import _iceberg_rematerialize_if_physical_differs

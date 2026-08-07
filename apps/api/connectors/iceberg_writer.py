@@ -314,11 +314,14 @@ def _iceberg_rematerialize_if_physical_differs(
     policy: Any,
     conflict_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
+    force_remap: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
     """Rebuild mapped rows from source when live DDL carriers differ from Map.
 
     Returns ``(mapped_rows, transform_errors, rejected_details, live_dest_types)``
     or ``None`` when carriers already match (caller keeps Map-built batch).
+
+    ``force_remap`` covers deferred Map under partial Studio (empty batch).
 
     Additive schema-evolution columns (Map targets not yet on the table) keep
     Map stamps; existing live columns rematerialize without Map VARCHAR invent.
@@ -355,8 +358,30 @@ def _iceberg_rematerialize_if_physical_differs(
         != str(live_dest_types.get(c) or "").strip().upper()
         for c in covered_cols
     )
-    if not carriers_differ:
+    if not carriers_differ and not force_remap:
         return None
+    # Partial Studio + deferred Map: additive targets not on live physical must
+    # carry an explicit Map target_type — never soft-fill from column_types /
+    # "string" defaults (create-new refuse parity).
+    if force_remap:
+        from services.mapping_constraints import write_mappings
+
+        by_tgt: dict[str, dict] = {}
+        for mapping in write_mappings(list(mappings or [])):
+            tgt = str(mapping.get("target") or "").strip()
+            if tgt and tgt not in by_tgt:
+                by_tgt[tgt] = mapping
+                by_tgt.setdefault(tgt.lower(), mapping)
+        for col in target_cols or []:
+            if not col:
+                continue
+            if str(live_dest_types.get(col) or "").strip():
+                continue
+            mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+            stamp = str(mapping.get("target_type") or "").strip()
+            if not stamp:
+                return None
+            live_dest_types[col] = stamp
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -1101,19 +1126,25 @@ def _write_mapped_rows_pyiceberg(
         product="Iceberg",
     )
     policy = transform_error_policy(error_policy)
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        error_policy=policy,
-        dest_types=dest_types,
-        preserve_case=True,
-        dest_kind="iceberg",
-        destination_pk_columns=list(conflict_columns or []) or None,
-        destination_column_nullability=destination_column_nullability,
-    )
+    # Partial Studio: defer Map until create-new refuse / live Arrow rematerialize
+    # (Map-blank invent must not run before physical carriers — PG/SQLite parity).
+    mapped_rows: list[tuple] = []
+    transform_errors: list[str] = []
+    rejected_details: list[dict] = []
+    if not studio_err:
+        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            error_policy=policy,
+            dest_types=dest_types,
+            preserve_case=True,
+            dest_kind="iceberg",
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=destination_column_nullability,
+        )
     # Defer empty / strict abort until after physical load + rematerialize —
     # Map INT/BOOL stamps can empty the batch while live STRING would keep rows.
 
@@ -1230,6 +1261,7 @@ def _write_mapped_rows_pyiceberg(
                         driver="iceberg",
                     )
                 physical = effective
+            _force_remap = bool(studio_err) and not mapped_rows
             remat = _iceberg_rematerialize_if_physical_differs(
                 physical=physical,
                 dest_types=dest_types,
@@ -1242,9 +1274,26 @@ def _write_mapped_rows_pyiceberg(
                 policy=policy,
                 conflict_columns=conflict_columns,
                 destination_column_nullability=destination_column_nullability,
+                force_remap=_force_remap,
             )
             if remat is not None:
                 mapped_rows, transform_errors, rejected_details, dest_types = remat
+            elif _force_remap:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Iceberg live DDL incomplete for mapped columns — "
+                        "refuse Map VARCHAR rematerialize invent. Re-run "
+                        "destination schema introspect and retry."
+                    ),
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
 
         _map_abort = reject_on_strict_policy(
             policy, rejected_details, "Iceberg", transform_errors
@@ -1844,19 +1893,24 @@ def _write_mapped_rows_filesystem(
         product="Iceberg",
     )
     policy = transform_error_policy(error_policy)
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        error_policy=policy,
-        dest_types=dest_types,
-        preserve_case=True,
-        dest_kind="iceberg",
-        destination_pk_columns=list(conflict_columns or []) or None,
-        destination_column_nullability=_kwargs.get("destination_column_nullability"),
-    )
+    # Partial Studio: defer Map until create-new refuse / committed rematerialize.
+    mapped_rows: list[tuple] = []
+    transform_errors: list[str] = []
+    rejected_details: list[dict] = []
+    if not studio_err:
+        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            error_policy=policy,
+            dest_types=dest_types,
+            preserve_case=True,
+            dest_kind="iceberg",
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        )
     # Defer strict abort until after committed-schema rematerialize.
 
     # Find current metadata version
@@ -1933,6 +1987,7 @@ def _write_mapped_rows_filesystem(
             # Prefer Studio-filled committed carriers for rematerialize
             # (same PyIceberg bar — never rematerialize from Map-only write_types).
             write_types = {**write_types, **effective}
+        _force_remap = bool(studio_err) and not mapped_rows
         remat = _iceberg_rematerialize_if_physical_differs(
             physical=write_types,
             dest_types=dest_types,
@@ -1945,10 +2000,27 @@ def _write_mapped_rows_filesystem(
             policy=policy,
             conflict_columns=conflict_columns,
             destination_column_nullability=_kwargs.get("destination_column_nullability"),
+            force_remap=_force_remap,
         )
         if remat is not None:
             mapped_rows, transform_errors, rejected_details, dest_types = remat
             write_types = _write_types_from_schema(schema_json, dest_types)
+        elif _force_remap:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=str(table_dir),
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "Iceberg live DDL incomplete for mapped columns — "
+                    "refuse Map VARCHAR rematerialize invent. Re-run "
+                    "destination schema introspect and retry."
+                ),
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
 
     _map_abort = reject_on_strict_policy(
         policy, rejected_details, "Iceberg", transform_errors
