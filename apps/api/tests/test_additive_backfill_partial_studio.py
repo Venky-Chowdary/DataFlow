@@ -138,3 +138,86 @@ def test_sqlite_backfill_refuses_partial_studio_unstamped(tmp_path: Path):
     )
     assert result.ok is False
     assert "note" in (result.error or "").lower()
+
+
+def test_sqlite_partial_studio_fail_policy_defers_map_until_pragma(tmp_path: Path):
+    """Partial Studio + error_policy=fail must not abort on pre-physical Map invent.
+
+    Live INTEGER affinity rematerialize owns the carrier; Map VARCHAR stamps must
+    not fail-closed before PRAGMA overlay (generic_sql / PG parity).
+    """
+    from connectors.sqlite_writer import write_mapped_rows
+
+    db = tmp_path / "defer_map_fail.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE amounts (amount REAL)")
+    conn.commit()
+    conn.close()
+
+    result = write_mapped_rows(
+        host="",
+        port=0,
+        database=str(db),
+        username="",
+        password="",
+        schema="main",
+        connection_string="",
+        ssl=False,
+        table_name="amounts",
+        headers=["amount"],
+        data_rows=[["12.50"]],
+        mappings=[
+            {
+                "source": "amount",
+                "target": "amount",
+                "target_type": "VARCHAR",
+                "source_type": "VARCHAR",
+            }
+        ],
+        column_types={"amount": "VARCHAR"},
+        create_table=False,
+        # Partial Studio: empty coverage for amount → studio_err, defer Map.
+        destination_column_types={"other": "INTEGER"},
+        error_policy="fail",
+        write_mode="insert",
+    )
+    assert result.ok is True, result.error
+    assert result.rows_written == 1
+
+    conn = sqlite3.connect(str(db))
+    try:
+        rows = conn.execute("SELECT amount FROM amounts").fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    assert float(rows[0][0]) == 12.5
+
+
+def test_sqlite_create_new_no_studio_still_uses_map_stamps(tmp_path: Path):
+    """No Studio dict → create-new still materializes from Map (unchanged)."""
+    from connectors.sqlite_writer import write_mapped_rows
+
+    db = tmp_path / "no_studio_create.db"
+    result = write_mapped_rows(
+        host="",
+        port=0,
+        database=str(db),
+        username="",
+        password="",
+        schema="main",
+        connection_string="",
+        ssl=False,
+        table_name="orders",
+        headers=["id", "note"],
+        data_rows=[["1", "hello"]],
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "INTEGER"},
+            {"source": "note", "target": "note", "target_type": "TEXT"},
+        ],
+        column_types={"id": "INTEGER", "note": "TEXT"},
+        create_table=True,
+        error_policy="fail",
+        write_mode="insert",
+    )
+    assert result.ok is True, result.error
+    assert result.rows_written == 1

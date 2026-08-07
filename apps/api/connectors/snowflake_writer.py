@@ -240,8 +240,12 @@ def _sf_rematerialize_if_physical_differs(
     conflict_columns: list[str] | None,
     write_mode: str,
     destination_column_nullability: Any = None,
+    force_remap: bool = False,
 ) -> _SfMaterializedBatch | None:
-    """Rebuild from source when live DDL carriers differ from Map stamps."""
+    """Rebuild from source when live DDL carriers differ from Map stamps.
+
+    ``force_remap`` covers deferred Map under partial Studio (empty batch).
+    """
     from connectors.writer_common import rematerialize_live_dest_types
 
     live_dest_types = rematerialize_live_dest_types(
@@ -254,7 +258,7 @@ def _sf_rematerialize_if_physical_differs(
         != str(live_dest_types.get(c) or "").strip().upper()
         for c in target_cols
     )
-    if not carriers_differ:
+    if not carriers_differ and not force_remap:
         return None
     return _sf_materialize_mapped_batch(
         headers=headers,
@@ -1128,29 +1132,36 @@ def write_mapped_rows(
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
 
-    _batch = _sf_materialize_mapped_batch(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        logical_types=logical_types,
-        policy=policy,
-        conflict_columns=conflict_columns,
-        write_mode=write_mode,
-        live_dest_types=live_dest_types if isinstance(live_dest_types, dict) else None,
-        destination_pk_columns=list(conflict_columns or []) or None,
-        destination_column_nullability=dest_nullability,
-        allow_logical_fallback=not bool(studio_err),
-    )
-    mapped_rows = _batch.mapped_rows
-    transform_errors = _batch.transform_errors
-    rejected_details = _batch.rejected_details
-    target_types = _batch.target_types
-    dest_types = _batch.dest_types
-    rows_for_checksum = _batch.rows_for_checksum
+    # Partial Studio: defer Map + strict abort until live DDL rematerialize.
+    mapped_rows: list = []
+    transform_errors: list[str] = []
+    rejected_details: list = []
+    target_types: list[str] = []
+    rows_for_checksum: list = []
     sparse_rows: list[tuple] = []
+    if not studio_err:
+        _batch = _sf_materialize_mapped_batch(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            logical_types=logical_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            write_mode=write_mode,
+            live_dest_types=live_dest_types if isinstance(live_dest_types, dict) else None,
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=dest_nullability,
+            allow_logical_fallback=True,
+        )
+        mapped_rows = _batch.mapped_rows
+        transform_errors = _batch.transform_errors
+        rejected_details = _batch.rejected_details
+        target_types = _batch.target_types
+        dest_types = _batch.dest_types
+        rows_for_checksum = _batch.rows_for_checksum
 
     try:
         conflict = resolve_conflict_targets(conflict_columns, target_cols)
@@ -1167,7 +1178,7 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
     # Within a single batch, the last occurrence of an upsert key wins.
-    if write_mode == "upsert" and conflict:
+    if write_mode == "upsert" and conflict and mapped_rows:
         mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
         if DF_LSN_COL in target_cols:
             mapped_rows = dedupe_rows_by_pk_and_lsn(
@@ -1198,24 +1209,34 @@ def write_mapped_rows(
     )
     coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Snowflake', transform_errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table_name,
-            target_schema=schema,
-            checksum="",
-            chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_rows=rejected_rows,
-            warnings=transform_errors,
-            rejected_details=rejected_details,
+    if not studio_err:
+        _map_abort = reject_on_strict_policy(
+            policy, rejected_details, "Snowflake", transform_errors
         )
+        if _map_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema,
+                checksum="",
+                chunks_completed=0,
+                error=_map_abort
+                or f"Transform errors: {'; '.join(transform_errors[:3])}",
+                rejected_rows=rejected_rows,
+                warnings=transform_errors,
+                rejected_details=rejected_details,
+            )
 
     # Never stub local/fakesnow accounts when snowflake.connector is installed —
     # stub writes skip real load and break strict reconciliation (no read-back).
-    if stub_writes_allowed() and not _is_local_account(str(account or "")):
+    # Under partial Studio defer, empty mapped_rows must hit live rematerialize —
+    # never stub an empty invent batch.
+    if (
+        stub_writes_allowed()
+        and not _is_local_account(str(account or ""))
+        and not (studio_err and not mapped_rows)
+    ):
         if not create_table:
             return WriteResult(
                 ok=False,
@@ -1457,6 +1478,7 @@ def write_mapped_rows(
                         rejected_details=rejected_details,
                         warnings=transform_errors,
                     )
+                _force_remap = bool(studio_err) and not mapped_rows
                 _re = _sf_rematerialize_if_physical_differs(
                     physical=physical,
                     dest_types=dest_types,
@@ -1470,6 +1492,7 @@ def write_mapped_rows(
                     conflict_columns=conflict,
                     write_mode=write_mode,
                     destination_column_nullability=dest_nullability,
+                    force_remap=_force_remap,
                 )
                 if _re is not None:
                     dest_types = _re.dest_types
@@ -1486,6 +1509,24 @@ def write_mapped_rows(
                             )
                         else:
                             mapped_rows = dedupe_rows(mapped_rows, conflict, target_cols)
+                elif _force_remap:
+                    # Deferred Map under partial Studio — refuse empty invent
+                    # success when live carriers cannot be rebuilt (PG/MySQL parity).
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            "Snowflake live DDL incomplete for mapped columns — "
+                            "refuse Map VARCHAR rematerialize invent. Re-run "
+                            "destination schema introspect and retry."
+                        ),
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
                 else:
                     target_types = _overlay_snowflake_physical_bind_types(
                         target_cols, target_types, physical
@@ -1578,6 +1619,7 @@ def write_mapped_rows(
                         rejected_details=rejected_details,
                         warnings=transform_errors,
                     )
+                _force_remap = bool(studio_err) and not mapped_rows
                 _re = _sf_rematerialize_if_physical_differs(
                     physical=physical,
                     dest_types=dest_types,
@@ -1591,6 +1633,7 @@ def write_mapped_rows(
                     conflict_columns=conflict_columns,
                     write_mode=write_mode,
                     destination_column_nullability=dest_nullability,
+                    force_remap=_force_remap,
                 )
                 if _re is not None:
                     dest_types = _re.dest_types
@@ -1599,6 +1642,22 @@ def write_mapped_rows(
                     rejected_details = _re.rejected_details
                     target_types = _re.target_types
                     rows_for_checksum = _re.rows_for_checksum
+                elif _force_remap:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            "Snowflake live DDL incomplete for mapped columns — "
+                            "refuse Map VARCHAR rematerialize invent. Re-run "
+                            "destination schema introspect and retry."
+                        ),
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
                 else:
                     target_types = _overlay_snowflake_physical_bind_types(
                         target_cols, target_types, physical

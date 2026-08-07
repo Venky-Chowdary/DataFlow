@@ -478,48 +478,66 @@ def write_mapped_rows(
     )
     policy = transform_error_policy(error_policy)
 
-    # Map before opening a socket so public proxies are not idle during transform.
-    # When Studio did not pass live DDL, physical overlay below rematerializes.
-    _batch = _mysql_materialize_mapped_batch(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        logical_types=logical_types,
-        policy=policy,
-        conflict_columns=conflict_columns,
-        write_mode=write_mode,
-        destination_pk_columns=list(conflict_columns or []) or None,
-        destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        allow_logical_fallback=not bool(studio_err),
-    )
-    mapped_rows = _batch.mapped_rows
-    sparse_rows = _batch.sparse_rows
-    transform_errors = _batch.transform_errors
-    rejected_details = _batch.rejected_details
-    target_types = _batch.target_types
-    rows_for_checksum = _batch.rows_for_checksum
-
-    rejected_rows = _rejected_row_count(
-        data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
-    )
-    coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-    _map_abort = reject_on_strict_policy(policy, rejected_details, 'MySQL', transform_errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False, rows_written=0, table_name=table_name, target_schema=database,
-            checksum="", chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_rows=rejected_rows,
-            rejected_details=rejected_details,
-            warnings=transform_errors,
+    # Partial Studio: defer Map + strict abort until live DDL rematerialize
+    # (Map-blank invent must not fail batches that succeed against physical carriers).
+    # Matches generic_sql / BigQuery. Create-new already refused below on studio_err.
+    mapped_rows: list = []
+    sparse_rows: list = []
+    transform_errors: list[str] = []
+    rejected_details: list = []
+    target_types: list[str] = []
+    rows_for_checksum: list = []
+    rejected_rows = 0
+    coerced_null_rows = 0
+    if not studio_err:
+        # Map before opening a socket so public proxies are not idle during transform.
+        _batch = _mysql_materialize_mapped_batch(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            logical_types=logical_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            write_mode=write_mode,
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=_kwargs.get("destination_column_nullability"),
+            allow_logical_fallback=True,
         )
+        mapped_rows = _batch.mapped_rows
+        sparse_rows = _batch.sparse_rows
+        transform_errors = _batch.transform_errors
+        rejected_details = _batch.rejected_details
+        target_types = _batch.target_types
+        rows_for_checksum = _batch.rows_for_checksum
+
+        rejected_rows = _rejected_row_count(
+            data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+        )
+        coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
+        _map_abort = reject_on_strict_policy(
+            policy, rejected_details, "MySQL", transform_errors
+        )
+        if _map_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=database,
+                checksum="",
+                chunks_completed=0,
+                error=_map_abort
+                or f"Transform errors: {'; '.join(transform_errors[:3])}",
+                rejected_rows=rejected_rows,
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
 
     chunk_size = write_chunk_size(host, connection_string=connection_string)
     total = len(mapped_rows)
-    chunks = max(1, (total + chunk_size - 1) // chunk_size) if total else 1
+    chunks = max(1, (total + chunk_size - 1) // chunk_size) if total else 0
     written = 0
     chunks_completed = 0
     placeholders = ", ".join(["%s"] * len(target_cols))
@@ -732,7 +750,8 @@ def write_mapped_rows(
                 != str(live_dest_types.get(c) or "").strip().upper()
                 for c in target_cols
             )
-            if carriers_differ:
+            need_remap = carriers_differ or (bool(studio_err) and not mapped_rows)
+            if need_remap:
                 # Rematerialize from source against live DDL (no Map VARCHAR invent).
                 dest_types = live_dest_types
                 _batch = _mysql_materialize_mapped_batch(
@@ -952,6 +971,18 @@ def write_mapped_rows(
 
             # Ack checksum must match rows that land (partitioned dense + sparse).
             rows_for_checksum = list(converted_rows) + sparse_checksum_rows
+            # Rematerialize under studio_err fills converted_rows after early defer —
+            # recompute chunk count so the write loop covers the full batch.
+            total = len(converted_rows)
+            chunks = max(1, (total + chunk_size - 1) // chunk_size) if total else 0
+            rejected_rows = _rejected_row_count(
+                data_rows,
+                converted_rows or mapped_rows,
+                rejected_details,
+                policy,
+                sparse_rows=sparse_rows,
+            )
+            coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
             for chunk_idx in range(chunks):
                 start = chunk_idx * chunk_size

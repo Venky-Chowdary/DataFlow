@@ -446,50 +446,18 @@ def write_mapped_rows(
     written = 0
     rows_skipped = 0
     transform_errors: list[str] = []
+    rejected_details: list[dict] = []
+    rows_for_checksum: list[tuple] = []
+    sparse_rows: list[tuple] = []
+    conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
+    tgt_types = [
+        str(target_types[i] if i < len(target_types) else "")
+        for i in range(len(target_cols))
+    ]
 
     try:
-        mapped_rows, transform_errors, rejected_details = (
-            build_mapped_rows_with_details(
-                headers=headers,
-                data_rows=data_rows,
-                mappings=mappings,
-                target_cols=target_cols,
-                column_types=column_types,
-                dest_types=dest_types,
-                error_policy=policy,
-                preserve_case=True,
-                dest_kind="sqlite",
-                destination_pk_columns=list(conflict_columns or []) or None,
-                destination_column_nullability=_kwargs.get("destination_column_nullability"),
-            )
-        )
-        # Shared quarantine matrix — SQLite is PRODUCTION_SKU; never skip fit
-        # checks that generic_sql / Postgres / BQ run (silent truncate / invent).
-        # Carriers must match transform dest_types (live DDL), not Map-only logicals.
-        tgt_types = [str(target_types[i] if i < len(target_types) else "") for i in range(len(target_cols))]
-        mapped_rows = apply_write_quarantine_matrix(
-            mapped_rows,
-            target_cols,
-            tgt_types,
-            rejected_details,
-            policy,
-            dialect_label="SQLite",
-            mappings=list(mappings or []) or None,
-        )
-
-        rows_for_checksum: list[tuple] = []
-        sparse_rows: list[tuple] = []
-        conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
-        if write_mode == "upsert" and conflict_cols:
-            mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-        else:
-            # Dense INSERT/COPY — coerce_null/STOP_COLUMN DF_MISSING → SQL NULL.
-            from connectors.writer_common import materialize_missing_as_null_for_dense_write
-
-            mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
-
-        # Map VARCHAR + declared DATE/INT affinity — overlay before bind refuse.
-        # Existing table + empty PRAGMA → fail closed (never invent NULL on typed sinks).
+        # Probe before Map so create-new refuse / rematerialize win over
+        # Map-blank invent under partial Studio (generic_sql / PG parity).
         from connectors.writer_common import (
             overlay_physical_bind_types,
             require_physical_types_for_existing_table,
@@ -532,6 +500,44 @@ def write_mapped_rows(
                 rejected_details=rejected_details,
                 warnings=transform_errors,
             )
+
+        if not studio_err:
+            mapped_rows, transform_errors, rejected_details = (
+                build_mapped_rows_with_details(
+                    headers=headers,
+                    data_rows=data_rows,
+                    mappings=mappings,
+                    target_cols=target_cols,
+                    column_types=column_types,
+                    dest_types=dest_types,
+                    error_policy=policy,
+                    preserve_case=True,
+                    dest_kind="sqlite",
+                    destination_pk_columns=list(conflict_columns or []) or None,
+                    destination_column_nullability=_kwargs.get(
+                        "destination_column_nullability"
+                    ),
+                )
+            )
+            # Shared quarantine matrix — SQLite is PRODUCTION_SKU; never skip fit
+            # checks that generic_sql / Postgres / BQ run (silent truncate / invent).
+            mapped_rows = apply_write_quarantine_matrix(
+                mapped_rows,
+                target_cols,
+                tgt_types,
+                rejected_details,
+                policy,
+                dialect_label="SQLite",
+                mappings=list(mappings or []) or None,
+            )
+            if write_mode == "upsert" and conflict_cols:
+                mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+            else:
+                from connectors.writer_common import (
+                    materialize_missing_as_null_for_dense_write,
+                )
+
+                mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
         overlay_err = require_physical_types_for_existing_table(
             table_existed=table_existed,
@@ -614,7 +620,8 @@ def write_mapped_rows(
                 != str(live_dest_types.get(c) or "").strip().upper()
                 for c in covered_cols
             )
-            if carriers_differ:
+            need_remap = carriers_differ or (bool(studio_err) and not mapped_rows)
+            if need_remap:
                 # Rematerialize from source against live DDL (no Map VARCHAR invent).
                 dest_types = live_dest_types
                 target_types = [
