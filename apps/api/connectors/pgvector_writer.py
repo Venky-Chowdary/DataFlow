@@ -155,13 +155,28 @@ def _pgvector_gate_existing_physical(
                     "(empty→NULL invent risk). Re-check grants."
                 )
             live.update(physical)
-            # Existing table: gate every mapped scalar column (ES/Mongo/Weaviate
-            # bar) — partial information_schema must not leave Map VARCHAR invent
-            # gaps. embedding is dim-gated separately.
+            # Gate only real table scalars (id/content/source_id/chunk_index/…)
+            # — other mapped fields land in JSONB metadata and must not trip
+            # require_physical. Known scalars still gate when information_schema
+            # is partial (invent cliff).
+            _scalar = {
+                "id",
+                "content",
+                "source_id",
+                "chunk_index",
+                "created_at",
+            }
             mapped_existing = [
                 c
                 for c in mapped_targets
-                if c and str(c).lower() != "embedding"
+                if c
+                and str(c).lower() != "embedding"
+                and (
+                    str(c).lower() in _scalar
+                    or c in physical
+                    or str(c).lower() in physical
+                    or str(c).upper() in physical
+                )
             ]
             effective = dict(live)
             if isinstance(studio_live, dict):
