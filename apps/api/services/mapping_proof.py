@@ -112,6 +112,7 @@ def mapping_fidelity(
     ) in {"identity_passthrough", "create_compatible_new"}
     transform = str(mapping.get("transform") or "none")
     t_fidelity = transform_fidelity(transform)
+    dest = (destination_db_type or "").strip().lower()
     # Existing match without Map/Studio stamp: refuse source_type invent for a
     # false-green preserve verdict (partial Studio honesty).
     if not stamp and not create_new:
@@ -129,9 +130,47 @@ def mapping_fidelity(
             "invents_capacity": False,
             "requires_risk_contract": True,
         }
-    tgt_type = stamp or src_type
+    # Create-new: prefer Map stamp, else dialect create-new physical — never
+    # green UUID→UUID when writers emit STRING(36) (BQ invent cliff).
+    if create_new and not stamp:
+        from services.conversion_contract import ConversionClass
 
-    dest = (destination_db_type or "").strip().lower()
+        if not dest:
+            return {
+                "verdict": "cast",
+                "reason": (
+                    "Create-new destination type pending Map stamp / dest_db — "
+                    "refuse source_type identity invent for fidelity."
+                ),
+                "type_narrowing": True,
+                "transform_fidelity": t_fidelity,
+                "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+                "invents_capacity": False,
+                "requires_risk_contract": True,
+            }
+        try:
+            from services.type_system import create_new_mapping_target_type
+
+            tgt_type = str(create_new_mapping_target_type(src_type, dest) or "").strip()
+        except Exception:
+            tgt_type = ""
+        if not tgt_type:
+            # Never fall back to source identity (UUID→UUID false-green).
+            return {
+                "verdict": "cast",
+                "reason": (
+                    f"Create-new physical stamp unavailable for {src_type} on "
+                    f"{dest} — refuse source_type identity invent for fidelity."
+                ),
+                "type_narrowing": True,
+                "transform_fidelity": t_fidelity,
+                "conversion_class": ConversionClass.NEEDS_QUARANTINE.value,
+                "invents_capacity": False,
+                "requires_risk_contract": True,
+            }
+    else:
+        tgt_type = stamp or src_type
+
     if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
         from services.conversion_contract import classify_conversion
 

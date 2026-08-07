@@ -488,8 +488,10 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_TIME: "STRING",
         LOGICAL_UUID: "STRING",
         LOGICAL_JSON: "STRING",
-        # Native nested — never collapse ARRAY/STRUCT to STRING (fidelity vs Airbyte).
-        LOGICAL_ARRAY: "ARRAY<STRING>",
+        # Bare ARRAY → document STRING wire (same as JSON) — never invent
+        # ARRAY<STRING> element polarity for Mongo/document bare arrays.
+        # Typed ARRAY<T> still emits ARRAY<T> via nested DDL.
+        LOGICAL_ARRAY: "STRING",
         LOGICAL_BINARY: "BINARY",
     },
     # Apache Iceberg table schema (writer/catalog native).
@@ -505,7 +507,8 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_TIME: "time",
         LOGICAL_UUID: "uuid",
         LOGICAL_JSON: "string",
-        LOGICAL_ARRAY: "list",
+        # Bare ARRAY → document string wire; typed ARRAY<T> → list<T>.
+        LOGICAL_ARRAY: "string",
         LOGICAL_BINARY: "binary",
     },
     # Schemaless / document / KV — wire as string; no SQL DDL contract.
@@ -581,7 +584,9 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_TIME: "String",
         LOGICAL_UUID: "UUID",
         LOGICAL_JSON: "String",
-        LOGICAL_ARRAY: "Array(String)",
+        # Bare ARRAY → document String wire (same as JSON) — never invent
+        # Array(String) element polarity. Typed ARRAY<T> → Array(T).
+        LOGICAL_ARRAY: "String",
         LOGICAL_BINARY: "String",
     },
     "trino": {

@@ -511,15 +511,53 @@ def write_mapped_rows(
                     "destination_column_nullability"
                 ),
             )
+            # First-register: Map stamp → logical → refuse. Never prefer soft
+            # VARCHAR defaults from resolve_mapping_dest_types over typed logicals
+            # (that invents open "string" JSON Schema for BOOLEAN/DECIMAL).
+            from services.mapping_constraints import write_mappings as _wm
+
+            by_tgt_reg: dict[str, dict] = {}
+            for mapping in _wm(list(mappings or [])):
+                tgt = str(mapping.get("target") or "").strip()
+                if tgt and tgt not in by_tgt_reg:
+                    by_tgt_reg[tgt] = mapping
+                    by_tgt_reg.setdefault(tgt.lower(), mapping)
+            missing_reg: list[str] = []
+            reg_props: dict[str, Any] = {}
+            for i, c in enumerate(target_cols):
+                if not c:
+                    continue
+                mapping = by_tgt_reg.get(c) or by_tgt_reg.get(str(c).lower()) or {}
+                explicit = str(
+                    mapping.get("target_type") or mapping.get("dest_type") or ""
+                ).strip()
+                logical = str(
+                    logical_types[i] if i < len(logical_types) else ""
+                ).strip()
+                carrier = explicit or logical
+                if not carrier:
+                    missing_reg.append(c)
+                    continue
+                reg_props[c] = _json_schema_property_for_logical(carrier)
+            if missing_reg:
+                sample = ", ".join(repr(c) for c in missing_reg[:12])
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=topic,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Kafka Schema Registry first-register field(s) {sample} "
+                        "lack Map/logical carriers — refuse open string invent. "
+                        "Stamp Map target_type or load destination schema."
+                    ),
+                    driver="kafka",
+                )
             schema_obj = {
                 "type": "object",
-                "properties": {
-                    c: _json_schema_property_for_logical(
-                        dest_types.get(c)
-                        or (logical_types[i] if i < len(logical_types) else "string")
-                    )
-                    for i, c in enumerate(target_cols)
-                },
+                "properties": reg_props,
             }
             try:
                 registered_schema_id = register_json_schema(

@@ -4288,16 +4288,23 @@ def write_mapped_rows(
                 error=str(exc),
             )
     from services.type_system import is_generated_always_column
+    from services.mapping_constraints import write_mappings
 
-    # Omit GENERATED ALWAYS from INSERT projection; keep mappings parallel.
+    # Omit GENERATED ALWAYS from INSERT projection by target column — never
+    # index-zip mappings[i] (omits/reorder mis-stamp invents wrong DDL).
     keep_idx = [
         i for i, typ in enumerate(logical_types) if not is_generated_always_column(typ)
     ]
     if len(keep_idx) < len(logical_types):
         target_cols = [target_cols[i] for i in keep_idx]
         logical_types = [logical_types[i] for i in keep_idx]
-        mappings = [mappings[i] for i in keep_idx if i < len(mappings)]
     dest_db = (cfg.get("type") or "").lower()
+    by_tgt: dict[str, dict] = {}
+    for mapping in write_mappings(list(mappings or [])):
+        tgt = str(mapping.get("target") or "").strip()
+        if tgt and tgt not in by_tgt:
+            by_tgt[tgt] = mapping
+            by_tgt.setdefault(tgt.lower(), mapping)
     target_column_types = {}
     explicit_stamps: set[str] = set()
     # Studio-probed live DDL beats Map stamps for existing tables (invent cliff).
@@ -4335,10 +4342,14 @@ def write_mapped_rows(
         # Partial Studio: do not Map-fill gaps — rematerialize or create-new refuse.
         if studio_err:
             continue
-        explicit = mappings[i].get("target_type") if i < len(mappings) else None
+        mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+        explicit = str(
+            mapping.get("target_type") or mapping.get("dest_type") or ""
+        ).strip() or None
         source_type = (
-            column_types.get(mappings[i]["source"]) if i < len(mappings) else None
-        ) or (logical_types[i] if i < len(logical_types) else "string")
+            column_types.get(str(mapping.get("source") or ""))
+            or (logical_types[i] if i < len(logical_types) else "string")
+        )
         # Map stamps / logicals through materialize_dest_ddl so CREATE cannot
         # invent REAL→DOUBLE or BQ TIMESTAMP→DATETIME after Map stamped.
         if explicit:
@@ -4386,10 +4397,9 @@ def write_mapped_rows(
         for i, col in enumerate(target_cols):
             if col in explicit_stamps or col in live_locked:
                 continue
-            mapping_source = mappings[i].get("source_type") if i < len(mappings) else None
-            catalog_source = (
-                column_types.get(mappings[i].get("source")) if i < len(mappings) else None
-            )
+            mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+            mapping_source = mapping.get("source_type")
+            catalog_source = column_types.get(str(mapping.get("source") or ""))
             source_type = _source_ddl_for_widen(mapping_source, catalog_source)
             # Unknown source DDL: do not invent string/VARCHAR widen candidate.
             if not str(source_type or "").strip():
@@ -4417,8 +4427,17 @@ def write_mapped_rows(
             new_typ = desired_list[i]
             old_typ = target_column_types[col]
             target_column_types[col] = new_typ
-            if col not in explicit_stamps and new_typ != old_typ and i < len(mappings):
-                mappings[i] = {**mappings[i], "target_type": new_typ}
+            if col not in explicit_stamps and new_typ != old_typ:
+                mapping = by_tgt.get(col) or by_tgt.get(str(col).lower())
+                if mapping is not None:
+                    updated = {**mapping, "target_type": new_typ}
+                    by_tgt[col] = updated
+                    by_tgt[str(col).lower()] = updated
+                    # Keep write_mappings list in sync for quarantine / bind.
+                    for mi, m in enumerate(mappings):
+                        if str(m.get("target") or "").strip().lower() == str(col).lower():
+                            mappings[mi] = updated
+                            break
 
     policy = transform_error_policy(error_policy)
     # Engine-honest dialect labels (Databricks/Delta via generic_sql share this path).
