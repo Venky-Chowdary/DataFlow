@@ -29,6 +29,26 @@ def test_mongo_rematerialize_when_physical_decimal_vs_map_varchar():
     ) == 1
 
 
+def test_mongo_rematerialize_refuses_map_varchar_gap_fill():
+    from connectors.mongodb_writer import _mongo_rematerialize_if_physical_differs
+
+    batch = _mongo_rematerialize_if_physical_differs(
+        physical={"amount": "DECIMAL"},
+        dest_types={"amount": "VARCHAR", "note": "VARCHAR"},
+        target_cols=["amount", "note"],
+        headers=["amount", "note"],
+        data_rows=[["12.50", "x"]],
+        mappings=[
+            {"source": "amount", "target": "amount", "target_type": "VARCHAR"},
+            {"source": "note", "target": "note", "target_type": "VARCHAR"},
+        ],
+        column_types={"amount": "VARCHAR", "note": "VARCHAR"},
+        logical_types=["VARCHAR", "VARCHAR"],
+        policy="quarantine",
+    )
+    assert batch is None
+
+
 def test_mongo_no_rematerialize_when_carriers_match():
     from connectors.mongodb_writer import _mongo_rematerialize_if_physical_differs
 
@@ -94,6 +114,26 @@ def test_es_rematerialize_when_physical_long_vs_map_varchar():
     assert any((d.get("column") or "").lower() == "qty" for d in rejected) or len(
         mapped_rows
     ) == 1
+
+
+def test_es_rematerialize_refuses_map_varchar_gap_fill():
+    from connectors.elasticsearch_writer import _es_rematerialize_if_physical_differs
+
+    batch = _es_rematerialize_if_physical_differs(
+        physical={"qty": "INTEGER"},
+        dest_types={"qty": "VARCHAR", "note": "VARCHAR"},
+        target_cols=["qty", "note"],
+        headers=["qty", "note"],
+        data_rows=[["12", "x"]],
+        mappings=[
+            {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            {"source": "note", "target": "note", "target_type": "VARCHAR"},
+        ],
+        column_types={"qty": "VARCHAR", "note": "VARCHAR"},
+        logical_types=["VARCHAR", "VARCHAR"],
+        policy="quarantine",
+    )
+    assert batch is None
 
 
 def test_fetch_es_physical_types_from_mapping():

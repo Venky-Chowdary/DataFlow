@@ -26,6 +26,27 @@ def test_dynamo_rematerialize_when_physical_decimal_vs_map_varchar():
     assert len(mapped_rows) + len(rejected) >= 1
 
 
+def test_dynamo_rematerialize_refuses_map_varchar_gap_fill():
+    """Incomplete AttrDef/sample must not soft-invent Map VARCHAR for gaps."""
+    from connectors.dynamodb_writer import _dynamo_rematerialize_if_physical_differs
+
+    batch = _dynamo_rematerialize_if_physical_differs(
+        physical={"id": "VARCHAR"},
+        dest_types={"id": "VARCHAR", "amount": "VARCHAR"},
+        target_cols=["id", "amount"],
+        headers=["id", "amount"],
+        data_rows=[["1", "9.99"]],
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "VARCHAR"},
+            {"source": "amount", "target": "amount", "target_type": "VARCHAR"},
+        ],
+        column_types={"id": "VARCHAR", "amount": "VARCHAR"},
+        logical_types=["VARCHAR", "VARCHAR"],
+        policy="quarantine",
+    )
+    assert batch is None
+
+
 def test_dynamo_no_rematerialize_when_carriers_match():
     from connectors.dynamodb_writer import _dynamo_rematerialize_if_physical_differs
 
@@ -104,6 +125,26 @@ def test_redis_rematerialize_when_physical_int_vs_map_varchar():
     mapped_rows, _errs, rejected, live = batch
     assert "INT" in str(live.get("qty") or "").upper()
     assert len(mapped_rows) + len(rejected) >= 1
+
+
+def test_redis_rematerialize_refuses_map_varchar_gap_fill():
+    from connectors.redis_writer import _redis_rematerialize_if_physical_differs
+
+    batch = _redis_rematerialize_if_physical_differs(
+        physical={"qty": "INTEGER"},
+        dest_types={"qty": "VARCHAR", "flag": "VARCHAR"},
+        target_cols=["qty", "flag"],
+        headers=["qty", "flag"],
+        data_rows=[["7", "true"]],
+        mappings=[
+            {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            {"source": "flag", "target": "flag", "target_type": "VARCHAR"},
+        ],
+        column_types={"qty": "VARCHAR", "flag": "VARCHAR"},
+        logical_types=["VARCHAR", "VARCHAR"],
+        policy="quarantine",
+    )
+    assert batch is None
 
 
 def test_fetch_redis_physical_types_majority_vote():

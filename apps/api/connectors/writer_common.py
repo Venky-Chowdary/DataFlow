@@ -2069,6 +2069,37 @@ def sample_values_by_source_from_batch(
     return out
 
 
+def rematerialize_live_dest_types(
+    physical: dict[str, str] | None,
+    target_cols: list[str],
+    *,
+    product: str,
+) -> dict[str, str] | None:
+    """Live sink carriers only for rematerialize — never Map VARCHAR gap-fill.
+
+    Returns ``None`` when ``physical`` is empty or does not cover every mapped
+    column (caller must have fail-closed via ``require_physical`` / Studio).
+    """
+    if not physical:
+        return None
+    from connectors.saas_common import merge_saas_live_types
+
+    live_map = {
+        str(k): str(v)
+        for k, v in physical.items()
+        if k and str(v or "").strip()
+    }
+    merged, err = merge_saas_live_types(
+        live_map,
+        list(target_cols or []),
+        studio_types=None,
+        product=product,
+    )
+    if err:
+        return None
+    return merged
+
+
 def resolve_mapping_dest_types(
     target_cols: list[str],
     mappings: list[dict],
@@ -2086,6 +2117,9 @@ def resolve_mapping_dest_types(
     3. ``resolve_target_columns`` logical types
     4. source ``column_types``
     5. ``default`` (never invent unbounded ``string`` when typed Map exists)
+
+    For rematerialize over live DDL/Registry/AttrDefs, prefer
+    ``rematerialize_live_dest_types`` so gaps never soft-fill Map VARCHAR.
     """
     cols = list(target_cols or [])
     maps = list(mappings or [])

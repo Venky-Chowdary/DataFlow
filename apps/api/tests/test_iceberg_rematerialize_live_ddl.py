@@ -52,6 +52,31 @@ def test_iceberg_no_rematerialize_when_carriers_match():
     assert batch is None
 
 
+def test_iceberg_rematerialize_overlays_existing_with_additive_map_cols():
+    """Additive Map columns keep Map stamps; live existing cols rematerialize."""
+    from connectors.iceberg_writer import _iceberg_rematerialize_if_physical_differs
+
+    batch = _iceberg_rematerialize_if_physical_differs(
+        physical={"qty": "INT"},
+        dest_types={"qty": "VARCHAR", "note": "VARCHAR"},
+        target_cols=["qty", "note"],
+        headers=["qty", "note"],
+        data_rows=[["12", "hello"], ["x", "world"]],
+        mappings=[
+            {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            {"source": "note", "target": "note", "target_type": "VARCHAR"},
+        ],
+        column_types={"qty": "VARCHAR", "note": "VARCHAR"},
+        logical_types=["VARCHAR", "VARCHAR"],
+        policy="quarantine",
+    )
+    assert batch is not None
+    mapped_rows, _errs, rejected, live = batch
+    assert "INT" in str(live.get("qty") or "").upper()
+    assert str(live.get("note") or "").upper().startswith("VARCHAR")
+    assert len(mapped_rows) + len(rejected) >= 1
+
+
 def test_physical_carriers_from_arrow_decimal():
     pa = pytest.importorskip("pyarrow")
     from connectors.iceberg_writer import _physical_carriers_from_arrow

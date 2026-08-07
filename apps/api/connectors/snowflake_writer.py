@@ -229,17 +229,13 @@ def _sf_rematerialize_if_physical_differs(
     destination_column_nullability: Any = None,
 ) -> _SfMaterializedBatch | None:
     """Rebuild from source when live DDL carriers differ from Map stamps."""
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import rematerialize_live_dest_types
 
-    if not physical:
-        return None
-    live_dest_types = resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=physical,
+    live_dest_types = rematerialize_live_dest_types(
+        physical, list(target_cols or []), product="Snowflake"
     )
+    if live_dest_types is None:
+        return None
     carriers_differ = any(
         str(dest_types.get(c) or "").strip().upper()
         != str(live_dest_types.get(c) or "").strip().upper()

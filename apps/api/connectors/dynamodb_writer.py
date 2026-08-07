@@ -127,18 +127,13 @@ def _dynamo_rematerialize_if_physical_differs(
     destination_column_nullability: Any = None,
 ) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
     """Rebuild mapped rows when live Dynamo carriers differ from Map stamps."""
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import rematerialize_live_dest_types
 
-    if not physical:
-        return None
-    live_dest_types = resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=physical,
-        default="VARCHAR",
+    live_dest_types = rematerialize_live_dest_types(
+        physical, list(target_cols or []), product="DynamoDB"
     )
+    if live_dest_types is None:
+        return None
     carriers_differ = any(
         str(dest_types.get(c) or "").strip().upper()
         != str(live_dest_types.get(c) or "").strip().upper()
@@ -554,13 +549,7 @@ def write_mapped_rows(
             ),
         )
 
-    tgt_types = [
-        str(
-            dest_types.get(c, logical_types[i] if i < len(logical_types) else "VARCHAR")
-            or "VARCHAR"
-        )
-        for i, c in enumerate(target_cols)
-    ]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
 
     mapped_rows = apply_write_quarantine_matrix(

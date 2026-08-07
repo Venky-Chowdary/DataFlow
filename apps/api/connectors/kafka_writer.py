@@ -102,26 +102,14 @@ def _kafka_rematerialize_if_physical_differs(
     destination_column_nullability: Any = None,
 ) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
     """Rebuild mapped rows when live Registry carriers differ from Map stamps."""
-    if not physical:
-        return None
-    from connectors.saas_common import merge_saas_live_types
+    from connectors.writer_common import rematerialize_live_dest_types
 
     # Live Registry∩Studio carriers only — never soft-fill Map VARCHAR for gaps
     # (require_physical already fail-closed on existing subjects).
-    live_map = {
-        str(k): str(v)
-        for k, v in physical.items()
-        if k and str(v or "").strip()
-    }
-    live_dest_types, cov_err = merge_saas_live_types(
-        live_map,
-        list(target_cols or []),
-        studio_types=None,
-        product="Kafka Schema Registry",
+    live_dest_types = rematerialize_live_dest_types(
+        physical, list(target_cols or []), product="Kafka Schema Registry"
     )
-    if cov_err:
-        # Incomplete live map — refuse rematerialize-via-Map invent; caller must
-        # have fail-closed at require_physical.
+    if live_dest_types is None:
         return None
     carriers_differ = any(
         str(dest_types.get(c) or "").strip().upper()
