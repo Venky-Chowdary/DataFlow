@@ -645,8 +645,12 @@ def write_mapped_rows(
                 source_type = (
                     column_types.get(source)
                     or mapping.get("source_type")
-                    or "VARCHAR"
+                    or ""
                 )
+                # Unknown source DDL: do not invent VARCHAR widen candidate —
+                # keep Map/current ceiling (desired_types falls back to cur_type).
+                if not str(source_type or "").strip():
+                    continue
                 candidate_by_col[col] = mysql_type(source_type)
 
             desired_types, alter_refusals = desired_types_honoring_map_stamps(

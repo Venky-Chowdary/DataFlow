@@ -474,12 +474,10 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="weaviate",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        # Existing class: live_prop_types already require_physical-complete.
-        # Create-new: only pass Studio when every mapped col is typed — else Map.
+        # Pass Studio/live whenever present — partial Studio fail-closes in
+        # prepare_records (never soft-bind Map invent on create-new).
         destination_column_types=(
-            live_prop_types
-            if (class_existed or studio_typed_all)
-            else None
+            live_prop_types if live_prop_types else None
         ),
     )
     if map_abort:

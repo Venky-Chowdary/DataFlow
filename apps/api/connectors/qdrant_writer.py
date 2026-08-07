@@ -337,7 +337,6 @@ def write_mapped_rows(
 
     collection_existed = False
     cached_live_dim: int | None = None
-    payload_schema_present = False
     try:
         session = _requests_session()
         hdrs = _headers(api_key)
@@ -373,7 +372,6 @@ def write_mapped_rows(
             # Schemaless collections stay Map-tolerant. Typed payload_schema is
             # the invent cliff — Studio may fill; else require_physical.
             if schema_types:
-                payload_schema_present = True
                 live_payload_types.update(schema_types)
                 mapped_existing = [
                     c
@@ -466,11 +464,11 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="qdrant",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        # Existing + payload_schema gated, or intentional full Studio.
+        # Pass Studio/live whenever present — partial Studio fail-closes in
+        # prepare_records (never soft-bind Map invent on create-new).
+        # Schemaless empty collections with no Studio still Map-bind (None).
         destination_column_types=(
-            live_payload_types
-            if (payload_schema_present or studio_typed_all)
-            else None
+            live_payload_types if live_payload_types else None
         ),
     )
     if map_abort:

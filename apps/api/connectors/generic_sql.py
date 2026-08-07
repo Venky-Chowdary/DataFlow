@@ -4390,7 +4390,10 @@ def write_mapped_rows(
             catalog_source = (
                 column_types.get(mappings[i].get("source")) if i < len(mappings) else None
             )
-            source_type = _source_ddl_for_widen(mapping_source, catalog_source) or "string"
+            source_type = _source_ddl_for_widen(mapping_source, catalog_source)
+            # Unknown source DDL: do not invent string/VARCHAR widen candidate.
+            if not str(source_type or "").strip():
+                continue
             source_ddl = (
                 materialize_dest_ddl(dest_db, source_type) if dest_db else source_type
             )

@@ -146,7 +146,9 @@ def _pgvector_gate_existing_physical(
             cur.execute("SELECT to_regclass(%s)", (f"{sch}.{table_name}",))
             existed = cur.fetchone()[0] is not None
             if not existed:
-                return False, (live if studio_typed_all else None), None
+                # Create-new: any Studio (incl. partial) → prepare fail-closes;
+                # no Studio → Map bind.
+                return False, (live if live else None), None
             physical = _fetch_pg_column_types(cur, sch, table_name)
             if not physical and not studio_typed_all:
                 return True, None, (

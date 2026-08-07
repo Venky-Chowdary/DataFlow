@@ -490,3 +490,75 @@ def test_weaviate_schema_auth_refuses_map_bind():
         )
     assert result.ok is False
     assert "auth" in (result.error or "").lower()
+
+
+def test_qdrant_create_new_refuses_partial_studio():
+    """Create-new Qdrant + partial Studio must not Map invent metadata gaps."""
+    from connectors.qdrant_writer import write_mapped_rows
+
+    session = MagicMock()
+    missing = MagicMock()
+    missing.status_code = 404
+    missing.json.return_value = {}
+    session.get.return_value = missing
+
+    with patch("connectors.qdrant_writer._requests_session", return_value=session):
+        result = write_mapped_rows(
+            host="localhost",
+            port=6333,
+            database="",
+            username="",
+            password="key",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="chunks",
+            headers=["id", "qty"],
+            data_rows=[["1", "7"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+            create_table=True,
+            destination_column_types={"id": "VARCHAR"},
+            embedding_model="hash/32",
+        )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()
+
+
+def test_pinecone_create_new_refuses_partial_studio():
+    """Create-new Pinecone + partial Studio must not Map invent metadata gaps."""
+    from connectors.pinecone_writer import write_mapped_rows
+
+    session = MagicMock()
+    stats = MagicMock()
+    stats.status_code = 200
+    stats.json.return_value = {"totalVectorCount": 0, "namespaces": {}}
+    session.get.return_value = stats
+
+    with patch("connectors.pinecone_writer._requests_session", return_value=session):
+        result = write_mapped_rows(
+            host="localhost",
+            port=0,
+            database="",
+            username="",
+            password="key",
+            schema="",
+            connection_string="https://index.pinecone.io",
+            ssl=True,
+            table_name="ns",
+            headers=["id", "qty"],
+            data_rows=[["1", "7"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+            create_table=True,
+            destination_column_types={"id": "VARCHAR"},
+            embedding_model="hash/32",
+        )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()

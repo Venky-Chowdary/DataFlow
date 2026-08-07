@@ -621,10 +621,10 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="milvus",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        # Pass Studio/live whenever present — partial Studio fail-closes in
+        # prepare_records (never soft-bind Map invent on create-new).
         destination_column_types=(
-            live_field_types
-            if (collection_existed or studio_typed_all)
-            else None
+            live_field_types if live_field_types else None
         ),
     )
     if map_abort:

@@ -1913,7 +1913,6 @@ def prepare_records_for_vector_write(
     """
     target_cols: list[str] = []
     source_for_target: list[str] = []
-    dest_types: dict[str, str] = {}
     for m in mappings or []:
         try:
             from services.mapping_constraints import is_intentional_omit
@@ -1929,34 +1928,24 @@ def prepare_records_for_vector_write(
         if tgt not in target_cols:
             target_cols.append(tgt)
             source_for_target.append(src or tgt)
-        dest_types[tgt] = str(
-            m.get("target_type") or m.get("dest_type") or (column_types or {}).get(src) or "string"
-        )
     if not target_cols:
         target_cols = list(headers)
         source_for_target = list(headers)
-        dest_types = {h: (column_types or {}).get(h, "string") for h in target_cols}
 
     live = destination_column_types or {}
-    if live:
-        # Studio/live carriers only — never soft-fill Map VARCHAR for gaps.
-        # Existing typed sinks must call require_physical (or pass full Studio)
-        # before invoking this helper so incomplete live never reaches here.
-        from connectors.saas_common import merge_saas_live_types
-
-        live_map = {
-            str(k): str(v).strip()
-            for k, v in live.items()
-            if k and str(v or "").strip()
-        }
-        dest_types, cov_err = merge_saas_live_types(
-            live_map,
-            list(target_cols or []),
-            studio_types=None,
-            product=(label or dest_kind or "vector").strip() or "vector",
-        )
-        if cov_err:
-            return [], [], cov_err
+    # Studio/live present → fail-closed coverage (never Map VARCHAR gap-fill).
+    # Create-new with no Studio → Map stamps only.
+    dest_types, cov_err = resolve_studio_or_map_dest_types(
+        list(target_cols or []),
+        list(mappings or []),
+        column_types or {},
+        studio_types=live if isinstance(live, dict) and live else None,
+        product=(label or dest_kind or "vector").strip() or "vector",
+    )
+    if cov_err:
+        return [], [], cov_err
+    # Map path may use VARCHAR default — vector quarantine treats unbounded
+    # string carriers as no-op unless VECTOR(n) specialty is stamped.
 
     mapped, _errors, rejected = build_mapped_rows_with_details(
         headers=headers,
