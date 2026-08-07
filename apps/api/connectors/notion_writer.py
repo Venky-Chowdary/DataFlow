@@ -132,7 +132,11 @@ def resolve_notion_dest_types(
     properties: dict[str, str] | None = None,
     property_options: dict[str, list[str]] | None = None,
 ) -> dict[str, str]:
-    """Prefer live Notion database property types; else Map/source carriers."""
+    """Prefer live Notion database property types; else Map/source carriers.
+
+    When properties are supplied, never soft-fill formula/unknown kinds with Map
+    ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate.
+    """
     opts = property_options or {}
     live = {
         name: notion_property_to_carrier(
@@ -141,12 +145,31 @@ def resolve_notion_dest_types(
         for name, typ in (properties or {}).items()
         if name and typ
     }
+    live = {k: v for k, v in live.items() if str(v or "").strip()}
+    if properties is not None:
+        from connectors.saas_common import merge_saas_live_types
+
+        # Page id is routing, not a Notion property carrier.
+        routing = {"id"}
+        property_cols = [
+            c for c in (target_cols or []) if c and str(c).lower() not in routing
+        ]
+        merged, _err = merge_saas_live_types(
+            live,
+            property_cols,
+            studio_types=None,
+            product="Notion",
+        )
+        for col in target_cols or []:
+            if col and str(col).lower() in routing and col not in merged:
+                merged[col] = "VARCHAR(64)"
+        return merged
     return resolve_mapping_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        live_types=live,
+        live_types=None,
         default="VARCHAR",
     )
 

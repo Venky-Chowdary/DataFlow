@@ -255,18 +255,31 @@ def resolve_salesforce_dest_types(
     *,
     describe_fields: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
-    """Prefer live Describe length/precision; else Map/source carriers."""
-    by_name: dict[str, dict[str, Any]] = {}
+    """Prefer live Describe length/precision; else Map/source carriers.
+
+    When Describe fields are supplied, never soft-fill unknown SOAP types with
+    Map ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate.
+    """
+    live: dict[str, str] = {}
     for f in describe_fields or []:
         name = str(f.get("name") or "").strip()
-        if name:
-            by_name[name.lower()] = f
+        if not name:
+            continue
+        carrier = salesforce_field_to_carrier(f)
+        if str(carrier or "").strip():
+            live[name] = carrier
+    if describe_fields is not None:
+        from connectors.saas_common import merge_saas_live_types
+
+        merged, _err = merge_saas_live_types(
+            live,
+            list(target_cols or []),
+            studio_types=None,
+            product="Salesforce",
+        )
+        return merged
     out: dict[str, str] = {}
     for i, col in enumerate(target_cols):
-        meta = by_name.get(col.lower())
-        if meta:
-            out[col] = salesforce_field_to_carrier(meta)
-            continue
         mapped = ""
         if i < len(mappings):
             mapped = str(

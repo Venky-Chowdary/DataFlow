@@ -193,6 +193,54 @@ def test_resolve_hubspot_does_not_map_invent_unknown_describe():
     assert "mystery" not in types
 
 
+def test_resolve_airtable_notion_sf_no_map_invent_on_describe():
+    from connectors.airtable_writer import resolve_airtable_dest_types
+    from connectors.notion_writer import resolve_notion_dest_types
+    from connectors.salesforce_writer import resolve_salesforce_dest_types
+
+    at = resolve_airtable_dest_types(
+        ["Name", "Score"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "s", "target": "Score", "target_type": "VARCHAR"},
+        ],
+        {},
+        meta_fields=[
+            {"name": "Name", "type": "singleLineText"},
+            {"name": "Score", "type": "formula"},
+        ],
+    )
+    assert at["Name"].startswith("VARCHAR")
+    assert "Score" not in at
+
+    no = resolve_notion_dest_types(
+        ["Name", "Computed"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "c", "target": "Computed", "target_type": "VARCHAR"},
+        ],
+        {},
+        properties={"Name": "title", "Computed": "formula"},
+    )
+    assert no["Name"].startswith("VARCHAR")
+    assert "Computed" not in no
+
+    sf = resolve_salesforce_dest_types(
+        ["Name", "Weird__c"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "w", "target": "Weird__c", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=[
+            {"name": "Name", "type": "string", "length": 80},
+            {"name": "Weird__c", "type": "brand_new_soap_type"},
+        ],
+    )
+    assert sf["Name"] == "VARCHAR(80)"
+    assert "Weird__c" not in sf
+
+
 def test_overlay_promotes_mysql_enum_set_over_map_varchar():
     from connectors.writer_common import overlay_physical_bind_types
 
