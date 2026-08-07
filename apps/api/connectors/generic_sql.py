@@ -4427,6 +4427,7 @@ def write_mapped_rows(
                 policy,
                 dialect_label=_engine_label,
                 mappings=mappings,
+                dest_db=dest_db or "",
             )
             if sparse_rows:
                 sparse_rows = apply_write_quarantine_matrix(
@@ -4437,6 +4438,7 @@ def write_mapped_rows(
                     policy,
                     dialect_label=_engine_label,
                     mappings=mappings,
+                    dest_db=dest_db or "",
                 )
             _late_abort = reject_on_strict_policy(
                 policy, rejected_details, "SQL", transform_errors
