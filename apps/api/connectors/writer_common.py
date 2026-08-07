@@ -2188,12 +2188,18 @@ _BARE_DECIMAL_DEFAULTS: dict[str, tuple[int, int]] = {
 }
 
 
-def parse_decimal_precision_scale(type_str: str) -> tuple[int, int] | None:
+def parse_decimal_precision_scale(
+    type_str: str,
+    *,
+    dest_db: str = "",
+) -> tuple[int, int] | None:
     """Parse DECIMAL/NUMERIC/NUMBER/BIGNUMERIC(p[,s]) → (precision, scale).
 
-    Bare ``NUMERIC`` / ``BIGNUMERIC`` use BigQuery platform defaults (38,9) /
-    (76,38). Bare ``DECIMAL`` / ``NUMBER`` return None (ambiguous capacity).
-    MONEY / SMALLMONEY map to SQL Server currency scales.
+    Bare ``NUMERIC`` / ``BIGNUMERIC`` use BigQuery / Spanner platform defaults
+    only when ``dest_db`` is bigquery/spanner (or unset for backward compat on
+    BIGNUMERIC). On PostgreSQL / Redshift, bare ``NUMERIC``/``DECIMAL`` are
+    unbounded → ``None`` (skip fit quarantine). Bare ``DECIMAL`` / ``NUMBER``
+    stay ``None`` when ambiguous. MONEY / SMALLMONEY → SQL Server currency.
     """
     text = (type_str or "").strip()
     upper = re.sub(r"\s+COLLATE\s+\S+", "", text, flags=re.I).strip().upper()
@@ -2209,6 +2215,16 @@ def parse_decimal_precision_scale(type_str: str) -> tuple[int, int] | None:
         return None
     base = base_m.group(1).upper()
     if m.group(1) is None:
+        dialect = (dest_db or "").strip().lower()
+        # Postgres bare NUMERIC/DECIMAL is unbounded — never invent BQ (38,9).
+        if dialect in {"postgresql", "postgres", "redshift", "greenplum", "cockroach", "cockroachdb"}:
+            return None
+        if dialect and dialect not in {"bigquery", "spanner", "bq"}:
+            # Other engines: bare DECIMAL/NUMBER stay ambiguous; bare BIGNUMERIC
+            # only exists on BQ-class — still use platform default when named.
+            if base == "BIGNUMERIC":
+                return _BARE_DECIMAL_DEFAULTS.get(base)
+            return None
         return _BARE_DECIMAL_DEFAULTS.get(base)
     precision = int(m.group(1))
     scale = int(m.group(2)) if m.group(2) is not None else 0
@@ -2218,7 +2234,12 @@ def parse_decimal_precision_scale(type_str: str) -> tuple[int, int] | None:
 
 
 def decimal_int_digits_and_scale(value: Any) -> tuple[int, int]:
-    """Return (integer_digits, fractional_scale) for a cell value."""
+    """Return (integer_digits, fractional_scale) for a cell value.
+
+    Fractional scale ignores trailing zeros in the wire representation
+    (``52.310500000000000`` → scale 4) so DECIMAL fit matches PostgreSQL /
+    warehouse bind capacity rather than string padding from MySQL DOUBLE dumps.
+    """
     from decimal import Decimal, InvalidOperation, Overflow
 
     try:
@@ -2228,6 +2249,8 @@ def decimal_int_digits_and_scale(value: Any) -> tuple[int, int]:
         d = Decimal(text)
         if not d.is_finite():
             return 0, 0
+        # normalize() collapses trailing zeros; scientific form is fine for as_tuple.
+        d = d.normalize()
         _sign, digits, exponent = d.as_tuple()
         scale = -exponent if exponent < 0 else 0
         int_digits = max(0, len(digits) + exponent)
@@ -2239,7 +2262,9 @@ def decimal_int_digits_and_scale(value: Any) -> tuple[int, int]:
 def fits_decimal(value: Any, precision: int, scale: int) -> bool:
     """True if value can be stored in DECIMAL/NUMBER(precision, scale).
 
-    Scale overflow is fail-closed — never silently quantize/round into (p,s).
+    Fail-closed when significant fractional digits exceed ``scale`` (never
+    silent money/geo truncation). Trailing zeros on the wire are stripped via
+    ``Decimal.normalize`` so ``52.310500000000000`` fits ``NUMERIC(38,9)``.
     """
     from decimal import Decimal, InvalidOperation, Overflow
 
@@ -2250,14 +2275,17 @@ def fits_decimal(value: Any, precision: int, scale: int) -> bool:
     if is_missing_sentinel(value):
         return True
     try:
-        d = Decimal(str(value).strip())
+        text = str(value).strip()
+        if not text:
+            return True
+        d = Decimal(text)
         if not d.is_finite():
             return False
         int_digits, value_scale = decimal_int_digits_and_scale(d)
-        if value_scale > scale:
+        if value_scale > int(scale):
             return False
-        max_int = max(0, precision - scale)
-        return int_digits <= max_int and value_scale <= scale
+        max_int = max(0, int(precision) - int(scale))
+        return int_digits <= max_int
     except (InvalidOperation, Overflow, ValueError, TypeError):
         return False
 
@@ -2270,6 +2298,7 @@ def quarantine_unfit_decimals(
     policy: str,
     *,
     dialect_label: str = "DECIMAL",
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out / NULL cells that cannot fit DECIMAL/NUMBER(p,s).
 
@@ -2279,7 +2308,7 @@ def quarantine_unfit_decimals(
     """
     number_cols: list[tuple[int, int, int]] = []
     for i, typ in enumerate(target_types):
-        parsed = parse_decimal_precision_scale(typ)
+        parsed = parse_decimal_precision_scale(typ, dest_db=dest_db)
         if parsed:
             number_cols.append((i, parsed[0], parsed[1]))
     if not number_cols:
@@ -3692,6 +3721,30 @@ def quarantine_unfit_json(
     return out
 
 
+def _infer_dest_db_from_dialect_label(dialect_label: str) -> str:
+    """Best-effort dest_db for bare DECIMAL/NUMERIC parse honesty."""
+    low = (dialect_label or "").strip().lower()
+    if not low:
+        return ""
+    if "redshift" in low:
+        return "redshift"
+    if "postgres" in low or "cockroach" in low or "greenplum" in low:
+        return "postgresql"
+    if "bigquery" in low or low.startswith("bq"):
+        return "bigquery"
+    if "spanner" in low:
+        return "spanner"
+    if "snowflake" in low:
+        return "snowflake"
+    if "mysql" in low or "mariadb" in low:
+        return "mysql"
+    if "sql server" in low or "mssql" in low or "azure sql" in low:
+        return "sqlserver"
+    if "oracle" in low:
+        return "oracle"
+    return ""
+
+
 def apply_write_quarantine_matrix(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -3701,6 +3754,7 @@ def apply_write_quarantine_matrix(
     *,
     dialect_label: str = "destination",
     mappings: list[dict[str, Any]] | None = None,
+    dest_db: str = "",
 ) -> list[tuple]:
     """Shared fail-closed quarantine matrix for every typed write path.
 
@@ -3715,6 +3769,7 @@ def apply_write_quarantine_matrix(
     token = _active_quarantine_mappings.set(mappings)
     try:
         label = (dialect_label or "destination").strip() or "destination"
+        decimal_dest = (dest_db or "").strip() or _infer_dest_db_from_dialect_label(label)
         mapped_rows = quarantine_currency_markers_into_numeric(
             mapped_rows, target_cols, target_types, rejected_details, policy
         )
@@ -3725,6 +3780,7 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=f"{label} DECIMAL",
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_years(
             mapped_rows, target_cols, target_types, rejected_details, policy

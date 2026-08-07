@@ -2309,19 +2309,24 @@ th.df2-type-string .df2-type-badge {
 .df2-dest-step-right {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   min-width: 0;
   min-height: 0;
   overflow-x: hidden;
-  overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding-bottom: 4px;
 }
 
+/* Left: one scroll owner (connector list). Avoid double vertical bars. */
 .df2-dest-step-left {
-  padding-right: 16px;
+  overflow-y: hidden;
+  padding-right: 12px;
   border-right: 1px solid #e8edf3;
+}
+
+.df2-dest-step-right {
+  overflow-y: auto;
 }
 
 .df2-dest-connector-search {
@@ -2926,14 +2931,20 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-dest-step .df2-dest-schema-preview {
-  margin-top: 10px;
-  max-height: min(28vh, 240px);
-  overflow: hidden;
+  /* Right rail scrolls once — do not nest a second vertical scrollbar here. */
+  margin-top: 0;
+  flex: 0 0 auto;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
+  border: 1px solid #e8edf3;
+  border-radius: 10px;
+  background: #fff;
 }
 
 .df2-dest-step .df2-dest-schema-preview .df2-structure-preview {
-  max-height: min(28vh, 240px);
-  overflow-y: auto;
+  max-height: none;
+  overflow: visible;
 }
 
 .df2-dest-step .df2-append-hint {
@@ -9682,36 +9693,52 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-page-transfer-studio .df2-dest-step-right {
   display: flex !important;
   flex-direction: column !important;
-  gap: 10px !important;
+  gap: 8px !important;
   min-width: 0 !important;
   min-height: 0 !important;
   overflow-x: hidden !important;
-  overflow-y: auto !important;
   position: relative !important;
 }
 
 .df2-page-transfer-studio .df2-dest-step-left {
-  padding-right: 12px !important;
+  overflow-y: hidden !important;
+  padding-right: 10px !important;
   border-right: 1px solid #e8edf3 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step-right {
+  overflow-y: auto !important;
 }
 
 .df2-page-transfer-studio .df2-dest-picker {
   display: flex !important;
   flex-direction: column !important;
-  gap: 14px !important;
+  gap: 10px !important;
   margin: 0 !important;
   min-height: 0 !important;
+  flex: 1 1 auto !important;
   position: static !important;
 }
 
 .df2-page-transfer-studio .df2-dest-picker-section {
   display: flex !important;
   flex-direction: column !important;
-  gap: 8px !important;
+  gap: 6px !important;
   margin: 0 !important;
   padding: 0 !important;
   position: static !important;
   min-width: 0 !important;
+  min-height: 0 !important;
+}
+
+/* Connections section owns the left-rail scroll; engines stay compact below. */
+.df2-page-transfer-studio .df2-dest-picker-section:first-child {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-picker-engines {
+  flex: 0 0 auto !important;
 }
 
 .df2-page-transfer-studio .df2-dest-picker-section + .df2-dest-picker-section {
@@ -9769,18 +9796,20 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-page-transfer-studio .df2-dest-connector-list {
   display: flex !important;
   flex-direction: column !important;
-  gap: 6px !important;
+  gap: 4px !important;
   margin: 0 !important;
-  padding: 0 !important;
+  padding: 0 2px 0 0 !important;
   position: static !important;
   box-shadow: none !important;
   min-width: 0 !important;
-  max-height: min(42vh, 320px) !important;
+  /* Single scrollbar for connections — fills leftover left-rail height. */
+  flex: 1 1 auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
   overscroll-behavior: contain !important;
   -webkit-overflow-scrolling: touch !important;
-  padding-right: 2px !important;
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card {

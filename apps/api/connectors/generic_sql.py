@@ -4315,6 +4315,7 @@ def write_mapped_rows(
         policy,
         dialect_label=_engine_label,
         mappings=mappings,
+        dest_db=dest_db or "",
     )
     _tgt_types = _tgt_types_pre
     sparse_rows: list[tuple] = []

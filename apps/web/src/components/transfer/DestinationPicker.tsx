@@ -86,7 +86,6 @@ export function DestinationPicker({
         <header className="df2-dest-picker-section-head">
           <div className="df2-dest-picker-section-title">
             <span className="df2-label">Connection</span>
-            <p className="df2-label-hint">Saved connector or custom host credentials.</p>
           </div>
           {connectors.length > 0 && typeFilters.length > 1 && (
             <FilterBar ariaLabel="Filter destinations by type">
@@ -94,7 +93,7 @@ export function DestinationPicker({
                 ariaLabel="Filter destinations by type"
                 value={filter}
                 onChange={setFilter}
-                items={typeFilters}
+                items={typeFilters.slice(0, 8)}
               />
             </FilterBar>
           )}

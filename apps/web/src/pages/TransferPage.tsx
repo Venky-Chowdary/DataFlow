@@ -5431,6 +5431,17 @@ export function TransferPage({
                 )}
               </div>
             )}
+            {/* Schema preview immediately under status — was buried below sync summary. */}
+            {destKindMode === "database" && destColumns.length > 0 && !destSchemaLoading && (
+              <div className="df2-dest-schema-preview">
+                <StructurePreview
+                  columns={destColumns}
+                  schema={destSchemaMap}
+                  title="Existing destination schema"
+                  subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection}`}
+                />
+              </div>
+            )}
           </div>
           {destDriverType === "dynamodb" && (
             <p className="df2-label-hint df2-field-note">
@@ -5501,17 +5512,6 @@ export function TransferPage({
               </p>
             )}
           </div>
-
-          {destKindMode === "database" && destColumns.length > 0 && !destSchemaLoading && (
-            <div className="df2-dest-schema-preview">
-              <StructurePreview
-                columns={destColumns}
-                schema={destSchemaMap}
-                title="Existing destination schema"
-                subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection}`}
-              />
-            </div>
-          )}
 
           {transferPlan && (
             <div className={`df2-plan-callout${transferPlan.supported ? " is-ready" : " is-warn"}`}>

@@ -972,6 +972,7 @@ def write_mapped_rows(
         rejected_details,
         policy,
         dialect_label="PostgreSQL NUMERIC",
+        dest_db="postgresql" if port != 5439 else "redshift",
     )
     mapped_rows = quarantine_unfit_years(
         mapped_rows, target_cols, target_types, rejected_details, policy
