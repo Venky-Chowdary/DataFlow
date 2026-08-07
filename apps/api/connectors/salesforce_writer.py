@@ -32,6 +32,24 @@ _CHUNK = 200
 _SF_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
 
 
+def _sf_field_api_name(name: str) -> str:
+    """Keep Salesforce API names including custom ``__c`` / ``__r`` suffixes.
+
+    Generic SQL ``sanitize_identifier`` collapses ``__`` → ``_``, which invents
+    wrong field API names and breaks External Id conflict columns on write.
+    """
+    import re
+
+    raw = (name or "").strip()
+    if not raw:
+        return raw
+    # Allow only Salesforce-legal identifier chars; never collapse underscores.
+    s = re.sub(r"[^a-zA-Z0-9_]", "_", raw)
+    if not s or s[0].isdigit():
+        s = f"f_{s or 'field'}"
+    return s[:255]
+
+
 def _require_instance_url(host: str) -> str:
     """Refuse login/test hosts — Composite APIs need the org instance URL."""
     host_l = (host or "").strip().lower()
@@ -380,11 +398,37 @@ def write_mapped_rows(
         )
 
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    # Rebuild targets with Salesforce API-name honesty (__c / __r preserved).
+    sf_cols: list[str] = []
+    for m in mappings or []:
+        try:
+            from services.mapping_constraints import is_intentional_omit
+
+            if is_intentional_omit(m):
+                continue
+        except Exception:
+            pass  # intentional omit helper optional
+        tgt = _sf_field_api_name(str(m.get("target") or ""))
+        if tgt and tgt not in sf_cols:
+            sf_cols.append(tgt)
+    if sf_cols:
+        target_cols = sf_cols
+    # Conflict columns must use the same API-name polarity as Map targets.
+    if conflict_columns:
+        conflict_columns = [
+            _sf_field_api_name(str(c)) for c in conflict_columns if str(c).strip()
+        ]
     policy = transform_error_policy(error_policy)
     # Live Describe when credentials allow — VARCHAR(n)/DECIMAL(p,s) for Bulk fit.
+    # Never degrade to Map VARCHAR invent on Describe failure (HubSpot class).
     describe_fields: list[dict[str, Any]] | None = None
     describe_warning = ""
+    live_dest = _kwargs.get("destination_column_types")
+    studio_live = isinstance(live_dest, dict) and all(
+        str(live_dest.get(c) or "").strip() for c in target_cols if c
+    )
     try:
+        from connectors.saas_common import is_auth_error
         from connectors.salesforce import describe_sobject
 
         cfg = {
@@ -398,10 +442,63 @@ def write_mapped_rows(
         }
         describe_fields = describe_sobject(cfg, sobject)
     except Exception as exc:
+        if is_auth_error(exc):
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Salesforce Describe auth failed: {exc} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk)."
+                ),
+                driver="salesforce",
+            )
+        if not studio_live:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Salesforce Describe unavailable ({exc}) and Studio did not "
+                    "type all mapped fields — refuse Map VARCHAR bind "
+                    "(empty→null invent risk). Re-run destination schema "
+                    "introspect or refresh org credentials."
+                ),
+                driver="salesforce",
+            )
         describe_fields = None
         describe_warning = (
-            f"Salesforce Describe unavailable ({exc}); length/picklist quarantine "
-            "and formula-field filtering are degraded for this write"
+            f"Salesforce Describe unavailable ({exc}); using Studio-typed "
+            "carriers only for this write"
+        )
+
+    if describe_fields is not None and len(describe_fields) == 0:
+        if not studio_live:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Salesforce Describe returned no fields for {sobject!r} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk). Confirm "
+                    "object API name and Describe access."
+                ),
+                driver="salesforce",
+            )
+        # Studio typed all fields — treat empty Describe as unavailable.
+        describe_fields = None
+        describe_warning = (
+            f"Salesforce Describe returned no fields for {sobject!r}; using "
+            "Studio-typed carriers only for this write"
         )
     # Skip formula / non-writable fields so a live demo does not explode on
     # Calculated fields the Map step may have suggested from Describe.
@@ -472,12 +569,23 @@ def write_mapped_rows(
             ),
             driver="salesforce",
         )
-    dest_types = resolve_salesforce_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        describe_fields=describe_fields,
-    )
+    if describe_fields:
+        dest_types = resolve_salesforce_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            describe_fields=describe_fields,
+        )
+    else:
+        from connectors.writer_common import resolve_mapping_dest_types
+
+        dest_types = resolve_mapping_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            live_types=live_dest if isinstance(live_dest, dict) else None,
+            default="VARCHAR",
+        )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,

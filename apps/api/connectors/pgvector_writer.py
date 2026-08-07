@@ -32,6 +32,53 @@ def _vector_literal(vector: list[float] | None) -> str | None:
     return "[" + ",".join(str(v) for v in vector) + "]"
 
 
+def _pgvector_live_embedding_dim(
+    cur: Any,
+    schema: str,
+    table_name: str,
+    *,
+    column: str = "embedding",
+) -> int | None:
+    """Read live ``vector(n)`` typmod for the embedding column.
+
+    Uses ``format_type`` so we never guess atttypmod encoding across pgvector
+    versions. Missing table/column → ``None`` (caller fail-closed).
+    """
+    import re
+
+    from psycopg2 import sql
+
+    cur.execute(
+        sql.SQL(
+            """
+            SELECT format_type(a.atttypid, a.atttypmod)
+            FROM pg_attribute a
+            JOIN pg_class c ON c.oid = a.attrelid
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s
+              AND c.relname = %s
+              AND a.attname = %s
+              AND a.attnum > 0
+              AND NOT a.attisdropped
+            """
+        ),
+        (schema, table_name, column),
+    )
+    row = cur.fetchone()
+    if not row or not row[0]:
+        return None
+    formatted = str(row[0]).lower().replace(" ", "")
+    match = re.search(r"vector\((\d+)\)", formatted)
+    if not match:
+        # Unbounded vector / non-vector type — refuse invent.
+        return None
+    try:
+        dim = int(match.group(1))
+    except (TypeError, ValueError):
+        return None
+    return dim if dim > 0 else None
+
+
 def _exec_schema_table(cur: Any, schema: str, table_name: str, dimension: int) -> None:
     from psycopg2 import sql
 
@@ -229,6 +276,54 @@ def write_mapped_rows(
                         rejected_details=list(map_rejected),
                         rejected_rows=len(map_rejected),
                     )
+
+            # CREATE TABLE IF NOT EXISTS does not alter an existing vector(n) —
+            # always probe live typmod and refuse dim invent / silent truncate.
+            live_dim = _pgvector_live_embedding_dim(
+                cur, schema or "public", table_name
+            )
+            if live_dim is None:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"pgvector table {schema or 'public'}.{table_name} "
+                        "embedding vector(n) typmod unavailable — refuse upsert "
+                        "with source-only dimension (silent dim invent risk)."
+                    ),
+                    rejected_details=list(map_rejected),
+                    rejected_rows=len(map_rejected),
+                )
+            if int(live_dim) != int(dimension):
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "public",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"pgvector column embedding is vector({live_dim}), but "
+                        f"embeddings are dimension {dimension} — refuse silent "
+                        "truncate/pad invent. Use a matching model or a new table."
+                    ),
+                    rejected_details=list(map_rejected)
+                    + [
+                        {
+                            "row": "",
+                            "column": "embedding",
+                            "target": "embedding",
+                            "value": f"source={dimension} live={live_dim}",
+                            "reason": "vector dimension mismatch",
+                            "policy": "fail",
+                        }
+                    ],
+                    rejected_rows=len(map_rejected) + 1,
+                )
 
             schema_id = sql.Identifier(schema or "public")
             table_id = sql.Identifier(table_name)

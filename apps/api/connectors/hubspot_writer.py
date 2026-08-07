@@ -411,7 +411,25 @@ def write_mapped_rows(
             )
         describe_props = None
 
-    if describe_props is not None:
+    if describe_props is not None and len(describe_props) == 0:
+        if not studio_live:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"HubSpot Properties Describe returned no properties for {obj!r} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk). Confirm object "
+                    "type and CRM scopes."
+                ),
+                driver="hubspot",
+            )
+        describe_props = None
+
+    if describe_props:
         dest_types = resolve_hubspot_dest_types(
             target_cols,
             mappings,
@@ -420,7 +438,7 @@ def write_mapped_rows(
             describe_props=describe_props,
         )
     else:
-        # Studio-typed fallback only after Describe failed non-auth.
+        # Studio-typed fallback only after Describe failed non-auth / empty.
         from connectors.writer_common import resolve_mapping_dest_types
 
         dest_types = resolve_mapping_dest_types(

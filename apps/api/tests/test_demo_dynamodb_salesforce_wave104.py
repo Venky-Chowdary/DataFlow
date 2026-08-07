@@ -363,7 +363,12 @@ def test_salesforce_upsert_by_id_uses_patch_not_post():
     assert result.ok
     methods = [c["method"] for c in calls]
     assert "PATCH" in methods
-    assert "POST" in methods  # missing Id inserts on upsert
+    # Empty Id must quarantine — refuse inventing an insert without identity
+    # (at-least-once upsert would silently collapse / mint records).
+    assert any(
+        (d.get("column") or "") == "Id" and "Id" in (d.get("reason") or "")
+        for d in (result.rejected_details or [])
+    )
     patch_call = next(c for c in calls if c["method"] == "PATCH")
     assert "Id" in patch_call["body"]["records"][0]
 
