@@ -23,6 +23,8 @@ def test_names_only_existing_blocks_create_compatible_new():
     assert by_src["orphan_metric"]["assignment_strategy"] == "pending_dest_schema"
     assert by_src["orphan_metric"].get("create_new") is False
     assert by_src["orphan_metric"].get("requires_review") is True
+    # Pending dest must not invent target_type from source (Validate invent cliff).
+    assert not str(by_src["orphan_metric"].get("target_type") or "").strip()
     # Matched names still map; invent path is what we refuse.
     assert by_src["lat"]["target"].lower() == "lat"
     assert by_src["lat"].get("create_new") is not True

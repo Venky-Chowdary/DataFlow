@@ -1720,6 +1720,47 @@ def document_domain_would_invent(source_type: str, target_type: str) -> bool:
     return src in {LOGICAL_STRING, LOGICAL_TEXT}
 
 
+def nested_to_native_document_wire_preserved(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when ARRAY/STRUCT/MAP → JSON/VARIANT matches create-new for ``dest_db``.
+
+    Mongo/ES document nests often have no relational field DDL. On MySQL the
+    intentional sink is native JSON; on PG bare STRUCT/ARRAY → JSONB. That is a
+    **representation** wire (values preserved), not a precision collapse.
+
+    When the dialect stamps native ``T[]`` / ``STRUCT<a:…>`` / ``MAP(K,V)``,
+    opaque JSON remains a document collapse — prefer the typed nested DDL.
+    """
+    src = normalize_logical_type(source_type)
+    if src not in {LOGICAL_ARRAY, LOGICAL_STRUCT, LOGICAL_MAP}:
+        return False
+    if not is_dialect_native_document_wire(target_type, dest_db=dest_db):
+        return False
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if not db:
+        # Fail closed without destination — keep nested→JSON as collapse.
+        return False
+    try:
+        stamped = ddl_type(db, source_type)
+    except Exception:
+        return False
+    stamped_l = normalize_logical_type(stamped)
+    # Dialect can emit native nested DDL — JSON sink drops field/element polarity.
+    if stamped_l in {LOGICAL_ARRAY, LOGICAL_STRUCT, LOGICAL_MAP}:
+        return False
+    if not is_dialect_native_document_wire(stamped, dest_db=db):
+        return False
+    t_log = normalize_logical_type(target_type)
+    if stamped_l == LOGICAL_JSON:
+        return t_log == LOGICAL_JSON
+    # Text LOB document wires (SQL Server NVARCHAR(MAX), Oracle CLOB, …).
+    return t_log in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
 def array_to_native_document_wire_preserved(
     source_type: str,
     target_type: str,
@@ -1728,37 +1769,13 @@ def array_to_native_document_wire_preserved(
 ) -> bool:
     """True when ARRAY→JSON/VARIANT/CLOB matches create-new for ``dest_db``.
 
-    Mongo/document arrays have no relational element DDL. On MySQL the intentional
-    sink is native JSON; on PG bare ARRAY → JSONB. That is a **representation**
-    wire (values preserved), not a precision collapse.
-
-    Typed ``ARRAY<T>`` → opaque JSON on engines that stamp native ``T[]`` /
-    ``ARRAY<T>`` (PostgreSQL, BigQuery, Snowflake) remains a document collapse —
-    the operator should prefer the typed array DDL.
+    Delegates to :func:`nested_to_native_document_wire_preserved` (ARRAY branch).
     """
     if normalize_logical_type(source_type) != LOGICAL_ARRAY:
         return False
-    if not is_dialect_native_document_wire(target_type, dest_db=dest_db):
-        return False
-    db = _normalize_dest_db(dest_db) if dest_db else ""
-    if not db:
-        # Fail closed without destination — keep ARRAY→JSON as collapse.
-        return False
-    try:
-        stamped = ddl_type(db, source_type)
-    except Exception:
-        return False
-    # Dialect can emit native typed arrays — JSON sink drops T[] polarity.
-    if normalize_logical_type(stamped) == LOGICAL_ARRAY:
-        return False
-    if not is_dialect_native_document_wire(stamped, dest_db=db):
-        return False
-    s_log = normalize_logical_type(stamped)
-    t_log = normalize_logical_type(target_type)
-    if s_log == LOGICAL_JSON:
-        return t_log == LOGICAL_JSON
-    # Text LOB document wires (SQL Server NVARCHAR(MAX), Oracle CLOB, …).
-    return t_log in {LOGICAL_STRING, LOGICAL_TEXT}
+    return nested_to_native_document_wire_preserved(
+        source_type, target_type, dest_db=dest_db
+    )
 
 
 def is_nested_document_collapse(
@@ -1773,9 +1790,9 @@ def is_nested_document_collapse(
     **not** field/element DDL fidelity. Operators must see it (G3 warn/block).
     Nested→VARCHAR/TEXT is the same field-DDL collapse (serialized document).
 
-    Exception: ARRAY → dialect create-new document wire (MySQL JSON, bare PG
-    JSONB, …) is representation-preserving — see
-    :func:`array_to_native_document_wire_preserved`.
+    Exception: ARRAY/STRUCT/MAP → dialect create-new document wire (MySQL JSON,
+    bare PG JSONB, …) is representation-preserving — see
+    :func:`nested_to_native_document_wire_preserved`.
     """
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
@@ -1783,7 +1800,7 @@ def is_nested_document_collapse(
         return False
     if tgt not in {LOGICAL_JSON, LOGICAL_STRING, LOGICAL_TEXT}:
         return False
-    if src == LOGICAL_ARRAY and array_to_native_document_wire_preserved(
+    if nested_to_native_document_wire_preserved(
         source_type, target_type, dest_db=dest_db
     ):
         return False
@@ -8332,8 +8349,8 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
     # VECTOR(n) â†’ ARRAY<FLOAT> lakehouse create-new wire â€” not embedding invent.
     if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
         return False
-    # ARRAY â†’ dialect create-new JSON/VARIANT/CLOB wire â€” representation, not lossy.
-    if array_to_native_document_wire_preserved(
+    # ARRAY/STRUCT/MAP â†’ dialect create-new JSON/VARIANT/CLOB wire â€” representation.
+    if nested_to_native_document_wire_preserved(
         source_type, target_type, dest_db=dest_db
     ):
         return False

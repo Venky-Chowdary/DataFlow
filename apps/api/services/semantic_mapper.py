@@ -1524,12 +1524,15 @@ def map_columns(
                         "confidence": 0.55,
                         "reasoning": (
                             f"{exists_note}. Retry destination schema load before Map "
-                            f"invents CREATE TABLE / identity passthrough "
-                            f"(projected type {dest_native})."
+                            "invents CREATE TABLE / identity passthrough "
+                            f"(projected type {dest_native} is advisory only — "
+                            "target_type left empty until Studio/Map stamp)."
                         ),
                         "user_override": False,
                         "source_type": src_type,
-                        "target_type": dest_native,
+                        # Never stamp source/projected DDL as dest — Validate would
+                        # invent fidelity greens under partial Studio.
+                        "target_type": "",
                         "assignment_strategy": "pending_dest_schema",
                         "create_new": False,
                         "requires_review": True,
@@ -1709,7 +1712,8 @@ def map_columns(
                         ),
                         "user_override": False,
                         "source_type": src_types.get(source, "VARCHAR"),
-                        "target_type": src_types.get(source, "VARCHAR"),
+                        # Empty dest stamp — never copy source_type (Validate invent cliff).
+                        "target_type": "",
                         "assignment_strategy": "pending_dest_schema",
                         "create_new": False,
                         "requires_review": True,

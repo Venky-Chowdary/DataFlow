@@ -110,6 +110,22 @@ def test_coercion_validator_blocks_pending_dest_stamp():
         assert "pending" in (issues[0].get("reason") or "").lower()
 
 
+def test_semantic_mapper_pending_dest_leaves_target_type_empty():
+    from services.semantic_mapper import map_columns
+
+    mappings = map_columns(
+        source_columns=["skills"],
+        target_columns=[],
+        source_schemas=[{"name": "skills", "inferred_type": "ARRAY"}],
+        target_schemas=None,
+        destination_db_type="mysql",
+        destination_table_exists=True,
+    )
+    assert mappings and mappings[0]["assignment_strategy"] == "pending_dest_schema"
+    assert not str(mappings[0].get("target_type") or "").strip()
+    assert mappings[0].get("create_new") is False
+
+
 def test_g9_coercion_safety_passes_dest_db_and_blocks_schemaless_invent():
     from services.data_integrity import _check_coercion_safety
     from services.type_system import (

@@ -70,3 +70,17 @@ def test_array_to_text_still_lossy_on_mysql():
     # Plain TEXT is not the MySQL array create-new wire (JSON is).
     assert is_lossy_coercion("ARRAY", "TEXT", dest_db="mysql") is True
     assert is_nested_document_collapse("ARRAY", "TEXT", dest_db="mysql") is True
+
+
+def test_mysql_struct_map_to_json_is_representation():
+    # Mongo/ES objects → MySQL JSON is create-new SSOT (no native STRUCT).
+    assert is_lossy_coercion("STRUCT", "JSON", dest_db="mysql") is False
+    assert is_lossy_coercion("STRUCT<a:INTEGER>", "JSON", dest_db="mysql") is False
+    assert is_lossy_coercion("MAP", "JSON", dest_db="mysql") is False
+    # BigQuery can stamp fielded STRUCT — JSON sink still collapses.
+    assert is_lossy_coercion(
+        "STRUCT<a:INTEGER>", "JSON", dest_db="bigquery"
+    ) is True
+    assert is_lossy_coercion(
+        "MAP<STRING,INTEGER>", "JSON", dest_db="bigquery"
+    ) is True
