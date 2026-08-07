@@ -36,12 +36,16 @@ def test_parse_decimal_precision_scale_variants():
 def test_fits_decimal_integer_and_scale_overflow():
     assert fits_decimal("1.50", 10, 2) is True
     assert fits_decimal("99999999999999999999", 10, 2) is False  # int digits
-    assert fits_decimal("1.234", 10, 2) is False  # scale overflow — no silent round
+    assert fits_decimal("1.234", 10, 2) is False  # MySQL/SF fail-closed on scale
     assert fits_decimal(None, 10, 2) is True
     # Trailing wire zeros are not scale overflow (MySQL→PG airports lat cliff).
     assert fits_decimal("52.310500000000000", 38, 9) is True
     assert fits_decimal("-33.939900000000000", 38, 9) is True
     assert fits_decimal("1.2345000001", 10, 2) is False  # non-zero beyond scale
+    # PostgreSQL rounds fractional excess — match destination engine, don't invent block.
+    assert fits_decimal("1.234", 10, 2, dest_db="postgresql") is True
+    assert fits_decimal("1.2345000001", 10, 2, dest_db="postgresql") is True
+    assert fits_decimal("99999999999999999999", 10, 2, dest_db="postgresql") is False
 
 
 def test_quarantine_holds_out_unfit_row():
@@ -73,9 +77,24 @@ def test_quarantine_allows_airport_lat_trailing_zeros_on_pg_numeric():
         dialect_label="PostgreSQL NUMERIC",
         dest_db="postgresql",
     )
-    assert out == [("52.310500000000000",), ("33.640700000000000",)]
-    assert len(details) == 1
-    assert details[0]["column"] == "lat"
+    # PG rounds fractional excess — all three fit NUMERIC(38,9).
+    assert out == rows
+    assert details == []
+
+
+def test_quarantine_still_blocks_pg_integer_overflow():
+    details: list[dict] = []
+    out = quarantine_unfit_decimals(
+        [("99999999999999999999999999999999999999",)],  # > 29 int digits for (38,9)
+        ["amount"],
+        ["NUMERIC(38,9)"],
+        details,
+        policy="quarantine",
+        dialect_label="PostgreSQL NUMERIC",
+        dest_db="postgresql",
+    )
+    assert out == []
+    assert details
 
 
 def test_coerce_null_omits_cell_keeps_row():

@@ -2575,6 +2575,14 @@ th.df2-type-string .df2-type-badge {
     border-bottom: 1px solid #e8edf3;
     padding-bottom: 12px;
   }
+
+  /* Layout is the sole scroll owner on narrow — disable nested list scroll. */
+  .df2-dest-step .df2-dest-connector-list,
+  .df2-page-transfer-studio .df2-dest-connector-list {
+    max-height: none !important;
+    overflow: visible !important;
+    flex: 0 0 auto !important;
+  }
 }
 
 .df2-wizard-label-short {
@@ -10051,6 +10059,23 @@ button.df2-vd-assist-toggle:focus-visible {
   .df2-page-transfer-studio .df2-dest-step-right {
     overflow: visible !important;
   }
+
+  .df2-page-transfer-studio .df2-dest-connector-list {
+    max-height: none !important;
+    overflow: visible !important;
+    flex: 0 0 auto !important;
+  }
+}
+
+.df2-dest-schema-pending {
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #334155;
+}
+
+.df2-dest-schema-pending p {
+  margin: 0;
 }
 
 @media (max-width: 640px) {

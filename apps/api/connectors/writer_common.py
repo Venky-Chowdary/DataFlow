@@ -2259,14 +2259,39 @@ def decimal_int_digits_and_scale(value: Any) -> tuple[int, int]:
         return 0, 0
 
 
-def fits_decimal(value: Any, precision: int, scale: int) -> bool:
+PG_DECIMAL_ROUND_DIALECTS = frozenset({
+    "postgresql", "postgres", "redshift", "greenplum", "cockroach", "cockroachdb",
+})
+# Back-compat alias for private import sites.
+_PG_DECIMAL_ROUND_DIALECTS = PG_DECIMAL_ROUND_DIALECTS
+
+
+def fits_decimal(
+    value: Any,
+    precision: int,
+    scale: int,
+    *,
+    dest_db: str = "",
+) -> bool:
     """True if value can be stored in DECIMAL/NUMBER(precision, scale).
 
-    Fail-closed when significant fractional digits exceed ``scale`` (never
-    silent money/geo truncation). Trailing zeros on the wire are stripped via
-    ``Decimal.normalize`` so ``52.310500000000000`` fits ``NUMERIC(38,9)``.
+    Trailing wire zeros are stripped (``52.310500000000000`` → scale 4).
+
+    Dialect honesty (PostgreSQL docs): excess *fractional* digits are rounded
+    at bind — do not invent a quarantine block PG would never raise. Integer /
+    precision overflow still fail-closed (PG ``numeric field overflow``).
+
+    MySQL / Snowflake / SQL Server stay fail-closed on significant scale
+    overflow (STRICT / warehouse reject class) unless ``dest_db`` is PG-family.
     """
-    from decimal import Decimal, InvalidOperation, Overflow
+    from decimal import (
+        ROUND_HALF_UP,
+        Context,
+        Decimal,
+        InvalidOperation,
+        Overflow,
+        localcontext,
+    )
 
     if value is None:
         return True
@@ -2281,10 +2306,23 @@ def fits_decimal(value: Any, precision: int, scale: int) -> bool:
         d = Decimal(text)
         if not d.is_finite():
             return False
+        prec = int(precision)
+        scl = int(scale)
+        max_int = max(0, prec - scl)
+        dialect = (dest_db or "").strip().lower()
+        pg_rounds_scale = dialect in _PG_DECIMAL_ROUND_DIALECTS
         int_digits, value_scale = decimal_int_digits_and_scale(d)
-        if value_scale > int(scale):
-            return False
-        max_int = max(0, int(precision) - int(scale))
+        if value_scale > scl:
+            if not pg_rounds_scale:
+                return False
+            # Match PG: round fractional excess, then prove integer capacity.
+            with localcontext(Context(prec=max(prec + 16, 80), rounding=ROUND_HALF_UP)):
+                try:
+                    rounded = d.quantize(Decimal(1).scaleb(-scl))
+                except (InvalidOperation, Overflow):
+                    return False
+            int_digits, _ = decimal_int_digits_and_scale(rounded)
+            return int_digits <= max_int
         return int_digits <= max_int
     except (InvalidOperation, Overflow, ValueError, TypeError):
         return False
@@ -2327,7 +2365,7 @@ def quarantine_unfit_decimals(
 
             if is_missing_sentinel(cells[col_idx]):
                 continue
-            if fits_decimal(cells[col_idx], precision, scale):
+            if fits_decimal(cells[col_idx], precision, scale, dest_db=dest_db):
                 continue
             sample = cell_to_string(cells[col_idx])[:120]
             append_write_quarantine_detail(
@@ -3460,7 +3498,12 @@ def _is_temporal_wire(value: Any) -> bool:
     return False
 
 
-def array_element_unfit_reason(element: Any, carrier: str) -> str | None:
+def array_element_unfit_reason(
+    element: Any,
+    carrier: str,
+    *,
+    dest_db: str = "",
+) -> str | None:
     """Reason an element cannot fit the ARRAY element carrier, else None.
 
     Reuses the scalar fit SSOT (``fits_integer`` / ``fits_decimal`` /
@@ -3484,8 +3527,10 @@ def array_element_unfit_reason(element: Any, carrier: str) -> str | None:
         return None
 
     logical = normalize_logical_type(carrier)
-    decimal_parsed = parse_decimal_precision_scale(carrier)
-    if decimal_parsed and not fits_decimal(element, decimal_parsed[0], decimal_parsed[1]):
+    decimal_parsed = parse_decimal_precision_scale(carrier, dest_db=dest_db)
+    if decimal_parsed and not fits_decimal(
+        element, decimal_parsed[0], decimal_parsed[1], dest_db=dest_db
+    ):
         return f"element does not fit {carrier}"
     if logical == "integer" and integer_storage_bounds(carrier) is not None:
         # ``fits_integer`` intentionally passes non-numeric text through so the
@@ -3516,6 +3561,7 @@ def quarantine_unfit_arrays(
     policy: str,
     *,
     dialect_label: str = "destination",
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out ARRAY cells whose payload or elements cannot reach the column.
 
@@ -3591,7 +3637,9 @@ def quarantine_unfit_arrays(
                             "(use ARRAY of STRUCT) — quarantined"
                         )
                         break
-                    unfit = array_element_unfit_reason(element, element_carrier)
+                    unfit = array_element_unfit_reason(
+                        element, element_carrier, dest_db=dest_db
+                    )
                     if unfit:
                         reason = f"{unfit} — quarantined (would not load into {typ})"
                         break
@@ -3849,6 +3897,7 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=label,
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_json(
             mapped_rows,

@@ -1028,6 +1028,7 @@ def write_mapped_rows(
         rejected_details,
         policy,
         dialect_label="Redshift" if engine.startswith("redshift") else "PostgreSQL",
+        dest_db="postgresql" if port != 5439 else "redshift",
     )
     mapped_rows = quarantine_unfit_json(
         mapped_rows,

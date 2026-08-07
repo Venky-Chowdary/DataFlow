@@ -212,6 +212,7 @@ def _quarantine_unfit_decimals(
         rejected_details,
         policy,
         dialect_label="Snowflake NUMBER",
+        dest_db="snowflake",
     )
 
 

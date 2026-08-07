@@ -747,6 +747,7 @@ def write_mapped_rows(
             rejected_details,
             policy,
             dialect_label="BigQuery NUMERIC",
+            dest_db="bigquery",
         )
         mapped_rows = quarantine_unfit_years(
             mapped_rows,

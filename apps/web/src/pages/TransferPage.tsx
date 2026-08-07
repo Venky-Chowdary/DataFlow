@@ -5431,15 +5431,27 @@ export function TransferPage({
                 )}
               </div>
             )}
-            {/* Schema preview immediately under status — was buried below sync summary. */}
-            {destKindMode === "database" && destColumns.length > 0 && !destSchemaLoading && (
+            {/* Schema preview under status — keep visible when exists but columns pending. */}
+            {destKindMode === "database"
+              && !destSchemaLoading
+              && destTableExists === true
+              && (
               <div className="df2-dest-schema-preview">
-                <StructurePreview
-                  columns={destColumns}
-                  schema={destSchemaMap}
-                  title="Existing destination schema"
-                  subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection}`}
-                />
+                {destColumns.length > 0 ? (
+                  <StructurePreview
+                    columns={destColumns}
+                    schema={destSchemaMap}
+                    title="Existing destination schema"
+                    subtitle={`${destColumns.length} fields in ${targetDb}.${targetCollection}`}
+                  />
+                ) : (
+                  <div className="df2-dest-schema-pending" role="status">
+                    <p>
+                      <strong>Existing table — column metadata pending.</strong>{" "}
+                      Retry schema load before Map invents create-new types.
+                    </p>
+                  </div>
+                )}
               </div>
             )}
           </div>

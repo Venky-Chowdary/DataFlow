@@ -2001,18 +2001,30 @@ def coerce_map_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> Any:
     )
 
 
-def coerce_decimal_wire(value: Any, *, ddl_type: str = "") -> Any:
+def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> Any:
     """Exact ``Decimal`` bind — never float64 round-trip invent.
 
-    Fivetran BIGDECIMAL / Databricks overflow class: values that cannot fit
-    ``DECIMAL|NUMERIC|NUMBER(p,s)`` raise — refuse silent quantize/round.
+    Values that cannot fit ``DECIMAL|NUMERIC|NUMBER(p,s)`` raise. PostgreSQL-
+    family destinations round fractional excess (engine docs) — match
+    ``fits_decimal(..., dest_db=)`` so quarantine and bind never disagree.
     Bare DECIMAL without (p,s) still returns an exact ``Decimal``.
     """
     if value is None:
         return None
-    from decimal import Decimal, InvalidOperation, Overflow
+    from decimal import (
+        ROUND_HALF_UP,
+        Context,
+        Decimal,
+        InvalidOperation,
+        Overflow,
+        localcontext,
+    )
 
-    from connectors.writer_common import fits_decimal
+    from connectors.writer_common import (
+        PG_DECIMAL_ROUND_DIALECTS,
+        decimal_int_digits_and_scale,
+        fits_decimal,
+    )
     from services.type_system import parse_numeric_precision_scale
     from services.value_serializer import is_missing_sentinel
 
@@ -2054,14 +2066,26 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "") -> Any:
             f"decimal wire parse failed — refuse invent into {ddl_type or 'DECIMAL'}"
         ) from exc
 
+    eng = (engine or "").strip().lower()
+    dest_db = eng
+    if eng in {"postgres", "pg", "postgresql+psycopg2"}:
+        dest_db = "postgresql"
     precision, scale = parse_numeric_precision_scale(ddl_type)
     if precision is not None:
         s = 0 if scale is None else int(scale)
-        if not fits_decimal(d, int(precision), s):
+        if not fits_decimal(d, int(precision), s, dest_db=dest_db):
             raise ValueError(
                 f"decimal overflow: value does not fit {ddl_type or f'DECIMAL({precision},{s})'} "
                 "— refuse silent quantize"
             )
+        # Apply the same PG scale round the engine would perform at INSERT.
+        if dest_db in PG_DECIMAL_ROUND_DIALECTS:
+            _, value_scale = decimal_int_digits_and_scale(d)
+            if value_scale > s:
+                with localcontext(
+                    Context(prec=max(int(precision) + 16, 80), rounding=ROUND_HALF_UP)
+                ):
+                    d = d.quantize(Decimal(1).scaleb(-s))
     return d
 
 
@@ -2408,7 +2432,7 @@ def normalize_sql_bind_value(
         "BIGDECIMAL",
         "CURRENCY",
     } or upper.startswith(("DECIMAL(", "NUMERIC(", "NUMBER(", "BIGNUMERIC(")):
-        return coerce_decimal_wire(value, ddl_type=ddl_type or upper)
+        return coerce_decimal_wire(value, ddl_type=ddl_type or upper, engine=eng)
     from services.type_system import (
         LOGICAL_GEOGRAPHY,
         LOGICAL_INTERVAL,
