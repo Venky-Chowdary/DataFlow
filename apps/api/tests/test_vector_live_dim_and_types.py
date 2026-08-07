@@ -28,6 +28,52 @@ def test_prepare_records_overlays_destination_column_types():
     ) == 1
 
 
+def test_weaviate_existing_class_partial_schema_refuses():
+    """Existing Weaviate class with incomplete properties → require_physical refuse."""
+    from unittest.mock import MagicMock, patch
+
+    from connectors.weaviate_writer import write_mapped_rows
+
+    class_resp = MagicMock()
+    class_resp.status_code = 200
+    class_resp.json.return_value = {
+        "class": "Orders",
+        "properties": [{"name": "id", "dataType": ["text"]}],
+    }
+    session = MagicMock()
+    session.get.return_value = class_resp
+
+    with (
+        patch("connectors.weaviate_writer._requests_session", return_value=session),
+        patch("connectors.weaviate_writer._headers", return_value={}),
+        patch("connectors.weaviate_writer._base_url", return_value="http://localhost:8080"),
+    ):
+        result = write_mapped_rows(
+            host="localhost",
+            port=8080,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="Orders",
+            headers=["id", "qty"],
+            data_rows=[["1", "7"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+            api_key="key",
+            create_table=True,
+            error_policy="quarantine",
+        )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()
+    assert "refuse" in (result.error or "").lower()
+
+
 def test_qdrant_live_vector_size_unnamed():
     from connectors.qdrant_writer import _qdrant_live_vector_size
 

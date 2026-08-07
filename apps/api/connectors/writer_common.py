@@ -1939,6 +1939,10 @@ def prepare_records_for_vector_write(
 
     live = destination_column_types or {}
     if live:
+        # Prefer live/Studio carriers for overlapping columns; Map may fill gaps
+        # on create-new / intentional partial Studio. Existing typed sinks must
+        # call require_physical_types_for_existing_table before invoking this
+        # helper (Weaviate/ES/Mongo class) so incomplete live never reaches here.
         dest_types = resolve_mapping_dest_types(
             target_cols,
             list(mappings or []),

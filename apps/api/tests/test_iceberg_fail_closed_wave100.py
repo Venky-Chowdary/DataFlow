@@ -63,6 +63,67 @@ def test_filesystem_path_still_resolves_without_pyiceberg(tmp_path):
         assert resolve_iceberg_write_path(endpoint) == "filesystem"
 
 
+def test_filesystem_existing_partial_physical_refuses(tmp_path):
+    """Existing Iceberg field with empty type must not invent string — refuse."""
+    import json
+    from pathlib import Path
+
+    from connectors.iceberg_writer import (
+        _iceberg_type_to_logical_carrier,
+        write_mapped_rows,
+    )
+
+    assert _iceberg_type_to_logical_carrier("") == ""
+    assert _iceberg_type_to_logical_carrier({"type": ""}) == ""
+    assert _iceberg_type_to_logical_carrier(None) == ""
+
+    warehouse = Path(tmp_path) / "wh"
+    table_dir = warehouse / "orders"
+    meta_dir = table_dir / "metadata"
+    meta_dir.mkdir(parents=True)
+    schema = {
+        "type": "struct",
+        "fields": [
+            {"id": 1, "name": "id", "type": "string", "required": False},
+            {"id": 2, "name": "qty", "type": "", "required": False},
+        ],
+    }
+    meta = {
+        "format-version": 2,
+        "table-uuid": "test-uuid",
+        "location": str(table_dir),
+        "schemas": [schema],
+        "current-schema-id": 0,
+        "schema": schema,
+        "snapshots": [],
+    }
+    (meta_dir / "v1.metadata.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    result = write_mapped_rows(
+        host="",
+        port=0,
+        database="",
+        username="",
+        password="",
+        schema="",
+        connection_string=str(warehouse),
+        ssl=False,
+        table_name="orders",
+        headers=["id", "qty"],
+        data_rows=[["1", "7"]],
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "VARCHAR"},
+            {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+        ],
+        column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+        create_table=True,
+        extra={"catalog_type": "filesystem"},
+    )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()
+    assert "refuse" in (result.error or "").lower()
+
+
 def test_sparse_unknown_pk_refused_on_filesystem_merge():
     from connectors.iceberg_writer import _merge_upsert_rows
 

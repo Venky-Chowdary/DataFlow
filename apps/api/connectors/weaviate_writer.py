@@ -389,6 +389,40 @@ def write_mapped_rows(
                 )
             # Live schema wins over Studio stamps for overlapping properties.
             live_prop_types.update(schema_types)
+            # Partial class properties: Studio may fill gaps (ES/Mongo bar —
+            # intentional Studio stamps beat Map VARCHAR invent on missing
+            # props / dynamic schema). Else require_physical refuses.
+            from connectors.writer_common import require_physical_types_for_existing_table
+
+            effective = dict(live_prop_types)
+            if isinstance(studio_live, dict):
+                for c in mapped_targets:
+                    if (
+                        effective.get(c)
+                        or effective.get(str(c).lower())
+                        or effective.get(str(c).upper())
+                    ):
+                        continue
+                    st = str(studio_live.get(c) or "").strip()
+                    if st:
+                        effective[c] = st
+            phys_err = require_physical_types_for_existing_table(
+                table_existed=True,
+                physical=effective,
+                dialect_label="Weaviate",
+                target_cols=mapped_targets,
+            )
+            if phys_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=class_name,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=phys_err,
+                )
+            live_prop_types = effective
         elif status == 404:
             if not create_table:
                 return WriteResult(
@@ -440,7 +474,13 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="weaviate",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        destination_column_types=live_prop_types or None,
+        # Existing class: live_prop_types already require_physical-complete.
+        # Create-new: only pass Studio when every mapped col is typed — else Map.
+        destination_column_types=(
+            live_prop_types
+            if (class_existed or studio_typed_all)
+            else None
+        ),
     )
     if map_abort:
         return WriteResult(

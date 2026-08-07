@@ -213,9 +213,15 @@ def _apply_iceberg_write_quarantine(
 
 
 def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
-    """Map committed Iceberg field type back to a logical carrier for Parquet writes."""
+    """Map committed Iceberg field type back to a logical carrier for Parquet writes.
+
+    Empty / missing types return ``""`` — never invent ``string`` (that would
+    soft-green incomplete metadata past require_physical / rematerialize).
+    """
     if isinstance(iceberg_type, dict):
-        kind = str(iceberg_type.get("type") or "").lower()
+        kind = str(iceberg_type.get("type") or "").strip().lower()
+        if not kind:
+            return ""
         if kind == "decimal":
             p = int(iceberg_type.get("precision") or 38)
             s = int(iceberg_type.get("scale") or 0)
@@ -231,8 +237,12 @@ def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
             return "BINARY"
         if kind in {"list", "map", "struct"}:
             return "JSON"
-        return kind or "string"
-    t = str(iceberg_type or "string").lower()
+        return kind
+    if iceberg_type is None:
+        return ""
+    t = str(iceberg_type).strip().lower()
+    if not t:
+        return ""
     m_fixed = re.match(r"fixed\s*\[\s*(\d+)\s*\]", t) or re.match(
         r"fixed\s*\(\s*(\d+)\s*\)", t
     )
@@ -253,7 +263,7 @@ def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
         "uuid": "uuid",
         "time": "time",
     }
-    return mapping.get(t, t or "string")
+    return mapping.get(t, t)
 
 
 def _write_types_from_schema(
@@ -266,7 +276,10 @@ def _write_types_from_schema(
         name = str(field.get("name") or "")
         if not name:
             continue
-        out[name] = _iceberg_type_to_logical_carrier(field.get("type"))
+        carrier = _iceberg_type_to_logical_carrier(field.get("type"))
+        # Incomplete metadata must not wipe Studio/Map with invent-empty "".
+        if carrier:
+            out[name] = carrier
     return out
 
 
@@ -1154,17 +1167,24 @@ def _write_mapped_rows_pyiceberg(
             mapped_existing = [
                 c for c in target_cols if c and c in existing_names
             ]
-            studio_live = (
-                isinstance(live_dest, dict)
-                and bool(mapped_existing)
-                and all(str(live_dest.get(c) or "").strip() for c in mapped_existing)
-            )
-            # Existing Iceberg fields without Arrow carriers must not bind Map
-            # VARCHAR (empty→NULL invent) — same bar as PG/Snowflake require_physical.
-            if mapped_existing and not studio_live:
+            # Studio may fill gaps; always require_physical on existing fields
+            # (same Mongo/ES bar — never skip when Studio is complete but Arrow sparse).
+            if mapped_existing:
+                effective = dict(physical)
+                if isinstance(live_dest, dict):
+                    for c in mapped_existing:
+                        if (
+                            effective.get(c)
+                            or effective.get(str(c).lower())
+                            or effective.get(str(c).upper())
+                        ):
+                            continue
+                        st = str(live_dest.get(c) or "").strip()
+                        if st:
+                            effective[c] = st
                 phys_err = require_physical_types_for_existing_table(
                     table_existed=True,
-                    physical=physical,
+                    physical=effective,
                     dialect_label="Iceberg",
                     target_cols=mapped_existing,
                 )
@@ -1179,6 +1199,7 @@ def _write_mapped_rows_pyiceberg(
                         error=phys_err,
                         driver="iceberg",
                     )
+                physical = effective
             remat = _iceberg_rematerialize_if_physical_differs(
                 physical=physical,
                 dest_types=dest_types,
@@ -1821,6 +1842,54 @@ def _write_mapped_rows_filesystem(
     write_types = _write_types_from_schema(schema_json, dest_types)
     # Rematerialize when committed metadata carriers ≠ Map stamps.
     if current_schema:
+        from connectors.writer_common import require_physical_types_for_existing_table
+
+        # Physical from committed fields only — do not seed Map stamps
+        # (empty→NULL invent on typed columns missing from metadata).
+        committed_physical: dict[str, str] = {}
+        for field in current_schema.get("fields") or []:
+            name = str(field.get("name") or "")
+            if not name:
+                continue
+            committed_physical[name] = _iceberg_type_to_logical_carrier(
+                field.get("type")
+            )
+        existing_names = set(committed_physical)
+        mapped_existing = [c for c in target_cols if c and c in existing_names]
+        effective = dict(committed_physical)
+        if isinstance(live_dest, dict):
+            for c in mapped_existing:
+                if (
+                    effective.get(c)
+                    or effective.get(str(c).lower())
+                    or effective.get(str(c).upper())
+                ):
+                    continue
+                st = str(live_dest.get(c) or "").strip()
+                if st:
+                    effective[c] = st
+        if mapped_existing:
+            phys_err = require_physical_types_for_existing_table(
+                table_existed=True,
+                physical=effective,
+                dialect_label="Iceberg",
+                target_cols=mapped_existing,
+            )
+            if phys_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=0,
+                    error=phys_err,
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
+            # Prefer Studio-filled committed carriers for rematerialize
+            # (same PyIceberg bar — never rematerialize from Map-only write_types).
+            write_types = {**write_types, **effective}
         remat = _iceberg_rematerialize_if_physical_differs(
             physical=write_types,
             dest_types=dest_types,
