@@ -45,12 +45,19 @@ def test_vectorize_refuses_silent_reembed_on_empty_embedding_list():
 def test_qdrant_refuses_invented_dimension_384():
     from connectors.qdrant_writer import write_mapped_rows
 
+    session = MagicMock()
+    # Create-new path: collection 404 so Map bind proceeds; dim still refused.
+    missing = MagicMock()
+    missing.status_code = 404
+    missing.json.return_value = {}
+    session.get.return_value = missing
+
     with patch(
         "connectors.qdrant_writer.vectorize_records",
         return_value=[
             {"id": "a", "content": "hi", "embedding": None, "source_id": "1", "chunk_index": 0}
         ],
-    ), patch("connectors.qdrant_writer._requests_session") as sess:
+    ), patch("connectors.qdrant_writer._requests_session", return_value=session):
         result = write_mapped_rows(
             host="localhost",
             port=6333,
@@ -70,7 +77,6 @@ def test_qdrant_refuses_invented_dimension_384():
         )
     assert result.ok is False
     assert "dimension" in (result.error or "").lower() or "embedding" in (result.error or "").lower()
-    sess.assert_not_called()
 
 
 def test_milvus_refuses_invented_dimension_384():

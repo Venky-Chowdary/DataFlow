@@ -255,6 +255,107 @@ def test_pgvector_existing_table_partial_physical_refuses():
     assert "refuse" in (result.error or "").lower()
 
 
+def test_qdrant_existing_payload_schema_partial_refuses():
+    """Existing Qdrant payload_schema with empty carrier → require_physical."""
+    from connectors.qdrant_writer import write_mapped_rows
+
+    session = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {
+        "result": {
+            "config": {"params": {"vectors": {"size": 3, "distance": "Cosine"}}},
+            "payload_schema": {
+                "id": {"data_type": "keyword"},
+                "qty": {"data_type": ""},
+            },
+        }
+    }
+    session.get.return_value = resp
+
+    with patch("connectors.qdrant_writer._requests_session", return_value=session):
+        result = write_mapped_rows(
+            host="localhost",
+            port=6333,
+            database="",
+            username="",
+            password="key",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="chunks",
+            headers=["id", "qty"],
+            data_rows=[["1", "7"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+            create_table=True,
+            error_policy="quarantine",
+        )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()
+    assert "refuse" in (result.error or "").lower()
+
+
+def test_pinecone_existing_vectors_require_studio_types():
+    """Non-empty Pinecone index without full Studio types → refuse Map invent."""
+    from connectors.pinecone_writer import write_mapped_rows
+
+    session = MagicMock()
+    resp = MagicMock()
+    resp.status_code = 200
+    resp.json.return_value = {
+        "dimension": 3,
+        "totalVectorCount": 12,
+        "namespaces": {"ns": {"vectorCount": 12}},
+    }
+    session.get.return_value = resp
+
+    with patch("connectors.pinecone_writer._requests_session", return_value=session):
+        result = write_mapped_rows(
+            host="https://idx.svc.pinecone.io",
+            port=443,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=True,
+            table_name="ns",
+            headers=["id", "qty"],
+            data_rows=[["1", "7"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+            api_key="pc-key",
+            create_table=True,
+            error_policy="quarantine",
+        )
+    assert result.ok is False
+    assert "studio" in (result.error or "").lower()
+    assert "refuse" in (result.error or "").lower()
+
+
+def test_pinecone_empty_namespace_allows_map_when_sibling_has_vectors():
+    """Empty target namespace must not invent-cliff from sibling namespace counts."""
+    from connectors.pinecone_writer import _pinecone_total_vector_count
+
+    stats = {
+        "dimension": 3,
+        "totalVectorCount": 99,
+        "namespaces": {
+            "other": {"vectorCount": 99},
+            "ns": {"vectorCount": 0},
+        },
+    }
+    assert _pinecone_total_vector_count(stats, namespace="ns") == 0
+    assert _pinecone_total_vector_count(stats, namespace="other") == 99
+
+
 def test_weaviate_live_property_types():
     from connectors.weaviate_writer import _weaviate_live_property_types
 

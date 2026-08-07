@@ -75,6 +75,54 @@ def _qdrant_live_vector_size(collection_info: dict[str, Any]) -> int | None:
     return None
 
 
+def _qdrant_payload_data_type_to_carrier(data_type: Any) -> str:
+    """Map Qdrant payload_schema ``data_type`` to a Datawrap logical carrier."""
+    raw = str(data_type or "").strip().lower()
+    if not raw:
+        return ""
+    mapping = {
+        "integer": "INTEGER",
+        "int": "INTEGER",
+        "float": "FLOAT",
+        "bool": "BOOLEAN",
+        "boolean": "BOOLEAN",
+        "keyword": "TEXT",
+        "text": "TEXT",
+        "datetime": "TIMESTAMPTZ",
+        "uuid": "UUID",
+        "geo": "JSON",
+    }
+    return mapping.get(raw, raw.upper())
+
+
+def _qdrant_live_payload_types(collection_info: dict[str, Any] | None) -> dict[str, str]:
+    """Extract payload_schema field carriers from GET /collections/{name} JSON."""
+    if not isinstance(collection_info, dict):
+        return {}
+    result = collection_info.get("result")
+    if not isinstance(result, dict):
+        result = collection_info
+    schema = result.get("payload_schema") if isinstance(result, dict) else None
+    if not isinstance(schema, dict):
+        return {}
+    out: dict[str, str] = {}
+    for name, spec in schema.items():
+        key = str(name or "").strip()
+        if not key:
+            continue
+        if isinstance(spec, dict):
+            carrier = _qdrant_payload_data_type_to_carrier(
+                spec.get("data_type") or spec.get("dataType")
+            )
+        else:
+            carrier = _qdrant_payload_data_type_to_carrier(spec)
+        # Keep empty carriers so require_physical can refuse incomplete schema.
+        out[key] = carrier
+        out.setdefault(key.lower(), carrier)
+        out.setdefault(key.upper(), carrier)
+    return out
+
+
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "requests"
@@ -254,13 +302,158 @@ def write_mapped_rows(
             driver="none",
         )
 
-    from connectors.writer_common import prepare_records_for_vector_write
+    from connectors.writer_common import (
+        prepare_records_for_vector_write,
+        require_physical_types_for_existing_table,
+    )
 
     pk_cols = list(
         _kwargs.get("destination_pk_columns")
         or _kwargs.get("conflict_columns")
         or []
     ) or None
+    collection = table_name or "dataflow_vectors"
+    api_key = password or username or ""
+    base_url = connection_string if connection_string else _base_url(host, port, ssl)
+
+    studio_live = _kwargs.get("destination_column_types")
+    live_payload_types: dict[str, str] = {}
+    if isinstance(studio_live, dict):
+        live_payload_types.update(
+            {str(k): str(v) for k, v in studio_live.items() if k and v}
+        )
+    mapped_targets = [
+        str(m.get("target") or m.get("source") or "").strip()
+        for m in (mappings or [])
+        if str(m.get("target") or m.get("source") or "").strip()
+    ]
+    if not mapped_targets:
+        mapped_targets = [str(h) for h in (headers or []) if h]
+    studio_typed_all = (
+        isinstance(studio_live, dict)
+        and bool(mapped_targets)
+        and all(str(studio_live.get(c) or "").strip() for c in mapped_targets)
+    )
+
+    collection_existed = False
+    cached_live_dim: int | None = None
+    payload_schema_present = False
+    try:
+        session = _requests_session()
+        hdrs = _headers(api_key)
+        exists = session.get(
+            f"{base_url}/collections/{collection}", headers=hdrs, timeout=10
+        )
+        status = int(exists.status_code)
+        if status in {401, 403}:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Qdrant schema probe auth failed ({status}) — "
+                    "refuse Map VARCHAR bind (empty→null invent risk)."
+                ),
+            )
+        if status == 200:
+            collection_existed = True
+            try:
+                info = exists.json()
+            except Exception:
+                info = {}
+            cached_live_dim = _qdrant_live_vector_size(
+                info if isinstance(info, dict) else {}
+            )
+            schema_types = _qdrant_live_payload_types(
+                info if isinstance(info, dict) else {}
+            )
+            # Schemaless collections stay Map-tolerant. Typed payload_schema is
+            # the invent cliff — Studio may fill; else require_physical.
+            if schema_types:
+                payload_schema_present = True
+                live_payload_types.update(schema_types)
+                mapped_existing = [
+                    c
+                    for c in mapped_targets
+                    if c
+                    and (
+                        c in schema_types
+                        or str(c).lower() in schema_types
+                        or str(c).upper() in schema_types
+                    )
+                ]
+                effective = dict(live_payload_types)
+                if isinstance(studio_live, dict):
+                    for c in mapped_existing:
+                        if (
+                            effective.get(c)
+                            or effective.get(str(c).lower())
+                            or effective.get(str(c).upper())
+                        ):
+                            continue
+                        st = str(studio_live.get(c) or "").strip()
+                        if st:
+                            effective[c] = st
+                if mapped_existing:
+                    phys_err = require_physical_types_for_existing_table(
+                        table_existed=True,
+                        physical=effective,
+                        dialect_label="Qdrant",
+                        target_cols=mapped_existing,
+                    )
+                    if phys_err:
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=collection,
+                            target_schema=schema or "",
+                            checksum="",
+                            chunks_completed=0,
+                            error=phys_err,
+                        )
+                live_payload_types = effective
+        elif status == 404:
+            if not create_table:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Qdrant collection '{collection}' is missing and "
+                        "create_table is disabled"
+                    ),
+                )
+        else:
+            # Unexpected status — never soft-skip dim/existence gates via Studio.
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Qdrant schema probe failed ({status}) — "
+                    "refuse Map VARCHAR bind without live collection config."
+                ),
+            )
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=collection,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=f"Qdrant schema probe failed: {exc}",
+        )
+
     records, map_rejected, map_abort = prepare_records_for_vector_write(
         headers=headers,
         data_rows=data_rows,
@@ -273,7 +466,12 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="qdrant",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        destination_column_types=_kwargs.get("destination_column_types"),
+        # Existing + payload_schema gated, or intentional full Studio.
+        destination_column_types=(
+            live_payload_types
+            if (payload_schema_present or studio_typed_all)
+            else None
+        ),
     )
     if map_abort:
         return WriteResult(
@@ -384,21 +582,22 @@ def write_mapped_rows(
         )
 
     collection = table_name or "dataflow_vectors"
-    api_key = password or username or ""
-    base_url = connection_string if connection_string else _base_url(host, port, ssl)
-
+    # api_key / base_url already resolved for schema probe above.
     inserted = 0
     try:
         session = _requests_session()
         hdrs = _headers(api_key)
-        exists = session.get(
-            f"{base_url}/collections/{collection}", headers=hdrs, timeout=10
-        )
-        if exists.status_code == 200:
-            try:
-                live_dim = _qdrant_live_vector_size(exists.json())
-            except Exception:
-                live_dim = None
+        if collection_existed:
+            live_dim = cached_live_dim
+            if live_dim is None:
+                exists = session.get(
+                    f"{base_url}/collections/{collection}", headers=hdrs, timeout=10
+                )
+                if exists.status_code == 200:
+                    try:
+                        live_dim = _qdrant_live_vector_size(exists.json())
+                    except Exception:
+                        live_dim = None
             if live_dim is None:
                 return WriteResult(
                     ok=False,

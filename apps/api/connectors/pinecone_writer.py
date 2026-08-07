@@ -68,6 +68,42 @@ def _pinecone_live_dimension(payload: dict[str, Any] | None) -> int | None:
     return dim if dim > 0 else None
 
 
+def _pinecone_total_vector_count(
+    payload: dict[str, Any] | None,
+    *,
+    namespace: str = "",
+) -> int:
+    """Live vector count from describe_index_stats.
+
+    When ``namespace`` is set, prefer that namespace's count so an empty target
+    namespace is not blocked by siblings (and a populated target is not missed
+    when only per-namespace stats are present).
+    """
+    if not isinstance(payload, dict):
+        return 0
+    ns = (namespace or "").strip()
+    namespaces = payload.get("namespaces")
+    if ns and isinstance(namespaces, dict):
+        entry = namespaces.get(ns)
+        if isinstance(entry, dict):
+            raw = entry.get("vectorCount")
+            if raw is None:
+                raw = entry.get("vector_count")
+            try:
+                return max(0, int(raw or 0))
+            except (TypeError, ValueError):
+                return 0
+        # Named namespace absent from stats → treat as empty for that namespace.
+        return 0
+    raw = payload.get("totalVectorCount")
+    if raw is None:
+        raw = payload.get("total_vector_count")
+    try:
+        return max(0, int(raw or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "requests"
@@ -267,6 +303,100 @@ def write_mapped_rows(
         or _kwargs.get("conflict_columns")
         or []
     ) or None
+    studio_live = _kwargs.get("destination_column_types")
+    live_meta_types: dict[str, str] = {}
+    if isinstance(studio_live, dict):
+        live_meta_types.update(
+            {str(k): str(v) for k, v in studio_live.items() if k and v}
+        )
+    mapped_targets = [
+        str(m.get("target") or m.get("source") or "").strip()
+        for m in (mappings or [])
+        if str(m.get("target") or m.get("source") or "").strip()
+    ]
+    if not mapped_targets:
+        mapped_targets = [str(h) for h in (headers or []) if h]
+    studio_typed_all = (
+        isinstance(studio_live, dict)
+        and bool(mapped_targets)
+        and all(str(studio_live.get(c) or "").strip() for c in mapped_targets)
+    )
+
+    # Pinecone has no payload DDL API — when the index already holds vectors,
+    # Map VARCHAR invent on metadata is refuse-closed unless Studio is complete
+    # (Redis empty-sample / object-store class).
+    cached_stats: dict[str, Any] | None = None
+    cached_live_dim: int | None = None
+    index_has_vectors = False
+    try:
+        session = _requests_session()
+        hdrs = _headers(key)
+        stats = session.get(
+            f"{index_url}/describe_index_stats", headers=hdrs, timeout=15
+        )
+        status = int(stats.status_code)
+        if status in {401, 403}:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=namespace or "default",
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Pinecone describe_index_stats auth failed ({status}) — "
+                    "refuse Map VARCHAR metadata bind (empty→null invent risk)."
+                ),
+            )
+        if status == 200:
+            try:
+                body = stats.json()
+                cached_stats = body if isinstance(body, dict) else {}
+            except Exception:
+                cached_stats = {}
+            cached_live_dim = _pinecone_live_dimension(cached_stats)
+            index_has_vectors = (
+                _pinecone_total_vector_count(cached_stats, namespace=namespace) > 0
+            )
+            if index_has_vectors and not studio_typed_all:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=namespace or "default",
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Pinecone index already contains vectors but Studio "
+                        "destination types are incomplete — refuse Map VARCHAR "
+                        "metadata bind (empty→null / filter-type invent risk). "
+                        "Pass full destination_column_types or clear the namespace."
+                    ),
+                )
+        elif not studio_typed_all:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=namespace or "default",
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Pinecone describe_index_stats failed ({status}) — "
+                    "refuse Map VARCHAR metadata bind without live index stats."
+                ),
+            )
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=namespace or "default",
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=f"Pinecone schema probe failed: {exc}",
+        )
+
     records, map_rejected, map_abort = prepare_records_for_vector_write(
         headers=headers,
         data_rows=data_rows,
@@ -279,7 +409,11 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="pinecone",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        destination_column_types=_kwargs.get("destination_column_types"),
+        destination_column_types=(
+            live_meta_types
+            if (index_has_vectors or studio_typed_all)
+            else None
+        ),
     )
     if map_abort:
         return WriteResult(
@@ -390,29 +524,31 @@ def write_mapped_rows(
     try:
         session = _requests_session()
         hdrs = _headers(key)
-        stats = session.get(
-            f"{index_url}/describe_index_stats", headers=hdrs, timeout=15
-        )
-        if stats.status_code != 200:
-            return WriteResult(
-                ok=False,
-                rows_written=0,
-                table_name=target,
-                target_schema="",
-                checksum="",
-                chunks_completed=0,
-                error=(
-                    f"Pinecone describe_index_stats failed ({stats.status_code}) — "
-                    "refuse upsert without live index dimension "
-                    f"(source embeddings are {dimension}-d)."
-                ),
-                rejected_details=rejected,
-                rejected_rows=len(rejected),
+        live_dim = cached_live_dim
+        if live_dim is None:
+            stats = session.get(
+                f"{index_url}/describe_index_stats", headers=hdrs, timeout=15
             )
-        try:
-            live_dim = _pinecone_live_dimension(stats.json())
-        except Exception:
-            live_dim = None
+            if stats.status_code != 200:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=target,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Pinecone describe_index_stats failed ({stats.status_code}) — "
+                        "refuse upsert without live index dimension "
+                        f"(source embeddings are {dimension}-d)."
+                    ),
+                    rejected_details=rejected,
+                    rejected_rows=len(rejected),
+                )
+            try:
+                live_dim = _pinecone_live_dimension(stats.json())
+            except Exception:
+                live_dim = None
         if live_dim is None:
             return WriteResult(
                 ok=False,
