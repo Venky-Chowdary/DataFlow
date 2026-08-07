@@ -22,22 +22,27 @@ from connectors.writer_common import (
 logger = logging.getLogger(__name__)
 
 
-def _fetch_es_physical_types(client: Any, index: str, target_cols: list[str]) -> dict[str, str]:
+def _fetch_es_physical_types(
+    client: Any, index: str, target_cols: list[str]
+) -> tuple[dict[str, str], Exception | None]:
     """Read committed index mapping → logical carriers for rematerialize.
 
     ``get_mapping`` responses are keyed by concrete index names; aliases resolve
     to those keys — never assume ``mapping[alias]`` exists.
+
+    Returns ``(physical, None)`` on success or ``({}, exc)`` on probe failure
+    so callers can fail-closed on auth (never soft-empty → Map invent).
     """
     from services.schema_introspect import _es_mapping_type
 
     wanted = {str(c) for c in target_cols if c}
     if not wanted:
-        return {}
+        return {}, None
     try:
         mapping = client.indices.get_mapping(index=index)
-    except Exception:
+    except Exception as exc:
         logger.debug("Elasticsearch get_mapping failed for %s", index, exc_info=True)
-        return {}
+        return {}, exc
     props: dict = {}
     if isinstance(mapping, dict):
         # Prefer exact name, then any concrete index body (alias → real index).
@@ -68,7 +73,7 @@ def _fetch_es_physical_types(client: Any, index: str, target_cols: list[str]) ->
         physical[name] = carrier
         physical.setdefault(name.lower(), carrier)
         physical.setdefault(name.upper(), carrier)
-    return physical
+    return physical, None
 
 
 def _es_rematerialize_if_physical_differs(
@@ -355,7 +360,22 @@ def write_mapped_rows(
             )
 
         if index_exists:
-            physical = _fetch_es_physical_types(client, index, target_cols)
+            from connectors.saas_common import is_auth_error
+
+            physical, map_exc = _fetch_es_physical_types(client, index, target_cols)
+            if map_exc is not None and is_auth_error(map_exc):
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=index,
+                    target_schema=host or "localhost",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Elasticsearch get_mapping auth failed: {map_exc} — "
+                        "refuse Map VARCHAR bind (empty→NULL invent risk)."
+                    ),
+                )
             if not physical:
                 mapped_data_cols = [c for c in target_cols if c and c != "_id"]
                 studio_live = isinstance(live_dest, dict) and all(

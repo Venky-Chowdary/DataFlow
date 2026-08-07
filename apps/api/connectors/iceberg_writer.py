@@ -1143,7 +1143,42 @@ def _write_mapped_rows_pyiceberg(
         # Rematerialize from source when committed Arrow carriers ≠ Map stamps
         # (VARCHAR→int/date/decimal invent cliff — same class as PG/Snowflake).
         if table_existed:
+            from connectors.writer_common import require_physical_types_for_existing_table
+
             physical = _physical_carriers_from_arrow(existing_arrow, pa)
+            existing_names = {
+                str(n) for n in (getattr(existing_arrow, "names", None) or [])
+            }
+            # Only gate columns already on the table — additive union_by_name
+            # fields are not in Arrow yet and must not trip require_physical.
+            mapped_existing = [
+                c for c in target_cols if c and c in existing_names
+            ]
+            studio_live = (
+                isinstance(live_dest, dict)
+                and bool(mapped_existing)
+                and all(str(live_dest.get(c) or "").strip() for c in mapped_existing)
+            )
+            # Existing Iceberg fields without Arrow carriers must not bind Map
+            # VARCHAR (empty→NULL invent) — same bar as PG/Snowflake require_physical.
+            if mapped_existing and not studio_live:
+                phys_err = require_physical_types_for_existing_table(
+                    table_existed=True,
+                    physical=physical,
+                    dialect_label="Iceberg",
+                    target_cols=mapped_existing,
+                )
+                if phys_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=phys_err,
+                        driver="iceberg",
+                    )
             remat = _iceberg_rematerialize_if_physical_differs(
                 physical=physical,
                 dest_types=dest_types,

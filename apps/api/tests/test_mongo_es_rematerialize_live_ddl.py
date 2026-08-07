@@ -68,7 +68,8 @@ def test_fetch_mongo_physical_types_majority_vote():
                 ]
             )
 
-    physical = _fetch_mongo_physical_types(Coll(), ["amount", "flag"])
+    physical, exc = _fetch_mongo_physical_types(Coll(), ["amount", "flag"])
+    assert exc is None
     assert physical.get("amount") == "INTEGER"
     assert "BOOL" in str(physical.get("flag") or "").upper()
 
@@ -110,7 +111,8 @@ def test_fetch_es_physical_types_from_mapping():
             }
         }
     }
-    physical = _fetch_es_physical_types(client, "orders", ["qty", "flag", "note"])
+    physical, exc = _fetch_es_physical_types(client, "orders", ["qty", "flag", "note"])
+    assert exc is None
     assert physical.get("qty") == "INTEGER"
     assert physical.get("flag") == "BOOLEAN"
     assert physical.get("note") == "TEXT"
@@ -130,5 +132,30 @@ def test_fetch_es_physical_types_resolves_alias_response_keys():
             }
         }
     }
-    physical = _fetch_es_physical_types(client, "orders-alias", ["qty"])
+    physical, exc = _fetch_es_physical_types(client, "orders-alias", ["qty"])
+    assert exc is None
     assert physical.get("qty") == "INTEGER"
+
+
+def test_fetch_es_physical_types_surfaces_auth_exc():
+    from connectors.elasticsearch_writer import _fetch_es_physical_types
+
+    client = MagicMock()
+    client.indices.get_mapping.side_effect = Exception("401 Unauthorized")
+    physical, exc = _fetch_es_physical_types(client, "orders", ["qty"])
+    assert physical == {}
+    assert exc is not None
+    assert "401" in str(exc)
+
+
+def test_fetch_mongo_physical_types_surfaces_auth_exc():
+    from connectors.mongodb_writer import _fetch_mongo_physical_types
+
+    class Coll:
+        def find(self):
+            raise Exception("403 Forbidden")
+
+    physical, exc = _fetch_mongo_physical_types(Coll(), ["amount"])
+    assert physical == {}
+    assert exc is not None
+    assert "403" in str(exc)

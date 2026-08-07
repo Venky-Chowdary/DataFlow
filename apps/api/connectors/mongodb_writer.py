@@ -43,10 +43,12 @@ def _fetch_mongo_physical_types(
     target_cols: list[str],
     *,
     sample_limit: int = 50,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], Exception | None]:
     """Sample live BSON types for mapped fields (majority vote).
 
-    Empty collections return ``{}`` — Map stamps remain authoritative for create-new.
+    Empty collections return ``({}, None)`` — Map stamps remain authoritative
+    for create-new. Probe failures return ``({}, exc)`` so writers can
+    fail-closed on auth (never soft-empty → Map invent).
     """
     from services.schema_introspect import (
         _finalize_mongodb_type,
@@ -55,7 +57,7 @@ def _fetch_mongo_physical_types(
 
     wanted = {str(c) for c in target_cols if c}
     if not wanted:
-        return {}
+        return {}, None
     type_counts: dict[str, dict[str, int]] = {c: {} for c in wanted}
     try:
         for doc in coll.find().limit(int(sample_limit)):
@@ -69,9 +71,9 @@ def _fetch_mongo_physical_types(
                     continue
                 tc = type_counts[key]
                 tc[inferred] = int(tc.get(inferred, 0)) + 1
-    except Exception:
+    except Exception as exc:
         logger.debug("Mongo physical type sample failed", exc_info=True)
-        return {}
+        return {}, exc
     physical: dict[str, str] = {}
     for col, counts in type_counts.items():
         if not counts:
@@ -81,7 +83,7 @@ def _fetch_mongo_physical_types(
             physical[col] = carrier
             physical.setdefault(col.lower(), carrier)
             physical.setdefault(col.upper(), carrier)
-    return physical
+    return physical, None
 
 
 def _mongo_rematerialize_if_physical_differs(
@@ -301,7 +303,22 @@ def write_mapped_rows(
         # Existing collection: sample BSON carriers and rematerialize when they
         # differ from Map/Studio stamps (VARCHAR→Decimal128 invent cliff).
         if collection_existed:
-            physical = _fetch_mongo_physical_types(coll, target_cols)
+            from connectors.saas_common import is_auth_error
+
+            physical, sample_exc = _fetch_mongo_physical_types(coll, target_cols)
+            if sample_exc is not None and is_auth_error(sample_exc):
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection_name,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"MongoDB BSON sample auth failed: {sample_exc} — "
+                        "refuse Map VARCHAR bind (empty→NULL invent risk)."
+                    ),
+                )
             if not physical:
                 # Empty sample on a non-empty / unknown-count collection — refuse
                 # Map-only bind unless Studio typed every mapped field.
