@@ -653,16 +653,19 @@ def _pg_materialize_mapped_batch(
     write_mode: str,
     destination_pk_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
+    allow_logical_fallback: bool = True,
 ) -> _PgMaterializedBatch:
     """Build mapped rows against ``dest_types`` then quarantine/bind.
 
     Call again after live DDL overlay so Map stamps cannot coerce before
     physical types win (BQ-class reorder — existing-table invent cliff).
     """
-    target_types = [
-        pg_type(dest_types.get(c, logical_types[i]), engine=engine)
-        for i, c in enumerate(target_cols)
-    ]
+    target_types = []
+    for i, c in enumerate(target_cols):
+        carrier = str(dest_types.get(c) or "").strip()
+        if not carrier and allow_logical_fallback:
+            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
+        target_types.append(pg_type(carrier, engine=engine) if carrier else "")
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -1203,6 +1206,7 @@ def write_mapped_rows(
         write_mode=write_mode,
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        allow_logical_fallback=not bool(studio_err),
     )
     mapped_rows = _batch.mapped_rows
     sparse_rows = _batch.sparse_rows
@@ -1333,8 +1337,10 @@ def write_mapped_rows(
             close_connection = True
         cur = conn.cursor()
 
+    additive_refuse: str | None = None
+
     def _run_setup(cursor) -> None:
-        nonlocal target_types
+        nonlocal target_types, additive_refuse
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="postgresql", schema=schema)
         if create_table:
@@ -1363,6 +1369,20 @@ def write_mapped_rows(
                 (schema, table_name),
             )
             existing = {row[0] for row in cursor.fetchall()}
+            from connectors.writer_common import gate_additive_types_under_partial_studio
+
+            target_types, add_err = gate_additive_types_under_partial_studio(
+                target_cols=target_cols,
+                target_types=target_types,
+                existing=existing,
+                mappings=mappings,
+                studio_err=studio_err,
+                product="PostgreSQL",
+                materialize_stamp=lambda stamp: pg_type(stamp, engine=engine),
+            )
+            if add_err:
+                additive_refuse = add_err
+                return
             for col, typ in zip(target_cols, target_types):
                 if col not in existing:
                     cursor.execute(
@@ -1512,6 +1532,19 @@ def write_mapped_rows(
                         raise
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
                     _reconnect()
+
+            if additive_refuse:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=additive_refuse,
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
 
             # Live DDL must win over Map stamps before values are coerced.
             # Rematerialize map/quarantine when physical carriers differ (BQ-class).

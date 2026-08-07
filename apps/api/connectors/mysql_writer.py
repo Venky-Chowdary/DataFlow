@@ -258,11 +258,15 @@ def _mysql_materialize_mapped_batch(
     write_mode: str,
     destination_pk_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
+    allow_logical_fallback: bool = True,
 ) -> _MysqlMaterializedBatch:
     """Map + quarantine against ``dest_types`` (call again after live DDL overlay)."""
-    target_types = [
-        mysql_type(dest_types.get(c, logical_types[i])) for i, c in enumerate(target_cols)
-    ]
+    target_types = []
+    for i, c in enumerate(target_cols):
+        carrier = str(dest_types.get(c) or "").strip()
+        if not carrier and allow_logical_fallback:
+            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
+        target_types.append(mysql_type(carrier) if carrier else "")
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -489,6 +493,7 @@ def write_mapped_rows(
         write_mode=write_mode,
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        allow_logical_fallback=not bool(studio_err),
     )
     mapped_rows = _batch.mapped_rows
     sparse_rows = _batch.sparse_rows
@@ -562,6 +567,7 @@ def write_mapped_rows(
     converted_rows: list[tuple] = []
     # Probed before CREATE so fail-closed overlay can distinguish create-new.
     table_existed = False
+    additive_refuse: str | None = None
 
     # CREATE/ALTER opens with purpose="setup" (short lock wait) so contended
     # metadata locks fail fast. After setup we reconnect with purpose="write"
@@ -588,7 +594,7 @@ def write_mapped_rows(
     )
 
     def _run_setup(cursor) -> None:
-        nonlocal target_types, converted_rows, dest_types
+        nonlocal target_types, converted_rows, dest_types, additive_refuse
         nonlocal mapped_rows, sparse_rows, transform_errors, rejected_details, rows_for_checksum
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="mysql")
@@ -616,6 +622,20 @@ def write_mapped_rows(
                 (table_name,),
             )
             existing = {row[0] for row in cursor.fetchall()}
+            from connectors.writer_common import gate_additive_types_under_partial_studio
+
+            target_types, add_err = gate_additive_types_under_partial_studio(
+                target_cols=target_cols,
+                target_types=target_types,
+                existing=existing,
+                mappings=mappings,
+                studio_err=studio_err,
+                product="MySQL",
+                materialize_stamp=mysql_type,
+            )
+            if add_err:
+                additive_refuse = add_err
+                return
             altered = False
             for col, typ in zip(target_cols, target_types):
                 if col not in existing:
@@ -835,6 +855,19 @@ def write_mapped_rows(
                         raise
                     time.sleep(reconnect_backoff_seconds(setup_attempt))
                     _reconnect(purpose="setup")
+
+            if additive_refuse:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=database,
+                    checksum="",
+                    chunks_completed=0,
+                    error=additive_refuse,
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
 
             # Setup used short lock waits; INSERT/UPSERT needs write I/O budget.
             _reconnect(purpose="write")

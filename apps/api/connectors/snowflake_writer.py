@@ -97,6 +97,7 @@ def _sf_materialize_mapped_batch(
     live_dest_types: dict[str, str] | None = None,
     destination_pk_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
+    allow_logical_fallback: bool = True,
 ) -> _SfMaterializedBatch:
     """Map + quarantine against ``dest_types`` (call again after live DDL overlay)."""
     from connectors.writer_common import (
@@ -127,8 +128,20 @@ def _sf_materialize_mapped_batch(
         destination_pk_columns=list(destination_pk_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
     )
-    sized_logical = [dest_types.get(c, logical_types[i]) for i, c in enumerate(target_cols)]
-    target_types = resolve_snowflake_create_types(sized_logical, mapped_rows)
+    sized_logical: list[str] = []
+    for i, c in enumerate(target_cols):
+        carrier = str(dest_types.get(c) or "").strip()
+        if not carrier and allow_logical_fallback:
+            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
+        sized_logical.append(carrier)
+    # resolve_snowflake_create_types needs non-empty carriers for sizing; gaps
+    # under partial Studio stay blank after (ADD gate stamps or refuses).
+    target_types = resolve_snowflake_create_types(
+        [s or "VARCHAR" for s in sized_logical], mapped_rows
+    )
+    for i, carrier in enumerate(sized_logical):
+        if not carrier:
+            target_types[i] = ""
     if isinstance(live_dest_types, dict) and live_dest_types:
         live_fold = {str(k).lower(): str(v) for k, v in live_dest_types.items() if k and v}
         for i, col in enumerate(target_cols):
@@ -1129,6 +1142,7 @@ def write_mapped_rows(
         live_dest_types=live_dest_types if isinstance(live_dest_types, dict) else None,
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=dest_nullability,
+        allow_logical_fallback=not bool(studio_err),
     )
     mapped_rows = _batch.mapped_rows
     transform_errors = _batch.transform_errors
@@ -1370,6 +1384,30 @@ def write_mapped_rows(
                     (schema, table_name),
                 )
                 existing = {row[0].upper() for row in cur.fetchall()}
+                from connectors.writer_common import gate_additive_types_under_partial_studio
+
+                target_types, add_err = gate_additive_types_under_partial_studio(
+                    target_cols=target_cols,
+                    target_types=target_types,
+                    existing=existing,
+                    mappings=mappings,
+                    studio_err=studio_err,
+                    product="Snowflake",
+                    materialize_stamp=sf_type,
+                    col_in_existing=lambda col, ex: str(col).upper() in ex,
+                )
+                if add_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=add_err,
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
                 tbl_q = quote_sql_identifier(table_name)
                 for col, typ in zip(target_cols, target_types):
                     if col.upper() not in existing:

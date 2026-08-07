@@ -2113,6 +2113,61 @@ def resolve_studio_or_map_dest_types(
     )
 
 
+def gate_additive_types_under_partial_studio(
+    *,
+    target_cols: list[str],
+    target_types: list[str],
+    existing: set[str] | frozenset[str] | set,
+    mappings: list[dict] | None,
+    studio_err: str | None,
+    product: str,
+    materialize_stamp: Any,
+    col_in_existing: Any = None,
+) -> tuple[list[str], str | None]:
+    """Under partial Studio, additive ADD must use explicit Map ``target_type``.
+
+    Existing columns keep ``target_types`` (rematerialize/physical owns them).
+    New columns without an operator Map stamp refuse — never invent from
+    source DDL / bare VARCHAR (BigQuery / generic_sql parity).
+    """
+    if not studio_err:
+        return list(target_types), None
+    out = list(target_types)
+    from services.mapping_constraints import write_mappings
+
+    by_tgt: dict[str, dict] = {}
+    for mapping in write_mappings(list(mappings or [])):
+        tgt = str(mapping.get("target") or "").strip()
+        if tgt and tgt not in by_tgt:
+            by_tgt[tgt] = mapping
+            by_tgt.setdefault(tgt.lower(), mapping)
+    contains = col_in_existing or (lambda col, ex: col in ex)
+    for i, col in enumerate(target_cols):
+        if not col or contains(col, existing):
+            continue
+        mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+        explicit = str(
+            mapping.get("target_type") or mapping.get("dest_type") or ""
+        ).strip()
+        if not explicit:
+            return out, (
+                f"{product} additive column {col!r} lacks Studio/live type and "
+                "Map target_type under partial Studio — refuse Map VARCHAR ADD "
+                "invent. Stamp the column on Map or disable backfill_new_fields."
+            )
+        stamped = materialize_stamp(explicit)
+        if not str(stamped or "").strip():
+            return out, (
+                f"{product} additive column {col!r} Map target_type {explicit!r} "
+                "did not materialize to DDL — refuse Map VARCHAR ADD invent."
+            )
+        if i < len(out):
+            out[i] = str(stamped)
+        else:
+            out.append(str(stamped))
+    return out, None
+
+
 def rematerialize_live_dest_types(
     physical: dict[str, str] | None,
     target_cols: list[str],

@@ -432,9 +432,12 @@ def write_mapped_rows(
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="SQLite",
     )
-    target_types = [
-        sqlite_type(dest_types.get(c, logical_types[i])) for i, c in enumerate(target_cols)
-    ]
+    target_types = []
+    for i, c in enumerate(target_cols):
+        carrier = str(dest_types.get(c) or "").strip()
+        if not carrier and not studio_err:
+            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
+        target_types.append(sqlite_type(carrier) if carrier else "")
     policy = transform_error_policy(error_policy)
 
     mapped_rows: list[tuple] = []
@@ -761,6 +764,31 @@ def write_mapped_rows(
                         row[1]
                         for row in cur.execute(f"PRAGMA table_info({table_quoted})")
                     }
+                    from connectors.writer_common import (
+                        gate_additive_types_under_partial_studio,
+                    )
+
+                    target_types, add_err = gate_additive_types_under_partial_studio(
+                        target_cols=target_cols,
+                        target_types=target_types,
+                        existing=existing,
+                        mappings=mappings,
+                        studio_err=studio_err,
+                        product="SQLite",
+                        materialize_stamp=sqlite_type,
+                    )
+                    if add_err:
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=table_name,
+                            target_schema=schema or "main",
+                            checksum="",
+                            chunks_completed=0,
+                            error=add_err,
+                            rejected_details=rejected_details,
+                            warnings=transform_errors,
+                        )
                     for col, typ in zip(target_cols, target_types):
                         if col not in existing:
                             try:
@@ -768,11 +796,20 @@ def write_mapped_rows(
                                     f"ALTER TABLE {table_quoted} ADD COLUMN {quote_sql_identifier(col)} {typ}"
                                 )
                             except sqlite3.OperationalError as exc:
-                                logger.debug(
-                                    "sqlite add column skipped for %s: %s",
-                                    col,
-                                    exc,
-                                    exc_info=exc,
+                                # Fail closed — silent skip invents schema drift.
+                                return WriteResult(
+                                    ok=False,
+                                    rows_written=0,
+                                    table_name=table_name,
+                                    target_schema=schema or "main",
+                                    checksum="",
+                                    chunks_completed=0,
+                                    error=(
+                                        f"SQLite ADD COLUMN {col!r} failed: {exc} — "
+                                        "refuse silent schema drift."
+                                    ),
+                                    rejected_details=rejected_details,
+                                    warnings=transform_errors,
                                 )
 
             if sparse_converted and write_mode == "upsert" and conflict_cols:
