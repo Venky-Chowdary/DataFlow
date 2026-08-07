@@ -187,11 +187,13 @@ def resolve_airtable_dest_types(
     *,
     logical_types: list[str] | None = None,
     meta_fields: list[dict[str, Any]] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Prefer live Meta field types; else Map/source carriers.
 
     When Meta fields are supplied, never soft-fill unknown/computed types with
-    Map ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate.
+    Map ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate
+    (including optional Studio ``destination_column_types``).
     """
     live: dict[str, str] = {}
     for f in meta_fields or []:
@@ -207,7 +209,7 @@ def resolve_airtable_dest_types(
         merged, _err = merge_saas_live_types(
             live,
             list(target_cols or []),
-            studio_types=None,
+            studio_types=studio_types if isinstance(studio_types, dict) else None,
             product="Airtable",
         )
         return merged

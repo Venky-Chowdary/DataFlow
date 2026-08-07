@@ -254,11 +254,13 @@ def resolve_salesforce_dest_types(
     column_types: dict[str, str],
     *,
     describe_fields: list[dict[str, Any]] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Prefer live Describe length/precision; else Map/source carriers.
 
     When Describe fields are supplied, never soft-fill unknown SOAP types with
-    Map ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate.
+    Map ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate
+    (including optional Studio ``destination_column_types``).
     """
     live: dict[str, str] = {}
     for f in describe_fields or []:
@@ -274,7 +276,7 @@ def resolve_salesforce_dest_types(
         merged, _err = merge_saas_live_types(
             live,
             list(target_cols or []),
-            studio_types=None,
+            studio_types=studio_types if isinstance(studio_types, dict) else None,
             product="Salesforce",
         )
         return merged

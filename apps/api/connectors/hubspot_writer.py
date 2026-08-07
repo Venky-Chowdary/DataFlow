@@ -228,12 +228,13 @@ def resolve_hubspot_dest_types(
     *,
     logical_types: list[str] | None = None,
     describe_props: list[dict[str, Any]] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Prefer live Properties Describe; else Map/source carriers.
 
     When Describe props are supplied (including empty list after a successful
     probe), never soft-fill missing/unknown Meta types with Map ``VARCHAR`` —
-    parity with ``merge_saas_live_types`` on the write path.
+    parity with ``merge_saas_live_types`` on the write path (Studio included).
     """
     live: dict[str, str] = {}
     for p in describe_props or []:
@@ -249,7 +250,7 @@ def resolve_hubspot_dest_types(
         merged, _err = merge_saas_live_types(
             live,
             list(target_cols or []),
-            studio_types=None,
+            studio_types=studio_types if isinstance(studio_types, dict) else None,
             product="HubSpot",
         )
         # Return covered carriers only — never Map VARCHAR invent for gaps.

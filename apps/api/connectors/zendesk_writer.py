@@ -173,6 +173,7 @@ def resolve_zendesk_dest_types(
     *,
     logical_types: list[str] | None = None,
     describe_fields: list[dict[str, Any]] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Prefer live Zendesk field schema; else Map/source carriers.
 
@@ -188,7 +189,7 @@ def resolve_zendesk_dest_types(
         merged, _err = merge_saas_live_types(
             live,
             list(target_cols or []),
-            studio_types=None,
+            studio_types=studio_types if isinstance(studio_types, dict) else None,
             product="Zendesk",
         )
         return merged

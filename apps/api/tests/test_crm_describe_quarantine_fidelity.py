@@ -241,6 +241,34 @@ def test_resolve_airtable_notion_sf_no_map_invent_on_describe():
     assert "Weird__c" not in sf
 
 
+def test_resolve_studio_fills_refused_meta_carrier():
+    from connectors.airtable_writer import resolve_airtable_dest_types
+    from connectors.notion_writer import resolve_notion_dest_types
+
+    at = resolve_airtable_dest_types(
+        ["Name", "Score"],
+        [],
+        {},
+        meta_fields=[
+            {"name": "Name", "type": "singleLineText"},
+            {"name": "Score", "type": "formula"},
+        ],
+        studio_types={"Score": "INTEGER"},
+    )
+    assert at["Score"] == "INTEGER"
+
+    no = resolve_notion_dest_types(
+        ["id", "Name"],
+        [],
+        {},
+        properties={"id": "rich_text", "Name": "title"},
+    )
+    # Live property named id keeps Describe carrier (not page-UUID invent).
+    assert no["id"] != "VARCHAR(64)"
+    assert no["id"].startswith("VARCHAR")
+    assert no["Name"].startswith("VARCHAR")
+
+
 def test_overlay_promotes_mysql_enum_set_over_map_varchar():
     from connectors.writer_common import overlay_physical_bind_types
 
