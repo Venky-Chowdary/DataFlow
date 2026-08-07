@@ -2075,7 +2075,7 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
         type_oid = int(row[8]) if len(row) > 8 and row[8] is not None else 0
         typ_type = str(row[9] if len(row) > 9 else "").strip().lower()
         if typ_type == "e" and type_oid in enum_labels and enum_labels[type_oid]:
-            # Preserve pg_enum domain — Airbyte invents bare string and loses labels.
+            # Preserve pg_enum domain — bare string invent loses labels.
             logical = format_enum_domain_carrier(enum_labels[type_oid])
         else:
             logical = _pg_to_logical(str(dtype or ""))

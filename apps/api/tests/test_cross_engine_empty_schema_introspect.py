@@ -40,12 +40,20 @@ def test_pipeline_existing_empty_targets_never_create_new_across_dest_families()
 
 
 def test_pg_cross_schema_recovery():
+    # _PG_COLUMN_SQL returns 10-tuples: name, dtype, nullable, identity,
+    # default, collation, coll_det, generated, type_oid, typ_type.
+    pg_cols = [
+        ("id", "text", "YES", "", None, "", True, "", 25, "b"),
+        ("title", "text", "YES", "", None, "", True, "", 25, "b"),
+    ]
     cur = MagicMock()
     cur.fetchall.side_effect = [
-        [],
-        [],
-        [("public", "jobs")],
-        [("id", "text", "YES"), ("title", "text", "YES")],
+        [],  # tables in wrong schema
+        [],  # columns in wrong schema
+        [("public", "jobs")],  # cross-schema recovery
+        pg_cols,  # columns in public
+        [],  # unique keys
+        [],  # foreign keys
     ]
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cur
@@ -53,12 +61,18 @@ def test_pg_cross_schema_recovery():
     with patch("connectors.postgresql_conn.get_connection", return_value=conn), patch(
         "services.schema_introspect._refine_columns_by_samples",
         side_effect=lambda _c, cols, *_a, **_k: cols,
+    ), patch(
+        "services.schema_introspect._pg_fetch_unique_keys",
+        return_value={"primary_key_columns": [], "unique_keys": []},
+    ), patch(
+        "services.schema_introspect._pg_fetch_foreign_keys",
+        return_value=[],
     ):
         result = _introspect_postgresql(
             host="h", port=5432, database="db", username="u", password="p",
             schema="wrong", connection_string="", ssl=True, table="jobs",
         )
-    assert result["ok"] is True
+    assert result["ok"] is True, result.get("error")
     assert result["schema"] == "public"
     assert [c["name"] for c in result["columns"]] == ["id", "title"]
 
@@ -135,10 +149,13 @@ def test_sqlserver_cross_schema_recovery():
             return FakeResult([])
         if "INFORMATION_SCHEMA.COLUMNS" in sql_u:
             if params and params.get("schema") == "dbo":
+                # 8-tuple matches live SELECT (precision/scale/len/dt_prec/collation/null).
                 return FakeResult([
-                    ("id", "varchar", None, None, "YES"),
-                    ("title", "nvarchar", None, None, "YES"),
+                    ("id", "varchar", None, None, 36, None, None, "YES"),
+                    ("title", "nvarchar", None, None, 200, None, None, "YES"),
                 ])
+            return FakeResult([])
+        if "SYS.COMPUTED_COLUMNS" in sql_u:
             return FakeResult([])
         return FakeResult([])
 
