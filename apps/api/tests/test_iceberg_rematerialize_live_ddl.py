@@ -173,6 +173,44 @@ def test_iceberg_filesystem_create_new_refuses_partial_studio(tmp_path):
     assert "qty" in (result.error or "").lower()
 
 
+def test_iceberg_evolve_require_types_refuses_string_invent():
+    """Partial Studio additive evolve must not default missing carriers to string."""
+    import pytest
+    from connectors.iceberg_writer import _evolve_schema
+
+    existing = {
+        "type": "struct",
+        "schema-id": 0,
+        "fields": [{"id": 1, "name": "qty", "required": False, "type": "long"}],
+    }
+    with pytest.raises(ValueError, match="note"):
+        _evolve_schema(
+            existing,
+            ["qty", "note"],
+            {"qty": "long"},  # note missing
+            require_types=True,
+        )
+
+
+def test_iceberg_evolve_require_types_keeps_stamped_additive():
+    from connectors.iceberg_writer import _evolve_schema
+
+    existing = {
+        "type": "struct",
+        "schema-id": 0,
+        "fields": [{"id": 1, "name": "qty", "required": False, "type": "long"}],
+    }
+    schema, notes = _evolve_schema(
+        existing,
+        ["qty", "note"],
+        {"qty": "long", "note": "string"},
+        require_types=True,
+    )
+    by_name = {f["name"]: f for f in schema["fields"]}
+    assert "note" in by_name
+    assert any("note" in n for n in notes)
+
+
 def test_physical_carriers_from_arrow_decimal():
     pa = pytest.importorskip("pyarrow")
     from connectors.iceberg_writer import _physical_carriers_from_arrow

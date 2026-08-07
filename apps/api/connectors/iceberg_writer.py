@@ -413,9 +413,28 @@ def _evolve_schema(
     existing: dict[str, Any] | None,
     columns: list[str],
     column_types: dict[str, str],
+    *,
+    require_types: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Return (schema_json, notes). Additive-only evolution; type_locked conflicts noted."""
+    """Return (schema_json, notes). Additive-only evolution; type_locked conflicts noted.
+
+    ``require_types`` (partial Studio): refuse missing carriers instead of inventing
+    Iceberg ``string`` for additive columns.
+    """
     notes: list[str] = []
+
+    def _carrier_for(name: str) -> str:
+        typ = str((column_types or {}).get(name) or "").strip()
+        if typ:
+            return typ
+        if require_types:
+            raise ValueError(
+                f"Iceberg additive column {name!r} lacks Studio/live type and "
+                "Map target_type under partial Studio — refuse string evolve invent. "
+                "Stamp the column on Map or re-run destination schema introspect."
+            )
+        return "string"
+
     if existing is None:
         fields = []
         for i, name in enumerate(columns, start=1):
@@ -423,7 +442,7 @@ def _evolve_schema(
                 "id": i,
                 "name": name,
                 "required": False,
-                "type": _logical_to_iceberg_type(column_types.get(name, "string")),
+                "type": _logical_to_iceberg_type(_carrier_for(name)),
             })
         return {
             "type": "struct",
@@ -436,16 +455,18 @@ def _evolve_schema(
     next_id = max((int(f.get("id", 0)) for f in fields), default=0) + 1
     for name in columns:
         if name in by_name:
-            want = _logical_to_iceberg_type(column_types.get(name, "string"))
+            want = _logical_to_iceberg_type(
+                str((column_types or {}).get(name) or "").strip() or "string"
+            )
             have = by_name[name].get("type")
-            if have != want:
+            if have != want and str((column_types or {}).get(name) or "").strip():
                 notes.append(f"type_locked: keep {name}:{have} (incoming {want})")
             continue
         fields.append({
             "id": next_id,
             "name": name,
             "required": False,
-            "type": _logical_to_iceberg_type(column_types.get(name, "string")),
+            "type": _logical_to_iceberg_type(_carrier_for(name)),
         })
         notes.append(f"schema_evolve: added column {name}")
         next_id += 1
@@ -1341,7 +1362,29 @@ def _write_mapped_rows_pyiceberg(
                 driver="iceberg",
             )
 
-        arrow_types = [_logical_to_arrow_type(dest_types.get(c, "string"), pa) for c in target_cols]
+        arrow_types: list[Any] = []
+        for c in target_cols:
+            carrier = str(dest_types.get(c) or "").strip()
+            if not carrier:
+                if studio_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"Iceberg additive column {c!r} lacks Studio/live type "
+                            "and Map target_type under partial Studio — refuse "
+                            "string union_by_name invent. Stamp the column on Map "
+                            "or re-run destination schema introspect."
+                        ),
+                        rejected_details=rejected_details,
+                        driver="iceberg",
+                    )
+                carrier = "string"
+            arrow_types.append(_logical_to_arrow_type(carrier, pa))
         type_locked_warnings: list[str] = []
         new_fields: list[tuple[str, Any]] = []
         for c, at in zip(target_cols, arrow_types):
@@ -1933,16 +1976,13 @@ def _write_mapped_rows_filesystem(
             driver="iceberg",
         )
 
-    schema_json, evolve_notes = _evolve_schema(current_schema, target_cols, dest_types)
-    # Always write Parquet/JSONL using committed field types — never diverge from
-    # type_locked metadata (incoming dest_types may differ).
-    write_types = _write_types_from_schema(schema_json, dest_types)
-    # Rematerialize when committed metadata carriers ≠ Map stamps.
+    # Rematerialize against committed carriers BEFORE evolve — never commit
+    # additive Iceberg ``string`` invent then clobber Map stamps (partial Studio).
+    evolve_notes: list[str] = []
+    write_types = dict(dest_types or {})
     if current_schema:
         from connectors.writer_common import require_physical_types_for_existing_table
 
-        # Physical from committed fields only — do not seed Map stamps
-        # (empty→NULL invent on typed columns missing from metadata).
         committed_physical: dict[str, str] = {}
         for field in current_schema.get("fields") or []:
             name = str(field.get("name") or "")
@@ -1984,12 +2024,9 @@ def _write_mapped_rows_filesystem(
                     rejected_details=rejected_details,
                     driver="iceberg",
                 )
-            # Prefer Studio-filled committed carriers for rematerialize
-            # (same PyIceberg bar — never rematerialize from Map-only write_types).
-            write_types = {**write_types, **effective}
         _force_remap = bool(studio_err) and not mapped_rows
         remat = _iceberg_rematerialize_if_physical_differs(
-            physical=write_types,
+            physical=effective if effective else committed_physical,
             dest_types=dest_types,
             target_cols=target_cols,
             headers=headers,
@@ -2004,7 +2041,6 @@ def _write_mapped_rows_filesystem(
         )
         if remat is not None:
             mapped_rows, transform_errors, rejected_details, dest_types = remat
-            write_types = _write_types_from_schema(schema_json, dest_types)
         elif _force_remap:
             return WriteResult(
                 ok=False,
@@ -2021,6 +2057,29 @@ def _write_mapped_rows_filesystem(
                 rejected_details=rejected_details,
                 driver="iceberg",
             )
+
+    try:
+        schema_json, evolve_notes = _evolve_schema(
+            current_schema,
+            target_cols,
+            dest_types,
+            require_types=bool(studio_err),
+        )
+    except ValueError as evolve_exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=str(evolve_exc),
+            rejected_details=rejected_details,
+            driver="iceberg",
+        )
+    # Always write Parquet/JSONL using committed field types — never diverge from
+    # type_locked metadata (incoming dest_types may differ).
+    write_types = _write_types_from_schema(schema_json, dest_types)
 
     _map_abort = reject_on_strict_policy(
         policy, rejected_details, "Iceberg", transform_errors
