@@ -239,3 +239,68 @@ def test_merge_shopify_catalog_allows_studio_typed_custom():
     )
     assert err is None
     assert live["custom_score"] == "INTEGER"
+
+
+def test_shopify_unknown_metafield_type_refuses_varchar_invent():
+    """Unknown Admin metafield tokens must not soft-bind VARCHAR(2048)."""
+    from connectors.saas_write_carriers import (
+        merge_shopify_catalog_types,
+        shopify_metafield_type_to_carrier,
+    )
+
+    assert shopify_metafield_type_to_carrier("brand_new_shopify_type_v99") == ""
+    assert shopify_metafield_type_to_carrier("list.brand_new_shopify_type_v99") == ""
+    # Documented types still resolve.
+    assert shopify_metafield_type_to_carrier("url") == "VARCHAR(2048)"
+
+    _live, err = merge_shopify_catalog_types(
+        "customers",
+        ["email", "custom.mystery"],
+        metafield_defs=[
+            {
+                "namespace": "custom",
+                "key": "mystery",
+                "type": "brand_new_shopify_type_v99",
+            }
+        ],
+        studio_types=None,
+    )
+    assert err is not None
+    assert "custom.mystery" in err or "mystery" in err
+
+    live2, err2 = merge_shopify_catalog_types(
+        "customers",
+        ["email", "custom.mystery"],
+        metafield_defs=[
+            {
+                "namespace": "custom",
+                "key": "mystery",
+                "type": "brand_new_shopify_type_v99",
+            }
+        ],
+        studio_types={"custom.mystery": "JSON"},
+    )
+    assert err2 is None
+    assert live2["custom.mystery"] == "JSON"
+
+
+def test_email_partial_studio_refuses_map_invent():
+    """Email attachment serialize shares object-store Studio coverage gate."""
+    from connectors.email import write_mapped_rows
+
+    result = write_mapped_rows(
+        connection_string="smtp://localhost:25?to=ops@example.com&from=df@example.com",
+        headers=["id", "amt"],
+        data_rows=[["1", "9.99"]],
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "VARCHAR"},
+            {"source": "amt", "target": "amt", "target_type": "VARCHAR"},
+        ],
+        column_types={"id": "VARCHAR", "amt": "VARCHAR"},
+        destination_column_types={"id": "INTEGER"},  # partial Studio
+    )
+    assert result.ok is False
+    assert result.error
+    assert "Object-store" in (result.error or "") or "Studio" in (result.error or "") or "amt" in (
+        result.error or ""
+    )

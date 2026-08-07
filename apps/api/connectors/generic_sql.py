@@ -804,12 +804,26 @@ def _logical_type_from_sa(col_type: Any) -> str:
         return "timestamptz"
     type_name = getattr(getattr(col_type, "__class__", None), "__name__", "").lower()
     module = getattr(getattr(col_type, "__class__", None), "__module__", "").lower()
+    # Specialty BEFORE broad "variant" → JSON (sql_variant must not invent JSON).
+    if "hierarchyid" in repr_ or type_name == "hierarchyid":
+        return "HIERARCHYID"
+    if "sql_variant" in repr_ or type_name in {"sql_variant", "sqlvariant"}:
+        return "SQL_VARIANT"
+    if type_name == "xml" or (repr_ == "xml" or repr_.endswith(".xml")):
+        return "XML"
+    if "geography" in repr_ or type_name == "geography":
+        return "GEOGRAPHY"
+    if "geometry" in repr_ or type_name == "geometry":
+        return "GEOMETRY"
     if "rowversion" in repr_ or (
         "mssql" in module and type_name in {"timestamp", "rowversion"}
     ):
         # SQL Server TIMESTAMP is rowversion (binary), not a datetime.
-        return "binary"
-    if "json" in repr_ or "variant" in repr_ or "super" in repr_:
+        return "ROWVERSION"
+    if "json" in repr_ or "super" in repr_:
+        return "json"
+    # Snowflake/Databricks VARIANT (not SQL Server sql_variant — handled above).
+    if "variant" in repr_ and "sql_variant" not in repr_:
         return "json"
     if "array" in repr_:
         return "array"
@@ -1158,6 +1172,62 @@ def _sa_type_for_logical(
             or native.upper() in {"STRING", "TEXT", "VARCHAR", "NVARCHAR", "VARCHAR2"}
         ):
             return _maybe_nullable(sa.Text())
+        if _DialectNativeType is None:
+            return _maybe_nullable(sa.Text())
+        return _maybe_nullable(_DialectNativeType(native))
+    # Specialty carriers that normalize to STRING (HIERARCHYID, SQL_VARIANT, XML,
+    # ROWVERSION, …) — DialectNativeType / typed wire via ddl_type; never invent
+    # bare Text that rematerializes as Map VARCHAR over live specialty DDL.
+    from services.type_system import specialty_carrier_base
+
+    spec = specialty_carrier_base(raw)
+    if spec:
+        engine_key = (db_type or dialect_name or "").lower()
+        native = ddl_type(engine_key, raw) if engine_key else spec
+        native_logical = normalize_logical_type(native or "")
+        native_base = (native or "").upper().split("(", 1)[0].strip()
+        # Same-token or remapped specialty (HIERARCHYID, LTREE, SQL_VARIANT, …)
+        # before LOGICAL_STRING collapse invents bare Text.
+        native_spec = specialty_carrier_base(native)
+        if native_spec:
+            if _DialectNativeType is None:
+                return _maybe_nullable(sa.Text())
+            return _maybe_nullable(_DialectNativeType(native))
+        stringish = {
+            "STRING",
+            "TEXT",
+            "VARCHAR",
+            "NVARCHAR",
+            "VARCHAR2",
+            "NVARCHAR2",
+            "CLOB",
+            "NCLOB",
+            "CHAR",
+            "NCHAR",
+        }
+        if (
+            not native
+            or native_logical in {LOGICAL_STRING, LOGICAL_TEXT}
+            or native_base in stringish
+        ):
+            m = re.match(
+                r"^(?:N?VAR)?CHAR2?\s*\(\s*(\d+)\s*\)$",
+                (native or "").strip(),
+                re.IGNORECASE,
+            )
+            if m:
+                return _maybe_nullable(sa.String(int(m.group(1))))
+            return _maybe_nullable(sa.Text())
+        if native_logical == LOGICAL_BINARY:
+            return sa.LargeBinary()
+        if native_logical == LOGICAL_UUID:
+            if dialect_name == "postgresql":
+                return postgresql.UUID()
+            return _maybe_nullable(sa.String(36))
+        if native_logical == LOGICAL_JSON:
+            if dialect_name == "postgresql":
+                return postgresql.JSONB()
+            return sa.JSON()
         if _DialectNativeType is None:
             return _maybe_nullable(sa.Text())
         return _maybe_nullable(_DialectNativeType(native))
@@ -4390,7 +4460,11 @@ def write_mapped_rows(
             if not name:
                 continue
             typ = col_meta.get("type")
-            ddl = str(typ) if typ is not None else ""
+            # Prefer specialty/logical carriers over raw SA str() (e.g. sql_variant
+            # must not soft-bind as Map VARCHAR / invent JSON via "variant").
+            ddl = _logical_type_from_sa(typ) if typ is not None else ""
+            if not str(ddl or "").strip():
+                ddl = str(typ) if typ is not None else ""
             physical[name] = ddl
             physical[name.lower()] = ddl
             physical[name.upper()] = ddl

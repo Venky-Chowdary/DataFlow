@@ -542,6 +542,9 @@ def shopify_metafield_type_to_carrier(
         inner = shopify_metafield_type_to_carrier(
             t[5:], max_validation=max_validation
         )
+        # Unknown element type — refuse soft ARRAY<TEXT> invent (Studio gate).
+        if not str(inner or "").strip():
+            return ""
         # List payloads are JSON arrays of the element type.
         if inner == "BOOLEAN":
             return "ARRAY<BOOLEAN>"
@@ -551,7 +554,7 @@ def shopify_metafield_type_to_carrier(
             return f"ARRAY<{inner}>"
         if inner == "JSON":
             return "ARRAY<JSON>"
-        if inner.startswith("VARCHAR"):
+        if inner.startswith("VARCHAR") or inner == "ARRAY<TEXT>":
             return "ARRAY<TEXT>"
         return "ARRAY<TEXT>"
     if t in {"boolean"}:
@@ -599,8 +602,9 @@ def shopify_metafield_type_to_carrier(
         if max_validation and max_validation > 0:
             return f"VARCHAR({min(max_validation, 65535)})"
         return f"VARCHAR({_SHOPIFY_SINGLE_LINE})"
-    # Unknown / new Shopify types — bounded text, never invent unbounded CLOB.
-    return "VARCHAR(2048)"
+    # Unknown / new Shopify Admin types — refuse soft VARCHAR invent; Studio or
+    # a documented carrier must cover the column (merge_shopify_catalog_types).
+    return ""
 
 
 def shopify_live_types_for_columns(
@@ -641,6 +645,9 @@ def shopify_live_types_for_columns(
             # Empty metafield type from Describe — do not invent VARCHAR(2048).
             continue
         carrier = shopify_metafield_type_to_carrier(typ, max_validation=max_v)
+        if not str(carrier or "").strip():
+            # Unknown Admin type token — leave uncatalogued for Studio gate.
+            continue
         names = []
         if ns and key:
             names.extend([f"{ns}.{key}", f"{ns}_{key}", key])
