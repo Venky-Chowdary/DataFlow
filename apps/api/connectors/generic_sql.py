@@ -4662,8 +4662,8 @@ def write_mapped_rows(
             live_dest_types = dict(target_column_types or {})
             if live_partial:
                 live_dest_types.update(live_partial)
-            # Partial Studio + backfill: Map-fill additive cols not on physical
-            # (Iceberg/PG parity — existing rematerialize; new cols keep Map stamps).
+            # Partial Studio + backfill: additive cols need an explicit Map stamp
+            # (operator-approved) — never invent from source DDL / bare string.
             if studio_err and backfill_new_fields:
                 covered_fold = {str(c).lower() for c in covered_cols}
                 for i, col in enumerate(target_cols):
@@ -4674,15 +4674,27 @@ def write_mapped_rows(
                     explicit = (
                         mappings[i].get("target_type") if i < len(mappings) else None
                     )
-                    source_type = (
-                        column_types.get(mappings[i]["source"])
-                        if i < len(mappings)
-                        else None
-                    )
+                    if not str(explicit or "").strip():
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=table_name,
+                            target_schema=schema or database,
+                            checksum="",
+                            chunks_completed=0,
+                            error=(
+                                f"{_engine_label} additive column {col!r} lacks "
+                                "Studio/live type and Map target_type under partial "
+                                "Studio — refuse Map VARCHAR ADD invent. Stamp the "
+                                "column on Map or disable backfill_new_fields."
+                            ),
+                            rejected_details=rejected_details,
+                            warnings=transform_errors,
+                        )
                     derived = (
-                        materialize_dest_ddl(dest_db, explicit or source_type or "string")
+                        materialize_dest_ddl(dest_db, explicit)
                         if dest_db
-                        else (explicit or source_type or "string")
+                        else str(explicit)
                     )
                     live_dest_types[col] = derived
             carriers_differ = bool(covered_cols) and any(

@@ -621,8 +621,14 @@ def write_mapped_rows(
         )
         table_id = f"{project_id}.{dataset_id}.{table_name}"
 
+        # CREATE/ADD must honor Studio/live dest_types — never Map logical_types invent.
         schema_fields = [
-            bq_schema_field(bigquery, col, t) for col, t in zip(target_cols, logical_types)
+            bq_schema_field(
+                bigquery,
+                col,
+                str(dest_types.get(col) or (logical_types[i] if i < len(logical_types) else "STRING")),
+            )
+            for i, col in enumerate(target_cols)
         ]
         dataset_ref = f"{project_id}.{dataset_id}"
         # Probe existence first — create_table=True + exists_ok must still
@@ -714,11 +720,51 @@ def write_mapped_rows(
         if backfill_new_fields:
             table = client.get_table(table_id)
             existing = {f.name for f in table.schema}
-            new_fields = [
-                bq_schema_field(bigquery, col, t)
-                for col, t in zip(target_cols, logical_types)
-                if col not in existing
-            ]
+            new_fields = []
+            for i, col in enumerate(target_cols):
+                if col in existing:
+                    continue
+                typ = str(dest_types.get(col) or "").strip()
+                if not typ:
+                    explicit = ""
+                    if i < len(mappings):
+                        explicit = str(
+                            mappings[i].get("target_type")
+                            or mappings[i].get("dest_type")
+                            or ""
+                        ).strip()
+                    # Partial Studio: explicit Map stamp OK; never invent from
+                    # source/logical alone (generic_sql additive parity).
+                    if explicit and (
+                        studio_err
+                        or (isinstance(live_dest_types, dict) and live_dest_types)
+                    ):
+                        typ = explicit
+                        dest_types[col] = typ
+                    elif studio_err or (
+                        isinstance(live_dest_types, dict) and live_dest_types
+                    ):
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=table_name,
+                            target_schema=dataset_id,
+                            checksum="",
+                            chunks_completed=0,
+                            error=(
+                                f"BigQuery additive column {col!r} lacks Studio/live "
+                                "type and Map target_type under partial destination "
+                                "schema — refuse Map VARCHAR ADD invent. Stamp the "
+                                "column on Map or disable backfill_new_fields."
+                            ),
+                        )
+                    else:
+                        typ = (
+                            logical_types[i]
+                            if i < len(logical_types)
+                            else "STRING"
+                        )
+                new_fields.append(bq_schema_field(bigquery, col, typ))
             if new_fields:
                 table.schema = list(table.schema) + new_fields
                 client.update_table(table, ["schema"])
@@ -823,6 +869,20 @@ def write_mapped_rows(
             dest_types = {
                 target_cols[i]: live_types[i] for i in range(len(target_cols))
             }
+
+        # Rebuild CREATE/MERGE staging schema from final dest_types (post-backfill
+        # + physical overlay) — never keep pre-backfill Map logical carriers.
+        schema_fields = [
+            bq_schema_field(
+                bigquery,
+                col,
+                str(
+                    dest_types.get(col)
+                    or (logical_types[i] if i < len(logical_types) else "STRING")
+                ),
+            )
+            for i, col in enumerate(target_cols)
+        ]
 
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
             headers=headers,

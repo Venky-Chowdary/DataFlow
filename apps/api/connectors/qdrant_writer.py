@@ -329,11 +329,6 @@ def write_mapped_rows(
     ]
     if not mapped_targets:
         mapped_targets = [str(h) for h in (headers or []) if h]
-    studio_typed_all = (
-        isinstance(studio_live, dict)
-        and bool(mapped_targets)
-        and all(str(studio_live.get(c) or "").strip() for c in mapped_targets)
-    )
 
     collection_existed = False
     cached_live_dim: int | None = None

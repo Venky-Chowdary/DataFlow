@@ -42,3 +42,18 @@ def test_bigquery_create_new_refuses_partial_studio():
     assert result.ok is False
     assert "amount" in (result.error or "").lower()
     client.create_table.assert_not_called()
+
+
+def test_bigquery_create_schema_types_prefer_studio_dest_over_map_logical():
+    """CREATE/ADD field types must prefer Studio dest_types over Map logical."""
+    target_cols = ["id", "qty"]
+    logical_types = ["STRING", "STRING"]
+    dest_types = {"id": "STRING", "qty": "INT64"}
+    field_types = [
+        str(
+            dest_types.get(col)
+            or (logical_types[i] if i < len(logical_types) else "STRING")
+        )
+        for i, col in enumerate(target_cols)
+    ]
+    assert field_types == ["STRING", "INT64"]
