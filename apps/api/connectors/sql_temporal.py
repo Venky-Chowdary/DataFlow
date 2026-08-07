@@ -37,10 +37,21 @@ def sql_base_type(source_type: str) -> str:
     - ``TIMESTAMP WITHOUT TIME ZONE`` → ``TIMESTAMP``
     - ``DATETIME(6)`` → ``DATETIME``
     - ``DECIMAL(10,2)`` → ``DECIMAL``
+
+    ClickHouse / Databricks class:
+    - ``Nullable(Int64)`` / ``LowCardinality(Nullable(DateTime64(3)))`` unwrap
+      then canonicalize ``Int64``→``BIGINT``, ``DateTime64``→``DATETIME64``.
     """
     upper = re.sub(r"\s+", " ", (source_type or "").upper().strip())
     if not upper:
         return upper
+    # Unwrap ClickHouse wrappers before TZ / precision decisions so
+    # ``Nullable(DateTime64(3))`` is not mis-read as base ``NULLABLE``.
+    while True:
+        wrap = re.match(r"^(NULLABLE|LOWCARDINALITY)\((.+)\)$", upper)
+        if not wrap:
+            break
+        upper = re.sub(r"\s+", " ", wrap.group(2).strip())
     # TZ polarity MUST be decided before splitting on '(' — otherwise
     # ``TIMESTAMP(6) WITH TIME ZONE`` collapses to ``TIMESTAMP`` and writers
     # silently strip offsets (enterprise fidelity failure).
@@ -66,7 +77,24 @@ def sql_base_type(source_type: str) -> str:
         return "TIMESTAMP"
     if "(" in upper:
         upper = upper.split("(", 1)[0].strip()
-    return upper
+    # ClickHouse / Arrow / Spark integer & temporal aliases → canonical bases
+    # so overlay_physical_bind_types and coerce_sql_temporal share one map.
+    aliases = {
+        "INT64": "BIGINT",
+        "INT32": "INTEGER",
+        "INT16": "SMALLINT",
+        "INT8": "TINYINT",
+        "UINT64": "BIGINT",
+        "UINT32": "INTEGER",
+        "UINT16": "SMALLINT",
+        "UINT8": "TINYINT",
+        "FLOAT32": "FLOAT",
+        "FLOAT64": "DOUBLE",
+        "DATE32": "DATE",
+        "DATETIME64": "DATETIME64",
+        "BOOL": "BOOLEAN",
+    }
+    return aliases.get(upper, upper)
 
 
 def input_has_timezone(value: Any) -> bool:
@@ -227,12 +255,26 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
         return parsed if parsed is not None else value
     if base in {
         "DATETIME",
+        "DATETIME64",
         "TIMESTAMP",
         "TIMESTAMP_NTZ",
         "DATETIME2",
         "SMALLDATETIME",
         "TIMESTAMP WITHOUT TIME ZONE",
     }:
+        # ClickHouse DateTime64(p, 'UTC') / named TZ → aware UTC polarity;
+        # bare DateTime64(p) stays wall-clock (no silent offset strip invent).
+        raw_u = re.sub(r"\s+", " ", (source_type or "").upper())
+        if base == "DATETIME64" and (
+            "'" in raw_u or "UTC" in raw_u or "TIME ZONE" in raw_u
+        ):
+            if not input_has_timezone(value):
+                raise ValueError(
+                    f"{source_type} refuses naive wall-clock (would invent UTC). "
+                    "Provide an offset/Z, or map to DateTime64 without timezone."
+                )
+            parsed = parse_sql_datetime(value, aware_utc=True)
+            return parsed if parsed is not None else value
         parsed = parse_sql_datetime(value, wall_clock=True)
         if parsed is None:
             return value
@@ -290,6 +332,7 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
 
 _TEMPORAL_BASES = frozenset({
     "DATETIME",
+    "DATETIME64",
     "TIMESTAMP",
     "TIMESTAMP_TZ",
     "TIMESTAMPTZ",

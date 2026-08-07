@@ -4489,6 +4489,7 @@ def overlay_physical_bind_types(
         "DATE",
         "TIME",
         "DATETIME",
+        "DATETIME64",
         "DATETIME2",
         "SMALLDATETIME",
         "TIMESTAMP",
@@ -4499,6 +4500,19 @@ def overlay_physical_bind_types(
         "TIMETZ",
         "DATETIMEOFFSET",
         "YEAR",
+    }
+    # Semi-structured warehouse carriers — Map VARCHAR must not stick.
+    typed_bases |= {
+        "SUPER",
+        "VARIANT",
+        "OBJECT",
+        "ARRAY",
+        "MAP",
+        "STRUCT",
+        "IPV4",
+        "IPV6",
+        "ENUM8",
+        "ENUM16",
     }
     for i, col in enumerate(target_cols):
         phys = physical.get(col) or physical.get(col.lower()) or physical.get(col.upper())

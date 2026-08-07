@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -162,6 +164,49 @@ def test_overlay_physical_bind_types_promotes_map_varchar():
     assert out[2] == "INTEGER"
     assert out[3] == "BOOLEAN"
     assert out[0] == "VARCHAR"
+
+
+def test_overlay_promotes_clickhouse_nullable_int64_datetime64():
+    """CH/DBX physical DDL must beat Map VARCHAR (empty→NULL invent cliff)."""
+    from connectors.sql_temporal import sql_base_type
+    from connectors.writer_common import overlay_physical_bind_types
+
+    assert sql_base_type("Nullable(Int64)") == "BIGINT"
+    assert sql_base_type("LowCardinality(Nullable(DateTime64(3)))") == "DATETIME64"
+    assert sql_base_type("Int64") == "BIGINT"
+    assert sql_base_type("UInt8") == "TINYINT"
+    assert sql_base_type("DateTime64(3)") == "DATETIME64"
+    assert sql_base_type("SUPER") == "SUPER"
+
+    out = overlay_physical_bind_types(
+        ["qty", "ts", "flag", "payload", "name"],
+        ["VARCHAR", "VARCHAR", "VARCHAR", "VARCHAR", "VARCHAR"],
+        {
+            "qty": "Nullable(Int64)",
+            "ts": "DateTime64(3)",
+            "flag": "UInt8",
+            "payload": "SUPER",
+            "name": "String",
+        },
+    )
+    assert out[0] == "Nullable(Int64)"
+    assert out[1] == "DateTime64(3)"
+    assert out[2] == "UInt8"
+    assert out[3] == "SUPER"
+    # Soft string physical stays Map VARCHAR (no typed promote).
+    assert out[4] == "VARCHAR"
+
+    from connectors.sql_bind import normalize_sql_bind_value
+    from connectors.sql_temporal import coerce_sql_temporal
+
+    with pytest.raises(ValueError, match="refuse|empty"):
+        normalize_sql_bind_value("", "SUPER", engine="redshift")
+    with pytest.raises(ValueError, match="refuse|empty"):
+        coerce_sql_temporal("", "DateTime64(3)")
+    aware = coerce_sql_temporal(
+        "2024-06-01T12:00:00Z", "DateTime64(3, 'UTC')"
+    )
+    assert getattr(aware, "tzinfo", None) is not None
 
 
 def test_run_sparse_cdc_upsert_quarantines_empty_pk():

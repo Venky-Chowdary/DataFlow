@@ -2378,12 +2378,13 @@ def normalize_sql_bind_value(
         return coerce_struct_wire(value, engine=eng, ddl_type=ddl_type or upper)
     if upper == "MAP" or upper.startswith("MAP<") or upper.startswith("MAP("):
         return coerce_map_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if upper in {"JSON", "JSONB", "VARIANT", "OBJECT"}:
+    if upper in {"JSON", "JSONB", "VARIANT", "OBJECT", "SUPER"}:
         # JSON text is the portable wire for every engine here. Handing psycopg2 a
         # native dict/list raises "can't adapt type 'dict'" and aborted the whole
         # transfer (only psycopg3 adapts dicts), while Postgres casts an
         # unknown-typed text parameter straight into json/jsonb. Read-back is
         # unaffected — psycopg2 still parses jsonb into native dict/list.
+        # SUPER (Redshift) shares empty→NULL refuse with VARIANT/OBJECT.
         return coerce_json_wire(value, as_text=True)
     if upper in {"BOOLEAN", "BOOL"}:
         return coerce_boolean_wire(value, as_int=eng in {"mysql", "mariadb"})

@@ -24,7 +24,7 @@ def test_sql_base_type_preserves_timestamptz_with_precision():
     assert sql_base_type("TIMESTAMP(6) WITHOUT TIME ZONE") == "TIMESTAMP"
     assert sql_base_type("DATETIME(6)") == "DATETIME"
     assert sql_base_type("DECIMAL(10,2)") == "DECIMAL"
-    assert sql_base_type("TIME(6) WITH TIME ZONE") == "TIME WITH TIME ZONE"
+    assert sql_base_type("TIME(6) WITH TIME ZONE") == "TIMETZ"
     assert sql_base_type("DATETIMEOFFSET(7)") == "TIMESTAMPTZ"
 
 
