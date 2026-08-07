@@ -242,6 +242,53 @@ def _has_collection(
     return bool(data)
 
 
+def _milvus_live_vector_dim(
+    session: Any,
+    base_url: str,
+    headers: dict[str, str],
+    collection_name: str,
+    db_name: str = "",
+) -> int | None:
+    """POST /collections/describe → FloatVector elementTypeParams.dim."""
+    payload: dict[str, Any] = {"collectionName": collection_name}
+    if db_name:
+        payload["dbName"] = db_name
+    resp = session.post(
+        f"{base_url}/v2/vectordb/collections/describe",
+        data=json.dumps(payload),
+        headers=headers,
+        timeout=15,
+    )
+    body = resp.json() if resp.content else {}
+    if not _ok_response(body if isinstance(body, dict) else {}, resp.status_code):
+        return None
+    data = body.get("data") if isinstance(body, dict) else None
+    if not isinstance(data, dict):
+        return None
+    fields = data.get("fields") or data.get("schema", {}).get("fields") or []
+    if not isinstance(fields, list):
+        return None
+    for field in fields:
+        if not isinstance(field, dict):
+            continue
+        dtype = str(field.get("dataType") or field.get("type") or "").upper()
+        if "VECTOR" not in dtype:
+            continue
+        params = field.get("elementTypeParams") or field.get("params") or {}
+        if not isinstance(params, dict):
+            continue
+        raw = params.get("dim")
+        if raw is None:
+            continue
+        try:
+            dim = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if dim > 0:
+            return dim
+    return None
+
+
 def _ensure_collection(
     session: Any,
     base_url: str,
@@ -526,6 +573,53 @@ def write_mapped_rows(
             _ensure_collection(
                 session, base_url, hdrs, collection, dimension, db_name=db_name
             )
+        else:
+            live_dim = _milvus_live_vector_dim(
+                session, base_url, hdrs, collection, db_name=db_name
+            )
+            if live_dim is None:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Milvus collection {collection!r} exists but live vector "
+                        "dimension was unavailable — refuse upsert with source-only "
+                        "dimension (silent dim invent risk). Re-check collection "
+                        "schema and retry."
+                    ),
+                    rejected_details=list(rejected),
+                    rejected_rows=len(rejected),
+                )
+            if int(live_dim) != int(dimension):
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Milvus collection {collection!r} vector dim is {live_dim}, "
+                        f"but embeddings are dimension {dimension} — refuse silent "
+                        "truncate/pad invent. Use a matching model or a new collection."
+                    ),
+                    rejected_details=list(rejected)
+                    + [
+                        {
+                            "row": "",
+                            "column": "embedding",
+                            "target": "vector",
+                            "value": f"source={dimension} live={live_dim}",
+                            "reason": "vector dimension mismatch",
+                            "policy": "fail",
+                        }
+                    ],
+                    rejected_rows=len(rejected) + 1,
+                )
 
         batch_size = 100
         total = len(entities)

@@ -358,8 +358,13 @@ def write_mapped_rows(
     # Live Properties Describe when scopes allow — VARCHAR(65536)/DECIMAL(38,10)
     # before batch upsert invents bad CRM cells (Salesforce Describe class).
     describe_props: list[dict[str, Any]] | None = None
+    live_dest = _kwargs.get("destination_column_types")
+    studio_live = isinstance(live_dest, dict) and all(
+        str(live_dest.get(c) or "").strip() for c in target_cols if c
+    )
     try:
         from connectors.hubspot import describe_properties
+        from connectors.saas_common import is_auth_error
 
         describe_props = describe_properties(
             {
@@ -373,15 +378,59 @@ def write_mapped_rows(
             },
             obj,
         )
-    except Exception:
+    except Exception as exc:
+        if is_auth_error(exc):
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"HubSpot Properties Describe auth failed: {exc} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk)."
+                ),
+                driver="hubspot",
+            )
+        if not studio_live:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"HubSpot Properties Describe unavailable ({exc}) and Studio "
+                    "did not type all mapped fields — refuse Map VARCHAR bind "
+                    "(empty→null invent risk). Re-run destination schema introspect "
+                    "or refresh CRM property scopes."
+                ),
+                driver="hubspot",
+            )
         describe_props = None
-    dest_types = resolve_hubspot_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        describe_props=describe_props,
-    )
+
+    if describe_props is not None:
+        dest_types = resolve_hubspot_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            logical_types=logical_types,
+            describe_props=describe_props,
+        )
+    else:
+        # Studio-typed fallback only after Describe failed non-auth.
+        from connectors.writer_common import resolve_mapping_dest_types
+
+        dest_types = resolve_mapping_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            logical_types=logical_types,
+            live_types=live_dest if isinstance(live_dest, dict) else None,
+            default="VARCHAR",
+        )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,

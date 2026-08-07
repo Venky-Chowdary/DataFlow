@@ -54,6 +54,20 @@ def _headers(api_key: str) -> dict[str, str]:
     return headers
 
 
+def _pinecone_live_dimension(payload: dict[str, Any] | None) -> int | None:
+    """Extract index dimension from ``describe_index_stats`` JSON."""
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("dimension")
+    if raw is None:
+        return None
+    try:
+        dim = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return dim if dim > 0 else None
+
+
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "requests"
@@ -376,6 +390,70 @@ def write_mapped_rows(
     try:
         session = _requests_session()
         hdrs = _headers(key)
+        stats = session.get(
+            f"{index_url}/describe_index_stats", headers=hdrs, timeout=15
+        )
+        if stats.status_code != 200:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=target,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Pinecone describe_index_stats failed ({stats.status_code}) — "
+                    "refuse upsert without live index dimension "
+                    f"(source embeddings are {dimension}-d)."
+                ),
+                rejected_details=rejected,
+                rejected_rows=len(rejected),
+            )
+        try:
+            live_dim = _pinecone_live_dimension(stats.json())
+        except Exception:
+            live_dim = None
+        if live_dim is None:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=target,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "Pinecone index dimension unavailable from describe_index_stats — "
+                    "refuse upsert with source-only dimension (silent dim invent risk)."
+                ),
+                rejected_details=rejected,
+                rejected_rows=len(rejected),
+            )
+        if int(live_dim) != int(dimension):
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=target,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Pinecone index dimension is {live_dim}, but embeddings are "
+                    f"dimension {dimension} — refuse silent truncate/pad invent. "
+                    "Use a matching model or a new index."
+                ),
+                rejected_details=list(rejected)
+                + [
+                    {
+                        "row": "",
+                        "column": "embedding",
+                        "target": "values",
+                        "value": f"source={dimension} live={live_dim}",
+                        "reason": "vector dimension mismatch",
+                        "policy": "fail",
+                    }
+                ],
+                rejected_rows=len(rejected) + 1,
+            )
         batch_size = 100
         total = len(vectors)
         for i in range(0, total, batch_size):

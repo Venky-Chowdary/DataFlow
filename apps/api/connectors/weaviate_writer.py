@@ -219,6 +219,59 @@ def _ensure_class(
         raise RuntimeError(f"Weaviate create class failed: {resp.status_code} {resp.text}")
 
 
+def _weaviate_property_to_carrier(data_types: Any) -> str:
+    """Map Weaviate property ``dataType`` list to a Datawrap logical carrier."""
+    if isinstance(data_types, str):
+        types = [data_types.lower()]
+    elif isinstance(data_types, list):
+        types = [str(t).lower() for t in data_types if t]
+    else:
+        return "TEXT"
+    if not types:
+        return "TEXT"
+    primary = types[0]
+    return {
+        "text": "TEXT",
+        "string": "TEXT",
+        "int": "INTEGER",
+        "number": "FLOAT",
+        "boolean": "BOOLEAN",
+        "date": "TIMESTAMPTZ",
+        "uuid": "UUID",
+        "blob": "BINARY",
+        "geoCoordinates": "JSON",
+        "phoneNumber": "JSON",
+        "object": "JSON",
+        "text[]": "ARRAY",
+        "int[]": "ARRAY",
+        "number[]": "ARRAY",
+        "boolean[]": "ARRAY",
+        "date[]": "ARRAY",
+        "uuid[]": "ARRAY",
+    }.get(primary, "TEXT")
+
+
+def _weaviate_live_property_types(schema_doc: dict[str, Any] | None) -> dict[str, str]:
+    """Extract property carriers from GET /v1/schema/{class} JSON."""
+    if not isinstance(schema_doc, dict):
+        return {}
+    props = schema_doc.get("properties")
+    if not isinstance(props, list):
+        return {}
+    out: dict[str, str] = {}
+    for prop in props:
+        if not isinstance(prop, dict):
+            continue
+        name = str(prop.get("name") or "").strip()
+        if not name:
+            continue
+        carrier = _weaviate_property_to_carrier(prop.get("dataType"))
+        out[name] = carrier
+        out.setdefault(name.lower(), carrier)
+        out.setdefault(name.upper(), carrier)
+    return out
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -269,6 +322,112 @@ def write_mapped_rows(
         or _kwargs.get("conflict_columns")
         or []
     ) or None
+    class_name = _class_name(table_name or database or "DataflowChunk")
+    key = api_key or password or username or ""
+    base_url = _base_url(host, port, ssl, connection_string)
+
+    # Probe live class properties before Map bind so text≠int invent is closed.
+    live_prop_types: dict[str, str] = {}
+    studio_live = _kwargs.get("destination_column_types")
+    if isinstance(studio_live, dict):
+        live_prop_types.update(
+            {str(k): str(v) for k, v in studio_live.items() if k and v}
+        )
+    mapped_targets = [
+        str(m.get("target") or m.get("source") or "").strip()
+        for m in (mappings or [])
+        if str(m.get("target") or m.get("source") or "").strip()
+    ]
+    if not mapped_targets:
+        mapped_targets = [str(h) for h in (headers or []) if h]
+    studio_typed_all = (
+        isinstance(studio_live, dict)
+        and bool(mapped_targets)
+        and all(str(studio_live.get(c) or "").strip() for c in mapped_targets)
+    )
+
+    session = _requests_session()
+    hdrs = _headers(key)
+    class_existed = False
+    try:
+        class_resp = session.get(
+            f"{base_url}/v1/schema/{class_name}", headers=hdrs, timeout=10
+        )
+        status = int(class_resp.status_code)
+        if status in {401, 403}:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=class_name,
+                target_schema=schema or "",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Weaviate schema probe auth failed ({status}) — "
+                    "refuse Map VARCHAR bind (empty→null invent risk)."
+                ),
+            )
+        if status == 200:
+            class_existed = True
+            try:
+                schema_types = _weaviate_live_property_types(class_resp.json())
+            except Exception:
+                schema_types = {}
+            if not schema_types and not studio_typed_all:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=class_name,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Weaviate class {class_name!r} exists but live property "
+                        "types were unavailable — refuse Map VARCHAR bind "
+                        "(empty→null invent risk). Re-run schema introspect."
+                    ),
+                )
+            # Live schema wins over Studio stamps for overlapping properties.
+            live_prop_types.update(schema_types)
+        elif status == 404:
+            if not create_table:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=class_name,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Weaviate class '{class_name}' is missing and "
+                        "create_table is disabled"
+                    ),
+                )
+        else:
+            if not studio_typed_all:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=class_name,
+                    target_schema=schema or "",
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"Weaviate schema probe failed ({status}) — "
+                        "refuse Map VARCHAR bind without live property types."
+                    ),
+                )
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=class_name,
+            target_schema=schema or "",
+            checksum="",
+            chunks_completed=0,
+            error=f"Weaviate schema probe failed: {exc}",
+        )
+
     records, map_rejected, map_abort = prepare_records_for_vector_write(
         headers=headers,
         data_rows=data_rows,
@@ -281,7 +440,7 @@ def write_mapped_rows(
         contract_primary_key=_kwargs.get("contract_primary_key"),
         label="weaviate",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        destination_column_types=_kwargs.get("destination_column_types"),
+        destination_column_types=live_prop_types or None,
     )
     if map_abort:
         return WriteResult(
@@ -312,7 +471,7 @@ def write_mapped_rows(
         return WriteResult(
             ok=False,
             rows_written=0,
-            table_name=table_name,
+            table_name=class_name,
             target_schema=schema or "",
             checksum="",
             chunks_completed=0,
@@ -321,7 +480,6 @@ def write_mapped_rows(
             rejected_rows=len(map_rejected),
         )
 
-    class_name = _class_name(table_name or database or "DataflowChunk")
     if not vector_rows:
         return WriteResult(
             ok=True,
@@ -358,8 +516,6 @@ def write_mapped_rows(
             rejected_rows=len(map_rejected) + 1,
         )
 
-    key = api_key or password or username or ""
-    base_url = _base_url(host, port, ssl, connection_string)
     objects, embed_rejected = build_weaviate_objects(
         vector_rows, class_name=class_name, dimension=dimension
     )
@@ -396,17 +552,7 @@ def write_mapped_rows(
 
     inserted = 0
     try:
-        session = _requests_session()
-        hdrs = _headers(key)
-        class_resp = session.get(
-            f"{base_url}/v1/schema/{class_name}", headers=hdrs, timeout=10
-        )
-        if class_resp.status_code != 200:
-            if not create_table:
-                raise RuntimeError(
-                    f"Weaviate class '{class_name}' is missing and "
-                    "create_table is disabled"
-                )
+        if not class_existed:
             _ensure_class(session, base_url, class_name, hdrs)
 
         batch_size = 100
