@@ -28,6 +28,28 @@ def test_prepare_records_overlays_destination_column_types():
     ) == 1
 
 
+def test_prepare_records_refuses_partial_studio_types():
+    """Partial Studio must not soft-fill Map VARCHAR for gaps."""
+    from connectors.writer_common import prepare_records_for_vector_write
+
+    records, rejected, abort = prepare_records_for_vector_write(
+        headers=["id", "qty"],
+        data_rows=[["1", "7"]],
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "VARCHAR"},
+            {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+        ],
+        column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+        error_policy="quarantine",
+        dest_kind="qdrant",
+        label="qdrant",
+        destination_column_types={"id": "VARCHAR"},  # qty missing
+    )
+    assert abort is not None
+    assert "qty" in abort.lower()
+    assert records == []
+
+
 def test_weaviate_existing_class_partial_schema_refuses():
     """Existing Weaviate class with incomplete properties → require_physical refuse."""
     from unittest.mock import MagicMock, patch

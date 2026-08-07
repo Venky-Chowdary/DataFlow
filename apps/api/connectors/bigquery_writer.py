@@ -592,15 +592,27 @@ def write_mapped_rows(
             checksum="", chunks_completed=0, error="No column mappings",
         )
     # Prefer Studio-probed live DDL over Map stamps; physical schema may refine later.
+    # Partial Studio must not soft-fill Map VARCHAR for create-new gaps.
+    from connectors.saas_common import merge_saas_live_types
     from connectors.writer_common import resolve_mapping_dest_types
 
-    dest_types = resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=live_dest_types if isinstance(live_dest_types, dict) else None,
-    )
+    studio_err: str | None = None
+    if isinstance(live_dest_types, dict) and live_dest_types:
+        dest_types, studio_err = merge_saas_live_types(
+            {},
+            list(target_cols or []),
+            studio_types=live_dest_types,
+            product="BigQuery",
+        )
+    else:
+        dest_types = resolve_mapping_dest_types(
+            target_cols,
+            mappings,
+            column_types,
+            logical_types=logical_types,
+            live_types=None,
+            default="VARCHAR",
+        )
 
     try:
         from google.cloud import bigquery
@@ -657,6 +669,17 @@ def write_mapped_rows(
             table_existed = False
 
         if not table_existed:
+            # Create-new: partial Studio must not soft-bind Map VARCHAR for gaps.
+            if studio_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=studio_err,
+                )
             if not create_table:
                 return WriteResult(
                     ok=False,

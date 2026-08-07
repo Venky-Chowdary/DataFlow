@@ -4470,6 +4470,7 @@ def write_mapped_rows(
             # exist — fail-closed on empty physical rather than Map VARCHAR invent.
             table_existed = not create_table
         existing_cols = []
+        cols_probe_failed = False
         if table_existed:
             try:
                 existing_cols = inspector.get_columns(
@@ -4477,7 +4478,24 @@ def write_mapped_rows(
                 )
             except Exception:
                 existing_cols = []
+                cols_probe_failed = True
                 # Keep table_existed True so require_physical fail-closes.
+        if table_existed and cols_probe_failed:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"{_engine_label} get_columns failed for existing table "
+                    f"{table_name!r} — refuse Map VARCHAR bind (empty→NULL invent "
+                    "risk). Re-check grants / information_schema and retry."
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
         for col_meta in existing_cols or []:
             name = str(col_meta.get("name") or "")
             if not name:
@@ -4495,7 +4513,21 @@ def write_mapped_rows(
             table_existed=table_existed,
             physical=physical,
             dialect_label="SQL",
-            target_cols=target_cols,
+            # With backfill, ADD COLUMN runs later — only require carriers for
+            # columns already on the table (PG/MySQL/SQLite parity).
+            target_cols=(
+                [
+                    c
+                    for c in target_cols
+                    if c
+                    and (
+                        c in physical
+                        or str(c).lower() in {str(k).lower() for k in physical}
+                    )
+                ]
+                if (table_existed and backfill_new_fields)
+                else target_cols
+            ),
         )
         if overlay_err:
             return WriteResult(
@@ -4510,19 +4542,57 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
         if physical:
-            type_list = [
-                target_column_types.get(c, "string") for c in target_cols
-            ]
-            overlaid = overlay_physical_bind_types(target_cols, type_list, physical)
-            carriers_differ = any(
-                str(type_list[i] or "").strip().upper()
-                != str(overlaid[i] or "").strip().upper()
-                for i in range(len(target_cols))
+            from connectors.writer_common import rematerialize_live_dest_types
+
+            # Overlay live carriers for existing columns; additive Map cols keep
+            # Map stamps until ALTER ADD COLUMN (schema-evolution parity).
+            covered_cols: list[str] = []
+            covered_physical: dict[str, str] = {}
+            for c in target_cols or []:
+                if not c:
+                    continue
+                hit = (
+                    physical.get(c)
+                    or physical.get(str(c).lower())
+                    or physical.get(str(c).upper())
+                )
+                if hit and str(hit).strip():
+                    covered_cols.append(c)
+                    covered_physical[c] = str(hit).strip()
+            live_partial = (
+                rematerialize_live_dest_types(
+                    covered_physical, covered_cols, product=_engine_label or "SQL"
+                )
+                if covered_cols
+                else None
             )
-            for col, typ in zip(target_cols, overlaid):
-                target_column_types[col] = typ
+            if covered_cols and live_partial is None:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or database,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"{_engine_label} live DDL incomplete for existing mapped "
+                        "columns — refuse Map VARCHAR rematerialize invent. "
+                        "Re-run destination schema introspect and retry."
+                    ),
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
+            live_dest_types = dict(target_column_types or {})
+            if live_partial:
+                live_dest_types.update(live_partial)
+            carriers_differ = bool(covered_cols) and any(
+                str(target_column_types.get(c) or "").strip().upper()
+                != str(live_dest_types.get(c) or "").strip().upper()
+                for c in covered_cols
+            )
+            target_column_types = live_dest_types
             _tgt_overlaid = [
-                target_column_types.get(c, "string") for c in target_cols
+                str(target_column_types.get(c, "") or "") for c in target_cols
             ]
             if carriers_differ:
                 # Rematerialize from source against live DDL — matrix-only on

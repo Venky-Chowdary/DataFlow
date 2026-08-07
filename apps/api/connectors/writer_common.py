@@ -1939,17 +1939,24 @@ def prepare_records_for_vector_write(
 
     live = destination_column_types or {}
     if live:
-        # Prefer live/Studio carriers for overlapping columns; Map may fill gaps
-        # on create-new / intentional partial Studio. Existing typed sinks must
-        # call require_physical_types_for_existing_table before invoking this
-        # helper (Weaviate/ES/Mongo class) so incomplete live never reaches here.
-        dest_types = resolve_mapping_dest_types(
-            target_cols,
-            list(mappings or []),
-            column_types,
-            live_types=live if isinstance(live, dict) else None,
-            default="VARCHAR",
+        # Studio/live carriers only — never soft-fill Map VARCHAR for gaps.
+        # Existing typed sinks must call require_physical (or pass full Studio)
+        # before invoking this helper so incomplete live never reaches here.
+        from connectors.saas_common import merge_saas_live_types
+
+        live_map = {
+            str(k): str(v).strip()
+            for k, v in live.items()
+            if k and str(v or "").strip()
+        }
+        dest_types, cov_err = merge_saas_live_types(
+            live_map,
+            list(target_cols or []),
+            studio_types=None,
+            product=(label or dest_kind or "vector").strip() or "vector",
         )
+        if cov_err:
+            return [], [], cov_err
 
     mapped, _errors, rejected = build_mapped_rows_with_details(
         headers=headers,
