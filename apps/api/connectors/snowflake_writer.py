@@ -134,14 +134,9 @@ def _sf_materialize_mapped_batch(
         if not carrier and allow_logical_fallback:
             carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
         sized_logical.append(carrier)
-    # resolve_snowflake_create_types needs non-empty carriers for sizing; gaps
-    # under partial Studio stay blank after (ADD gate stamps or refuses).
-    target_types = resolve_snowflake_create_types(
-        [s or "VARCHAR" for s in sized_logical], mapped_rows
-    )
-    for i, carrier in enumerate(sized_logical):
-        if not carrier:
-            target_types[i] = ""
+    # Never invent VARCHAR for empty carriers (partial Studio / ADD gaps).
+    # resolve_snowflake_create_types preserves blanks — ADD gate stamps or refuses.
+    target_types = resolve_snowflake_create_types(sized_logical, mapped_rows)
     if isinstance(live_dest_types, dict) and live_dest_types:
         live_fold = {str(k).lower(): str(v) for k, v in live_dest_types.items() if k and v}
         for i, col in enumerate(target_cols):
@@ -349,6 +344,10 @@ def resolve_snowflake_create_types(
 
     out: list[str] = []
     for i, t in enumerate(logical_types):
+        if not str(t or "").strip():
+            # Preserve blank — never invent VARCHAR for partial Studio gaps.
+            out.append("")
+            continue
         if normalize_logical_type(t) == "decimal":
             if _parse_number_type(t) is not None:
                 out.append(sf_type(t))

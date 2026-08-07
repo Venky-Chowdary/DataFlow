@@ -79,6 +79,15 @@ def test_mapping_proof_create_new_uses_physical_not_source_identity():
     assert "UUID → UUID" not in reason
 
 
+def test_snowflake_create_types_preserve_blank_carriers():
+    from connectors.snowflake_writer import resolve_snowflake_create_types
+
+    out = resolve_snowflake_create_types(["NUMBER(10,2)", "", "BOOLEAN"], [])
+    assert out[0].upper().startswith("NUMBER") or "DECIMAL" in out[0].upper()
+    assert out[1] == ""
+    assert "BOOLEAN" in out[2].upper() or out[2].upper() == "BOOL"
+
+
 def test_lakehouse_bare_array_document_wire_not_string_element_invent():
     from services.type_system import (
         create_new_mapping_target_type,
