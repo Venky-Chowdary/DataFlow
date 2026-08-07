@@ -95,7 +95,7 @@ def _fits_snowflake_number(value: Any, precision: int, scale: int) -> bool:
     """True if value can be stored in Snowflake NUMBER(precision, scale)."""
     from connectors.writer_common import fits_decimal
 
-    return fits_decimal(value, precision, scale)
+    return fits_decimal(value, precision, scale, dest_db="snowflake")
 
 
 def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:

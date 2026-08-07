@@ -1418,7 +1418,12 @@ def _to_sa_value(
         from connectors.sql_bind import coerce_decimal_wire
 
         # Never bind Decimal('NaN')/Inf — coerce_decimal_wire refuses non-finite.
-        return coerce_decimal_wire(value, ddl_type=str(sa_type or "DECIMAL"))
+        # Pass engine so PG-family scale-round matches quarantine (quarantine≡bind).
+        return coerce_decimal_wire(
+            value,
+            ddl_type=str(sa_type or "DECIMAL"),
+            engine=str(db_type or dialect_name or ""),
+        )
 
     if t == LOGICAL_INTEGER:
         from connectors.sql_bind import coerce_integer_wire

@@ -965,14 +965,20 @@ def write_mapped_rows(
         mapped_rows, target_cols, target_types, rejected_details, policy
     )
     # Fail-closed NUMERIC/DECIMAL(p,s) fit — never silently truncate/round into target.
+    # dest_db from engine string (not port 5439 heuristic — real PG can use 5439).
+    _decimal_dest = (
+        "redshift"
+        if engine.startswith("redshift") or engine in {"amazon_redshift", "redshift_serverless"}
+        else "postgresql"
+    )
     mapped_rows = quarantine_unfit_decimals(
         mapped_rows,
         target_cols,
         target_types,
         rejected_details,
         policy,
-        dialect_label="PostgreSQL NUMERIC",
-        dest_db="postgresql" if port != 5439 else "redshift",
+        dialect_label="PostgreSQL NUMERIC" if _decimal_dest == "postgresql" else "Redshift NUMERIC",
+        dest_db=_decimal_dest,
     )
     mapped_rows = quarantine_unfit_years(
         mapped_rows, target_cols, target_types, rejected_details, policy
@@ -1027,8 +1033,8 @@ def write_mapped_rows(
         target_types,
         rejected_details,
         policy,
-        dialect_label="Redshift" if engine.startswith("redshift") else "PostgreSQL",
-        dest_db="postgresql" if port != 5439 else "redshift",
+        dialect_label="Redshift" if _decimal_dest == "redshift" else "PostgreSQL",
+        dest_db=_decimal_dest,
     )
     mapped_rows = quarantine_unfit_json(
         mapped_rows,
