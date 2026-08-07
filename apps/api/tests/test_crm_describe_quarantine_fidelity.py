@@ -138,3 +138,74 @@ def test_zendesk_quarantine_holds_subject_overflow():
     )
     assert out == [("ok subject",)]
     assert any("Zendesk" in d.get("reason", "") for d in details)
+
+
+def test_hubspot_zendesk_unknown_meta_refuse_varchar_invent():
+    """Unknown CRM Meta types must not soft-bind platform VARCHAR caps."""
+    from connectors.saas_common import merge_saas_live_types
+
+    assert hubspot_property_to_carrier({"type": "brand_new_hs_type_v99"}) == ""
+    assert hubspot_property_to_carrier({"type": "json"}) == "JSON"
+    assert zendesk_field_to_carrier({"type": "brand_new_zd_type_v99"}) == ""
+    assert zendesk_field_to_carrier({"type": "lookup"}) == "VARCHAR(64)"
+
+    live, err = merge_saas_live_types(
+        {
+            "email": hubspot_property_to_carrier(
+                {"type": "string", "fieldType": "text"}
+            ),
+            "mystery": hubspot_property_to_carrier({"type": "brand_new_hs_type_v99"}),
+        },
+        ["email", "mystery"],
+        studio_types=None,
+        product="HubSpot",
+    )
+    assert err is not None
+    assert "mystery" in err
+    live2, err2 = merge_saas_live_types(
+        {
+            "email": hubspot_property_to_carrier(
+                {"type": "string", "fieldType": "text"}
+            ),
+        },
+        ["email", "mystery"],
+        studio_types={"mystery": "INTEGER"},
+        product="HubSpot",
+    )
+    assert err2 is None
+    assert live2["mystery"] == "INTEGER"
+
+
+def test_resolve_hubspot_does_not_map_invent_unknown_describe():
+    types = resolve_hubspot_dest_types(
+        ["email", "mystery"],
+        [
+            {"source": "e", "target": "email", "target_type": "VARCHAR"},
+            {"source": "m", "target": "mystery", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_props=[
+            {"name": "email", "type": "string", "fieldType": "text"},
+            {"name": "mystery", "type": "brand_new_hs_type_v99"},
+        ],
+    )
+    assert types["email"].startswith("VARCHAR")
+    assert "mystery" not in types
+
+
+def test_overlay_promotes_mysql_enum_set_over_map_varchar():
+    from connectors.writer_common import overlay_physical_bind_types
+
+    overlaid = overlay_physical_bind_types(
+        ["status", "flags", "note"],
+        ["VARCHAR", "VARCHAR", "VARCHAR"],
+        {
+            "status": "enum('open','closed')",
+            "flags": "set('a','b','c')",
+            "note": "varchar(40)",
+        },
+    )
+    assert overlaid[0].lower().startswith("enum(")
+    assert overlaid[1].lower().startswith("set(")
+    # Soft string physical does not specialty-promote.
+    assert overlaid[2] == "VARCHAR"

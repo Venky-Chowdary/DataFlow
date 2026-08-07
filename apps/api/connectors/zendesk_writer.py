@@ -112,7 +112,8 @@ def zendesk_field_to_carrier(field: dict[str, Any]) -> str:
         return "VARCHAR(19)"
     if ftype == "lookup":
         return "VARCHAR(64)"
-    return f"VARCHAR({_ZENDESK_TEXT_CHARS})"
+    # Unknown / new Zendesk custom field types — refuse soft VARCHAR invent.
+    return ""
 
 
 def _zendesk_system_seed_carriers(target_cols: list[str]) -> dict[str, str]:
@@ -151,6 +152,8 @@ def _zendesk_live_carriers(
         if not isinstance(f, dict):
             continue
         carrier = zendesk_field_to_carrier(f)
+        if not str(carrier or "").strip():
+            continue
         for key in (f.get("name"), f.get("title"), f.get("id")):
             if key is None or key == "":
                 continue
@@ -171,14 +174,30 @@ def resolve_zendesk_dest_types(
     logical_types: list[str] | None = None,
     describe_fields: list[dict[str, Any]] | None = None,
 ) -> dict[str, str]:
-    """Prefer live Zendesk field schema; else Map/source carriers."""
-    live = _zendesk_live_carriers(target_cols, describe_fields, include_seeds=True)
+    """Prefer live Zendesk field schema; else Map/source carriers.
+
+    When Describe fields are supplied, never soft-fill unknown Meta types with
+    Map ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate.
+    """
+    if describe_fields is not None:
+        from connectors.saas_common import merge_saas_live_types
+
+        live = _zendesk_live_carriers(
+            target_cols, describe_fields, include_seeds=True
+        )
+        merged, _err = merge_saas_live_types(
+            live,
+            list(target_cols or []),
+            studio_types=None,
+            product="Zendesk",
+        )
+        return merged
     return resolve_mapping_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        live_types=live,
+        live_types=None,
         default="VARCHAR",
     )
 

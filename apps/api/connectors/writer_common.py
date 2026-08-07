@@ -4448,7 +4448,10 @@ def overlay_physical_bind_types(
     DECIMAL/JSON/…) always wins over Map stamps on existing tables.
     """
     from connectors.sql_temporal import is_temporal_ddl, sql_base_type
-    from services.type_system import specialty_carrier_base
+    from services.type_system import (
+        parse_enum_or_set_ordered_members,
+        specialty_carrier_base,
+    )
 
     if not physical:
         return list(target_types)
@@ -4523,6 +4526,10 @@ def overlay_physical_bind_types(
             out[i] = phys
         elif specialty_carrier_base(phys):
             # Live HSTORE/OID/POINT/INET/… beat Map JSON/INTEGER/GEOGRAPHY stamps.
+            out[i] = phys
+        elif parse_enum_or_set_ordered_members(phys) is not None:
+            # MySQL/PG closed ENUM('a','b') / SET('x','y') — Map VARCHAR must not
+            # soft-bind open text over live domain (empty→null / ordinal invent).
             out[i] = phys
         elif (
             phys_base in typed_bases
