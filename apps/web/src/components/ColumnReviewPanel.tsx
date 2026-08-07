@@ -751,20 +751,44 @@ export function ColumnReviewPanel({
                           ))}
                         </select>
                       )}
-                      {!omitted && (isArrayLogicalType(m.inferredType) || isArrayLogicalType(m.destType) || m.structPolicy === "explode_rows") && !m.structDerived && (
+                      {!omitted && (isArrayLogicalType(m.inferredType) || isArrayLogicalType(m.destType) || m.structPolicy === "explode_rows" || m.structPolicy === "normalize_child_table" || m.structPolicy === "hybrid_json_and_child") && !m.structDerived && (
+                        <>
                         <select
                           className="df2-input df2-select df2-column-struct-policy"
-                          value={m.structPolicy === "explode_rows" ? "explode_rows" : "store_as_json"}
+                          value={
+                            m.structPolicy === "explode_rows"
+                            || m.structPolicy === "normalize_child_table"
+                            || m.structPolicy === "hybrid_json_and_child"
+                              ? m.structPolicy
+                              : "store_as_json"
+                          }
                           onChange={(e) =>
                             onChange(applyStructPolicyChange(mappings, index, e.target.value as StructPolicy))
                           }
                           aria-label={`ARRAY policy for ${m.source}`}
-                          title={ARRAY_POLICIES.find((p) => p.id === (m.structPolicy === "explode_rows" ? "explode_rows" : "store_as_json"))?.detail}
+                          title={
+                            ARRAY_POLICIES.find((p) => p.id === (m.structPolicy ?? "store_as_json"))?.detail
+                            || (m.structuralClass ? `Detected ${m.structuralClass}` : undefined)
+                          }
                         >
                           {ARRAY_POLICIES.map((p) => (
                             <option key={p.id} value={p.id}>{p.label}</option>
                           ))}
                         </select>
+                        {m.structuralClass && (
+                          <span className="df2-col-badge-struct" title="Sample-aware array shape">
+                            {m.structuralClass.replace(/_/g, " ")}
+                          </span>
+                        )}
+                        {(m.structPolicy === "normalize_child_table" || m.structPolicy === "hybrid_json_and_child") && m.childTableSpec && (
+                          <span
+                            className="df2-col-badge-struct"
+                            title={`Child ${m.childTableSpec.child_table}: ${(m.childTableSpec.columns || []).map((c) => c.name).join(", ")}`}
+                          >
+                            → {m.childTableSpec.child_table}
+                          </span>
+                        )}
+                        </>
                       )}
                       {!omitted && (
                       <div className="df2-column-dest-badges">
@@ -790,6 +814,16 @@ export function ColumnReviewPanel({
                         {m.structPolicy === "explode_rows" && !m.structDerived && (
                           <span className="df2-col-badge-struct" title="Array row explode (capped)">
                             explode
+                          </span>
+                        )}
+                        {m.structPolicy === "hybrid_json_and_child" && !m.structDerived && (
+                          <span className="df2-col-badge-struct" title="Parent JSON + child table">
+                            hybrid
+                          </span>
+                        )}
+                        {m.structPolicy === "normalize_child_table" && !m.structDerived && (
+                          <span className="df2-col-badge-struct" title="Normalized child table">
+                            normalize
                           </span>
                         )}
                         {m.structDerived && m.structParent && (

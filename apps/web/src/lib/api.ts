@@ -287,6 +287,14 @@ export async function runPreflight(payload: {
     struct_policy?: string;
     struct_derived?: boolean;
     struct_parent?: string;
+    structural_class?: string;
+    child_table_spec?: {
+      child_table: string;
+      parent_key_columns: string[];
+      ordinal_column?: string;
+      columns: Array<{ name: string; type: string }>;
+      keep_parent_json?: boolean;
+    };
   }[];
   connector_id?: string;
   source_connector_id?: string;

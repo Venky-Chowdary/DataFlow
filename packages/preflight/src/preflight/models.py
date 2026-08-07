@@ -72,6 +72,9 @@ class ColumnMapping:
     struct_policy: str | None = None
     struct_derived: bool = False
     struct_parent: str | None = None
+    # Array structural class + operator-approved child table (normalize/hybrid).
+    structural_class: str | None = None
+    child_table_spec: dict[str, Any] | None = None
     # Fidelity stamps from Map / mapping_fidelity — G4 fail-closed on lossy.
     fidelity: str | None = None
     type_narrowing: bool = False

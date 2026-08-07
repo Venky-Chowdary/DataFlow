@@ -94,6 +94,14 @@ export interface EditableMapping {
   structDerived?: boolean;
   /** Parent source column when structDerived. */
   structParent?: string;
+  /** Sample-aware array class from Map pipeline (array_of_object, …). */
+  structuralClass?: string;
+  /** Ranked strategy recommendations from the engine. */
+  arrayStrategies?: ArrayStrategyOption[];
+  /** Operator-approved child table contract for normalize/hybrid. */
+  childTableSpec?: ChildTableSpec;
+  /** Proposed child spec while policy is still JSON (one-click apply). */
+  proposedChildTableSpec?: ChildTableSpec;
   /**
    * Engine fidelity verdict from `mapping_fidelity` — preserve | cast | mutate | lossy_cast.
    * Prefer this over client-side type heuristics when present.
@@ -216,7 +224,26 @@ export type StructPolicy =
   | "store_as_json"
   | "flatten_top_level_keys"
   | "flatten_deep"
-  | "explode_rows";
+  | "explode_rows"
+  | "normalize_child_table"
+  | "hybrid_json_and_child";
+
+export type ChildTableSpec = {
+  child_table: string;
+  parent_key_columns: string[];
+  ordinal_column?: string;
+  columns: Array<{ name: string; type: string }>;
+  keep_parent_json?: boolean;
+};
+
+export type ArrayStrategyOption = {
+  id: StructPolicy;
+  label: string;
+  fidelity?: string;
+  recommended?: boolean;
+  detail?: string;
+  child_table_spec?: ChildTableSpec;
+};
 
 export const STRUCT_POLICIES: { id: StructPolicy; label: string; detail: string }[] = [
   {
@@ -239,8 +266,18 @@ export const STRUCT_POLICIES: { id: StructPolicy; label: string; detail: string 
 export const ARRAY_POLICIES: { id: StructPolicy; label: string; detail: string }[] = [
   {
     id: "store_as_json",
-    label: "Serialize JSON",
-    detail: "Keep ARRAY as one JSON/list column — no row explosion",
+    label: "JSON column",
+    detail: "Keep ARRAY as one JSON/list column — lossless document wire (default)",
+  },
+  {
+    id: "hybrid_json_and_child",
+    label: "Hybrid (JSON + child)",
+    detail: "Parent JSON for fidelity + normalized child table for SQL analytics",
+  },
+  {
+    id: "normalize_child_table",
+    label: "Normalize child table",
+    detail: "Relational child table (parent JSON kept fail-closed unless cleared)",
   },
   {
     id: "explode_rows",
@@ -853,6 +890,7 @@ function childSampleFromParent(sample: string | undefined, key: string): string 
 /**
  * Apply STRUCT/ARRAY Map policy. Flatten synthesizes ``parent_key`` child mappings;
  * explode_rows synthesizes ``parent_elem``; store_as_json removes prior derived children.
+ * Normalize/hybrid attach ``childTableSpec`` from engine proposals (operator-approved).
  * Parent blob is always kept.
  */
 export function applyStructPolicyChange(
@@ -870,26 +908,39 @@ export function applyStructPolicyChange(
 
   const flattenish = FLATTEN_POLICIES.has(policy);
   const exploding = policy === "explode_rows";
+  const normalizing =
+    policy === "normalize_child_table" || policy === "hybrid_json_and_child";
+  const fromStrategy = parent.arrayStrategies?.find((s) => s.id === policy);
+  const childSpec = normalizing
+    ? (fromStrategy?.child_table_spec
+      || parent.childTableSpec
+      || parent.proposedChildTableSpec)
+    : undefined;
   const nextParent: EditableMapping = {
     ...withoutDerived[parentIdx],
     structPolicy: policy,
     approved: false,
+    childTableSpec: childSpec,
     // Leaving flatten clears collision metadata so the Map table does not stick.
     flattenCollisions: flattenish ? withoutDerived[parentIdx].flattenCollisions : undefined,
-    requiresReview: flattenish || exploding
+    requiresReview: flattenish || exploding || normalizing
       ? true
       : withoutDerived[parentIdx].flattenCollisions?.length
         ? false
         : withoutDerived[parentIdx].requiresReview,
     reason: exploding
       ? "ARRAY explode — one output row per element (capped); parent array kept"
-      : policy === "flatten_deep"
-        ? "STRUCT deep flatten — nested keys promoted (depth≤2); parent JSON kept"
-        : policy === "flatten_top_level_keys"
-          ? "STRUCT flatten — top-level keys promoted; nested objects stay on parent JSON"
-          : isArrayLogicalType(parent.inferredType) || isArrayLogicalType(parent.destType)
-            ? "ARRAY serialized as JSON/list"
-            : "STRUCT stored as JSON/VARIANT blob",
+      : policy === "hybrid_json_and_child"
+        ? "ARRAY hybrid — parent JSON + normalized child table"
+        : policy === "normalize_child_table"
+          ? "ARRAY normalize — child table from profiled keys; parent JSON kept fail-closed"
+          : policy === "flatten_deep"
+            ? "STRUCT deep flatten — nested keys promoted (depth≤2); parent JSON kept"
+            : policy === "flatten_top_level_keys"
+              ? "STRUCT flatten — top-level keys promoted; nested objects stay on parent JSON"
+              : isArrayLogicalType(parent.inferredType) || isArrayLogicalType(parent.destType)
+                ? "ARRAY serialized as JSON/list"
+                : "STRUCT stored as JSON/VARIANT blob",
     transform:
       withoutDerived[parentIdx].transform === "none" || !withoutDerived[parentIdx].transform
         ? "parse_json"
@@ -1357,6 +1408,8 @@ export function buildPreflightMappings(
         struct_policy: omitted ? undefined : safe.structPolicy,
         struct_derived: safe.structDerived || undefined,
         struct_parent: safe.structParent,
+        structural_class: omitted ? undefined : safe.structuralClass,
+        child_table_spec: omitted ? undefined : safe.childTableSpec,
         fidelity: omitted ? undefined : safe.fidelity,
         type_narrowing: omitted ? undefined : Boolean(safe.typeNarrowing) || undefined,
         risk_acknowledged: omitted ? undefined : Boolean(safe.riskAcknowledged) || undefined,
@@ -1406,6 +1459,10 @@ export function editableFromPipelineMappings(
     struct_policy?: string;
     struct_derived?: boolean;
     struct_parent?: string;
+    structural_class?: string;
+    array_strategies?: ArrayStrategyOption[];
+    child_table_spec?: ChildTableSpec;
+    proposed_child_table_spec?: ChildTableSpec;
     fidelity?: string;
     fidelity_reason?: string;
     type_narrowing?: boolean;
@@ -1464,6 +1521,8 @@ export function editableFromPipelineMappings(
       m.struct_policy === "flatten_top_level_keys" ||
       m.struct_policy === "flatten_deep" ||
       m.struct_policy === "explode_rows" ||
+      m.struct_policy === "normalize_child_table" ||
+      m.struct_policy === "hybrid_json_and_child" ||
       m.struct_policy === "store_as_json"
         ? m.struct_policy
         : structish
@@ -1505,7 +1564,7 @@ export function editableFromPipelineMappings(
         : structish && !m.reasoning
           ? "STRUCT/JSON — choose JSON blob, flatten keys, or deep flatten"
           : arrayish && !m.reasoning
-            ? "ARRAY — serialize as JSON/list or explode rows (Map policy)"
+            ? "ARRAY — JSON default; optional normalize/hybrid/explode (Map policy)"
             : m.reasoning,
       existsInDestination: existsInDest,
       requiresReview: requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
@@ -1516,6 +1575,10 @@ export function editableFromPipelineMappings(
       createNew: rowCreateNew,
       assignmentStrategy: m.assignment_strategy,
       structPolicy: structPolicy ?? (arrayish ? "store_as_json" : undefined),
+      structuralClass: m.structural_class,
+      arrayStrategies: Array.isArray(m.array_strategies) ? m.array_strategies : undefined,
+      childTableSpec: m.child_table_spec,
+      proposedChildTableSpec: m.proposed_child_table_spec,
       fidelity: engineFidelity || undefined,
       fidelityReason: m.fidelity_reason || undefined,
       typeNarrowing: Boolean(m.type_narrowing),

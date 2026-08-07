@@ -39,6 +39,9 @@ class MappingItem(BaseModel):
     struct_policy: str | None = None
     struct_derived: bool = False
     struct_parent: str | None = None
+    # Array normalize/hybrid — must survive Validate → Execute.
+    structural_class: str | None = None
+    child_table_spec: dict[str, Any] | None = None
     # Map Accept risk must survive /preflight/run — stripping these left G3/G4/G9
     # blocking after the operator already acknowledged lossy TEXT→INTEGER (etc.).
     fidelity: str | None = None

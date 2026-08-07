@@ -20,11 +20,16 @@ STRUCT_POLICY_STORE_AS_JSON = "store_as_json"
 STRUCT_POLICY_FLATTEN_TOP_LEVEL = "flatten_top_level_keys"
 STRUCT_POLICY_FLATTEN_DEEP = "flatten_deep"
 ARRAY_POLICY_EXPLODE = "explode_rows"
+# Document → relational strategies (structural_array SSOT).
+ARRAY_POLICY_NORMALIZE_CHILD = "normalize_child_table"
+ARRAY_POLICY_HYBRID = "hybrid_json_and_child"
 VALID_STRUCT_POLICIES = frozenset({
     STRUCT_POLICY_STORE_AS_JSON,
     STRUCT_POLICY_FLATTEN_TOP_LEVEL,
     STRUCT_POLICY_FLATTEN_DEEP,
     ARRAY_POLICY_EXPLODE,
+    ARRAY_POLICY_NORMALIZE_CHILD,
+    ARRAY_POLICY_HYBRID,
 })
 # Top-level flatten depth=1; deep uses DEFAULT_FLATTEN_DEPTH (capped keys).
 STRUCT_FLATTEN_DEPTH = 1
@@ -57,6 +62,10 @@ def normalize_struct_policy(value: Any) -> str | None:
         return STRUCT_POLICY_FLATTEN_DEEP
     if s in {"explode", "explode_rows", "unnest", "array_explode"}:
         return ARRAY_POLICY_EXPLODE
+    if s in {"normalize", "normalize_child", "normalize_child_table", "child_table"}:
+        return ARRAY_POLICY_NORMALIZE_CHILD
+    if s in {"hybrid", "hybrid_json_and_child", "json_and_child"}:
+        return ARRAY_POLICY_HYBRID
     return None
 
 

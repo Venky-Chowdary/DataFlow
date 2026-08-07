@@ -41,6 +41,7 @@ from connectors.writer_common import (
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
+    flush_normalized_child_batches,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
     filter_stale_lsn_rows,
@@ -1254,6 +1255,7 @@ def write_mapped_rows(
     chunks = max(1, (total + chunk_size - 1) // chunk_size) if total else 0
     written = 0
     chunks_completed = 0
+    child_flush_error: str | None = None
     proxy_dest = is_public_proxy_host(host) or is_public_proxy_host(connection_string)
     # Chunked COPY (PROXY_CHUNK_SIZE / CHUNK_SIZE) + per-chunk commit + ledger
     # resume. Blanket proxy COPY-off forced executemany at ~1k rows and made
@@ -1944,6 +1946,33 @@ def write_mapped_rows(
                 chunks_completed = chunk_idx + 1
                 if on_checkpoint:
                     on_checkpoint(chunks_completed, chunks, written)
+
+            child_flush = flush_normalized_child_batches(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                dest_db="postgresql",
+                create_table=create_table,
+                cursor=cur,
+                quote='"',
+                placeholder="%s",
+                schema=schema or "public",
+            )
+            if not child_flush.get("ok", True):
+                try:
+                    conn.rollback()
+                except Exception as exc:
+                    logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                child_flush_error = "; ".join(
+                    child_flush.get("errors") or ["child table flush failed"]
+                )
+            elif child_flush.get("rows_written"):
+                try:
+                    conn.commit()
+                except Exception as exc:
+                    logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                for t in child_flush.get("tables") or []:
+                    transform_errors.append(f"normalized child table wrote {t}")
         finally:
             try:
                 cur.close()
@@ -1952,6 +1981,22 @@ def write_mapped_rows(
 
         if close_connection:
             close_quietly(conn)
+        if child_flush_error:
+            return WriteResult(
+                ok=False,
+                rows_written=written,
+                table_name=table_name,
+                target_schema=schema,
+                checksum="",
+                chunks_completed=chunks_completed or chunks,
+                error=child_flush_error,
+                rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+                rejected_details=rejected_details,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                warnings=transform_errors,
+                load_method="copy" if use_copy else "insert",
+            )
         _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
         if _final_abort:
             return WriteResult(

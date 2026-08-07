@@ -1889,6 +1889,138 @@ def build_mapped_rows_with_details(
     return mapped, errors, rejected_details
 
 
+def flush_normalized_child_batches(
+    *,
+    headers: list[str],
+    data_rows: list[list[Any]],
+    mappings: list[dict[str, Any]] | None,
+    dest_db: str,
+    create_table: bool = True,
+    cursor: Any = None,
+    sa_conn: Any = None,
+    quote: str = "`",
+    placeholder: str = "%s",
+    schema: str | None = None,
+) -> dict[str, Any]:
+    """CREATE + INSERT child tables for normalize/hybrid array Map policies.
+
+    Parent rows are written separately (JSON retained). Fail-closed when the
+    operator chose normalize/hybrid without a valid ``child_table_spec``.
+    """
+    from services.structural_array import (
+        array_strategy_gate_issues,
+        build_normalized_child_batches,
+    )
+
+    known = set(headers or [])
+    gate = array_strategy_gate_issues(mappings, known_source_columns=known)
+    if gate:
+        return {
+            "ok": False,
+            "rows_written": 0,
+            "tables": [],
+            "errors": gate,
+        }
+    batches, build_errors = build_normalized_child_batches(
+        headers, data_rows, mappings, dest_db=dest_db
+    )
+    if build_errors:
+        return {
+            "ok": False,
+            "rows_written": 0,
+            "tables": [],
+            "errors": build_errors,
+        }
+    if not batches:
+        return {"ok": True, "rows_written": 0, "tables": [], "errors": []}
+
+    written = 0
+    tables: list[str] = []
+    errors: list[str] = []
+
+    def _qualified(name: str) -> str:
+        safe = require_safe_identifier(name)
+        qname = quote_sql_identifier(safe, quote)
+        if schema:
+            return f"{quote_sql_identifier(require_safe_identifier(schema), quote)}.{qname}"
+        return qname
+
+    for batch in batches:
+        child = str(batch.get("child_table") or "")
+        cols = list(batch.get("columns") or [])
+        types = list(batch.get("ddl_types") or [])
+        rows = list(batch.get("rows") or [])
+        if not child or not cols or not rows:
+            continue
+        try:
+            table_q = _qualified(child)
+            col_q = ", ".join(quote_sql_identifier(c, quote) for c in cols)
+            if create_table:
+                col_defs = ", ".join(
+                    f"{quote_sql_identifier(c, quote)} {t}"
+                    for c, t in zip(cols, types)
+                )
+                # columns = parent_keys + ordinal + value cols — unique for at-least-once.
+                pk_n = int(batch.get("parent_key_count") or 1)
+                uniq_cols = cols[: max(1, pk_n) + 1]
+                uniq_sql = ", ".join(quote_sql_identifier(c, quote) for c in uniq_cols)
+                ddl = (
+                    f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs}, "
+                    f"UNIQUE ({uniq_sql}))"
+                )
+                if cursor is not None:
+                    cursor.execute(ddl)
+                elif sa_conn is not None:
+                    import sqlalchemy as sa
+
+                    sa_conn.execute(sa.text(ddl))
+                else:
+                    errors.append("no cursor/connection for child DDL")
+                    return {"ok": False, "rows_written": written, "tables": tables, "errors": errors}
+
+            ph = ", ".join([placeholder] * len(cols))
+            insert_sql = f"INSERT INTO {table_q} ({col_q}) VALUES ({ph})"  # nosec B608
+            if cursor is not None:
+                try:
+                    cursor.executemany(insert_sql, rows)
+                except Exception:
+                    # Fallback: ignore duplicate on at-least-once replay.
+                    for row in rows:
+                        try:
+                            cursor.execute(insert_sql, row)
+                        except Exception as row_exc:
+                            msg = str(row_exc).lower()
+                            if "duplicate" in msg or "unique" in msg:
+                                continue
+                            raise
+            else:
+                import sqlalchemy as sa
+
+                for row in rows:
+                    params = {f"p{i}": v for i, v in enumerate(row)}
+                    named_ph = ", ".join(f":p{i}" for i in range(len(cols)))
+                    sql = f"INSERT INTO {table_q} ({col_q}) VALUES ({named_ph})"  # nosec B608
+                    try:
+                        sa_conn.execute(sa.text(sql), params)
+                    except Exception as row_exc:
+                        msg = str(row_exc).lower()
+                        if "duplicate" in msg or "unique" in msg:
+                            continue
+                        raise
+            written += len(rows)
+            tables.append(child)
+        except Exception as exc:
+            errors.append(f"child table {child!r}: {exc}")
+            return {
+                "ok": False,
+                "rows_written": written,
+                "tables": tables,
+                "errors": errors,
+            }
+
+    return {"ok": True, "rows_written": written, "tables": tables, "errors": errors}
+
+
 def prepare_records_for_vector_write(
     *,
     headers: list[str],

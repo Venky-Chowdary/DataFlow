@@ -695,12 +695,32 @@ def run_mapping_pipeline(
         destination_db_type=destination_db_type or "",
     )
 
+    from services.structural_array import (
+        array_strategy_gate_issues,
+        parent_key_hint_from_schemas,
+        stamp_mapping_array_strategies,
+    )
+
+    # Sample-aware Array<Primitive|Object> strategies — JSON default; normalize/hybrid
+    # require explicit operator child_table_spec (never silent fan-out).
+    enriched_mappings = stamp_mapping_array_strategies(
+        enriched_mappings,
+        source_samples=source_samples,
+        dest_db=destination_db_type or "",
+        parent_key_hint=parent_key_hint_from_schemas(
+            source_schemas, source_columns
+        ),
+    )
+
     transforms = generate_transforms(
         enriched_mappings,
         schema_by_name=schema_by_name,
         target_by_name=target_by_name,
     )
     validation = validate_mappings(enriched_mappings, confidence_threshold=confidence_threshold)
+    array_gate = array_strategy_gate_issues(enriched_mappings)
+    if array_gate:
+        quality_issues = [*quality_issues, *array_gate]
     if quality_issues or coerce_blocks_transfer(coercion_issues):
         validation = {
             **validation,

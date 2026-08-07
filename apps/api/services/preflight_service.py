@@ -113,6 +113,11 @@ class FilePreflightContext(PreflightContext):
                 None,
             ),
             "create_new": bool(getattr(m, "create_new", False)),
+            "struct_policy": getattr(m, "struct_policy", None) or None,
+            "struct_derived": bool(getattr(m, "struct_derived", False)),
+            "struct_parent": getattr(m, "struct_parent", None) or None,
+            "structural_class": getattr(m, "structural_class", None) or None,
+            "child_table_spec": getattr(m, "child_table_spec", None) or None,
             "fidelity": getattr(m, "fidelity", None) or None,
             "type_narrowing": bool(getattr(m, "type_narrowing", False)),
             "risk_acknowledged": bool(getattr(m, "risk_acknowledged", False)),
@@ -317,7 +322,7 @@ class FilePreflightContext(PreflightContext):
         ]
         mode = getattr(self.plan, "validation_mode", "strict") or "strict"
         sync_mode = getattr(self.plan, "sync_mode", "") or ""
-        return audit(
+        report = audit(
             source_columns=source_columns,
             mappings=mapping_dicts,
             source_schemas=source_schemas,
@@ -339,6 +344,25 @@ class FilePreflightContext(PreflightContext):
             source_duplicate_probe_message=self.source_duplicate_probe_message,
             source_duplicate_probe_expected=self.source_duplicate_probe_expected,
         )
+        # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
+        try:
+            from services.structural_array import array_strategy_gate_issues
+
+            array_issues = array_strategy_gate_issues(
+                mapping_dicts,
+                known_source_columns=set(source_columns),
+            )
+        except Exception:
+            array_issues = []
+        if array_issues:
+            issues = list(report.get("issues") or [])
+            issues.extend(array_issues)
+            report = {
+                **report,
+                "issues": issues,
+                "blocks_transfer": True,
+            }
+        return report
 
 
 VALIDATION_CONFIDENCE_THRESHOLDS = {
@@ -1102,6 +1126,14 @@ def run_file_preflight(
                 m.get("struct_derived") or m.get("structDerived", False)
             ),
             struct_parent=m.get("struct_parent") or m.get("structParent"),
+            structural_class=m.get("structural_class") or m.get("structuralClass"),
+            child_table_spec=(
+                m.get("child_table_spec")
+                if isinstance(m.get("child_table_spec"), dict)
+                else m.get("childTableSpec")
+                if isinstance(m.get("childTableSpec"), dict)
+                else None
+            ),
             fidelity=(m.get("fidelity") or None),
             type_narrowing=bool(m.get("type_narrowing") or m.get("typeNarrowing", False)),
             risk_acknowledged=bool(

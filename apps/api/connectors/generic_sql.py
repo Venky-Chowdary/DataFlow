@@ -100,6 +100,7 @@ from connectors.writer_common import (
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
+    flush_normalized_child_batches,
     compare_lsn,
     quarantine_currency_markers_into_numeric,
     quarantine_unfit_binaries,
@@ -5401,6 +5402,47 @@ def write_mapped_rows(
                 "Could not create the write ledger on this destination; a retry "
                 "after an interrupted write may duplicate rows"
             )
+
+        _child_db = str(dest_db or cfg.get("type") or "generic_sql").lower()
+        _child_quote = "`" if _child_db in {"mysql", "mariadb", "tidb", "singlestore"} else '"'
+        child_flush = flush_normalized_child_batches(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            dest_db=_child_db,
+            create_table=create_table,
+            sa_conn=conn,
+            quote=_child_quote,
+            placeholder="%s",
+            schema=schema_name or schema or None,
+        )
+        if not child_flush.get("ok", True):
+            return WriteResult(
+                ok=False,
+                rows_written=written,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=chunks_completed or chunks,
+                error="; ".join(child_flush.get("errors") or ["child table flush failed"]),
+                rejected_rows=max(
+                    _rejected_row_count(
+                        data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+                    ),
+                    len(data_rows) - written - rows_skipped if data_rows else 0,
+                ),
+                rejected_details=rejected_details,
+                coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
+                rows_skipped=rows_skipped,
+                warnings=transform_errors,
+            )
+        if child_flush.get("rows_written"):
+            try:
+                conn.commit()
+            except Exception as exc:
+                logger.warning("child flush commit failed: %s", exc, exc_info=exc)
+            for t in child_flush.get("tables") or []:
+                transform_errors.append(f"normalized child table wrote {t}")
 
         _final_abort = reject_on_strict_policy(policy, rejected_details, "SQL")
         if _final_abort:
