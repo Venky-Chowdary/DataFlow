@@ -4169,14 +4169,19 @@ th.df2-type-string .df2-type-badge {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  flex: 1 1 180px;
-  max-width: 280px;
-  min-width: 140px;
-  padding: 5px 10px;
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  height: 32px;
+  min-height: 32px;
+  max-height: 32px;
+  padding: 0 10px;
   border: 1px solid #e2e8f0;
-  border-radius: 8px;
+  border-radius: var(--df-radius-md, 8px);
   background: #fff;
   color: #94a3b8;
+  box-sizing: border-box;
 }
 
 .df2-dest-engine-search input {
@@ -9856,16 +9861,29 @@ button.df2-vd-assist-toggle:focus-visible {
   margin: 0 !important;
   padding: 0 2px 2px 0 !important;
   flex: 1 1 auto !important;
-  min-height: 180px !important;
+  min-height: 160px !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
   overscroll-behavior: contain !important;
   -webkit-overflow-scrolling: touch !important;
+  scrollbar-width: thin !important;
+  scrollbar-color: #cbd5e1 transparent !important;
+}
+
+.df2-page-transfer-studio .df2-dest-connector-list::-webkit-scrollbar {
+  width: 6px !important;
+}
+
+.df2-page-transfer-studio .df2-dest-connector-list::-webkit-scrollbar-thumb {
+  background: #cbd5e1 !important;
+  border-radius: 999px !important;
 }
 
 .df2-page-transfer-studio .df2-dest-picker.is-custom-engine .df2-dest-connector-list {
-  min-height: 140px !important;
-  flex: 1 1 55% !important;
+  /* Keep saved connections reachable while Custom + engine panel is open. */
+  min-height: 120px !important;
+  flex: 1 1 48% !important;
+  max-height: none !important;
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card {
@@ -9879,14 +9897,17 @@ button.df2-vd-assist-toggle:focus-visible {
   margin: 0 !important;
   padding: 8px 10px !important;
   border: 1px solid #e2e8f0 !important;
-  border-radius: 8px !important;
+  border-radius: var(--df-radius-md, 8px) !important;
   background: #fff !important;
+  background-clip: padding-box !important;
   box-shadow: none !important;
+  outline: none !important;
   position: relative !important;
   box-sizing: border-box !important;
   text-align: left !important;
   cursor: pointer !important;
   overflow: hidden !important;
+  isolation: isolate !important;
   flex-shrink: 0 !important;
 }
 
@@ -9957,14 +9978,21 @@ button.df2-vd-assist-toggle:focus-visible {
   margin: 0 !important;
   padding: 10px !important;
   border: 1px solid #e8edf3 !important;
-  border-radius: 10px !important;
+  border-radius: var(--df-radius-md, 8px) !important;
   background: #f8fafc !important;
+  max-height: min(42vh, 320px) !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain !important;
+  scrollbar-width: thin !important;
+  box-sizing: border-box !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-panel-head {
   display: flex !important;
   align-items: center !important;
   gap: 8px !important;
+  flex-shrink: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-panel-head > .df2-label {
@@ -9982,20 +10010,45 @@ button.df2-vd-assist-toggle:focus-visible {
   width: 100% !important;
   height: 34px !important;
   min-height: 34px !important;
+  max-height: 34px !important;
   padding: 0 10px !important;
   border: 1px solid #e2e8f0 !important;
-  border-radius: 8px !important;
+  border-radius: var(--df-radius-md, 8px) !important;
   background: #fff !important;
   font-size: 13px !important;
   color: #0f172a !important;
   box-sizing: border-box !important;
 }
 
-.df2-page-transfer-studio .df2-dest-engine-grid {
+.df2-page-transfer-studio .df2-dest-engine-back {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 2px !important;
+  flex: 0 0 auto !important;
+  height: 34px !important;
+  padding: 0 8px !important;
+  border: 1px solid #e2e8f0 !important;
+  border-radius: var(--df-radius-md, 8px) !important;
+  background: #fff !important;
+  color: #334155 !important;
+  font-size: 12px !important;
+  font-weight: 600 !important;
+  cursor: pointer !important;
+  white-space: nowrap !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-back:hover {
+  border-color: #0f766e !important;
+  color: #0f766e !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-grid,
+.df2-page-transfer-studio .df2-dest-engine-more-grid {
   display: grid !important;
   grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
   gap: 5px !important;
   margin: 0 !important;
+  flex-shrink: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-tile {
@@ -10005,15 +10058,18 @@ button.df2-vd-assist-toggle:focus-visible {
   width: 100% !important;
   min-width: 0 !important;
   height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
   padding: 0 8px !important;
   border: 1px solid #e2e8f0 !important;
-  border-radius: 6px !important;
+  border-radius: var(--df-radius-sm, 6px) !important;
   background: #fff !important;
   font-size: 11.5px !important;
   font-weight: 600 !important;
   color: #334155 !important;
   cursor: pointer !important;
   overflow: hidden !important;
+  box-sizing: border-box !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-tile > span {
@@ -10033,29 +10089,94 @@ button.df2-vd-assist-toggle:focus-visible {
   color: #0f766e !important;
 }
 
+/* Compact single-line search — never a tall empty panel. */
 .df2-page-transfer-studio .df2-dest-engine-search {
   display: flex !important;
   align-items: center !important;
   gap: 6px !important;
-  height: 30px !important;
+  flex: 0 0 auto !important;
+  width: 100% !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
   padding: 0 8px !important;
   border: 1px solid #e2e8f0 !important;
-  border-radius: 6px !important;
+  border-radius: var(--df-radius-md, 8px) !important;
   background: #fff !important;
   margin: 0 !important;
+  box-sizing: border-box !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-search input {
   flex: 1 1 auto !important;
   min-width: 0 !important;
+  height: 100% !important;
   border: 0 !important;
   outline: 0 !important;
   background: transparent !important;
   font-size: 12px !important;
+  line-height: 1.2 !important;
+  color: #0f172a !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-search-clear {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  flex: 0 0 auto !important;
+  width: 20px !important;
+  height: 20px !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: var(--df-radius-sm, 6px) !important;
+  background: transparent !important;
+  color: #94a3b8 !important;
+  cursor: pointer !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-search-clear:hover {
+  color: #0f172a !important;
+  background: #f1f5f9 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-more {
+  display: flex !important;
+  flex-direction: column !important;
+  gap: 6px !important;
+  flex: 0 0 auto !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-more-head {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 8px !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-more-head .df2-dest-engine-hint {
+  margin: 0 !important;
+  font-size: 10px !important;
+  font-weight: 700 !important;
+  letter-spacing: 0.04em !important;
+  text-transform: uppercase !important;
+  color: #64748b !important;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-more-grid {
+  max-height: 108px !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  scrollbar-width: thin !important;
+  padding-right: 2px !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-selected-hint {
   margin: 0 !important;
+  flex-shrink: 0 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-right-empty {

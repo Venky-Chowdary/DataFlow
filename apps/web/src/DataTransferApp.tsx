@@ -425,8 +425,9 @@ function AppShell({
             }}
             aria-label={sidebarNavCompact ? "Expand navigation" : "Collapse navigation"}
             title={sidebarNavCompact ? "Expand navigation" : "Collapse navigation"}
+            aria-pressed={!sidebarNavCompact}
           >
-            <DtIcon name={sidebarNavCompact ? "chevron-right" : "chevron-left"} size={16} />
+            <DtIcon name="panel-left" size={16} />
           </button>
         </div>
 

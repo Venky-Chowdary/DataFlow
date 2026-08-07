@@ -3415,15 +3415,16 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 /* ═══════════════════════════════════════════════════════════
-   ENTERPRISE TOOLBAR — always ONE row
-   search | filters (center cluster) | actions
+   ENTERPRISE TOOLBAR — search | filters | actions
+   Flex + wrap so dense action rows (Schedules GitOps) never
+   paint over filter tabs.
    ═══════════════════════════════════════════════════════════ */
 .df2-toolbar {
   --df-toolbar-h: 38px;
-  display: grid;
-  grid-template-columns: minmax(140px, 1fr) auto minmax(140px, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  column-gap: 12px;
+  gap: 10px 12px;
   flex-shrink: 0;
   width: 100%;
   min-height: 52px;
@@ -3441,25 +3442,110 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-toolbar-end {
   display: flex;
   align-items: center;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   min-width: 0;
   min-height: var(--df-toolbar-h);
+  gap: 8px;
 }
 
 .df2-toolbar-start {
+  flex: 1 1 200px;
   justify-content: flex-start;
+  max-width: 100%;
 }
 
 .df2-toolbar-center {
-  justify-content: center;
-  justify-self: center;
+  /* Content-sized — never grow under the action cluster */
+  flex: 0 1 auto;
+  justify-content: flex-start;
   max-width: 100%;
 }
 
 .df2-toolbar-end {
+  /* Content-sized + push right. Growing flex + margin-left:auto
+     was letting the action cluster paint over filter tabs. */
+  flex: 0 1 auto;
   justify-content: flex-end;
-  justify-self: end;
+  justify-self: unset;
+  margin-left: auto;
+  max-width: 100%;
   gap: 8px;
+}
+
+.df2-toolbar-filters {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+}
+
+.df2-toolbar-actions-cluster {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  justify-content: flex-end;
+}
+
+/*
+ * Dense GitOps toolbars (Schedules): never share one squeezed row with
+ * filter tabs. Search on its own row; filters + actions share the next
+ * with clear separation.
+ */
+.df2-toolbar:has(.df2-toolbar-actions-cluster) {
+  row-gap: 10px;
+}
+
+.df2-toolbar:has(.df2-toolbar-actions-cluster) .df2-toolbar-start {
+  flex: 1 1 100%;
+  max-width: 100%;
+}
+
+.df2-toolbar:has(.df2-toolbar-actions-cluster) .df2-toolbar-center {
+  flex: 1 1 auto;
+  justify-content: flex-start;
+  min-width: 0;
+}
+
+.df2-toolbar:has(.df2-toolbar-actions-cluster) .df2-toolbar-end {
+  flex: 0 1 auto;
+  margin-left: auto;
+  max-width: 100%;
+  justify-content: flex-end;
+}
+
+.df2-toolbar:has(.df2-toolbar-actions-cluster) .df2-toolbar-search {
+  width: min(100%, 420px);
+}
+
+.df2-toolbar-gitops-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  height: var(--df-toolbar-h, 38px);
+  padding: 0 8px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: var(--df-radius-md, 8px);
+  background: #fff;
+  color: #475569;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+
+.df2-toolbar-gitops-toggle input {
+  margin: 0;
+  accent-color: var(--df-brand, #0d9488);
+}
+
+.df2-toolbar-gitops-toggle:hover {
+  border-color: #cbd5e1;
+  color: #0f172a;
 }
 
 .df2-toolbar-search {
@@ -3544,19 +3630,18 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.25);
 }
 
-/* One shared filter cluster — oval pill, single row (Airbyte / Job Theater pattern) */
-.df2-filter-bar,
-.df2-toolbar-filters {
+/* One shared filter cluster — rectangular segment (matches Destination mode toggle) */
+.df2-filter-bar {
   display: inline-flex;
   align-items: center;
   flex-wrap: nowrap;
   gap: 2px;
   height: var(--df-toolbar-h, 38px);
   min-height: var(--df-toolbar-h, 38px);
-  max-width: min(960px, 72vw);
-  padding: 4px;
+  max-width: min(960px, 100%);
+  padding: 3px;
   border: 1px solid var(--df-border, #e2e8f0);
-  border-radius: 999px;
+  border-radius: var(--df-radius-md, 8px);
   background: #f1f5f9;
   overflow-x: auto;
   overflow-y: hidden;
@@ -3631,9 +3716,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   height: calc(var(--df-toolbar-h, 38px) - 6px) !important;
   min-height: calc(var(--df-toolbar-h, 38px) - 6px) !important;
   margin: 0 !important;
-  padding: 0 14px !important;
+  padding: 0 12px !important;
   border: 0 !important;
-  border-radius: 999px !important;
+  border-radius: var(--df-radius-sm, 6px) !important;
   font-size: 12.5px !important;
   font-weight: 600 !important;
   line-height: 1 !important;
@@ -3771,19 +3856,48 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   white-space: nowrap;
 }
 
-/* Narrow screens: keep ONE row, allow horizontal scroll — never stack to column */
+/* Dense GitOps + narrow: stack filters above actions; never overlap */
 @media (max-width: 900px) {
-  .df2-toolbar {
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    overflow-x: auto;
+  .df2-toolbar-search {
+    width: min(100%, 280px);
   }
 
-  .df2-toolbar-search {
-    width: 180px;
+  .df2-toolbar-start {
+    flex: 1 1 100%;
   }
 
   .df2-toolbar-filters {
-    max-width: none;
+    max-width: 100%;
+  }
+
+  .df2-toolbar-end {
+    justify-content: flex-start;
+  }
+
+  .df2-toolbar:has(.df2-toolbar-actions-cluster) .df2-toolbar-center,
+  .df2-toolbar:has(.df2-toolbar-actions-cluster) .df2-toolbar-end {
+    flex: 1 1 100%;
+    margin-left: 0;
+    justify-content: flex-start;
+  }
+
+  .df2-toolbar:has(.df2-toolbar-actions-cluster) .df2-toolbar-actions-cluster {
+    width: 100%;
+    justify-content: flex-start;
+  }
+}
+
+/* Other toolbars: wrap actions under filters on laptop widths */
+@media (max-width: 1100px) {
+  .df2-toolbar:not(:has(.df2-toolbar-actions-cluster)) .df2-toolbar-end {
+    flex: 1 1 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  .df2-toolbar:not(:has(.df2-toolbar-actions-cluster)) .df2-toolbar-center {
+    flex: 1 1 auto;
+    justify-content: flex-start;
   }
 }
 
@@ -9180,7 +9294,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-badge,
 .df2-app [class*="df2-badge-"] {
-  border-radius: 999px;
+  border-radius: var(--df-radius-sm, 6px);
   font-weight: 650;
   letter-spacing: 0.01em;
 }
@@ -10721,6 +10835,60 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 0;
   display: grid;
   gap: var(--df-space-3, 12px);
+}
+
+/* Compact transform rows — same interaction model as Schedules */
+.df2-xform-rows .df2-pipeline-rows-head,
+.df2-xform-rows .df2-pipeline-row {
+  grid-template-columns: auto auto minmax(0, 1.6fr) minmax(100px, 1fr) 88px 72px 88px 40px;
+}
+
+.df2-xform-drawer-models,
+.df2-xform-drawer-layers {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.df2-xform-drawer-models li,
+.df2-xform-drawer-layers li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-surface-subtle, #f8fafc);
+  font-size: 12px;
+}
+
+.df2-xform-drawer-layers {
+  list-style: none;
+}
+
+.df2-xform-drawer-layers li span:first-child {
+  font-weight: 700;
+  color: var(--df-text-secondary, #64748b);
+  min-width: 28px;
+}
+
+@media (max-width: 900px) {
+  .df2-xform-rows .df2-pipeline-rows-head {
+    display: none;
+  }
+
+  .df2-xform-rows .df2-pipeline-row {
+    grid-template-columns: auto auto minmax(0, 1fr) auto 40px;
+  }
+
+  .df2-xform-rows .df2-pipeline-row-cadence,
+  .df2-xform-rows .df2-pipeline-row-sync {
+    display: none;
+  }
 }
 
 .df2-xform-card {

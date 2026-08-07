@@ -248,6 +248,13 @@
   color: var(--df-text-primary, #0f172a);
 }
 
+/* Active when left nav is expanded — same language as IDE layout toggles. */
+.df2-app:not(.df2-sidebar-nav-compact) .df2-sidebar-collapse-btn[aria-pressed="true"] {
+  color: var(--df-brand, #0d9488);
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 35%, #e2e8f0);
+  background: var(--df-brand-muted, #f0fdfa);
+}
+
 /* ─── User footer (Cursor-style) ─── */
 .df2-sidebar-user {
   display: flex;

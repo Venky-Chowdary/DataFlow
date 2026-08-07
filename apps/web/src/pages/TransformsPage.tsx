@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { SectionLoader } from "../components/LoadingState";
+import { TransformDetailDrawer } from "../components/TransformDetailDrawer";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -22,7 +23,6 @@ import {
   type TransformProject,
   type TransformRunResult,
 } from "../lib/api";
-import { formatSeconds } from "../lib/phaseProfile";
 import type { Connector } from "../lib/types";
 
 interface TransformsPageProps {
@@ -67,7 +67,11 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
   const [preview, setPreview] = useState<TransformPlanPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [lastRun, setLastRun] = useState<TransformRunResult | null>(null);
+  const [lastRunProjectId, setLastRunProjectId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [resumeDrawerAfterEdit, setResumeDrawerAfterEdit] = useState(false);
 
   const destConnectors = useMemo(
     () =>
@@ -109,10 +113,25 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
     [connectors],
   );
 
+  const selectedProject = useMemo(
+    () => projects.find((p) => p.id === selectedId) ?? null,
+    [projects, selectedId],
+  );
+
+  const openDrawer = (id: string) => {
+    setSelectedId(id);
+    setDrawerOpen(true);
+  };
+
+  const closeDrawer = () => {
+    setDrawerOpen(false);
+  };
+
   const openCreate = () => {
+    setResumeDrawerAfterEdit(false);
+    closeDrawer();
     setEditing(EMPTY_DRAFT());
     setPreview(null);
-    setLastRun(null);
   };
 
   const openEdit = (project: TransformProject) => {
@@ -121,7 +140,14 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
       models: project.models.length ? project.models.map((m) => ({ ...m })) : [EMPTY_MODEL()],
     });
     setPreview(null);
-    setLastRun(null);
+  };
+
+  const cancelEdit = () => {
+    const reopenId = resumeDrawerAfterEdit ? editing?.id ?? selectedId : null;
+    setEditing(null);
+    setPreview(null);
+    setResumeDrawerAfterEdit(false);
+    if (reopenId) openDrawer(reopenId);
   };
 
   const updateModel = (index: number, patch: Partial<TransformModelDef>) => {
@@ -199,12 +225,19 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
           expected_version: editing.version ?? 0,
         });
         toast({ title: "Transform updated.", tone: "success" });
+        const reopenId = editing.id;
+        setEditing(null);
+        setResumeDrawerAfterEdit(false);
+        await load();
+        openDrawer(reopenId);
       } else {
-        await createTransformProject(body);
+        const created = await createTransformProject(body);
         toast({ title: "Transform created.", tone: "success" });
+        setEditing(null);
+        setResumeDrawerAfterEdit(false);
+        await load();
+        openDrawer(created.id);
       }
-      setEditing(null);
-      await load();
     } catch (err) {
       toast({ title: err instanceof Error ? err.message : "Could not save transform", tone: "error" });
     } finally {
@@ -224,6 +257,14 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
       await deleteTransformProject(project.id);
       toast({ title: "Transform deleted.", tone: "success" });
       if (editing?.id === project.id) setEditing(null);
+      if (selectedId === project.id) {
+        setDrawerOpen(false);
+        setSelectedId(null);
+      }
+      if (lastRunProjectId === project.id) {
+        setLastRun(null);
+        setLastRunProjectId(null);
+      }
       await load();
     } catch (err) {
       toast({ title: err instanceof Error ? err.message : "Could not delete transform", tone: "error" });
@@ -256,6 +297,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
     try {
       const result = await runTransformProject(project.id, { dryRun });
       setLastRun(result);
+      setLastRunProjectId(project.id);
       if (result.status === "success") {
         toast({
           title: dryRun ? "Dry run complete" : "Models built",
@@ -285,7 +327,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
   return (
     <PageShell
       title="Transforms"
-      description="Post-load SQL models that run at the destination after a transfer lands."
+      description="Post-load SQL models that run at the destination after a transfer lands — open a row for Dry run, Run, Export, or Edit."
     >
       <PageFrame>
         {editing ? (
@@ -294,7 +336,7 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
             subtitle="SELECT models · runner materializes VIEW / TABLE / incremental MERGE."
             actions={
               <>
-                <Button variant="ghost" onClick={() => setEditing(null)} disabled={saving}>
+                <Button variant="ghost" onClick={cancelEdit} disabled={saving}>
                   Cancel
                 </Button>
                 <Button
@@ -464,89 +506,110 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
                 page
               />
             ) : (
-              <ul className="df2-xform-list">
-                {filtered.map((project) => (
-                  <li key={project.id} className="df2-xform-card">
-                    <div className="df2-xform-card-head">
-                      <div>
-                        <h3>{project.name}</h3>
-                        <p>
+              <div className="df2-pipeline-rows df2-xform-rows" role="list" aria-label="Transforms">
+                <div className="df2-pipeline-rows-head df2-xform-rows-head" aria-hidden>
+                  <span className="df2-pipeline-rows-head-name">Transform</span>
+                  <span>Destination</span>
+                  <span>Models</span>
+                  <span>Trigger</span>
+                  <span>Status</span>
+                  <span />
+                </div>
+                {filtered.map((project) => {
+                  const modelCount = project.models.length;
+                  const trigger = project.run_after_transfer
+                    ? project.trigger_tables.length
+                      ? project.trigger_tables.join(", ")
+                      : "Any table"
+                    : "Manual";
+                  return (
+                    <div
+                      key={project.id}
+                      className={[
+                        "df2-pipeline-row",
+                        "df2-xform-row",
+                        "df2-card-interactive",
+                        project.enabled ? "is-active" : "is-paused",
+                        drawerOpen && selectedId === project.id ? "selected" : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" ")}
+                      role="button"
+                      tabIndex={0}
+                      aria-current={drawerOpen && selectedId === project.id ? true : undefined}
+                      onClick={() => openDrawer(project.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.preventDefault();
+                          openDrawer(project.id);
+                        }
+                      }}
+                    >
+                      <span
+                        className={`df2-health-dot ${project.enabled ? "ok" : "err"}`}
+                        aria-hidden
+                        title={project.enabled ? "Enabled" : "Disabled"}
+                      />
+                      <span className="df2-pipeline-row-icons" aria-hidden>
+                        <DtIcon name="layers" size={16} />
+                      </span>
+                      <div className="df2-pipeline-row-identity">
+                        <span className="df2-pipeline-row-name">{project.name}</span>
+                        <span className="df2-pipeline-row-meta">
                           v{project.version ?? 0}
-                          {" · "}
-                          {connectorName(project.destination_connector_id)}
                           {project.schema ? ` · ${project.schema}` : ""}
-                          {project.run_after_transfer
-                            ? project.trigger_tables.length
-                              ? ` · auto on ${project.trigger_tables.join(", ")}`
-                              : " · auto after every transfer"
-                            : " · manual only"}
-                        </p>
+                        </span>
                       </div>
-                      <div className="df2-xform-card-actions">
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void handleRun(project, true)}
-                          loading={runningId === project.id}
-                        >
-                          Dry run
-                        </Button>
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          onClick={() => void handleRun(project, false)}
-                          loading={runningId === project.id}
-                        >
-                          Run now
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void handleExportDbt(project)}
-                        >
-                          Export dbt
-                        </Button>
-                        <Button variant="ghost" size="sm" onClick={() => openEdit(project)}>
-                          Edit
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => void handleDelete(project)}
-                        >
-                          Delete
-                        </Button>
-                      </div>
+                      <span className="df2-pipeline-row-cadence" title={project.destination_connector_id}>
+                        {connectorName(project.destination_connector_id)}
+                      </span>
+                      <span className="df2-pipeline-row-sync">
+                        {modelCount} model{modelCount === 1 ? "" : "s"}
+                      </span>
+                      <span className="df2-pipeline-row-signal" title={trigger}>
+                        {project.run_after_transfer ? "Auto" : "Manual"}
+                      </span>
+                      <span
+                        className={`df2-badge ${project.enabled ? "df2-badge-live" : "df2-badge-muted"}`}
+                      >
+                        {project.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                      <span className="df2-pipeline-row-open" aria-hidden>
+                        <DtIcon name="chevron-right" size={16} />
+                      </span>
                     </div>
-                    <ul className="df2-xform-card-models">
-                      {project.models.map((m) => (
-                        <li key={m.name}>
-                          <DtIcon name="layers" size={12} />
-                          <code>{m.name}</code>
-                          <span>{m.materialization}</span>
-                          {(m.refs?.length ?? 0) > 0 && (
-                            <span className="df2-xform-refs">
-                              → {m.refs!.join(", ")}
-                            </span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                    {project.plan?.layers && (
-                      <p className="df2-xform-layers">
-                        Plan:{" "}
-                        {project.plan.layers
-                          .map((layer, i) => `L${i + 1} ${layer.join(", ")}`)
-                          .join(" · ")}
-                      </p>
-                    )}
-                  </li>
-                ))}
-              </ul>
+                  );
+                })}
+              </div>
             )}
-
-            {lastRun && <RunResultPanel result={lastRun} />}
           </>
+        )}
+
+        {!editing && (
+          <TransformDetailDrawer
+            open={drawerOpen && Boolean(selectedProject)}
+            project={selectedProject}
+            destinationName={
+              selectedProject
+                ? connectorName(selectedProject.destination_connector_id)
+                : undefined
+            }
+            running={Boolean(selectedProject && runningId === selectedProject.id)}
+            lastRun={
+              selectedProject && lastRunProjectId === selectedProject.id ? lastRun : null
+            }
+            onClose={closeDrawer}
+            onDryRun={() => selectedProject && void handleRun(selectedProject, true)}
+            onRun={() => selectedProject && void handleRun(selectedProject, false)}
+            onExportDbt={() => selectedProject && void handleExportDbt(selectedProject)}
+            onEdit={() => {
+              if (!selectedProject) return;
+              setResumeDrawerAfterEdit(true);
+              closeDrawer();
+              openEdit(selectedProject);
+            }}
+            onDelete={() => selectedProject && void handleDelete(selectedProject)}
+          />
         )}
       </PageFrame>
     </PageShell>
@@ -658,30 +721,5 @@ function PlanPreview({ preview }: { preview: TransformPlanPreview }) {
         </article>
       ))}
     </div>
-  );
-}
-
-function RunResultPanel({ result }: { result: TransformRunResult }) {
-  return (
-    <PageSection
-      title="Last run"
-      subtitle={`${result.status} · ${formatSeconds(result.seconds)} · ${result.model_count} model(s)`}
-    >
-      {result.error && <p className="df2-xform-preview-error">{result.error}</p>}
-      <ul className="df2-xform-run-list">
-        {result.models.map((m) => (
-          <li key={m.name} className={`is-${m.status}`}>
-            <DtIcon
-              name={m.status === "success" ? "check" : m.status === "failed" ? "alert" : "minus"}
-              size={13}
-            />
-            <code>{m.name}</code>
-            <span>{m.materialization}</span>
-            <span>{formatSeconds(m.seconds)}</span>
-            {m.error && <em>{m.error}</em>}
-          </li>
-        ))}
-      </ul>
-    </PageSection>
   );
 }

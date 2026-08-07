@@ -706,10 +706,10 @@ body {
 .df2-tabs {
   display: flex;
   gap: 4px;
-  padding: 4px;
+  padding: 3px;
   margin-bottom: 16px;
   border: 1px solid var(--df-line);
-  border-radius: 10px;
+  border-radius: var(--df-radius-md, 8px);
   background: #f0f3f6;
   width: fit-content;
   max-width: 100%;
@@ -720,7 +720,7 @@ body {
   height: 34px;
   padding: 0 14px;
   border: none;
-  border-radius: 7px;
+  border-radius: var(--df-radius-sm, 6px);
   background: transparent;
   color: var(--df-ink-secondary);
   font-size: 13px;
@@ -1496,7 +1496,7 @@ body {
   display: inline-flex;
   align-items: center;
   padding: 3px 8px;
-  border-radius: 999px;
+  border-radius: var(--df-radius-sm, 6px);
   font-size: 11px;
   font-weight: 600;
 }

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector } from "../../lib/types";
@@ -43,6 +43,7 @@ export function DestinationPicker({
   const [typeFilter, setTypeFilter] = useState("all");
   const [connectorQuery, setConnectorQuery] = useState("");
   const [engineQuery, setEngineQuery] = useState("");
+  const listRef = useRef<HTMLDivElement>(null);
 
   const filtered = useMemo(() => {
     const cq = connectorQuery.trim().toLowerCase();
@@ -87,6 +88,19 @@ export function DestinationPicker({
     destType && !FEATURED_DEST_IDS.includes(destType as (typeof FEATURED_DEST_IDS)[number]),
   );
 
+  const showMoreEngines = otherEngines.length > 0;
+  /** When searching, surface matches as a compact list; otherwise only a short peek. */
+  const moreEnginesVisible = query ? otherEngines : otherEngines.slice(0, 6);
+
+  const focusSavedConnections = () => {
+    setEngineQuery("");
+    listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+    const first = listRef.current?.querySelector<HTMLButtonElement>(
+      ".df2-dest-connector-card:not(.df2-dest-connector-manual)",
+    );
+    first?.focus();
+  };
+
   return (
     <div className={`df2-dest-picker${manualActive ? " is-custom-engine" : ""}`}>
       <div className="df2-dest-picker-toolbar">
@@ -118,7 +132,12 @@ export function DestinationPicker({
         )}
       </div>
 
-      <div className="df2-dest-connector-list" role="radiogroup" aria-label="Destination connectors">
+      <div
+        ref={listRef}
+        className="df2-dest-connector-list"
+        role="radiogroup"
+        aria-label="Destination connectors"
+      >
         {filtered.map((c) => (
           <button
             key={c.id}
@@ -199,7 +218,39 @@ export function DestinationPicker({
                 ))}
               </select>
             </label>
+            {connectors.length > 0 && (
+              <button
+                type="button"
+                className="df2-dest-engine-back"
+                onClick={focusSavedConnections}
+                title="Back to saved connections"
+              >
+                <DtIcon name="chevron-left" size={12} />
+                <span>Saved</span>
+              </button>
+            )}
           </div>
+
+          <label className="df2-dest-engine-search">
+            <DtIcon name="search" size={12} />
+            <input
+              type="search"
+              value={engineQuery}
+              onChange={(e) => setEngineQuery(e.target.value)}
+              placeholder="Search engines…"
+              aria-label="Search destination engines"
+            />
+            {engineQuery ? (
+              <button
+                type="button"
+                className="df2-dest-engine-search-clear"
+                aria-label="Clear engine search"
+                onClick={() => setEngineQuery("")}
+              >
+                <DtIcon name="x" size={11} />
+              </button>
+            ) : null}
+          </label>
 
           <div className="df2-dest-engine-grid" role="radiogroup" aria-label="Featured destination engines">
             {featuredEngines.map((d) => (
@@ -218,17 +269,40 @@ export function DestinationPicker({
             ))}
           </div>
 
-          {(otherEngines.length > 0 || engineQuery) && (
-            <label className="df2-dest-engine-search">
-              <DtIcon name="search" size={12} />
-              <input
-                type="search"
-                value={engineQuery}
-                onChange={(e) => setEngineQuery(e.target.value)}
-                placeholder="Filter featured engines…"
-                aria-label="Filter featured destination engines"
-              />
-            </label>
+          {featuredEngines.length === 0 && query ? (
+            <p className="df2-label-hint df2-dest-engine-selected-hint" role="status">
+              No featured matches — try the list below or the engine dropdown.
+            </p>
+          ) : null}
+
+          {showMoreEngines && (
+            <div className="df2-dest-engine-more" aria-label="More destination engines">
+              <div className="df2-dest-engine-more-head">
+                <span className="df2-dest-engine-hint">
+                  {query ? `Matches (${otherEngines.length})` : "More engines"}
+                </span>
+                {!query && otherEngines.length > moreEnginesVisible.length ? (
+                  <span className="df2-label-hint">
+                    +{otherEngines.length - moreEnginesVisible.length} in dropdown
+                  </span>
+                ) : null}
+              </div>
+              <div className="df2-dest-engine-more-grid" role="list">
+                {moreEnginesVisible.map((d) => (
+                  <button
+                    key={d.id}
+                    type="button"
+                    role="listitem"
+                    className={`df2-dest-engine-tile${destType === d.id ? " active" : ""}`}
+                    onClick={() => onSelectType(d.id)}
+                    title={d.label}
+                  >
+                    <ConnectorIcon id={d.id} size={14} />
+                    <span>{d.label}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
           )}
 
           {selectedOutsideFeatured && destType && (

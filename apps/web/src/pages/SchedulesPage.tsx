@@ -410,7 +410,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           searchPlaceholder="Search schedules by name, table, cadence, or sync mode…"
           filters={
             schedules.length > 0 ? (
-              <FilterBar variant="inline" ariaLabel="Filter schedules">
+              <FilterBar ariaLabel="Filter schedules">
                 {showForm ? (
                   <span className="df2-toolbar-status" role="status">
                     {editing ? "Editing schedule" : "Creating schedule"}
@@ -448,43 +448,44 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     if (f) void handleImportFile(f);
                   }}
                 />
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  loading={gitopsBusy}
-                  onClick={() => void handleExportFleet()}
-                  title="Export schedules + contracts as dataflow.yaml"
-                >
-                  Export YAML
-                </Button>
-                <label
-                  className="df2-policy-toggle"
-                  title="CD/staging: refuse schedules unless contract_id is SIGNED"
-                  style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", margin: 0 }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={gitopsRequireSigned}
-                    onChange={(e) => setGitopsRequireSigned(e.target.checked)}
-                  />
-                  <span style={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>Require signed</span>
-                </label>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  loading={gitopsBusy}
-                  onClick={() => importInputRef.current?.click()}
-                  title={
-                    gitopsRequireSigned
-                      ? "Plan then apply with signed-contract gate"
-                      : "Plan then apply a dataflow.yaml manifest"
-                  }
-                >
-                  Import YAML
-                </Button>
-                <Button size="sm" variant="primary" onClick={openCreate}>
-                  New pipeline
-                </Button>
+                <div className="df2-toolbar-actions-cluster" role="group" aria-label="Schedule actions">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    loading={gitopsBusy}
+                    onClick={() => void handleExportFleet()}
+                    title="Export schedules + contracts as dataflow.yaml"
+                  >
+                    Export YAML
+                  </Button>
+                  <label
+                    className="df2-toolbar-gitops-toggle"
+                    title="CD/staging: refuse schedules unless contract_id is SIGNED"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={gitopsRequireSigned}
+                      onChange={(e) => setGitopsRequireSigned(e.target.checked)}
+                    />
+                    <span>Require signed</span>
+                  </label>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    loading={gitopsBusy}
+                    onClick={() => importInputRef.current?.click()}
+                    title={
+                      gitopsRequireSigned
+                        ? "Plan then apply with signed-contract gate"
+                        : "Plan then apply a dataflow.yaml manifest"
+                    }
+                  >
+                    Import YAML
+                  </Button>
+                  <Button size="sm" variant="primary" onClick={openCreate}>
+                    New pipeline
+                  </Button>
+                </div>
               </>
             ) : undefined
           }
