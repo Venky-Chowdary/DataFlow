@@ -88,31 +88,42 @@ def test_salesforce_empty_describe_refuses_map_only():
     assert "no fields" in (result.error or "").lower()
 
 
-def test_hubspot_empty_describe_refuses_map_only():
-    from connectors.hubspot_writer import write_mapped_rows
+def test_hubspot_describe_properties_preserves_enumeration_options():
+    """Properties API options must survive Describe → ENUM carrier (not VARCHAR)."""
+    from connectors.hubspot import describe_properties
+    from connectors.hubspot_writer import hubspot_property_to_carrier
+    from unittest.mock import MagicMock, patch
 
-    with patch("connectors.hubspot.describe_properties", return_value=[]):
-        result = write_mapped_rows(
-            host="api.hubapi.com",
-            port=443,
-            database="",
-            username="",
-            password="",
-            schema="",
-            connection_string="",
-            ssl=True,
-            table_name="contacts",
-            headers=["email"],
-            data_rows=[["a@b.com"]],
-            mappings=[
-                {"source": "email", "target": "email", "target_type": "VARCHAR"}
-            ],
-            column_types={"email": "VARCHAR"},
-            api_key="pat-xxx",
-            error_policy="quarantine",
+    payload = {
+        "results": [
+            {
+                "name": "lifecyclestage",
+                "type": "enumeration",
+                "fieldType": "select",
+                "label": "Lifecycle Stage",
+                "options": [
+                    {"label": "Lead", "value": "lead", "hidden": False},
+                    {"label": "Customer", "value": "customer", "hidden": False},
+                ],
+            }
+        ]
+    }
+    resp = MagicMock()
+    resp.json.return_value = payload
+    resp.raise_for_status = MagicMock()
+
+    with patch("connectors.hubspot.request", return_value=resp):
+        props = describe_properties(
+            {"api_key": "pat-xxx", "table": "contacts"},
+            "contacts",
         )
-    assert result.ok is False
-    assert "no properties" in (result.error or "").lower()
+    assert len(props) == 1
+    assert isinstance(props[0].get("options"), list)
+    assert len(props[0]["options"]) == 2
+    carrier = hubspot_property_to_carrier(props[0])
+    assert carrier.startswith("ENUM(")
+    assert "lead" in carrier and "customer" in carrier
+    assert "VARCHAR" not in carrier
 
 
 def test_pgvector_live_embedding_dim_parses_format_type():
