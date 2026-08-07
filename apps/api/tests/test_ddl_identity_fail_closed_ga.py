@@ -40,3 +40,17 @@ def test_enforce_ddl_identity_fails_without_preflight_when_mappings_present():
     )
     assert err is not None
     assert "preflight" in err.lower() or "validate" in err.lower()
+
+
+def test_enforce_ddl_identity_accepts_stamped_hash_without_preflight():
+    from services.conversion_contract import approved_mapping_ddl_fingerprint
+
+    maps = [{"source": "a", "target": "a", "target_type": "TEXT"}]
+    fp = approved_mapping_ddl_fingerprint(maps, dest_db="sqlite")
+    err = _enforce_ddl_identity(
+        None,
+        maps,
+        dest_db="sqlite",
+        approved_ddl_identity_hash=fp,
+    )
+    assert err is None

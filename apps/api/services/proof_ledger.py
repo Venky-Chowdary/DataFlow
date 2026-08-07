@@ -4,7 +4,7 @@ Publishes honest metrics:
   - unique transfer-live drivers (not catalog alias inflation)
   - PRODUCTION_SKU route inventory (committed CI set)
   - live fidelity proofs under ``data/proofs/``
-  - competitive integrity framing vs Airbyte (quarantine, checksum, no silent drop)
+  - integrity framing vs industry ELT baselines (quarantine, checksum, no silent drop)
 
 This is NOT a throughput marketing page. Scale benchmarks stay in
 ``benchmarks.cloud_scale``.
@@ -77,7 +77,9 @@ FIDELITY_RECORDS = [
         "id": "5",
         "name": "",
         "amount": "0",
-        "active": "yes",
+        # Strict boolean wire only (true/false/1/0) — informal yes/no is
+        # quarantine-only by coerce_boolean_wire (never invent True).
+        "active": "true",
         "created_at": "2024-03-01T00:00:00+00:00",
         "payload": "[]",
         "note": "empty-name",
@@ -117,31 +119,31 @@ def _competitive_integrity() -> list[dict[str, Any]]:
         {
             "dimension": "Silent data loss",
             "dataflow": "Forbidden — bad cells quarantine or fail-closed; never dropped without a record",
-            "airbyte": "Sync can succeed while rows are truncated or type-failed depending on destination",
+            "industry_elt": "Many ELT syncs can succeed while rows are truncated or type-failed depending on destination",
             "proof": "quarantine_panel + rejected_details on WriteResult",
         },
         {
             "dimension": "Preflight gates",
             "dataflow": "8 hard gates + policy gates before write (schema, mapping, dry-run, DDL, capacity, recon)",
-            "airbyte": "Schema discovery + sync; limited typed dry-run integrity before commit",
+            "industry_elt": "Schema discovery + sync; limited typed dry-run integrity before commit",
             "proof": "preflight_proof_bundle + Validate Studio",
         },
         {
             "dimension": "Post-write reconciliation",
             "dataflow": "Gate-8 checksum / key-set reconcile with fail-closed strict mode",
-            "airbyte": "Row counts / destination metrics; not content-addressed fingerprints by default",
+            "industry_elt": "Row counts / destination metrics; not content-addressed fingerprints by default",
             "proof": "services.reconciliation + Job Theater",
         },
         {
             "dimension": "Catalog honesty",
             "dataflow": "Certified / source-only / planned tiers — aliases do not inflate unique drivers",
-            "airbyte": "Large connector catalog with varying production depth per source",
+            "industry_elt": "Large connector catalogs with varying production depth per source",
             "proof": "certification_tier + test_catalog_honesty",
         },
         {
             "dimension": "Type fidelity fixture",
             "dataflow": "Unicode, nulls, decimals, JSON, bool forms proven CSV→SQLite (and SKU matrix)",
-            "airbyte": "Per-connector integration tests; not a single customer-visible fidelity ledger",
+            "industry_elt": "Per-connector integration tests; not a single customer-visible fidelity ledger",
             "proof": "proof_ledger.run_fidelity_proof → data/proofs/",
         },
     ]
@@ -193,7 +195,7 @@ def build_proof_ledger() -> dict[str, Any]:
         },
         "production_sku": sku_routes,
         "recent_proofs": proofs,
-        "vs_airbyte": _competitive_integrity(),
+        "integrity_comparison": _competitive_integrity(),
         "how_to_verify": [
             "Run POST /api/v1/workspace/proofs/fidelity to execute the rich-type CSV→SQLite proof.",
             "Open Job Theater after a transfer — quarantine rows and Gate-8 checksum must match.",
@@ -227,7 +229,23 @@ def run_fidelity_proof() -> dict[str, Any]:
             connection_string=str(db_path),
             table="fidelity",
         )
+        mappings = [{"source": c, "target": c} for c in FIDELITY_COLUMNS]
+        from services.conversion_contract import approved_mapping_ddl_fingerprint
+
+        ddl_fp = approved_mapping_ddl_fingerprint(mappings, dest_db="sqlite")
         engine = UniversalTransferEngine()
+        # Job must be a real transfer_jobs ObjectId — synthetic ledger-* ids
+        # fail `_as_object_id` and checkpoint persistence fail-closes.
+        from services.mongodb_service import get_mongodb_service
+
+        job_id = get_mongodb_service().create_transfer_job(
+            {
+                "name": "proof-ledger-fidelity-csv-sqlite",
+                "source_name": "fidelity.csv",
+                "destination_name": "sqlite:fidelity",
+                "operation": "upload",
+            }
+        )
         t0 = time.perf_counter()
         result = engine.execute_tracked(
             TransferRequest(
@@ -238,9 +256,12 @@ def run_fidelity_proof() -> dict[str, Any]:
                 sync_mode="full_refresh_overwrite",
                 skip_preflight=True,
                 validation_mode="strict",
-                mappings=[{"source": c, "target": c} for c in FIDELITY_COLUMNS],
+                mappings=mappings,
+                # Skip full Validate gates for the ledger fixture, but still
+                # fail-closed on Map→DDL stamp drift (GA Module 12).
+                approved_ddl_identity_hash=ddl_fp,
             ),
-            job_id=f"ledger-fidelity-{uuid.uuid4().hex[:8]}",
+            job_id=job_id,
         )
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
 
@@ -289,7 +310,7 @@ def run_fidelity_proof() -> dict[str, Any]:
             "checks": [k for k, v in checks.items() if v],
             "check_detail": checks,
             "spot": spot,
-            "vs_airbyte": "Content-addressed fidelity on unicode/null/decimal/JSON — not a connect() ping",
+            "integrity_note": "Content-addressed fidelity on unicode/null/decimal/JSON — not a connect() ping",
         }
         out_path = PROOF_DIR / f"{run_id}-fidelity-csv-sqlite.json"
         out_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")

@@ -1475,10 +1475,13 @@ def map_columns(
             tgt_roles[t["name"]] = analyzed["semantic_role"]
             tgt_types[t["name"]] = t.get("inferred_type", "VARCHAR")
     elif target_columns:
+        # Names-only without typed introspect: never invent proven VARCHAR.
+        # Existing tables must reload schema before create_compatible_new.
+        names_only_existing = destination_table_exists is True
         for t in target_columns:
             analyzed = analyze_column(t, "VARCHAR", [])
             tgt_roles[t] = analyzed["semantic_role"]
-            tgt_types[t] = "VARCHAR"
+            tgt_types[t] = "" if names_only_existing else "VARCHAR"
 
     if not target_columns:
         # Empty targets are NOT automatically create-new. Only invent CREATE when
@@ -1692,6 +1695,29 @@ def map_columns(
                 continue
         # Prefer create-new text column over a lossy existing target (e.g. ObjectId → DECIMAL).
         if (not best_target or best_score < floor) and target_columns:
+            # Existing table + names-only (no typed schema) — refuse invent ADD COLUMN.
+            if destination_table_exists is True and not target_schemas:
+                mappings.append(
+                    {
+                        "source": source,
+                        "target": _semantic_form(source),
+                        "confidence": 0.55,
+                        "reasoning": (
+                            "Destination table exists but column types were not loaded — "
+                            "retry destination schema introspect before inventing ADD COLUMN "
+                            "or create-compatible carriers."
+                        ),
+                        "user_override": False,
+                        "source_type": src_types.get(source, "VARCHAR"),
+                        "target_type": src_types.get(source, "VARCHAR"),
+                        "assignment_strategy": "pending_dest_schema",
+                        "create_new": False,
+                        "requires_review": True,
+                        "alternatives": alternatives,
+                        "score_gap": 0.0,
+                    }
+                )
+                continue
             # Final gate: if any unused dest is a reasonable form match, map there
             # with review instead of inventing (avoids ph_number when phone exists).
             if near_tgt and near_ratio >= 0.50:

@@ -135,6 +135,9 @@ class TransferRequest:
     fk_risk_acknowledged: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
+    # Map→DDL fingerprint from Validate (or ledger proof). Required when
+    # skip_preflight + mappings so Execute still fail-closes on stamp drift.
+    approved_ddl_identity_hash: str = ""
 
     @property
     def operation(self) -> str:
@@ -283,6 +286,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "fk_risk_acknowledged": bool(request.fk_risk_acknowledged),
         "acknowledgment_actor": request.acknowledgment_actor or "",
         "acknowledgment_reason": request.acknowledgment_reason or "",
+        "approved_ddl_identity_hash": request.approved_ddl_identity_hash or "",
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -359,6 +363,9 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         fk_risk_acknowledged=bool(data.get("fk_risk_acknowledged")),
         acknowledgment_actor=str(data.get("acknowledgment_actor") or "").strip(),
         acknowledgment_reason=str(data.get("acknowledgment_reason") or "").strip(),
+        approved_ddl_identity_hash=str(
+            data.get("approved_ddl_identity_hash") or ""
+        ).strip(),
     )
 
 

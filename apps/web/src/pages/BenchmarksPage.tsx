@@ -151,7 +151,7 @@ export function BenchmarksPage() {
 
           {tab === "integrity" && (
             <>
-              <PageSection title="Why Datawrap beats Airbyte on integrity">
+              <PageSection title="Why integrity proofs beat connect() theater">
                 <p className="df2-page-benchmarks-intro">
                   Connection tests prove a socket opened. These proofs prove rows, types, quarantine, and
                   checksums survive the full write path — the bar for “any schema → anywhere.”
@@ -226,23 +226,23 @@ export function BenchmarksPage() {
                     )}
 
                     <div className="df2-page-benchmarks-section">
-                      <h3>Datawrap vs Airbyte — integrity dimensions</h3>
+                      <h3>Integrity dimensions vs industry ELT baselines</h3>
                       <div className="df2-page-benchmarks-table-wrap">
                         <table className="df2-page-benchmarks-table">
                           <thead>
                             <tr>
                               <th>Dimension</th>
                               <th>Datawrap</th>
-                              <th>Airbyte</th>
+                              <th>Industry ELT</th>
                               <th>Proof surface</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {ledger.vs_airbyte.map((row) => (
+                            {ledger.integrity_comparison.map((row) => (
                               <tr key={row.dimension}>
                                 <td><strong>{row.dimension}</strong></td>
                                 <td>{row.dataflow}</td>
-                                <td>{row.airbyte}</td>
+                                <td>{row.industry_elt}</td>
                                 <td><code>{row.proof}</code></td>
                               </tr>
                             ))}
@@ -353,7 +353,7 @@ export function BenchmarksPage() {
                 </div>
               </div>
               <p className="df2-page-benchmarks-intro">
-                Secondary to integrity: synthetic CSV → SQLite throughput vs public Fivetran / Airbyte / Stitch
+                Secondary to integrity: synthetic CSV → SQLite throughput vs illustrative mid-market ELT
                 baselines. Speed without quarantine and checksums is not a migration proof.
               </p>
 

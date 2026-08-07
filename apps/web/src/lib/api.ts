@@ -2995,10 +2995,10 @@ export type ProofLedger = {
     checks?: string[];
     elapsed_ms?: number;
   }[];
-  vs_airbyte: {
+  integrity_comparison: {
     dimension: string;
     dataflow: string;
-    airbyte: string;
+    industry_elt: string;
     proof: string;
   }[];
   how_to_verify: string[];
@@ -3017,7 +3017,7 @@ export type FidelityProofResult = {
   spot?: Record<string, unknown>;
   proof_id?: string;
   proof_file?: string;
-  vs_airbyte?: string;
+  integrity_note?: string;
 };
 
 export async function fetchProofLedger(): Promise<ProofLedger> {

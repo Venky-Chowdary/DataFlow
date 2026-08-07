@@ -1078,7 +1078,7 @@ def _introspect_bigquery(**kwargs) -> dict[str, Any]:
             out["warnings"] = [
                 "BigQuery PRIMARY KEY is NOT ENFORCED (optimizer metadata only) — "
                 "Validate will not invent write blockers; prove uniqueness with "
-                "pipeline tests (dbt unique / Gate-9 sample) before trusting merges."
+                "pipeline unique tests / Gate-9 sample before trusting merges."
             ]
             out["message"] = out["warnings"][0]
         return out

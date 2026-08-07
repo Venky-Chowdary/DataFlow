@@ -534,9 +534,70 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
         if physical:
-            tgt_types = overlay_physical_bind_types(
-                target_cols, tgt_types, physical
+            live_dest_types = resolve_mapping_dest_types(
+                target_cols,
+                mappings,
+                column_types,
+                logical_types=logical_types,
+                live_types=physical,
             )
+            carriers_differ = any(
+                str(dest_types.get(c) or "").strip().upper()
+                != str(live_dest_types.get(c) or "").strip().upper()
+                for c in target_cols
+            )
+            if carriers_differ:
+                # Rematerialize from source against live DDL (PG/MySQL-class invent fix).
+                dest_types = live_dest_types
+                target_types = [
+                    sqlite_type(dest_types.get(c, logical_types[i]))
+                    for i, c in enumerate(target_cols)
+                ]
+                mapped_rows, transform_errors, rejected_details = (
+                    build_mapped_rows_with_details(
+                        headers=headers,
+                        data_rows=data_rows,
+                        mappings=mappings,
+                        target_cols=target_cols,
+                        column_types=column_types,
+                        dest_types=dest_types,
+                        error_policy=policy,
+                        preserve_case=True,
+                        dest_kind="sqlite",
+                        destination_pk_columns=list(conflict_columns or []) or None,
+                        destination_column_nullability=_kwargs.get(
+                            "destination_column_nullability"
+                        ),
+                    )
+                )
+                tgt_types = [
+                    str(target_types[i] if i < len(target_types) else "")
+                    for i in range(len(target_cols))
+                ]
+                mapped_rows = apply_write_quarantine_matrix(
+                    mapped_rows,
+                    target_cols,
+                    tgt_types,
+                    rejected_details,
+                    policy,
+                    dialect_label="SQLite",
+                    mappings=list(mappings or []) or None,
+                )
+                sparse_rows = []
+                if write_mode == "upsert" and conflict_cols:
+                    mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+                else:
+                    from connectors.writer_common import (
+                        materialize_missing_as_null_for_dense_write,
+                    )
+
+                    mapped_rows = materialize_missing_as_null_for_dense_write(
+                        mapped_rows
+                    )
+            else:
+                tgt_types = overlay_physical_bind_types(
+                    target_cols, tgt_types, physical
+                )
 
         converted_rows = bind_sql_mapped_rows_with_quarantine(
             mapped_rows,

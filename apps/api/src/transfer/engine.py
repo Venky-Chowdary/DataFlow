@@ -354,26 +354,32 @@ def _enforce_ddl_identity(
     mappings: list,
     *,
     dest_db: str,
+    approved_ddl_identity_hash: str = "",
 ) -> str | None:
     """Module 12 / GA — fail closed when Map→DDL fingerprint drifts after Validate.
 
     Returns an error message when identity fails. When Validate preflight is
     present, a missing ``ddl_identity_hash`` also fails closed (no soft-skip).
 
-    Enterprise GA: mappings without a Validate preflight also fail closed —
-    never skip Map→DDL identity on a silent ``pf is None`` path.
+    Enterprise GA: mappings without a Validate preflight **or** an explicit
+    ``approved_ddl_identity_hash`` (stamped at Validate / ledger proof) fail
+    closed — never skip Map→DDL identity on a silent ``pf is None`` path.
     """
     has_maps = bool(mappings)
-    if not pf:
+    approved = ""
+    if pf:
+        approved = ((pf.get("proof_bundle") or {}).get("ddl_identity") or {}).get(
+            "ddl_identity_hash"
+        ) or ""
+    if not approved:
+        approved = (approved_ddl_identity_hash or "").strip()
+    if not pf and not approved:
         if has_maps:
             return (
                 "DDL identity requires Validate preflight before Execute — "
                 "refuse write without Map→DDL fingerprint (re-run Validate)."
             )
         return None
-    approved = ((pf.get("proof_bundle") or {}).get("ddl_identity") or {}).get(
-        "ddl_identity_hash"
-    ) or ""
     if not approved:
         return (
             "DDL identity fingerprint missing after Validate — refuse Execute "
@@ -2533,10 +2539,20 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            identity_maps = mappings
+            approved_hash = str(
+                getattr(request, "approved_ddl_identity_hash", "") or ""
+            )
+            # skip_preflight + stamped hash: identity is over the operator Map
+            # contract (request.mappings), not post-enrich stamps — Validate path
+            # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
+            if pf is None and approved_hash:
+                identity_maps = list(request.mappings or []) or mappings
             ddl_err = _enforce_ddl_identity(
                 pf,
-                mappings,
+                identity_maps,
                 dest_db=str(getattr(request.destination, "format", None) or ""),
+                approved_ddl_identity_hash=approved_hash,
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -3486,10 +3502,20 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            identity_maps = mappings
+            approved_hash = str(
+                getattr(request, "approved_ddl_identity_hash", "") or ""
+            )
+            # skip_preflight + stamped hash: identity is over the operator Map
+            # contract (request.mappings), not post-enrich stamps — Validate path
+            # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
+            if pf is None and approved_hash:
+                identity_maps = list(request.mappings or []) or mappings
             ddl_err = _enforce_ddl_identity(
                 pf,
-                mappings,
+                identity_maps,
                 dest_db=str(getattr(request.destination, "format", None) or ""),
+                approved_ddl_identity_hash=approved_hash,
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -4187,10 +4213,20 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
+            identity_maps = mappings
+            approved_hash = str(
+                getattr(request, "approved_ddl_identity_hash", "") or ""
+            )
+            # skip_preflight + stamped hash: identity is over the operator Map
+            # contract (request.mappings), not post-enrich stamps — Validate path
+            # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
+            if pf is None and approved_hash:
+                identity_maps = list(request.mappings or []) or mappings
             ddl_err = _enforce_ddl_identity(
                 pf,
-                mappings,
+                identity_maps,
                 dest_db=str(getattr(request.destination, "format", None) or ""),
+                approved_ddl_identity_hash=approved_hash,
             )
             if ddl_err:
                 mongo.update_job_status(
