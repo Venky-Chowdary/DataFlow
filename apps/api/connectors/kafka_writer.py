@@ -313,25 +313,16 @@ def write_mapped_rows(
     # JSON wire still serializes via json_default, but quarantine must catch
     # DECIMAL/BOOLEAN/BINARY/VARCHAR(n) unfit before produce invents bad events
     # (Schema Registry + compaction consumers assume typed fidelity).
-    studio_err: str | None = None
-    if isinstance(live_dest, dict) and live_dest:
-        from connectors.saas_common import merge_saas_live_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
-        dest_types, studio_err = merge_saas_live_types(
-            {},
-            list(target_cols or []),
-            studio_types=live_dest,
-            product="Kafka",
-        )
-    else:
-        dest_types = resolve_mapping_dest_types(
-            target_cols,
-            mappings,
-            column_types,
-            logical_types=logical_types,
-            live_types=None,
-            default="VARCHAR",
-        )
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="Kafka",
+    )
 
     registered_schema_id: int | None = None
     transform_errors: list[str] = []

@@ -371,15 +371,16 @@ def write_mapped_rows(
         "ssl": ssl,
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types")
-    dest_types = resolve_mapping_dest_types(
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        live_types=live_dest if isinstance(live_dest, dict) else None,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="Redis",
     )
 
     # Connect before Map bind — sample existing JSON docs under prefix so live
@@ -392,6 +393,17 @@ def write_mapped_rows(
     studio_live = isinstance(live_dest, dict) and all(
         str(live_dest.get(c) or "").strip() for c in mapped_data_cols
     )
+    # Empty prefix: partial Studio must not soft-bind Map VARCHAR.
+    if studio_err and key_hint == 0:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=prefix,
+            target_schema=f"db{database or 0}",
+            checksum="",
+            chunks_completed=0,
+            error=studio_err,
+        )
     if key_hint < 0 and mapped_data_cols:
         # Probe failure must never take the empty-prefix Map path — even when
         # Studio typed all fields (unknown populated keyspace invent cliff).

@@ -257,15 +257,16 @@ def write_mapped_rows(
     collection_name = sanitize_identifier(table_name, preserve_case=True)
     db_name = database or schema or "test"
     # Prefer Studio-probed live field types over Map stamps (invent cliff).
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types")
-    dest_types = resolve_mapping_dest_types(
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        live_types=live_dest if isinstance(live_dest, dict) else None,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="MongoDB",
     )
     policy = transform_error_policy(error_policy)
 
@@ -293,6 +294,17 @@ def write_mapped_rows(
                     f"MongoDB collection {collection_name!r} is missing "
                     "and create_table is disabled"
                 ),
+            )
+        # Create-new: partial Studio must not soft-bind Map VARCHAR.
+        if studio_err and not collection_existed:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=collection_name,
+                target_schema=db_name,
+                checksum="",
+                chunks_completed=0,
+                error=studio_err,
             )
         coll = db[collection_name]
 
@@ -323,9 +335,20 @@ def write_mapped_rows(
                     doc_count = int(coll.count_documents({}))
                 except Exception:
                     doc_count = -1
-            # Empty collection: Map stamps OK for first fill. Non-empty / unknown
-            # count: every mapped field needs BSON sample or Studio carrier
-            # (partial sample must not leave Map VARCHAR invent gaps).
+            # Empty collection: Map stamps OK for first fill unless partial Studio
+            # (no BSON to rematerialize — refuse Map VARCHAR invent for gaps).
+            if studio_err and doc_count == 0:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection_name,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=studio_err,
+                )
+            # Non-empty / unknown count: every mapped field needs BSON sample or
+            # Studio carrier (partial sample must not leave Map VARCHAR invent gaps).
             if mapped_data_cols and (doc_count > 0 or doc_count < 0):
                 from connectors.writer_common import require_physical_types_for_existing_table
 

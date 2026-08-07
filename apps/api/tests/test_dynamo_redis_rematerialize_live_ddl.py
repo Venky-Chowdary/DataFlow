@@ -235,6 +235,41 @@ def test_redis_writer_probe_failure_refuses_even_with_studio():
     assert "probe failed" in (result.error or "").lower()
 
 
+def test_redis_empty_prefix_refuses_partial_studio():
+    """Empty keyspace + partial Studio — refuse Map VARCHAR invent."""
+    from unittest.mock import patch
+
+    from connectors.redis_writer import write_mapped_rows
+
+    client = MagicMock()
+    with (
+        patch("connectors.redis_writer._redis_client", return_value=client),
+        patch("connectors.redis_writer._redis_prefix_key_count_hint", return_value=0),
+    ):
+        result = write_mapped_rows(
+            host="localhost",
+            port=6379,
+            database="0",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["id", "qty"],
+            data_rows=[["1", "7"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+            create_table=True,
+            destination_column_types={"id": "INTEGER"},
+        )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()
+
+
 def test_redis_prefix_hint_loops_until_keys_or_wrap():
     from connectors.redis_writer import _redis_prefix_key_count_hint
 

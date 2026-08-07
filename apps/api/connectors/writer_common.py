@@ -2076,6 +2076,54 @@ def sample_values_by_source_from_batch(
     return out
 
 
+def resolve_studio_or_map_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str] | None = None,
+    *,
+    logical_types: list[str] | None = None,
+    studio_types: dict[str, Any] | None = None,
+    product: str = "destination",
+) -> tuple[dict[str, str], str | None]:
+    """Studio present → fail-closed coverage; else Map stamps for create-new.
+
+    Partial Studio must never soft-fill Map ``VARCHAR`` for gaps (empty→NULL /
+    polarity invent). Callers with an existing typed sink should rematerialize
+    from live DDL after this helper; create-new / empty sinks must refuse
+    ``error`` when Studio was incomplete.
+    """
+    from connectors.saas_common import merge_saas_live_types
+
+    studio = (
+        studio_types
+        if isinstance(studio_types, dict) and studio_types
+        else None
+    )
+    if studio is not None:
+        live = {
+            str(k): str(v).strip()
+            for k, v in studio.items()
+            if k and str(v or "").strip()
+        }
+        return merge_saas_live_types(
+            live,
+            list(target_cols or []),
+            studio_types=None,
+            product=product,
+        )
+    return (
+        resolve_mapping_dest_types(
+            target_cols,
+            mappings,
+            column_types or {},
+            logical_types=logical_types,
+            live_types=None,
+            default="VARCHAR",
+        ),
+        None,
+    )
+
+
 def rematerialize_live_dest_types(
     physical: dict[str, str] | None,
     target_cols: list[str],

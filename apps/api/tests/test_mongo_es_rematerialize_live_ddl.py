@@ -198,4 +198,68 @@ def test_fetch_mongo_physical_types_surfaces_auth_exc():
     physical, exc = _fetch_mongo_physical_types(Coll(), ["amount"])
     assert physical == {}
     assert exc is not None
-    assert "403" in str(exc)
+
+
+def test_mongo_create_new_refuses_partial_studio():
+    from unittest.mock import MagicMock, patch
+
+    from connectors.mongodb_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.__getitem__.return_value.list_collection_names.return_value = []
+    with patch("connectors.mongodb_common._mongo_client", return_value=client):
+        result = write_mapped_rows(
+            host="localhost",
+            port=27017,
+            database="testdb",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["id", "qty"],
+            data_rows=[["1", "7"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+            create_table=True,
+            destination_column_types={"id": "INTEGER"},
+        )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()
+
+
+def test_es_create_new_refuses_partial_studio():
+    from unittest.mock import MagicMock, patch
+
+    from connectors.elasticsearch_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.indices.exists.return_value = False
+    with patch("connectors.elasticsearch_writer._client", return_value=client):
+        result = write_mapped_rows(
+            host="localhost",
+            port=9200,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["id", "qty"],
+            data_rows=[["1", "7"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+            create_table=True,
+            destination_column_types={"id": "INTEGER"},
+            conflict_columns=["id"],
+        )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower()

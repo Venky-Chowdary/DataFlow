@@ -1102,14 +1102,15 @@ def write_mapped_rows(
     # creating a parallel "CSVTESTFILE".
     table_name = sanitize_identifier(table_name)
     # Prefer Studio-probed live DDL over Map stamps (BOOLEAN→VARCHAR invent cliff).
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
-    dest_types = resolve_mapping_dest_types(
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        live_types=live_dest_types if isinstance(live_dest_types, dict) else None,
+        studio_types=live_dest_types if isinstance(live_dest_types, dict) else None,
+        product="Snowflake",
     )
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
@@ -1305,6 +1306,17 @@ def write_mapped_rows(
                         f"Snowflake table {table_name!r} is missing and "
                         "create_table is disabled"
                     ),
+                )
+            # Create-new: partial Studio must not soft-bind Map VARCHAR.
+            if found is None and studio_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=studio_err,
                 )
             table_name = (
                 found if found is not None else snowflake_fold_identifier(table_name)

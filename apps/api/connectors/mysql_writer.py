@@ -461,15 +461,16 @@ def write_mapped_rows(
 
     table_name = sanitize_identifier(table_name, preserve_case=True)
     # Prefer Studio-probed live DDL over Map stamps (BOOLEAN→VARCHAR invent cliff).
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types")
-    dest_types = resolve_mapping_dest_types(
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        live_types=live_dest if isinstance(live_dest, dict) else None,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="MySQL",
     )
     policy = transform_error_policy(error_policy)
 
@@ -782,6 +783,20 @@ def write_mapped_rows(
                 table_existed = cur.fetchone() is not None
             except Exception:
                 table_existed = not create_table
+
+            # Create-new: partial Studio must not soft-bind Map VARCHAR.
+            if not table_existed and studio_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=database,
+                    checksum="",
+                    chunks_completed=0,
+                    error=studio_err,
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
 
             setup_attempt = 0
             setup_started = time.monotonic()

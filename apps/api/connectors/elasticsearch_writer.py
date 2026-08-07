@@ -307,15 +307,16 @@ def write_mapped_rows(
         "connection_string": connection_string, "ssl": ssl, "api_key": api_key,
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types")
-    dest_types = resolve_mapping_dest_types(
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        live_types=live_dest if isinstance(live_dest, dict) else None,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="Elasticsearch",
     )
     # Defer map/quarantine until after index probe — rematerialize when live
     # mapping carriers differ from Map/Studio stamps.
@@ -346,6 +347,17 @@ def write_mapped_rows(
                     f"Elasticsearch index {index!r} is missing and "
                     "create_table is disabled"
                 ),
+            )
+        # Create-new index: partial Studio must not soft-bind Map VARCHAR.
+        if studio_err and not index_exists:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=index,
+                target_schema=host or "localhost",
+                checksum="",
+                chunks_completed=0,
+                error=studio_err,
             )
         if create_table and not index_exists:
             # Use one shard and zero replicas for predictable test/CI behavior

@@ -404,15 +404,16 @@ def write_mapped_rows(
         "endpoint_url": endpoint_url,
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
     live_dest = _kwargs.get("destination_column_types")
-    dest_types = resolve_mapping_dest_types(
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
-        live_types=live_dest if isinstance(live_dest, dict) else None,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="DynamoDB",
     )
 
     # Connect + describe before Map bind — AttributeDefinitions / sample must
@@ -459,6 +460,18 @@ def write_mapped_rows(
     studio_live = isinstance(live_dest, dict) and all(
         str(live_dest.get(c) or "").strip() for c in mapped_data_cols
     )
+    # No live AttrDefs/sample: partial Studio must not soft-bind Map VARCHAR
+    # (empty table / failed introspect — parity with Mongo/Redis empty sinks).
+    if studio_err and not physical:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=host or "",
+            checksum="",
+            chunks_completed=0,
+            error=studio_err,
+        )
     # Populated / unknown item count + failed non-key sample → refuse Map-only.
     if (
         (item_count > 0 or item_count < 0)
@@ -480,9 +493,14 @@ def write_mapped_rows(
             ),
         )
 
-    # Partial AttrDef/sample coverage: Studio may fill gaps; else require_physical
-    # (same bar as Mongo/ES — never soft-bind Map VARCHAR on missing attrs).
-    if mapped_data_cols and (item_count > 0 or item_count < 0):
+    # Partial AttrDef/sample coverage: Studio may fill gaps; else require_physical.
+    # Also when ItemCount reads 0 but partial Studio + AttrDefs exist (stale count
+    # or empty table with keys) — rematerialize / fail-closed, never Map invent.
+    # Map-only create-new (no studio_err, ItemCount 0) must skip require_physical
+    # so non-key Map columns are not refused against key-only AttrDefs.
+    if mapped_data_cols and (
+        item_count > 0 or item_count < 0 or (bool(studio_err) and bool(physical))
+    ):
         from connectors.writer_common import require_physical_types_for_existing_table
 
         effective_physical = dict(physical)
@@ -511,7 +529,7 @@ def write_mapped_rows(
                 target_schema=host or "",
                 checksum="",
                 chunks_completed=0,
-                error=phys_err,
+                error=studio_err or phys_err,
             )
         physical = effective_physical
 

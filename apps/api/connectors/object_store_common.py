@@ -298,35 +298,13 @@ def resolve_object_store_write_dest_types(
 
     Returns ``(dest_types, None)`` or ``(partial, error)``.
     """
-    from connectors.saas_common import merge_saas_live_types
-    from connectors.writer_common import resolve_mapping_dest_types
+    from connectors.writer_common import resolve_studio_or_map_dest_types
 
-    studio = (
-        destination_column_types
-        if isinstance(destination_column_types, dict) and destination_column_types
-        else None
-    )
-    if studio is not None:
-        live = {
-            str(k): str(v).strip()
-            for k, v in studio.items()
-            if k and str(v or "").strip()
-        }
-        return merge_saas_live_types(
-            live,
-            list(target_cols or []),
-            studio_types=None,
-            product="Object-store",
-        )
-    # No Studio types — Map stamps for first-write export.
-    return (
-        resolve_mapping_dest_types(
-            target_cols,
-            mappings,
-            column_types or {},
-            logical_types=logical_types,
-            live_types=None,
-            default="VARCHAR",
-        ),
-        None,
+    return resolve_studio_or_map_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        studio_types=destination_column_types,
+        product="Object-store",
     )
