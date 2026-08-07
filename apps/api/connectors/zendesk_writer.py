@@ -25,7 +25,6 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -180,29 +179,31 @@ def resolve_zendesk_dest_types(
 ) -> dict[str, str]:
     """Prefer live Zendesk field schema; else Map/source carriers.
 
-    When Describe fields are supplied, never soft-fill unknown Meta types with
-    Map ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate.
+    When Describe fields are supplied or Studio typed carriers, never soft-fill
+    unknown Meta types with Map ``VARCHAR`` — parity with the write-path
+    ``merge_saas_live_types`` gate. Documented system seeds always count as
+    live carriers (subject/status/id…) — same as write-path ``studio_for_gate``.
     """
-    if describe_fields is not None:
-        from connectors.saas_common import merge_saas_live_types
+    from connectors.saas_common import resolve_saas_live_or_map_dest_types
 
+    seeds = _zendesk_system_seed_carriers(target_cols)
+    if describe_fields is not None:
         live = _zendesk_live_carriers(
             target_cols, describe_fields, include_seeds=True
         )
-        merged, _err = merge_saas_live_types(
-            live,
-            list(target_cols or []),
-            studio_types=studio_types if isinstance(studio_types, dict) else None,
-            product="Zendesk",
-        )
-        return merged
-    return resolve_mapping_dest_types(
+    else:
+        # Always seed system carriers — never Map invent subject/status/id
+        # when Describe is down (write path merges the same seeds).
+        live = dict(seeds)
+    return resolve_saas_live_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
+        live_carriers=live,
+        live_schema_present=describe_fields is not None or bool(live),
+        studio_types=studio_types,
         logical_types=logical_types,
-        live_types=None,
-        default="VARCHAR",
+        product="Zendesk",
     )
 
 

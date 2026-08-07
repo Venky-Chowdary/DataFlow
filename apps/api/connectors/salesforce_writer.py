@@ -258,10 +258,12 @@ def resolve_salesforce_dest_types(
 ) -> dict[str, str]:
     """Prefer live Describe length/precision; else Map/source carriers.
 
-    When Describe fields are supplied, never soft-fill unknown SOAP types with
-    Map ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate
-    (including optional Studio ``destination_column_types``).
+    When Describe fields are supplied or Studio typed carriers, never soft-fill
+    unknown SOAP types with Map ``VARCHAR`` — parity with the write-path
+    ``merge_saas_live_types`` gate.
     """
+    from connectors.saas_common import resolve_saas_live_or_map_dest_types
+
     live: dict[str, str] = {}
     for f in describe_fields or []:
         name = str(f.get("name") or "").strip()
@@ -270,28 +272,15 @@ def resolve_salesforce_dest_types(
         carrier = salesforce_field_to_carrier(f)
         if str(carrier or "").strip():
             live[name] = carrier
-    if describe_fields is not None:
-        from connectors.saas_common import merge_saas_live_types
-
-        merged, _err = merge_saas_live_types(
-            live,
-            list(target_cols or []),
-            studio_types=studio_types if isinstance(studio_types, dict) else None,
-            product="Salesforce",
-        )
-        return merged
-    out: dict[str, str] = {}
-    for i, col in enumerate(target_cols):
-        mapped = ""
-        if i < len(mappings):
-            mapped = str(
-                mappings[i].get("target_type")
-                or mappings[i].get("dest_type")
-                or ""
-            )
-        src = str(mappings[i].get("source") or "") if i < len(mappings) else ""
-        out[col] = mapped or column_types.get(src) or column_types.get(col) or "VARCHAR"
-    return out
+    return resolve_saas_live_or_map_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        live_carriers=live,
+        live_schema_present=describe_fields is not None,
+        studio_types=studio_types,
+        product="Salesforce",
+    )
 
 
 def _normalize_salesforce_id_cells(

@@ -269,6 +269,93 @@ def test_resolve_studio_fills_refused_meta_carrier():
     assert no["Name"].startswith("VARCHAR")
 
 
+def test_resolve_partial_studio_without_describe_no_map_invent():
+    """Describe unavailable + partial Studio must not Map-fill gaps."""
+    from connectors.airtable_writer import resolve_airtable_dest_types
+    from connectors.salesforce_writer import resolve_salesforce_dest_types
+
+    hs = resolve_hubspot_dest_types(
+        ["email", "mystery"],
+        [
+            {"source": "e", "target": "email", "target_type": "VARCHAR"},
+            {"source": "m", "target": "mystery", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_props=None,
+        studio_types={"email": "VARCHAR(65536)"},
+    )
+    assert hs["email"].startswith("VARCHAR")
+    assert "mystery" not in hs
+
+    at = resolve_airtable_dest_types(
+        ["Name", "Score"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "s", "target": "Score", "target_type": "VARCHAR"},
+        ],
+        {},
+        meta_fields=None,
+        studio_types={"Name": "VARCHAR(100000)"},
+    )
+    assert "Name" in at
+    assert "Score" not in at
+
+    sf = resolve_salesforce_dest_types(
+        ["Name", "Weird__c"],
+        [
+            {"source": "n", "target": "Name", "target_type": "VARCHAR"},
+            {"source": "w", "target": "Weird__c", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=None,
+        studio_types={"Name": "VARCHAR(80)"},
+    )
+    assert sf["Name"] == "VARCHAR(80)"
+    assert "Weird__c" not in sf
+
+    zd = resolve_zendesk_dest_types(
+        ["subject", "custom_gap"],
+        [
+            {"source": "s", "target": "subject", "target_type": "VARCHAR"},
+            {"source": "c", "target": "custom_gap", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=None,
+        studio_types={"subject": "VARCHAR(255)"},
+    )
+    # System seed covers subject even when Studio stamp differs; gap stays refuse.
+    assert "subject" in zd
+    assert zd["subject"].startswith("VARCHAR")
+    assert "custom_gap" not in zd
+
+    zd_seed_only = resolve_zendesk_dest_types(
+        ["subject", "custom_gap"],
+        [
+            {"source": "s", "target": "subject", "target_type": "VARCHAR"},
+            {"source": "c", "target": "custom_gap", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=None,
+        studio_types={"custom_gap": "INTEGER"},
+    )
+    assert "subject" in zd_seed_only
+    assert zd_seed_only["custom_gap"] == "INTEGER"
+
+    # No Describe + no Studio: system seeds still bind; custom stays refuse.
+    zd_seeds_only = resolve_zendesk_dest_types(
+        ["subject", "custom_gap"],
+        [
+            {"source": "s", "target": "subject", "target_type": "VARCHAR"},
+            {"source": "c", "target": "custom_gap", "target_type": "VARCHAR"},
+        ],
+        {},
+        describe_fields=None,
+        studio_types=None,
+    )
+    assert "subject" in zd_seeds_only
+    assert "custom_gap" not in zd_seeds_only
+
+
 def test_overlay_promotes_mysql_enum_set_over_map_varchar():
     from connectors.writer_common import overlay_physical_bind_types
 

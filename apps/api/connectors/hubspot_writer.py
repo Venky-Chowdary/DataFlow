@@ -22,7 +22,6 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -233,9 +232,11 @@ def resolve_hubspot_dest_types(
     """Prefer live Properties Describe; else Map/source carriers.
 
     When Describe props are supplied (including empty list after a successful
-    probe), never soft-fill missing/unknown Meta types with Map ``VARCHAR`` —
-    parity with ``merge_saas_live_types`` on the write path (Studio included).
+    probe) or Studio typed carriers, never soft-fill missing/unknown Meta types
+    with Map ``VARCHAR`` — parity with ``merge_saas_live_types`` on the write path.
     """
+    from connectors.saas_common import resolve_saas_live_or_map_dest_types
+
     live: dict[str, str] = {}
     for p in describe_props or []:
         if not isinstance(p, dict):
@@ -244,24 +245,15 @@ def resolve_hubspot_dest_types(
         if name:
             live[name] = hubspot_property_to_carrier(p)
     live = {k: v for k, v in live.items() if str(v or "").strip()}
-    if describe_props is not None:
-        from connectors.saas_common import merge_saas_live_types
-
-        merged, _err = merge_saas_live_types(
-            live,
-            list(target_cols or []),
-            studio_types=studio_types if isinstance(studio_types, dict) else None,
-            product="HubSpot",
-        )
-        # Return covered carriers only — never Map VARCHAR invent for gaps.
-        return merged
-    return resolve_mapping_dest_types(
+    return resolve_saas_live_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
+        live_carriers=live,
+        live_schema_present=describe_props is not None,
+        studio_types=studio_types,
         logical_types=logical_types,
-        live_types=None,
-        default="VARCHAR",
+        product="HubSpot",
     )
 
 

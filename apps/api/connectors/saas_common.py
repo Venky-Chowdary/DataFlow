@@ -82,6 +82,47 @@ def merge_saas_live_types(
     return merged, None
 
 
+def resolve_saas_live_or_map_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str] | None = None,
+    *,
+    live_carriers: dict[str, str] | None = None,
+    live_schema_present: bool = False,
+    studio_types: dict[str, Any] | None = None,
+    logical_types: list[str] | None = None,
+    product: str = "SaaS",
+    default: str = "VARCHAR",
+) -> dict[str, str]:
+    """Live/Studio fail-closed carriers; Map only when neither was supplied.
+
+    When Describe/Meta was probed (``live_schema_present``) or Studio typed any
+    destination carriers, never soft-fill gaps with Map ``VARCHAR`` — return
+    covered carriers only (parity with write-path ``merge_saas_live_types``).
+    Map invent is allowed only for offline / create-new paths with no live
+    schema and no Studio types.
+    """
+    studio = studio_types if isinstance(studio_types, dict) and studio_types else None
+    if live_schema_present or studio is not None:
+        merged, _err = merge_saas_live_types(
+            live_carriers if isinstance(live_carriers, dict) else {},
+            list(target_cols or []),
+            studio_types=studio,
+            product=product,
+        )
+        return merged
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    return resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types or {},
+        logical_types=logical_types,
+        live_types=None,
+        default=default,
+    )
+
+
 def gate_saas_describe(
     *,
     product: str,

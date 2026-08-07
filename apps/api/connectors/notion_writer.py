@@ -25,7 +25,6 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -135,9 +134,12 @@ def resolve_notion_dest_types(
 ) -> dict[str, str]:
     """Prefer live Notion database property types; else Map/source carriers.
 
-    When properties are supplied, never soft-fill formula/unknown kinds with Map
-    ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate.
+    When properties are supplied or Studio typed carriers, never soft-fill
+    formula/unknown kinds with Map ``VARCHAR`` — parity with the write-path
+    ``merge_saas_live_types`` gate.
     """
+    from connectors.saas_common import resolve_saas_live_or_map_dest_types
+
     opts = property_options or {}
     live = {
         name: notion_property_to_carrier(
@@ -147,33 +149,27 @@ def resolve_notion_dest_types(
         if name and typ
     }
     live = {k: v for k, v in live.items() if str(v or "").strip()}
+    # Page id routes the write only when it is not a live Notion property.
+    live_l = {str(k).lower() for k in live}
+    routing_only = {"id"} - live_l
+    property_cols = [
+        c for c in (target_cols or []) if c and str(c).lower() not in routing_only
+    ]
+    merged = resolve_saas_live_or_map_dest_types(
+        property_cols if properties is not None else list(target_cols or []),
+        mappings,
+        column_types,
+        live_carriers=live,
+        live_schema_present=properties is not None,
+        studio_types=studio_types,
+        logical_types=logical_types,
+        product="Notion",
+    )
     if properties is not None:
-        from connectors.saas_common import merge_saas_live_types
-
-        # Page id routes the write only when it is not a live Notion property.
-        live_l = {str(k).lower() for k in live}
-        routing_only = {"id"} - live_l
-        property_cols = [
-            c for c in (target_cols or []) if c and str(c).lower() not in routing_only
-        ]
-        merged, _err = merge_saas_live_types(
-            live,
-            property_cols,
-            studio_types=studio_types if isinstance(studio_types, dict) else None,
-            product="Notion",
-        )
         for col in target_cols or []:
             if col and str(col).lower() in routing_only and col not in merged:
                 merged[col] = "VARCHAR(64)"
-        return merged
-    return resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=None,
-        default="VARCHAR",
-    )
+    return merged
 
 
 def _rich_text_chunks(text: str) -> list[dict[str, Any]]:

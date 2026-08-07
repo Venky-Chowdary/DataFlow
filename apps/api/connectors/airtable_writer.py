@@ -22,7 +22,6 @@ from connectors.writer_common import (
     WriteResult,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -191,10 +190,12 @@ def resolve_airtable_dest_types(
 ) -> dict[str, str]:
     """Prefer live Meta field types; else Map/source carriers.
 
-    When Meta fields are supplied, never soft-fill unknown/computed types with
-    Map ``VARCHAR`` — parity with the write-path ``merge_saas_live_types`` gate
-    (including optional Studio ``destination_column_types``).
+    When Meta fields are supplied or Studio typed carriers, never soft-fill
+    unknown/computed types with Map ``VARCHAR`` — parity with the write-path
+    ``merge_saas_live_types`` gate.
     """
+    from connectors.saas_common import resolve_saas_live_or_map_dest_types
+
     live: dict[str, str] = {}
     for f in meta_fields or []:
         if not isinstance(f, dict):
@@ -203,23 +204,15 @@ def resolve_airtable_dest_types(
         if name:
             live[name] = airtable_field_to_carrier(f)
     live = {k: v for k, v in live.items() if str(v or "").strip()}
-    if meta_fields is not None:
-        from connectors.saas_common import merge_saas_live_types
-
-        merged, _err = merge_saas_live_types(
-            live,
-            list(target_cols or []),
-            studio_types=studio_types if isinstance(studio_types, dict) else None,
-            product="Airtable",
-        )
-        return merged
-    return resolve_mapping_dest_types(
+    return resolve_saas_live_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
+        live_carriers=live,
+        live_schema_present=meta_fields is not None,
+        studio_types=studio_types,
         logical_types=logical_types,
-        live_types=None,
-        default="VARCHAR",
+        product="Airtable",
     )
 
 
