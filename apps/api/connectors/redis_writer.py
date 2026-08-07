@@ -396,7 +396,9 @@ def write_mapped_rows(
     studio_live = isinstance(live_dest, dict) and all(
         str(live_dest.get(c) or "").strip() for c in mapped_data_cols
     )
-    if key_hint < 0 and mapped_data_cols and not studio_live:
+    if key_hint < 0 and mapped_data_cols:
+        # Probe failure must never take the empty-prefix Map path — even when
+        # Studio typed all fields (unknown populated keyspace invent cliff).
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -427,6 +429,40 @@ def write_mapped_rows(
                     "introspect and retry."
                 ),
             )
+        # Partial JSON sample: Studio may fill gaps; else require_physical
+        # (same bar as Mongo/Dynamo — never soft-bind Map VARCHAR on missing fields).
+        if mapped_data_cols and docs_sampled > 0:
+            from connectors.writer_common import require_physical_types_for_existing_table
+
+            effective_physical = dict(physical)
+            if isinstance(live_dest, dict):
+                for c in mapped_data_cols:
+                    if (
+                        effective_physical.get(c)
+                        or effective_physical.get(str(c).lower())
+                        or effective_physical.get(str(c).upper())
+                    ):
+                        continue
+                    st = str(live_dest.get(c) or "").strip()
+                    if st:
+                        effective_physical[c] = st
+            phys_err = require_physical_types_for_existing_table(
+                table_existed=True,
+                physical=effective_physical,
+                dialect_label="Redis",
+                target_cols=mapped_data_cols,
+            )
+            if phys_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=prefix,
+                    target_schema=f"db{database or 0}",
+                    checksum="",
+                    chunks_completed=0,
+                    error=phys_err,
+                )
+            physical = effective_physical
         remat = _redis_rematerialize_if_physical_differs(
             physical=physical,
             dest_types=dest_types,

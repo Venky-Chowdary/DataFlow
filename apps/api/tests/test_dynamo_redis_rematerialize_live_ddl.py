@@ -123,6 +123,77 @@ def test_fetch_redis_physical_types_majority_vote():
     assert "BOOL" in str(physical.get("flag") or "").upper()
 
 
+def test_redis_writer_refuses_partial_json_sample_coverage():
+    """Existing keys + sample missing a mapped field → refuse Map invent."""
+    from unittest.mock import patch
+
+    from connectors.redis_writer import write_mapped_rows
+
+    client = MagicMock()
+    with (
+        patch("connectors.redis_writer._redis_client", return_value=client),
+        patch("connectors.redis_writer._redis_prefix_key_count_hint", return_value=2),
+        patch(
+            "connectors.redis_writer._fetch_redis_physical_types",
+            return_value=({"qty": "INTEGER"}, 2),
+        ),
+    ):
+        result = write_mapped_rows(
+            host="localhost",
+            port=6379,
+            database="0",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["qty", "flag"],
+            data_rows=[["1", "true"]],
+            mappings=[
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+                {"source": "flag", "target": "flag", "target_type": "VARCHAR"},
+            ],
+            column_types={"qty": "VARCHAR", "flag": "VARCHAR"},
+            create_table=False,
+        )
+    assert result.ok is False
+    assert "flag" in (result.error or "").lower()
+    assert "refuse" in (result.error or "").lower()
+
+
+def test_redis_writer_probe_failure_refuses_even_with_studio():
+    """key_hint=-1 must not fall through to empty-prefix Map path."""
+    from unittest.mock import patch
+
+    from connectors.redis_writer import write_mapped_rows
+
+    client = MagicMock()
+    with (
+        patch("connectors.redis_writer._redis_client", return_value=client),
+        patch("connectors.redis_writer._redis_prefix_key_count_hint", return_value=-1),
+    ):
+        result = write_mapped_rows(
+            host="localhost",
+            port=6379,
+            database="0",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["qty"],
+            data_rows=[["1"]],
+            mappings=[{"source": "qty", "target": "qty", "target_type": "VARCHAR"}],
+            column_types={"qty": "VARCHAR"},
+            create_table=False,
+            destination_column_types={"qty": "INTEGER"},
+        )
+    assert result.ok is False
+    assert "probe failed" in (result.error or "").lower()
+
+
 def test_redis_prefix_hint_loops_until_keys_or_wrap():
     from connectors.redis_writer import _redis_prefix_key_count_hint
 

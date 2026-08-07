@@ -98,13 +98,23 @@ def write_mapped_rows(
     }
 
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    dest_types = resolve_object_store_write_dest_types(
+    dest_types, cov_err = resolve_object_store_write_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
         destination_column_types=_kwargs.get("destination_column_types"),
     )
+    if cov_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=key,
+            target_schema=container,
+            checksum="",
+            chunks_completed=0,
+            error=cov_err,
+        )
     policy = transform_error_policy(error_policy)
     mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,

@@ -284,25 +284,49 @@ def resolve_object_store_write_dest_types(
     *,
     logical_types: list[str] | None = None,
     destination_column_types: dict[str, Any] | None = None,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], str | None]:
     """Prefer Studio/probed live carriers over Map stamps for serialize.
 
     S3/GCS/ADLS/SFTP must quarantine DECIMAL/BINARY/VARCHAR(n) against the
     destination schema Studio probed — never ignore live types and soft-bind
     Map VARCHAR (overflow / empty→null invent on JSON/CSV/Parquet export).
+
+    When Studio ``destination_column_types`` is present (non-empty), every mapped
+    column must be covered — partial Studio must not fall through to Map
+    VARCHAR invent. When Studio is absent, Map stamps are allowed for first-write
+    export (no live object schema to probe).
+
+    Returns ``(dest_types, None)`` or ``(partial, error)``.
     """
+    from connectors.saas_common import merge_saas_live_types
     from connectors.writer_common import resolve_mapping_dest_types
 
-    live = (
+    studio = (
         destination_column_types
-        if isinstance(destination_column_types, dict)
+        if isinstance(destination_column_types, dict) and destination_column_types
         else None
     )
-    return resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types or {},
-        logical_types=logical_types,
-        live_types=live,
-        default="VARCHAR",
+    if studio is not None:
+        live = {
+            str(k): str(v).strip()
+            for k, v in studio.items()
+            if k and str(v or "").strip()
+        }
+        return merge_saas_live_types(
+            live,
+            list(target_cols or []),
+            studio_types=None,
+            product="Object-store",
+        )
+    # No Studio types — Map stamps for first-write export.
+    return (
+        resolve_mapping_dest_types(
+            target_cols,
+            mappings,
+            column_types or {},
+            logical_types=logical_types,
+            live_types=None,
+            default="VARCHAR",
+        ),
+        None,
     )

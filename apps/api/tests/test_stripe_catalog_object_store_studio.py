@@ -113,27 +113,48 @@ def test_stripe_writer_studio_typed_custom_proceeds_past_catalog_gate():
 def test_object_store_dest_types_prefer_studio_decimal():
     from connectors.object_store_common import resolve_object_store_write_dest_types
 
-    dest = resolve_object_store_write_dest_types(
+    dest, err = resolve_object_store_write_dest_types(
         ["amount"],
         [{"source": "amount", "target": "amount", "target_type": "VARCHAR"}],
         {"amount": "VARCHAR"},
         logical_types=["VARCHAR"],
         destination_column_types={"amount": "DECIMAL(18,2)"},
     )
+    assert err is None
     assert "DECIMAL" in str(dest.get("amount") or "").upper()
 
 
 def test_object_store_dest_types_fall_back_to_map_without_studio():
     from connectors.object_store_common import resolve_object_store_write_dest_types
 
-    dest = resolve_object_store_write_dest_types(
+    dest, err = resolve_object_store_write_dest_types(
         ["note"],
         [{"source": "note", "target": "note", "target_type": "VARCHAR(100)"}],
         {"note": "VARCHAR(100)"},
         logical_types=["VARCHAR(100)"],
         destination_column_types=None,
     )
+    assert err is None
     assert "VARCHAR" in str(dest.get("note") or "").upper()
+
+
+def test_object_store_partial_studio_refuses_map_invent():
+    from connectors.object_store_common import resolve_object_store_write_dest_types
+
+    dest, err = resolve_object_store_write_dest_types(
+        ["amount", "note"],
+        [
+            {"source": "amount", "target": "amount", "target_type": "VARCHAR"},
+            {"source": "note", "target": "note", "target_type": "VARCHAR"},
+        ],
+        {"amount": "VARCHAR", "note": "VARCHAR"},
+        logical_types=["VARCHAR", "VARCHAR"],
+        destination_column_types={"amount": "DECIMAL(18,2)"},
+    )
+    assert err is not None
+    assert "note" in err.lower()
+    assert "amount" in dest
+    assert "refuse" in err.lower()
 
 
 def test_merge_shopify_catalog_refuses_uncatalogued_without_studio():
