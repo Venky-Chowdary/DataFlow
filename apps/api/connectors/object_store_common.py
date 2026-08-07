@@ -23,6 +23,7 @@ __all__ = [
     "object_store_read_keys",
     "purge_object_store_parts",
     "read_object_from_store",
+    "resolve_object_store_write_dest_types",
     "resolve_object_write_key",
     "resolve_object_write_layout",
     "_object_version_token",
@@ -274,3 +275,34 @@ def read_object_from_store(
         known_total=known_total_rows,
     )
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+
+
+def resolve_object_store_write_dest_types(
+    target_cols: list[str],
+    mappings: list[dict],
+    column_types: dict[str, str] | None,
+    *,
+    logical_types: list[str] | None = None,
+    destination_column_types: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Prefer Studio/probed live carriers over Map stamps for serialize.
+
+    S3/GCS/ADLS/SFTP must quarantine DECIMAL/BINARY/VARCHAR(n) against the
+    destination schema Studio probed — never ignore live types and soft-bind
+    Map VARCHAR (overflow / empty→null invent on JSON/CSV/Parquet export).
+    """
+    from connectors.writer_common import resolve_mapping_dest_types
+
+    live = (
+        destination_column_types
+        if isinstance(destination_column_types, dict)
+        else None
+    )
+    return resolve_mapping_dest_types(
+        target_cols,
+        mappings,
+        column_types or {},
+        logical_types=logical_types,
+        live_types=live,
+        default="VARCHAR",
+    )

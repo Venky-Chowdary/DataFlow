@@ -13,6 +13,7 @@ from typing import Any, Callable
 from connectors.aws_common import boto3_client, is_local_endpoint, resolve_region
 from connectors.object_store_common import (
     purge_object_store_parts,
+    resolve_object_store_write_dest_types,
     resolve_object_write_layout,
 )
 from connectors.writer_common import WriteResult as _WriteResult
@@ -143,7 +144,13 @@ def write_mapped_rows(
         "path_style": path_style,
     }
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    dest_types = resolve_object_store_write_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        destination_column_types=_kwargs.get("destination_column_types"),
+    )
     mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,

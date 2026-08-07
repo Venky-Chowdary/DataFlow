@@ -14,6 +14,7 @@ from typing import Any
 
 from services.value_serializer import cell_to_string, json_default
 
+from connectors.object_store_common import resolve_object_store_write_dest_types
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
 from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
 from connectors.writer_common import (
@@ -89,7 +90,13 @@ def write_mapped_rows(
         )
 
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    dest_types = resolve_object_store_write_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        destination_column_types=_kwargs.get("destination_column_types"),
+    )
     policy = transform_error_policy(_kwargs.get("error_policy"))
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,

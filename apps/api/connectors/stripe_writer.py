@@ -18,7 +18,7 @@ from connectors.saas_common import (
     request,
     token,
 )
-from connectors.saas_write_carriers import stripe_live_types_for_columns
+from connectors.saas_write_carriers import merge_stripe_catalog_types
 from connectors.writer_common import (
     reject_on_strict_policy,
     WriteResult,
@@ -40,9 +40,15 @@ def resolve_stripe_dest_types(
     *,
     logical_types: list[str] | None = None,
     object_type: str = "customers",
+    studio_types: dict[str, Any] | None = None,
+    live_types: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Prefer Stripe API-documented field limits; else Map/source carriers."""
-    live = stripe_live_types_for_columns(object_type, target_cols)
+    """Prefer Stripe OpenAPI catalog (+ Studio overlay); never bare Map invent."""
+    live = live_types
+    if live is None:
+        live, _err = merge_stripe_catalog_types(
+            object_type, target_cols, studio_types=studio_types
+        )
     return resolve_mapping_dest_types(
         target_cols,
         mappings,
@@ -124,14 +130,32 @@ def write_mapped_rows(
         mappings, column_types, preserve_case=True
     )
     policy = transform_error_policy(error_policy)
-    # Stripe has no Describe API — use documented OpenAPI field maxima so
-    # email/phone/metadata overflow quarantines before inventing bad customers.
+    # Stripe has no Describe API — OpenAPI catalog∩Studio coverage gate so
+    # uncatalogued Map VARCHAR cannot invent empty→null / overflow customers.
+    live_dest = _kwargs.get("destination_column_types")
+    catalog_live, catalog_err = merge_stripe_catalog_types(
+        obj,
+        target_cols,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+    )
+    if catalog_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=catalog_err,
+            driver="stripe",
+        )
     dest_types = resolve_stripe_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
         object_type=obj,
+        live_types=catalog_live,
     )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,

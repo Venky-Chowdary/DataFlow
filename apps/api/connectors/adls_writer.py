@@ -13,6 +13,7 @@ from services.value_serializer import cell_to_string, json_default
 from connectors.adls_common import blob_service_client
 from connectors.object_store_common import (
     purge_object_store_parts,
+    resolve_object_store_write_dest_types,
     resolve_object_write_layout,
 )
 from connectors.writer_common import (
@@ -97,7 +98,13 @@ def write_mapped_rows(
     }
 
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    dest_types = resolve_object_store_write_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        destination_column_types=_kwargs.get("destination_column_types"),
+    )
     policy = transform_error_policy(error_policy)
     mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,

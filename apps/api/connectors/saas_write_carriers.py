@@ -216,6 +216,50 @@ def stripe_live_types_for_columns(
     return live
 
 
+def merge_stripe_catalog_types(
+    object_type: str,
+    target_cols: list[str],
+    *,
+    studio_types: dict[str, Any] | None = None,
+) -> tuple[dict[str, str], str | None]:
+    """Catalog∩Studio coverage gate for Stripe Map bind (no live Describe API).
+
+    Returns ``(live_types, None)`` when every mapped column has a documented
+    OpenAPI carrier or a Studio-typed destination carrier. Uncatalogued Map
+    columns without Studio types return an error — never soft-bind VARCHAR
+    (empty→null / overflow invent risk on create).
+    """
+    live = stripe_live_types_for_columns(object_type, target_cols)
+    studio = studio_types if isinstance(studio_types, dict) else {}
+    studio_l = {
+        str(k).lower(): str(v).strip()
+        for k, v in studio.items()
+        if k and str(v or "").strip()
+    }
+    merged = dict(live)
+    missing: list[str] = []
+    for col in target_cols:
+        if not col:
+            continue
+        if col in live:
+            continue
+        st = studio_l.get(str(col).lower())
+        if st:
+            merged[col] = st
+            continue
+        missing.append(col)
+    if missing:
+        sample = ", ".join(repr(c) for c in missing[:12])
+        more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+        return merged, (
+            f"Stripe OpenAPI catalog has no carrier for mapped field(s) "
+            f"{sample}{more} — refuse Map VARCHAR invent (empty→null / "
+            "overflow risk). Map documented Stripe fields or provide Studio "
+            "destination_column_types for custom/metadata leaves."
+        )
+    return merged, None
+
+
 # ---------------------------------------------------------------------------
 # Shopify — Admin core fields + metafield type → carrier
 # ---------------------------------------------------------------------------
