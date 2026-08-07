@@ -176,6 +176,47 @@ def test_es_force_remap_when_carriers_match_partial_studio():
     assert "INT" in str(live.get("qty") or "").upper()
 
 
+def test_es_writer_refuses_logical_quarantine_invent_under_partial_studio():
+    """After force_remap failure path: studio_err + incomplete dest must not Map-fill."""
+    from unittest.mock import MagicMock, patch
+
+    from connectors.elasticsearch_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.indices.exists.return_value = True
+    client.indices.get_mapping.return_value = {
+        "orders": {"mappings": {"properties": {"id": {"type": "long"}}}}
+    }
+    # Partial Studio: id only — qty missing from Studio and mapping props.
+    with patch("connectors.elasticsearch_writer._client", return_value=client):
+        result = write_mapped_rows(
+            host="localhost",
+            port=9200,
+            database="",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["id", "qty"],
+            data_rows=[["1", "7"]],
+            mappings=[
+                {"source": "id", "target": "id", "target_type": "VARCHAR"},
+                {"source": "qty", "target": "qty", "target_type": "VARCHAR"},
+            ],
+            column_types={"id": "VARCHAR", "qty": "VARCHAR"},
+            create_table=False,
+            destination_column_types={"id": "INTEGER"},
+            error_policy="quarantine",
+            write_mode="insert",
+            conflict_columns=["id"],
+            api_key="",
+        )
+    assert result.ok is False
+    assert "qty" in (result.error or "").lower() or "invent" in (result.error or "").lower()
+
+
 def test_fetch_es_physical_types_from_mapping():
     from connectors.elasticsearch_writer import _fetch_es_physical_types
 

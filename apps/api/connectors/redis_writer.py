@@ -543,14 +543,39 @@ def write_mapped_rows(
 
     from connectors.writer_common import apply_write_quarantine_matrix, reject_on_strict_policy
 
-    tgt_types = [
-        str(
-            dest_types.get(c)
-            or (logical_types[i] if i < len(logical_types) else "")
-            or ""
-        )
-        for i, c in enumerate(target_cols)
-    ]
+    # Partial Studio: never soft-fill quarantine carriers from Map logicals
+    # after force_remap (empty→NULL invent on typed Redis JSON fields).
+    if studio_err:
+        missing = [
+            c
+            for c in target_cols
+            if c and not str(dest_types.get(c) or "").strip()
+        ]
+        if missing:
+            sample = ", ".join(repr(c) for c in missing[:12])
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=prefix,
+                target_schema=f"db{database or 0}",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Redis mapped field(s) {sample} lack live carriers under "
+                    "partial Studio — refuse Map logical quarantine invent. "
+                    "Re-run destination schema introspect and retry."
+                ),
+            )
+        tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
+    else:
+        tgt_types = [
+            str(
+                dest_types.get(c)
+                or (logical_types[i] if i < len(logical_types) else "")
+                or ""
+            )
+            for i, c in enumerate(target_cols)
+        ]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,

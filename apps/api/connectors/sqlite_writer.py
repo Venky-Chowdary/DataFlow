@@ -571,6 +571,45 @@ def write_mapped_rows(
                 rejected_details=rejected_details,
                 warnings=transform_errors,
             )
+
+        # Partial Studio + ADD: stamp Map target_type into dest_types BEFORE
+        # rematerialize/bind so we never coerce against source logical invent
+        # then ALTER ADD a different affinity (PG/MySQL order parity).
+        if studio_err and backfill_new_fields:
+            from connectors.writer_common import gate_additive_types_under_partial_studio
+
+            existing_probe = {str(k) for k in physical.keys() if k}
+            stamped_logical, add_err = gate_additive_types_under_partial_studio(
+                target_cols=target_cols,
+                target_types=[""] * len(target_cols),
+                existing=existing_probe,
+                mappings=mappings,
+                studio_err=studio_err,
+                product="SQLite",
+                # Identity — dest_types need Map logicals; sqlite_type applied below.
+                materialize_stamp=lambda s: str(s or "").strip(),
+                col_in_existing=lambda col, ex: (
+                    col in ex
+                    or str(col).lower() in {str(k).lower() for k in ex}
+                ),
+            )
+            if add_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "main",
+                    checksum="",
+                    chunks_completed=0,
+                    error=add_err,
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
+            for i, col in enumerate(target_cols):
+                stamp = str(stamped_logical[i] if i < len(stamped_logical) else "").strip()
+                if col and stamp:
+                    dest_types[col] = stamp
+
         if physical:
             from connectors.writer_common import rematerialize_live_dest_types
 
@@ -624,10 +663,29 @@ def write_mapped_rows(
             if need_remap:
                 # Rematerialize from source against live DDL (no Map VARCHAR invent).
                 dest_types = live_dest_types
-                target_types = [
-                    sqlite_type(dest_types.get(c, logical_types[i]))
-                    for i, c in enumerate(target_cols)
-                ]
+                target_types = []
+                for i, c in enumerate(target_cols):
+                    carrier = str(dest_types.get(c) or "").strip()
+                    if not carrier and not studio_err:
+                        carrier = str(
+                            logical_types[i] if i < len(logical_types) else ""
+                        ).strip()
+                    if not carrier and studio_err:
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=table_name,
+                            target_schema=schema or "main",
+                            checksum="",
+                            chunks_completed=0,
+                            error=(
+                                f"SQLite mapped field {c!r} lacks live/Map carrier "
+                                "under partial Studio — refuse logical bind invent."
+                            ),
+                            rejected_details=rejected_details,
+                            warnings=transform_errors,
+                        )
+                    target_types.append(sqlite_type(carrier) if carrier else "")
                 mapped_rows, transform_errors, rejected_details = (
                     build_mapped_rows_with_details(
                         headers=headers,

@@ -177,6 +177,57 @@ def test_sqlite_backfill_refuses_partial_studio_unstamped(tmp_path: Path):
     assert "note" in (result.error or "").lower()
 
 
+def test_sqlite_partial_studio_stamps_additive_before_bind(tmp_path: Path):
+    """Partial Studio ADD: Map stamp owns bind affinity before ALTER (not source logical)."""
+    from connectors.sqlite_writer import write_mapped_rows
+
+    db = tmp_path / "stamp_before_bind.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE orders (id INTEGER)")
+    conn.commit()
+    conn.close()
+
+    result = write_mapped_rows(
+        host="",
+        port=0,
+        database=str(db),
+        username="",
+        password="",
+        schema="main",
+        connection_string="",
+        ssl=False,
+        table_name="orders",
+        headers=["id", "qty"],
+        data_rows=[["1", "12"], ["2", "not-an-int"]],
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "INTEGER"},
+            # Map stamps INTEGER — source column_types VARCHAR must not bind invent.
+            {"source": "qty", "target": "qty", "target_type": "INTEGER"},
+        ],
+        column_types={"id": "INTEGER", "qty": "VARCHAR"},
+        create_table=False,
+        backfill_new_fields=True,
+        destination_column_types={"id": "INTEGER"},
+        error_policy="quarantine",
+        write_mode="insert",
+    )
+    assert result.ok is True, result.error
+    assert result.rows_written == 1
+    assert result.rejected_details
+    assert any((d.get("column") or "").lower() == "qty" for d in result.rejected_details)
+
+    conn = sqlite3.connect(str(db))
+    try:
+        cols = {row[1]: row[2] for row in conn.execute("PRAGMA table_info(orders)")}
+        rows = conn.execute("SELECT id, qty FROM orders").fetchall()
+    finally:
+        conn.close()
+    assert "qty" in cols
+    assert len(rows) == 1
+    assert rows[0][0] == 1
+    assert int(rows[0][1]) == 12
+
+
 def test_sqlite_partial_studio_fail_policy_defers_map_until_pragma(tmp_path: Path):
     """Partial Studio + error_policy=fail must not abort on pre-physical Map invent.
 
