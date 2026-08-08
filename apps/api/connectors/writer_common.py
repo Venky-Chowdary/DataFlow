@@ -82,10 +82,24 @@ def quarantine_cell_wire(value: Any) -> str:
 
 
 def mapped_row_quarantine_values(row: Any, target_cols: list[str]) -> dict[str, str]:
-    """Target-column dict for quarantine replay (full row, not single bad cell)."""
+    """Target-column dict for quarantine replay (full row, not single bad cell).
+
+    Accepts tuple/list bind images and SQLAlchemy/sparse ``dict`` rows — never
+    ``list(dict)`` key-order invent (that poisoned generic_sql salvage replay).
+    """
     from services.value_serializer import DF_MISSING_SENTINEL
 
     out: dict[str, str] = {}
+    if isinstance(row, dict):
+        for col in target_cols or []:
+            key = str(col)
+            if key in row:
+                out[key] = quarantine_cell_wire(row[key])
+            elif col in row:
+                out[key] = quarantine_cell_wire(row[col])
+            else:
+                out[key] = DF_MISSING_SENTINEL
+        return out
     seq = list(row) if row is not None else []
     for i, col in enumerate(target_cols or []):
         if i >= len(seq):

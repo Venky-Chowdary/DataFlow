@@ -5347,14 +5347,22 @@ def write_mapped_rows(
                                 sample_val = ""
                                 if col_name != "*" and col_name in row:
                                     sample_val = str(row.get(col_name, ""))[:120]
-                                rejected_details.append(
+                                from connectors.writer_common import (
+                                    append_write_quarantine_detail,
+                                )
+
+                                append_write_quarantine_detail(
+                                    rejected_details,
                                     {
                                         "row": start + row_i,
                                         "column": col_name,
                                         "value": sample_val,
                                         "reason": str(row_exc)[:300],
                                         "policy": policy,
-                                    }
+                                    },
+                                    mapped_row=row,
+                                    target_cols=target_cols,
+                                    mappings=mappings,
                                 )
                                 transform_errors.append(str(row_exc)[:200])
                         if ledger_table is not None:

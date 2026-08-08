@@ -1105,13 +1105,8 @@ def _persist_job_quarantine(
     replay_all = replay_quarantine_details(details)
     dest_summary["rows_skipped_contract"] = skip_n
     dest_summary["rows_quarantined_replay"] = len(replay_all)
-    if not replay_all:
-        # SKIP_ROW / audit-skip only — no replay DLQ required.
-        dest_summary["quarantine_durable"] = True
-        dest_summary["quarantine_dlq_persisted_count"] = len(details)
-        if already_persisted is not None:
-            already_persisted[0] = len(details)
-        return
+    dest_summary["rejected_details_total"] = len(details)
+    dest_summary["rejected_details_truncated"] = len(details) > 2000
     already = int(
         (already_persisted[0] if already_persisted else None)
         or dest_summary.get("quarantine_dlq_persisted_count")
@@ -1119,6 +1114,35 @@ def _persist_job_quarantine(
     )
     already = max(0, min(already, len(details)))
     delta = details[already:]
+    if not replay_all:
+        # SKIP_ROW / audit-skip only — persist skip_audit (not replay), then ok.
+        try:
+            if delta:
+                persist_rejected_rows(
+                    job_id=job_id,
+                    rejected_details=delta,
+                    workspace_id=str(getattr(request, "workspace_id", "") or "")
+                    if request
+                    else "",
+                    source="universal_engine",
+                    connector=str(
+                        getattr(getattr(request, "destination", None), "format", "")
+                        or getattr(getattr(request, "destination", None), "kind", "")
+                        or ""
+                    )
+                    if request
+                    else "",
+                )
+            dest_summary["quarantine_durable"] = True
+            dest_summary["quarantine_dlq_persisted_count"] = len(details)
+            if already_persisted is not None:
+                already_persisted[0] = len(details)
+        except Exception as exc:
+            dest_summary["quarantine_skip_audit_error"] = str(exc)[:300]
+            # Replay not required for skip-only; still surface audit loss.
+            dest_summary["quarantine_durable"] = True
+            dest_summary["quarantine_dlq_persisted_count"] = already
+        return
     try:
         if delta:
             persist_rejected_rows(
@@ -1448,6 +1472,8 @@ def _fail_runtime_job(
             getattr(exc, "rejected_rows", 0) or len(stamped_details)
         )
         status_kwargs["rejected_details"] = stamped_details[:2000]
+        status_kwargs["rejected_details_total"] = len(stamped_details)
+        status_kwargs["rejected_details_truncated"] = len(stamped_details) > 2000
         status_kwargs["records_processed"] = int(getattr(exc, "rows_written", 0) or 0)
     mongo.update_job_status(
         job_id,

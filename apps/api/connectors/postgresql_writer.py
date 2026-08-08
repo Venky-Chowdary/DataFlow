@@ -1909,13 +1909,23 @@ def write_mapped_rows(
                                             sample_val = str(row[target_cols.index(col_name)])[:120]
                                         except (ValueError, IndexError, TypeError):
                                             sample_val = ""
-                                    rejected_details.append({
-                                        "row": start + row_i,
-                                        "column": col_name,
-                                        "value": sample_val,
-                                        "reason": str(row_exc)[:300],
-                                        "policy": policy,
-                                    })
+                                    from connectors.writer_common import (
+                                        append_write_quarantine_detail,
+                                    )
+
+                                    append_write_quarantine_detail(
+                                        rejected_details,
+                                        {
+                                            "row": start + row_i,
+                                            "column": col_name,
+                                            "value": sample_val,
+                                            "reason": str(row_exc)[:300],
+                                            "policy": policy,
+                                        },
+                                        mapped_row=row,
+                                        target_cols=target_cols,
+                                        mappings=mappings,
+                                    )
                                     transform_errors.append(str(row_exc)[:200])
                             try:
                                 if use_ledger and chunk_written:

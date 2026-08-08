@@ -210,21 +210,50 @@ def persist_rejected_rows(
         return None
     skip_n = sum(1 for d in raw if is_contract_skip_detail(d))
     replay = replay_quarantine_details(raw)
-    if not replay:
-        # SKIP_ROW / audit-skip only — durable audit stamp, not replay DLQ.
-        return {
-            "rows": 0,
-            "chunks": 0,
-            "quarantine_durable": True,
-            "total_rejected": 0,
-            "skipped_contract": skip_n,
-            "note": "Contract skip rows excluded from replay DLQ",
-        }
+    skips = [d for d in raw if isinstance(d, dict) and is_contract_skip_detail(d)]
     jid = str(job_id or "").strip()
     if not jid:
         raise QuarantineRowContractError(
             "persist_rejected_rows requires job_id — refuse undurable quarantine"
         )
+
+    # SKIP_ROW audit is durable but never enters replay (action=skip_audit).
+    skip_chunks_written = 0
+    if skips:
+        skip_chunks = [
+            skips[i : i + _DLQ_CHUNK_SIZE]
+            for i in range(0, len(skips), _DLQ_CHUNK_SIZE)
+        ]
+        for idx, chunk in enumerate(skip_chunks):
+            append_dlq_event(
+                job_id=jid,
+                action="skip_audit",
+                rows=len(chunk),
+                workspace_id=workspace_id,
+                details={
+                    "source": source,
+                    "rejected_details": chunk,
+                    "chunk_index": idx,
+                    "chunk_count": len(skip_chunks),
+                    "total_skipped": len(skips),
+                    "audit_only": True,
+                },
+            )
+            skip_chunks_written += 1
+
+    if not replay:
+        return {
+            "rows": 0,
+            "chunks": 0,
+            "skip_audit_chunks": skip_chunks_written,
+            "quarantine_durable": True,
+            "total_rejected": 0,
+            "skipped_contract": skip_n,
+            "note": (
+                "Contract skip rows excluded from replay DLQ"
+                + (f"; {skip_n} skip_audit event(s) durable" if skip_n else "")
+            ),
+        }
     rows = normalize_quarantine_rows(replay, job_id=jid, connector=connector)
     assert_quarantine_rows_contract(rows, require_job_id=True)
     chunk_size = _DLQ_CHUNK_SIZE
@@ -249,10 +278,60 @@ def persist_rejected_rows(
         **(last_event or {}),
         "rows": len(rows),
         "chunks": len(chunks),
+        "skip_audit_chunks": skip_chunks_written,
         "quarantine_durable": True,
         "total_rejected": len(rows),
         "skipped_contract": skip_n,
     }
+
+
+def quarantine_details_from_dlq(
+    job_id: str,
+    *,
+    max_rows: int = 10000,
+    include_skip_audit: bool = True,
+) -> list[dict[str, Any]]:
+    """Flatten durable DLQ quarantine (+ optional skip_audit) into Inspect rows.
+
+    Job documents truncate ``rejected_details`` (~2000). Stream/engine persist
+    full bodies here — Inspect must hydrate from DLQ when the job sample is
+    incomplete, or quarantine overflow is invisible to operators.
+    """
+    jid = str(job_id or "").strip()
+    if not jid:
+        return []
+    # Enough events for large chunked jobs (200 rows/chunk → 50 events = 10k).
+    events = list_dlq_events(job_id=jid, limit=500)
+    events.sort(
+        key=lambda e: (
+            str(e.get("ts") or ""),
+            int((e.get("details") or {}).get("chunk_index") or 0),
+        )
+    )
+    allowed = {"quarantine", "quarantine_chunk"}
+    if include_skip_audit:
+        allowed.add("skip_audit")
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for ev in events:
+        if str(ev.get("action") or "") not in allowed:
+            continue
+        chunk = (ev.get("details") or {}).get("rejected_details") or []
+        for d in chunk:
+            if not isinstance(d, dict):
+                continue
+            key = (
+                d.get("row"),
+                str(d.get("column") or ""),
+                str(d.get("reason") or "")[:160],
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(d)
+            if len(out) >= max_rows:
+                return out
+    return out
 
 
 def list_dlq_events(*, job_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:

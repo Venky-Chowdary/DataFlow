@@ -294,7 +294,11 @@ def test_skip_row_excluded_from_replay_dlq_persist(monkeypatch) -> None:
     assert out is not None
     assert out.get("rows") == 0
     assert out.get("skipped_contract") == 1
-    assert events == []
+    # Durable skip_audit — never replay quarantine action.
+    assert len(events) == 1
+    assert events[0].get("action") == "skip_audit"
+    assert events[0].get("rows") == 1
+    assert all(e.get("action") != "quarantine" for e in events)
     outcome = persist_job_quarantine_outcome(
         {
             "rejected_details": [

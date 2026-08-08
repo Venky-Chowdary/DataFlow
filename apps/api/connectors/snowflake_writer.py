@@ -647,14 +647,19 @@ def _sf_apply_sparse_upsert(
                     )[:120]
                 except Exception:
                     sample = ""
-                rejected_details.append(
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    rejected_details,
                     {
                         "row": row_idx,
                         "column": "*",
                         "value": sample,
                         "reason": str(exc)[:300],
                         "policy": policy,
-                    }
+                    },
+                    mapped_row=raw_present,
+                    target_cols=target_cols,
                 )
             continue
         non_pk = {k: v for k, v in present.items() if k not in conflict}

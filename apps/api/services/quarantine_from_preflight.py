@@ -211,14 +211,54 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
         return rows
 
 
-def merge_job_quarantine(job: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Prefer write-time rejected_details; fall back to preflight findings."""
+def merge_job_quarantine(
+    job: dict[str, Any] | None,
+    *,
+    hydrate_dlq: bool = True,
+) -> list[dict[str, Any]]:
+    """Prefer write-time rejected_details; hydrate durable DLQ when truncated.
+
+    Job status stores a sample (``[:2000]``). Full quarantine bodies live in the
+    control-plane DLQ — Inspect must not pretend the sample is complete.
+    """
     if not job:
         return []
     details = list(job.get("rejected_details") or [])
+    dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     if not details:
-        dest = job.get("destination_summary") or {}
-        details = list(dest.get("rejected_details") or [])
+        details = list((dest or {}).get("rejected_details") or [])
+
+    job_id = str(job.get("id") or job.get("job_id") or "").strip()
+    truncated = bool(
+        job.get("rejected_details_truncated")
+        or (dest or {}).get("rejected_details_truncated")
+    )
+    try:
+        total_hint = int(
+            job.get("rejected_details_total")
+            or job.get("rejected_rows")
+            or (dest or {}).get("rejected_details_total")
+            or (dest or {}).get("rejected_rows")
+            or 0
+        )
+    except (TypeError, ValueError):
+        total_hint = 0
+
+    if hydrate_dlq and job_id:
+        try:
+            from services.quarantine_dlq import quarantine_details_from_dlq
+
+            dlq_rows = quarantine_details_from_dlq(job_id)
+        except Exception:
+            dlq_rows = []
+        if dlq_rows and (
+            not details
+            or truncated
+            or len(dlq_rows) > len(details)
+            or (total_hint > 0 and len(details) < total_hint)
+        ):
+            return dlq_rows
+
     if details:
         return details
     return quarantine_rows_from_preflight(job.get("preflight"))

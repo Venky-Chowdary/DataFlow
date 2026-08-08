@@ -768,10 +768,23 @@ async def get_job_quarantine(job_id: str, request: Request):
 
     details = merge_job_quarantine(job)
     row_ids = {d.get("row") for d in details if isinstance(d, dict) and d.get("row") is not None}
-    rejected_rows = int(job.get("rejected_rows") or 0) or (len(row_ids) if row_ids else len(details))
-    source = "write" if (job.get("rejected_details") or (job.get("destination_summary") or {}).get("rejected_details")) else (
-        "preflight" if details else "none"
+    rejected_rows = int(
+        job.get("rejected_details_total")
+        or job.get("rejected_rows")
+        or 0
+    ) or (len(row_ids) if row_ids else len(details))
+    has_write = bool(
+        job.get("rejected_details")
+        or (job.get("destination_summary") or {}).get("rejected_details")
     )
+    source = "write" if has_write else ("preflight" if details else "none")
+    # DLQ hydrate when job sample was truncated / incomplete.
+    if details and (
+        job.get("rejected_details_truncated")
+        or int(job.get("rejected_details_total") or 0) > len(job.get("rejected_details") or [])
+        or len(details) > len(job.get("rejected_details") or [])
+    ):
+        source = "dlq" if has_write or source == "none" else source
     ds = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     dest_q = ds.get("dest_quarantine") if isinstance(ds.get("dest_quarantine"), dict) else {}
     dest_dlq: dict[str, Any] = {
