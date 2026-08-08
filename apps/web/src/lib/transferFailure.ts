@@ -195,6 +195,19 @@ export function inferTransferFailureHint(
     };
   }
   if (
+    text.includes("no durable checkpoint to resume")
+    || text.includes("restart-from-zero would duplicate")
+  ) {
+    return {
+      code: errorCode || "resume_without_checkpoint",
+      title: errorTitle || "Resume needs a committed checkpoint",
+      confidence: "high",
+      fix:
+        errorFix
+        || "This job never saved durable progress (0 rows). Do not Resume — re-run from Validate, or start a new transfer. After a deploy/restart, claim workers now restart zero-progress jobs from the beginning instead of false-failing Resume.",
+    };
+  }
+  if (
     text.includes("ambiguous_write_outcome")
     || text.includes("cannot be safely retried")
     || text.includes("unknown outcome")

@@ -206,7 +206,15 @@ async def lifespan(app: FastAPI):
                             job.get("_id"),
                             hydrate_exc,
                         )
-                    run_transfer_async(job["_id"], request, resume=True)
+                    from services.execution_engine_contract import resolve_reclaim_resume
+
+                    # Fresh pending / zero-progress reclaim → resume=False.
+                    # Forcing resume=True on append/Excel falsely fails Module 14.
+                    run_transfer_async(
+                        job["_id"],
+                        request,
+                        resume=resolve_reclaim_resume(job),
+                    )
                     resumed += 1
             print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
         except Exception as e:

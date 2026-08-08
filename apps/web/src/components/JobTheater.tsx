@@ -652,7 +652,9 @@ export function JobTheaterView({
               {rejectedRows > 0 ? `${rejectedRows.toLocaleString()} quarantined (data-quality findings — separate from this load failure). ` : ""}
               {job.chunk_current != null
                 ? `Checkpoint at batch ${job.chunk_current}${job.chunk_total != null ? `/${job.chunk_total}` : ""}.`
-                : "Use Resume below if a checkpoint was saved."}
+                : processed > 0
+                  ? "Use Resume below if a checkpoint was saved."
+                  : "Re-run from Validate or start a new transfer — Resume needs a committed checkpoint."}
             </p>
             <div className="df2-theater-v3-alert-actions">
               {duplicateKeyFailure && onBackToMap && (

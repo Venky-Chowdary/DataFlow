@@ -22,6 +22,7 @@ DEFAULT_DELIVERY_SEMANTICS = "at_least_once"
 class ResumeKind(str, Enum):
     CHECKPOINT = "checkpoint_resume"
     FROM_ZERO_IDEMPOTENT = "from_zero_idempotent_sync"
+    FROM_ZERO_NO_WRITES = "from_zero_no_writes"
     REFUSED = "refused"
 
 
@@ -52,11 +53,14 @@ def decide_resume(
     resume_requested: bool,
     checkpoint_has_progress: bool,
     sync_mode: str | None,
+    rows_committed: int = 0,
 ) -> dict[str, Any]:
     """Decide Resume posture without inventing durable progress.
 
-    Insert/append without a durable checkpoint ⇒ REFUSED (would duplicate).
-    Upsert/overwrite without checkpoint ⇒ FROM_ZERO_IDEMPOTENT (convergent).
+    Insert/append without a durable checkpoint **and** prior committed rows
+    ⇒ REFUSED (would duplicate). Zero committed rows cannot duplicate — allow
+    from-zero (orphan reclaim / claim-worker false resume). Upsert/overwrite
+    without checkpoint ⇒ FROM_ZERO_IDEMPOTENT (convergent).
     """
     if not resume_requested:
         return {
@@ -74,6 +78,18 @@ def decide_resume(
             "reason": (
                 "Resume from last committed chunk — at-least-once; sinks must "
                 "upsert / ledger to converge."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
+    # Reclaim with no writes yet — restart-from-zero cannot duplicate.
+    if int(rows_committed or 0) <= 0:
+        return {
+            "kind": ResumeKind.FROM_ZERO_NO_WRITES.value,
+            "allowed": True,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                "No durable checkpoint and zero committed rows — restart from "
+                "zero (cannot duplicate)."
             ),
             "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
         }
@@ -105,16 +121,54 @@ def assert_resume_allowed(
     resume_requested: bool,
     checkpoint_has_progress: bool,
     sync_mode: str | None,
+    rows_committed: int = 0,
 ) -> dict[str, Any]:
     """Fail closed when Resume would silently duplicate."""
     decision = decide_resume(
         resume_requested=resume_requested,
         checkpoint_has_progress=checkpoint_has_progress,
         sync_mode=sync_mode,
+        rows_committed=rows_committed,
     )
     if not decision["allowed"]:
         raise ExecutionContractError(decision["reason"])
     return decision
+
+
+def job_has_durable_progress(job: dict | None) -> bool:
+    """True when a job document carries committed progress safe to resume."""
+    if not isinstance(job, dict):
+        return False
+    try:
+        if int(job.get("records_processed") or 0) > 0:
+            return True
+    except (TypeError, ValueError):
+        pass
+    cp = job.get("checkpoint")
+    if not isinstance(cp, dict):
+        return False
+    try:
+        return bool(
+            int(cp.get("chunk_index") or 0) > 0
+            or int(cp.get("rows_processed") or 0) > 0
+            or int(cp.get("offset") or 0) > 0
+            or int(cp.get("file_offset") or 0) > 0
+            or cp.get("cursor_value") is not None
+            or cp.get("dynamodb_cursor")
+            or cp.get("kafka_cursor")
+            or cp.get("es_search_after") is not None
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def resolve_reclaim_resume(job: dict | None) -> bool:
+    """Whether orphan/claim reclaim should pass ``resume=True``.
+
+    Pending jobs and mid-flight reclaim with **no** durable progress must run
+    as a fresh start — forcing resume on append/Excel falsely fails Module 14.
+    """
+    return job_has_durable_progress(job)
 
 
 def kafka_offset_commit_must_fail_closed(exc: BaseException) -> ExecutionContractError:
@@ -254,7 +308,8 @@ def execution_contract_dict() -> dict[str, Any]:
             "chunk_ledger",
             "keyed_document",
             "job_idempotency_claim",
-            "refuse_insert_resume_without_checkpoint",
+            "refuse_insert_resume_without_checkpoint_after_writes",
+            "allow_from_zero_when_rows_committed_zero",
         ],
         "capabilities": capability_matrix(),
         "operator_notes": [
@@ -264,6 +319,7 @@ def execution_contract_dict() -> dict[str, Any]:
             "Quarantine / rejected_rows is the partial-failure SSOT.",
             "Exactly-once and one-click undo are not claimed.",
             "Append sinks require ack / watermark persistence fail-closed.",
+            "Orphan/claim reclaim uses resume only when durable progress exists.",
         ],
         "docs": "docs/EXECUTION_ENGINE_CONTRACT.md",
     }

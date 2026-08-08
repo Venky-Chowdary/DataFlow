@@ -986,14 +986,27 @@ def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> st
 
 
 def _checkpoint_has_progress(checkpoint: Any) -> bool:
-    """True when the checkpoint has committed rows from a previous run."""
+    """True when the checkpoint has durable resume tokens (parity with Module 14).
+
+    Must match ``job_has_durable_progress`` / ``evaluate_resume_safety`` — cursor /
+    file_offset alone are enough to resume. Narrow row-only checks wiped those
+    tokens on reclaim and restarted append from zero (silent duplicates).
+    """
     if not checkpoint:
         return False
-    return bool(
-        getattr(checkpoint, "chunk_index", 0)
-        or getattr(checkpoint, "offset", 0)
-        or getattr(checkpoint, "rows_processed", 0)
-    )
+    try:
+        return bool(
+            int(getattr(checkpoint, "chunk_index", 0) or 0) > 0
+            or int(getattr(checkpoint, "offset", 0) or 0) > 0
+            or int(getattr(checkpoint, "rows_processed", 0) or 0) > 0
+            or int(getattr(checkpoint, "file_offset", 0) or 0) > 0
+            or getattr(checkpoint, "cursor_value", None) is not None
+            or getattr(checkpoint, "dynamodb_cursor", None)
+            or getattr(checkpoint, "kafka_cursor", None)
+            or getattr(checkpoint, "es_search_after", None) is not None
+        )
+    except (TypeError, ValueError):
+        return False
 
 
 def _apply_post_load_transforms(request: Any, dest_summary: dict[str, Any]) -> None:
@@ -2258,6 +2271,7 @@ class UniversalTransferEngine:
                 checkpoint = None
             # Prefer job.records_processed when the checkpoint blob was cleared
             # after a completed partial wave (Studio Resume / multi-batch upsert).
+            prior_rows = 0
             if not _checkpoint_has_progress(checkpoint):
                 try:
                     job_doc = mongo.get_job(job_id) or {}
@@ -2289,6 +2303,7 @@ class UniversalTransferEngine:
                         resume_requested=True,
                         checkpoint_has_progress=False,
                         sync_mode=sync,
+                        rows_committed=prior_rows,
                     )
                 except ExecutionContractError as exc:
                     raise ValueError(str(exc)) from exc

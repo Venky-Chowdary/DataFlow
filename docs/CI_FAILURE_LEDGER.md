@@ -154,6 +154,12 @@
 3. Record class + owner module + linked fix.  
 4. Do not mark `main` green until open `real_bug` = 0 for merge gate jobs.
 
+## Production — Excel→PG false Resume (2026-08-08)
+
+| Symptom | Class | Fix |
+|---------|-------|-----|
+| Theater: ``No durable checkpoint to resume…`` with **0 rows** after deploy/claim | real_bug | Orphan/fleet forced ``resume=True``; Module 14 now allows from-zero when ``rows_committed=0``; ``resolve_reclaim_resume`` only when durable progress |
+
 ## Next triage slice
 
 1. Fresh `--maxfail=25` after wave4 fixes.  

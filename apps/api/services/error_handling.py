@@ -610,6 +610,26 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             ),
         }
 
+    if (
+        "no durable checkpoint to resume" in text
+        or "restart-from-zero would duplicate" in text
+    ):
+        return {
+            "code": "resume_without_checkpoint",
+            "category": "execution",
+            "title": "Resume needs a committed checkpoint",
+            "message": raw,
+            "fix": (
+                "This job has no durable progress (typically 0 rows written). "
+                "Re-run from Validate or start a new transfer — do not Resume. "
+                "After a deploy/restart, workers restart zero-progress jobs from "
+                "the beginning instead of false-failing Resume on append/Excel."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+        }
+
     try:
         from services.cdc_lease import CdcLeaseConflict
 

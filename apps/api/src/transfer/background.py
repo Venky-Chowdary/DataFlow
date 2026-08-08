@@ -107,11 +107,11 @@ def run_fleet_job(job_id: str) -> None:
             message="File re-upload required after restart — open Transfer Studio",
         )
         return
-    resume = bool(job.get("checkpoint")) or str(job.get("status") or "") in {
-        "paused",
-        "retrying",
-        "running",
-    }
+    # Only resume when durable progress exists — empty checkpoint / running
+    # reclaim must not force Module 14 refuse on append/Excel (0 rows written).
+    from services.execution_engine_contract import resolve_reclaim_resume
+
+    resume = resolve_reclaim_resume(job)
     _run_transfer(job_id, request, resume=resume)
 
 
