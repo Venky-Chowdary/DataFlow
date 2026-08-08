@@ -94,8 +94,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         if (!(p.stale || p.severity === "warn" || p.severity === "critical")) continue;
         const prev = map[p.schedule_id];
         const sev = p.severity || (p.stale ? "warn" : "ok");
-        if (!prev || p.lag_seconds > prev.lag) {
-          map[p.schedule_id] = { lag: p.lag_seconds, severity: sev };
+        // Proven seconds may be null when only WAL/binlog bytes prove behind.
+        const lag = typeof p.lag_seconds === "number" && Number.isFinite(p.lag_seconds)
+          ? p.lag_seconds
+          : typeof p.lag_bytes === "number" && Number.isFinite(p.lag_bytes)
+            ? Math.max(0, p.lag_bytes / 1_048_576) // MB as display proxy when seconds unknown
+            : 0;
+        if (!prev || lag > prev.lag) {
+          map[p.schedule_id] = { lag, severity: sev };
         }
       }
       setFreshnessLag(map);

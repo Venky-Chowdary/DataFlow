@@ -21,7 +21,10 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { ProgressCell } from "../components/ui/ProgressCell";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
-import { FreshnessSloPanel } from "../components/overview/FreshnessSloPanel";
+import {
+  FreshnessSloPanel,
+  type FreshnessAlert,
+} from "../components/overview/FreshnessSloPanel";
 import { buildDataPlaneTopology } from "../lib/topologyUtils";
 
 interface DashboardPageProps {
@@ -86,16 +89,7 @@ export function DashboardPage({
     stale_count?: number;
     critical_count?: number;
     worst_lag_seconds?: number | null;
-    alerts?: Array<{
-      severity: string;
-      code: string;
-      title: string;
-      detail: string;
-      schedule_id?: string | null;
-      job_id?: string | null;
-      stream?: string | null;
-      lag_seconds?: number;
-    }>;
+    alerts?: FreshnessAlert[];
   } | null>(null);
 
   useEffect(() => {
