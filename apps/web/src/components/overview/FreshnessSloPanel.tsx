@@ -9,7 +9,8 @@ export type FreshnessAlert = {
   schedule_id?: string | null;
   job_id?: string | null;
   stream?: string | null;
-  lag_seconds?: number;
+  lag_seconds?: number | null;
+  lag_bytes?: number | null;
 };
 
 interface FreshnessSloPanelProps {
@@ -25,9 +26,17 @@ interface FreshnessSloPanelProps {
   onOpenJob?: (jobId: string) => void;
 }
 
+function formatLagBytes(n: number): string {
+  if (n >= 1_048_576) return `${(n / 1_048_576).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
 /**
  * Closed-loop freshness SLO surface for Overview — lag/heartbeat alerts with
  * Open schedule / Open job CTAs (same pattern as quarantine / lease next steps).
+ *
+ * Heartbeat alone never claims catch-up; unknown SLO stays visible as honesty.
  */
 export function FreshnessSloPanel({
   sloStatus,
@@ -41,7 +50,21 @@ export function FreshnessSloPanel({
   onOpenPipeline,
   onOpenJob,
 }: FreshnessSloPanelProps) {
-  if (!sloStatus || sloStatus === "unknown") return null;
+  if (!sloStatus) return null;
+  if (sloStatus === "unknown") {
+    return (
+      <div className="df2-freshness-slo is-warn" role="status" aria-label="CDC freshness SLO unknown">
+        <DtIcon name="alert" size={16} />
+        <div>
+          <strong>Freshness SLO unknown</strong>
+          <p>
+            No proven commit lag or WAL/binlog byte probe — heartbeat is liveness only,
+            not catch-up. Open the CDC job and confirm slot/plugin lag.
+          </p>
+        </div>
+      </div>
+    );
+  }
   if (sloStatus === "ok" && alerts.length === 0) {
     return (
       <div className="df2-freshness-slo is-ok" role="status" aria-label="CDC freshness SLO">
@@ -50,8 +73,8 @@ export function FreshnessSloPanel({
           <strong>Freshness SLO met</strong>
           <p>
             {worstLagSeconds != null
-              ? `Worst CDC lag ${worstLagSeconds.toFixed(1)}s (warn ${warnSeconds}s).`
-              : `No pipelines above the ${warnSeconds}s warn threshold.`}
+              ? `Worst proven CDC lag ${worstLagSeconds.toFixed(1)}s (warn ${warnSeconds}s).`
+              : `Pipelines within warn (${warnSeconds}s) / WAL catch-up band.`}
           </p>
         </div>
       </div>
@@ -96,6 +119,7 @@ export function FreshnessSloPanel({
                     {" · "}
                     {name}
                     {a.lag_seconds != null ? ` · ${a.lag_seconds.toFixed(1)}s` : ""}
+                    {a.lag_bytes != null ? ` · ${formatLagBytes(Number(a.lag_bytes))}` : ""}
                   </span>
                   <span className="df2-freshness-slo-actions">
                     {a.schedule_id && onOpenPipeline && (

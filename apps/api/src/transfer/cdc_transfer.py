@@ -103,13 +103,22 @@ def _cdc_span(name: str, **attrs: Any):
 
 
 def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
-    """Collect lag / heartbeat / last-DDL / plugin fields from a CDC reader."""
+    """Collect lag / heartbeat / last-DDL / plugin fields from a CDC reader.
+
+    Lag seconds never invent catch-up from heartbeat age — see
+    ``services.cdc_lag_honesty.observe_cdc_lag``.
+    """
+    from services.cdc_lag_honesty import observe_cdc_lag
+
     lag_bytes = None
     lag_seconds = None
+    lag_basis = None
+    heartbeat_age = None
     last_ddl = None
     heartbeat_at = None
     plugin = None
     slot_name = None
+    meta: dict[str, Any] = {}
     if hasattr(cdc, "cdc_metadata"):
         try:
             meta = cdc.cdc_metadata() or {}
@@ -119,6 +128,8 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
                 lag_bytes = meta.get("replication_lag_bytes")
             if meta.get("replication_lag_seconds") is not None:
                 lag_seconds = meta.get("replication_lag_seconds")
+            lag_basis = meta.get("cdc_lag_basis")
+            heartbeat_age = meta.get("cdc_heartbeat_age_sec")
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     if hasattr(cdc, "replication_lag_bytes") and lag_bytes is None:
@@ -131,13 +142,43 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
             lag_seconds = cdc.replication_lag_seconds()
         except Exception:
             lag_seconds = None
-    if lag_seconds is None and hasattr(cdc, "lag_seconds"):
-        try:
-            lag_seconds = cdc.lag_seconds()
-        except Exception:
-            lag_seconds = None
+    # Recompute via SSOT when commit clock or byte lag is available.
+    # Heartbeat-only readers must not keep inventing catch-up seconds.
+    commit_at = getattr(cdc, "_last_event_commit_at", None)
+    hb_raw = getattr(cdc, "_last_heartbeat_at", None)
+    reader_seconds = lag_seconds
+    try:
+        if isinstance(commit_at, datetime) or lag_bytes is not None:
+            obs = observe_cdc_lag(
+                last_event_commit_at=commit_at if isinstance(commit_at, datetime) else None,
+                last_heartbeat_at=hb_raw if isinstance(hb_raw, datetime) else None,
+                replication_lag_bytes=lag_bytes,
+            )
+            lag_seconds = obs.get("cdc_lag_seconds")
+            lag_basis = obs.get("cdc_lag_basis") or lag_basis
+            heartbeat_age = obs.get("cdc_heartbeat_age_sec")
+            if obs.get("replication_lag_bytes") is not None:
+                lag_bytes = obs.get("replication_lag_bytes")
+            if obs.get("freshness_severity"):
+                meta = {**meta, "freshness_severity": obs.get("freshness_severity")}
+            if obs.get("cdc_lag_unknown_reason"):
+                meta = {
+                    **meta,
+                    "cdc_lag_unknown_reason": obs.get("cdc_lag_unknown_reason"),
+                }
+        else:
+            # Legacy dialect lag_seconds only — keep value, never call it catch-up.
+            if reader_seconds is not None and not lag_basis:
+                lag_basis = "legacy_seconds"
+            if isinstance(hb_raw, datetime):
+                from services.cdc_lag_honesty import age_seconds
+
+                heartbeat_age = age_seconds(hb_raw)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     last_ddl = getattr(cdc, "last_ddl_at", None)
-    hb = getattr(cdc, "_last_heartbeat_at", None) or getattr(cdc, "_last_event_at", None)
+    # Heartbeat clock only — never fall back to last event (that greenwashed lag).
+    hb = getattr(cdc, "_last_heartbeat_at", None)
     if isinstance(hb, datetime):
         heartbeat_at = hb.astimezone(timezone.utc).isoformat()
     if plugin is None:
@@ -181,6 +222,8 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
     out: dict[str, Any] = {
         "replication_lag_bytes": lag_bytes,
         "cdc_lag_seconds": lag_seconds,
+        "cdc_lag_basis": lag_basis,
+        "cdc_heartbeat_age_sec": heartbeat_age,
         "cdc_last_ddl_at": last_ddl,
         "cdc_heartbeat_at": heartbeat_at,
         "cdc_plugin": plugin,
@@ -190,6 +233,10 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         **_source_ha_lag_fields(cdc),
         **_cdc_retention_lag_fields(cdc),
     }
+    if meta.get("freshness_severity"):
+        out["cdc_freshness_severity"] = meta.get("freshness_severity")
+    if meta.get("cdc_lag_unknown_reason"):
+        out["cdc_lag_unknown_reason"] = meta.get("cdc_lag_unknown_reason")
     # Retained WAL is the number an on-call engineer needs first: an idle slot
     # that stops advancing fills the primary's disk, and the job looks healthy
     # right up until the database stops accepting writes.
@@ -2087,6 +2134,8 @@ def _run_cdc_single_stream(
 
             record_cdc_poll(
                 lag_seconds=lag_fields.get("cdc_lag_seconds"),
+                lag_bytes=lag_fields.get("replication_lag_bytes"),
+                lag_basis=lag_fields.get("cdc_lag_basis"),
                 job_id=str(job_id or ""),
                 stream=str(table_name or ""),
             )

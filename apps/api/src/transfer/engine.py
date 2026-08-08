@@ -1235,6 +1235,10 @@ def _attach_job_rollback_plan(
 
 _CDC_JOB_FIELDS = (
     "cdc_lag_seconds",
+    "cdc_lag_basis",
+    "cdc_heartbeat_age_sec",
+    "cdc_freshness_severity",
+    "cdc_lag_unknown_reason",
     "replication_lag_bytes",
     "cdc_confirmed_flush_lsn",
     "cdc_heartbeat_at",

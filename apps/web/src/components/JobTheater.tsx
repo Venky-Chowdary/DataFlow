@@ -894,11 +894,38 @@ export function JobTheaterView({
           </article>
         )}
         {job.cdc_lag_seconds != null && Number.isFinite(Number(job.cdc_lag_seconds)) && (
-          <article className="df2-theater-v3-metric">
+          <article
+            className="df2-theater-v3-metric"
+            title={
+              job.cdc_lag_basis
+                ? `Proven lag basis: ${job.cdc_lag_basis} (heartbeat is liveness only)`
+                : "Proven CDC lag — heartbeat is liveness only, not catch-up"
+            }
+          >
             <DtIcon name="activity" size={16} />
             <div>
               <strong>{`${Number(job.cdc_lag_seconds).toFixed(1)}s`}</strong>
-              <span>CDC lag</span>
+              <span>
+                {job.cdc_lag_basis === "wal_bytes"
+                  ? "CDC lag (WAL catch-up)"
+                  : job.cdc_lag_basis === "commit_ts"
+                    ? "CDC lag (commit)"
+                    : "CDC lag"}
+              </span>
+            </div>
+          </article>
+        )}
+        {job.cdc_lag_seconds == null
+          && job.replication_lag_bytes != null
+          && Number(job.replication_lag_bytes) > 1_048_576 && (
+          <article
+            className="df2-theater-v3-metric"
+            title="Seconds lag unknown while WAL/binlog is behind — not claimed caught up"
+          >
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Unknown</strong>
+              <span>CDC lag (bytes behind)</span>
             </div>
           </article>
         )}

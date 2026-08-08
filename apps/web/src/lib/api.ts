@@ -1169,6 +1169,9 @@ export function streamJobProgress(
           ? rpsFromDs
           : undefined,
       cdc_lag_seconds: raw.cdc_lag_seconds != null ? Number(raw.cdc_lag_seconds) : null,
+      cdc_lag_basis: raw.cdc_lag_basis != null ? String(raw.cdc_lag_basis) : null,
+      cdc_heartbeat_age_sec:
+        raw.cdc_heartbeat_age_sec != null ? Number(raw.cdc_heartbeat_age_sec) : null,
       replication_lag_bytes: raw.replication_lag_bytes != null ? Number(raw.replication_lag_bytes) : null,
       cdc_heartbeat_at: raw.cdc_heartbeat_at ? String(raw.cdc_heartbeat_at) : null,
       cdc_last_ddl_at: raw.cdc_last_ddl_at ? String(raw.cdc_last_ddl_at) : null,
@@ -1686,13 +1689,16 @@ export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
     schedule_id?: string | null;
     job_id?: string | null;
     stream?: string | null;
-    lag_seconds?: number;
+    lag_seconds?: number | null;
+    lag_bytes?: number | null;
   }>;
   pipelines: Array<{
     schedule_id: string;
     stream: string;
     job_id: string;
-    lag_seconds: number;
+    lag_seconds: number | null;
+    lag_bytes?: number | null;
+    lag_basis?: string | null;
     polls_total: number;
     heartbeat_at?: number;
     heartbeat_age_seconds?: number | null;

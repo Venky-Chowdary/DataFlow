@@ -96,7 +96,9 @@ class MySqlChangeStreamCdc:
         self.decode_schema: dict[str, Any] = {}
         self.last_ddl_at: str | None = None
         self._last_event_at: datetime | None = None
+        self._last_event_commit_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
+        self._lag_observation: dict | None = None
         self._schema_ready = False
         self._processed_signal_ids: set[str] = set()
         self.signal_table = str(cfg.get("signal_table") or "dataflow_signal")
@@ -499,11 +501,16 @@ class MySqlChangeStreamCdc:
             return None
 
     def replication_lag_seconds(self) -> float | None:
-        """Seconds since the last binlog event / heartbeat, when known."""
-        anchor = self._last_event_at or self._last_heartbeat_at
-        if anchor is None:
-            return None
-        return max(0.0, (datetime.now(timezone.utc) - anchor).total_seconds())
+        """Proven CDC lag seconds — never heartbeat age (Debezium-class honesty)."""
+        from services.cdc_lag_honesty import observe_cdc_lag
+
+        obs = observe_cdc_lag(
+            last_event_commit_at=self._last_event_commit_at,
+            last_heartbeat_at=self._last_heartbeat_at,
+            replication_lag_bytes=self.replication_lag_bytes(),
+        )
+        self._lag_observation = obs
+        return obs.get("cdc_lag_seconds")
 
     def heartbeat(self) -> None:
         self._last_heartbeat_at = datetime.now(timezone.utc)
@@ -1115,7 +1122,9 @@ class MySqlChangeStreamCdc:
 
                 event_ts = getattr(binlog_event, "timestamp", None)
                 if isinstance(event_ts, (int, float)) and event_ts > 0:
-                    self._last_event_at = datetime.fromtimestamp(event_ts, tz=timezone.utc)
+                    commit_at = datetime.fromtimestamp(event_ts, tz=timezone.utc)
+                    self._last_event_commit_at = commit_at
+                    self._last_event_at = commit_at
                 else:
                     self._last_event_at = datetime.now(timezone.utc)
 

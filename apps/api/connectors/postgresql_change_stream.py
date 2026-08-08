@@ -277,7 +277,10 @@ class PostgreSqlChangeStreamCdc:
         self.decode_schema: dict[str, Any] = {}
         self.last_ddl_at: str | None = None
         self._last_event_at: datetime | None = None
+        # Source commit clock when decoder exposes it (pgoutput rarely does).
+        self._last_event_commit_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
+        self._lag_observation: dict[str, Any] | None = None
         self._schema_ready = False
         self._pending_ack_lsn: str | None = None
         self._pgoutput_decoder = None
@@ -353,14 +356,19 @@ class PostgreSqlChangeStreamCdc:
 
     def cdc_metadata(self) -> dict[str, Any]:
         """Operator-visible CDC status for Job Theater / Validate."""
+        lag_sec = self.replication_lag_seconds()
+        obs = dict(self._lag_observation or {})
         return {
             "plugin": self.output_plugin,
             "slot_name": self.slot_name,
             "publication_name": self.publication_name if self.output_plugin == "pgoutput" else None,
             "phase": self.phase,
             "consistent_point_lsn": self.consistent_point_lsn,
-            "replication_lag_bytes": self.replication_lag_bytes(),
-            "replication_lag_seconds": self.replication_lag_seconds(),
+            "replication_lag_bytes": obs.get("replication_lag_bytes", self.replication_lag_bytes()),
+            "replication_lag_seconds": lag_sec,
+            "cdc_lag_basis": obs.get("cdc_lag_basis"),
+            "cdc_heartbeat_age_sec": obs.get("cdc_heartbeat_age_sec"),
+            "freshness_severity": obs.get("freshness_severity"),
             "delivery": "at-least-once",
             **self._lease.theater_fields(),
         }
@@ -505,11 +513,20 @@ class PostgreSqlChangeStreamCdc:
         return None
 
     def replication_lag_seconds(self) -> float | None:
-        """Seconds since the last decoded event / heartbeat, when known."""
-        anchor = self._last_event_at or self._last_heartbeat_at
-        if anchor is None:
-            return None
-        return max(0.0, (datetime.now(timezone.utc) - anchor).total_seconds())
+        """Proven CDC lag seconds — never heartbeat age (Debezium-class honesty).
+
+        Returns ``0`` when ``pg_wal_lsn_diff`` proves catch-up; ``None`` when
+        behind on WAL without a source commit timestamp (basis ``wal_bytes``).
+        """
+        from services.cdc_lag_honesty import observe_cdc_lag
+
+        obs = observe_cdc_lag(
+            last_event_commit_at=self._last_event_commit_at,
+            last_heartbeat_at=self._last_heartbeat_at,
+            replication_lag_bytes=self.replication_lag_bytes(),
+        )
+        self._lag_observation = obs
+        return obs.get("cdc_lag_seconds")
 
     def heartbeat(self) -> None:
         """Keep the lease alive and release WAL an idle slot no longer needs.

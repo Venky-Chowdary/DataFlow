@@ -145,22 +145,57 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
             "present": False,
         })
 
-    # Freshness (CDC lag)
-    if lag is not None and str(lag) != "" and _num(lag, -1) >= 0:
-        lag_f = float(lag)
-        if lag_f <= 60:
-            fresh_score = 100.0
-        elif lag_f >= 600:
-            fresh_score = 0.0
+    # Freshness (CDC lag) — byte lag + proven seconds; never heartbeat invent.
+    from services.cdc_lag_honesty import BYTE_CRITICAL, BYTE_WARN, observe_cdc_lag
+
+    lag_bytes = j.get("replication_lag_bytes")
+    lag_basis = str(j.get("cdc_lag_basis") or "")
+    try:
+        lag_bytes_i = int(lag_bytes) if lag_bytes is not None and str(lag_bytes) != "" else None
+    except (TypeError, ValueError):
+        lag_bytes_i = None
+    lag_f = float(lag) if lag is not None and str(lag) != "" and _num(lag, -1) >= 0 else None
+    obs = observe_cdc_lag(
+        last_event_commit_at=None,
+        replication_lag_bytes=lag_bytes_i,
+    )
+    # Prefer job-stamped seconds when present; fold byte severity.
+    if lag_f is not None or lag_bytes_i is not None:
+        sev = str(obs.get("freshness_severity") or "unknown")
+        if lag_f is not None:
+            if lag_f <= 60:
+                fresh_score = 100.0
+            elif lag_f >= 600:
+                fresh_score = 0.0
+            else:
+                fresh_score = max(0.0, 100.0 * (1.0 - (lag_f - 60.0) / 540.0))
+            note = f"CDC lag {lag_f:.1f}s (basis={lag_basis or obs.get('cdc_lag_basis') or 'seconds'})."
         else:
-            fresh_score = max(0.0, 100.0 * (1.0 - (lag_f - 60.0) / 540.0))
+            # Seconds unknown — score from bytes only.
+            if lag_bytes_i is not None and lag_bytes_i <= (1 * 1024 * 1024):
+                fresh_score = 100.0
+                note = f"CDC caught up on WAL/binlog ({lag_bytes_i:,} B)."
+            elif lag_bytes_i is not None and lag_bytes_i >= BYTE_CRITICAL:
+                fresh_score = 0.0
+                note = f"CDC WAL/binlog lag critical ({lag_bytes_i:,} B)."
+            elif lag_bytes_i is not None and lag_bytes_i >= BYTE_WARN:
+                fresh_score = 35.0
+                note = f"CDC WAL/binlog lag warn ({lag_bytes_i:,} B)."
+            else:
+                fresh_score = None
+                note = "CDC lag unknown — heartbeat is not catch-up proof."
+                sev = "unknown"
+        if sev == "critical" and fresh_score is not None:
+            fresh_score = min(fresh_score, 15.0)
+        elif sev == "warn" and fresh_score is not None:
+            fresh_score = min(fresh_score, 55.0)
         factors.append({
             "id": "freshness",
             "label": "Freshness",
             "score": fresh_score,
             "weight": 0.10,
-            "note": f"CDC lag {lag_f:.1f}s (warn 60s).",
-            "present": True,
+            "note": note,
+            "present": fresh_score is not None,
         })
     else:
         factors.append({
@@ -168,7 +203,7 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
             "label": "Freshness",
             "score": None,
             "weight": 0.10,
-            "note": "No CDC lag on this job (batch or not reported).",
+            "note": "No proven CDC lag on this job (batch or unknown).",
             "present": False,
         })
 

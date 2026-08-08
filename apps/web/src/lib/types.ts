@@ -174,8 +174,11 @@ export interface TransferJob {
   updated_at?: string;
   started_at?: string;
   completed_at?: string;
-  /** CDC heartbeat / event age in seconds (not end-to-end pipeline latency). */
+  /** Proven CDC lag seconds (commit_ts or WAL catch-up) — never heartbeat age. */
   cdc_lag_seconds?: number | null;
+  /** Lag proof basis: commit_ts | wal_bytes | legacy_seconds | unknown. */
+  cdc_lag_basis?: string | null;
+  cdc_heartbeat_age_sec?: number | null;
   /** Logical decoding plugin (pgoutput / test_decoding) or binlog engine. */
   cdc_plugin?: string | null;
   cdc_slot_name?: string | null;
