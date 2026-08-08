@@ -25,6 +25,30 @@ def test_stamp_writer_ack_phase():
     })
     assert stamped["phase"] == "post_write_writer_ack"
     assert stamped["post_write_pending"] is False
+    assert stamped["assurance_level"] == "writer_ack"
+
+
+def test_stamp_file_object_export_unproven_not_writer_ack():
+    """File/object export message must not false-green as writer_ack / verified."""
+    from services.reconciliation import stamp_post_write_phase
+
+    stamped = stamp_post_write_phase({
+        "passed": True,
+        "unproven": True,
+        "skipped_readback": True,
+        "message": (
+            "File/object export wrote successfully — Gate-8 cell fidelity "
+            "unproven (no destination read-back). Writer checksum present (abc123…) — count/bytes only."
+        ),
+        "source_rows": 1,
+        "target_rows": 1,
+        "checksum": "abc123checksum",
+    })
+    assert stamped["phase"] == "post_write_skipped"
+    assert stamped["assurance_level"] == "none"
+    assert stamped["coverage"] == "none"
+    assert stamped["unproven"] is True
+    assert stamped["migration_proven"] is False
 
 
 def test_reconcile_row_mismatch():

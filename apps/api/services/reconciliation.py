@@ -116,12 +116,27 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
 
-    if "file export" in msg or ("skipped" in msg and "reconciliation skipped" in msg):
+    # File/object export messages use "File/object export" — substring "file export"
+    # alone never matched and falsely fell through to writer_ack / verified.
+    unproven_export = (
+        out.get("unproven") is True
+        or out.get("skipped_readback") is True
+        or "file/object export" in msg
+        or "file export" in msg
+        or "object export" in msg
+        or ("skipped" in msg and "reconciliation skipped" in msg)
+        or ("cell fidelity" in msg and "unproven" in msg)
+    )
+    if unproven_export:
         out["phase"] = "post_write_skipped"
         out["post_write_pending"] = False
         out["preview"] = False
         out["coverage"] = "none"
         out["assurance_level"] = "none"
+        out["unproven"] = True
+        out["skipped_readback"] = True
+        out["migration_proven"] = False
+        out["checksum_match"] = False
         return out
 
     if not passed:

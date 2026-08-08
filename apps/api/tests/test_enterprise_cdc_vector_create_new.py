@@ -228,6 +228,9 @@ def test_file_export_reconcile_is_unproven_not_green():
     assert result.get("unproven") is True
     assert result.get("migration_proven") is False
     assert result.get("skipped_readback") is True
+    assert result.get("phase") == "post_write_skipped"
+    assert result.get("assurance_level") == "none"
+    assert result.get("coverage") == "none"
 
 
 def test_create_new_over_cap_prefers_unbounded_text():

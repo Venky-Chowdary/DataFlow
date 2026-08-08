@@ -25,6 +25,116 @@ def is_terminal_status(status: str | None) -> bool:
     return str(status or "").strip().lower() in _TERMINAL
 
 
+def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
+    """True only for independent source↔dest digest match (not writer-ack/sample)."""
+    if not isinstance(recon, dict) or not recon:
+        return False
+    assurance = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
+    if assurance == "full_checksum":
+        return True
+    phase = str(recon.get("phase") or "").strip().lower()
+    if "writer_ack" in phase or "sample" in phase or "skipped" in phase:
+        return False
+    if recon.get("unproven") is True or recon.get("skipped_readback") is True:
+        return False
+    src = str(recon.get("source_checksum") or "").strip()
+    tgt = str(recon.get("target_checksum") or "").strip()
+    return bool(src and tgt and src == tgt and recon.get("passed") is True)
+
+
+def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
+    """Gate-8 reconcile factor — never invent Verified from writer-ack / sample."""
+    passed = recon.get("passed")
+    phase = str(recon.get("phase") or "").lower()
+    msg = str(recon.get("message") or "").lower()
+    assurance = str(recon.get("assurance_level") or recon.get("coverage") or "").lower()
+    src = str(recon.get("source_checksum") or "").strip()
+    tgt = str(recon.get("target_checksum") or "").strip()
+    unproven = (
+        recon.get("unproven") is True
+        or recon.get("skipped_readback") is True
+        or "post_write_skipped" in phase
+        or (
+            assurance == "none"
+            and ("file/object" in msg or "file export" in msg or "unproven" in msg)
+        )
+    )
+    writer_ack = (
+        assurance == "writer_ack"
+        or "writer_ack" in phase
+        or "verified by writer" in msg
+        or "read-back verifier not available" in msg
+        or (passed is True and bool(src) and not tgt and not unproven)
+    )
+    sample = (
+        assurance == "sample"
+        or "sample_verified" in phase
+        or "sample-verified" in msg
+    )
+    pre_write = (
+        recon.get("preview") is True
+        or recon.get("post_write_pending") is True
+        or "pre_write" in phase
+        or "post_write_pending" in phase
+    )
+
+    fidelity = recon.get("row_fidelity_score")
+    if isinstance(fidelity, (int, float)) and fidelity == fidelity:
+        recon_score = max(0.0, min(100.0, float(fidelity) * (100.0 if float(fidelity) <= 1.0 else 1.0)))
+        if float(fidelity) <= 1.0:
+            recon_score = float(fidelity) * 100.0
+    elif passed is False:
+        recon_score = 18.0
+    elif unproven or pre_write:
+        # Operational / pending — not independent cell fidelity.
+        recon_score = 45.0
+    elif writer_ack:
+        recon_score = 58.0
+    elif sample:
+        recon_score = 68.0
+    elif has_full_checksum_proof(recon):
+        recon_score = 100.0
+    elif passed is True:
+        # passed without stamped assurance — do not invent grade-A Verified.
+        recon_score = 70.0
+    else:
+        recon_score = 70.0
+
+    missing = int(recon.get("missing_key_count") or 0)
+    extra = int(recon.get("extra_key_count") or 0)
+    if passed is False:
+        r_note = str(recon.get("message") or "Gate-8 reconcile failed.")
+    elif unproven:
+        r_note = (
+            "Gate-8 cell fidelity unproven (file/object export or skipped read-back) "
+            "— operational pass only."
+        )
+    elif pre_write:
+        r_note = "Pre-write / pending Gate-8 — not independent post-write proof."
+    elif writer_ack:
+        r_note = "Writer acknowledgment only — independent read-back not captured."
+    elif sample:
+        r_note = "Sample-verified Gate-8 — not full independent checksum."
+    elif missing or extra:
+        r_note = f"Keys missing={missing} extra={extra}."
+        recon_score = min(recon_score, 70.0)
+    elif has_full_checksum_proof(recon):
+        r_note = "Gate-8 full checksum reconcile passed."
+    elif passed is True:
+        r_note = "Gate-8 passed without full_checksum assurance — incomplete proof."
+    else:
+        r_note = "Gate-8 reconcile pending."
+
+    return {
+        "id": "reconcile",
+        "label": "Reconcile",
+        "score": recon_score,
+        "weight": 0.30,
+        "note": r_note,
+        "present": True,
+    }
+
+
 def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
     """Compute a 0–100 trust score from persisted job fields."""
     j = job if isinstance(job, dict) else {}
@@ -43,6 +153,7 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         "cdc_cursor_gap",
         "cdc_lsn_gap",
         "cdc_scn_gap",
+        "cdc_binlog_gap",
     }
     source_ha_role = str(j.get("source_ha_role") or "").strip().upper() or None
 
@@ -59,8 +170,13 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         outcome = 78.0
         outcome_note = "Completed with quarantine — not full fidelity."
     elif status in {"completed", "success"}:
-        outcome = 100.0
-        outcome_note = "Terminal success."
+        # Terminal success without Gate-8 is not a perfect completeness score.
+        outcome = 100.0 if recon else 82.0
+        outcome_note = (
+            "Terminal success."
+            if recon
+            else "Terminal success — Gate-8 reconcile not on this job yet."
+        )
     else:
         outcome = 55.0
         outcome_note = "In progress — score is provisional."
@@ -104,37 +220,9 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         ),
     })
 
-    # Gate-8 reconcile
+    # Gate-8 reconcile — writer_ack / sample / unproven never score as Verified.
     if recon:
-        passed = recon.get("passed")
-        fidelity = recon.get("row_fidelity_score")
-        if isinstance(fidelity, (int, float)) and fidelity == fidelity:
-            recon_score = max(0.0, min(100.0, float(fidelity) * (100.0 if float(fidelity) <= 1.0 else 1.0)))
-            if float(fidelity) <= 1.0:
-                recon_score = float(fidelity) * 100.0
-        elif passed is True:
-            recon_score = 100.0
-        elif passed is False:
-            recon_score = 18.0
-        else:
-            recon_score = 70.0
-        missing = int(recon.get("missing_key_count") or 0)
-        extra = int(recon.get("extra_key_count") or 0)
-        if passed is False:
-            r_note = str(recon.get("message") or "Gate-8 reconcile failed.")
-        elif missing or extra:
-            r_note = f"Keys missing={missing} extra={extra}."
-            recon_score = min(recon_score, 70.0)
-        else:
-            r_note = "Gate-8 reconcile passed."
-        factors.append({
-            "id": "reconcile",
-            "label": "Reconcile",
-            "score": recon_score,
-            "weight": 0.30,
-            "note": r_note,
-            "present": True,
-        })
+        factors.append(_reconcile_factor(recon))
     else:
         factors.append({
             "id": "reconcile",
@@ -228,6 +316,12 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
                     "CDC cursor gap (retention / AG·Data Guard failover class) — "
                     "reset watermark and re-snapshot; continuous CDC across the gap is not claimed."
                 )
+
+    # Never grade-A without independent full checksum proof (enterprise honesty).
+    if not recon:
+        score = min(score, 84.0)
+    elif not has_full_checksum_proof(recon):
+        score = min(score, 89.0)
 
     if source_ha_role in {"SECONDARY", "PHYSICAL_STANDBY", "LOGICAL_STANDBY", "SNAPSHOT_STANDBY"}:
         # Reading from a standby is unusual for CDC capture — surface in confidence.

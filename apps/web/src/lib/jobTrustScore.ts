@@ -68,7 +68,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
   const leaseConflict = Boolean(job?.cdc_lease_conflict);
   const cursorGap =
     Boolean(job?.cdc_cursor_gap)
-    || ["cdc_cursor_gap", "cdc_lsn_gap", "cdc_scn_gap"].includes(String(job?.error_code || ""));
+    || ["cdc_cursor_gap", "cdc_lsn_gap", "cdc_scn_gap", "cdc_binlog_gap"].includes(
+      String(job?.error_code || ""),
+    );
   const sourceHaRole = String(job?.source_ha_role || "").trim().toUpperCase() || null;
 
   const factors: JobTrustFactor[] = [];
@@ -118,11 +120,33 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     const passed = recon.passed;
     const phase = String(recon.phase || "").toLowerCase();
     const msg = String(recon.message || "").toLowerCase();
+    const assurance = String(recon.assurance_level || recon.coverage || "").toLowerCase();
     const preview = recon.preview === true || recon.post_write_pending === true;
+    const unproven =
+      recon.unproven === true
+      || recon.skipped_readback === true
+      || phase.includes("skipped")
+      || (assurance === "none" && /file\/object|file export|unproven/i.test(msg));
     const writerAck =
-      phase.includes("writer_ack")
+      assurance === "writer_ack"
+      || phase.includes("writer_ack")
       || /verified by writer|read-back verifier not available/i.test(msg)
-      || (passed === true && Boolean(recon.source_checksum) && !recon.target_checksum);
+      || (passed === true && Boolean(recon.source_checksum) && !recon.target_checksum && !unproven);
+    const sample =
+      assurance === "sample"
+      || phase.includes("sample_verified")
+      || /sample-verified|sample verified/i.test(msg);
+    const fullChecksum =
+      assurance === "full_checksum"
+      || (
+        passed === true
+        && Boolean(recon.source_checksum)
+        && Boolean(recon.target_checksum)
+        && String(recon.source_checksum) === String(recon.target_checksum)
+        && !writerAck
+        && !sample
+        && !unproven
+      );
     const preWrite =
       preview
       || phase.includes("pre_write")
@@ -133,13 +157,19 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     const fidelity = recon.row_fidelity_score;
     if (typeof fidelity === "number" && Number.isFinite(fidelity)) {
       reconScore = fidelity <= 1 ? fidelity * 100 : Math.max(0, Math.min(100, fidelity));
-    } else if (passed === true && !writerAck && !preWrite) {
-      reconScore = 100;
     } else if (passed === false) {
       reconScore = 18;
-    } else if (writerAck || preWrite) {
-      // Acknowledgment / simulation is not independent Gate-8 proof.
-      reconScore = Math.min(reconScore, 58);
+    } else if (unproven || preWrite) {
+      reconScore = 45;
+    } else if (writerAck) {
+      reconScore = 58;
+    } else if (sample) {
+      reconScore = 68;
+    } else if (fullChecksum) {
+      reconScore = 100;
+    } else if (passed === true) {
+      // passed without full_checksum assurance — do not invent Verified.
+      reconScore = 70;
     }
 
     const missing = num(recon.missing_key_count);
@@ -147,14 +177,20 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     let rNote: string;
     if (passed === false) {
       rNote = String(recon.message || "Gate-8 reconcile failed.");
+    } else if (unproven) {
+      rNote = "Gate-8 cell fidelity unproven (file/object export or skipped read-back) — operational pass only.";
     } else if (preWrite) {
       rNote = "Pre-write / pending Gate-8 — not independent post-write proof.";
     } else if (writerAck) {
       rNote = "Writer acknowledgment only — independent read-back not captured.";
+    } else if (sample) {
+      rNote = "Sample-verified Gate-8 — not full independent checksum.";
     } else if (missing || extra) {
       rNote = `Keys missing=${missing} extra=${extra}.`;
+    } else if (fullChecksum) {
+      rNote = "Gate-8 full checksum reconcile passed.";
     } else if (passed === true) {
-      rNote = "Gate-8 reconcile passed.";
+      rNote = "Gate-8 passed without full_checksum assurance — incomplete proof.";
     } else {
       rNote = "Gate-8 reconcile pending.";
     }
@@ -211,6 +247,27 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
   }
   if (cursorGap) {
     score = Math.min(score, 28);
+  }
+  // Never grade-A without independent full checksum proof (mirrors job_trust.py).
+  const assurance = String(recon?.assurance_level || recon?.coverage || "").toLowerCase();
+  const phase = String(recon?.phase || "").toLowerCase();
+  const fullProof =
+    assurance === "full_checksum"
+    || (
+      recon?.passed === true
+      && Boolean(recon?.source_checksum)
+      && Boolean(recon?.target_checksum)
+      && String(recon?.source_checksum) === String(recon?.target_checksum)
+      && !phase.includes("writer_ack")
+      && !phase.includes("sample")
+      && !phase.includes("skipped")
+      && recon?.unproven !== true
+      && recon?.skipped_readback !== true
+    );
+  if (!recon) {
+    score = Math.min(score, 84);
+  } else if (!fullProof) {
+    score = Math.min(score, 89);
   }
 
   const covered = 3 + factors.filter((f) => f.present === true).length;

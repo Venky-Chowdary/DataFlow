@@ -12,11 +12,28 @@ describe("computeJobTrustScore", () => {
       records_processed: 1000,
       rejected_rows: 0,
       coerced_null_rows: 0,
-      reconciliation: { passed: true },
+      reconciliation: {
+        passed: true,
+        assurance_level: "full_checksum",
+        source_checksum: "aaa",
+        target_checksum: "aaa",
+        phase: "post_write_verified",
+      },
     });
     assert.ok(t.score >= 90);
     assert.equal(t.grade, "A");
     assert.equal(t.next_action.code, "ok");
+  });
+
+  it("does not grade-A on passed without full_checksum assurance", () => {
+    const t = computeJobTrustScore({
+      status: "completed",
+      records_processed: 1000,
+      rejected_rows: 0,
+      reconciliation: { passed: true },
+    });
+    assert.ok(t.score <= 89);
+    assert.notEqual(t.grade, "A");
   });
 
   it("drops score on quarantine and points next action", () => {
@@ -58,7 +75,12 @@ describe("computeJobTrustScore", () => {
       status: "completed",
       records_processed: 1000,
       rejected_rows: 0,
-      reconciliation: { passed: true },
+      reconciliation: {
+        passed: true,
+        assurance_level: "full_checksum",
+        source_checksum: "a",
+        target_checksum: "a",
+      },
     });
     const without = computeJobTrustScore({
       status: "completed",
@@ -66,6 +88,7 @@ describe("computeJobTrustScore", () => {
       rejected_rows: 0,
     });
     assert.ok(without.score < withRecon.score);
+    assert.ok(without.score <= 84);
     const completeness = without.factors.find((f) => f.id === "completeness");
     assert.ok(completeness && (completeness.score as number) <= 82);
   });
@@ -75,7 +98,13 @@ describe("computeJobTrustScore", () => {
       status: "completed",
       records_processed: 1000,
       rejected_rows: 0,
-      reconciliation: { passed: true, phase: "post_write", source_checksum: "a", target_checksum: "a" },
+      reconciliation: {
+        passed: true,
+        phase: "post_write_verified",
+        assurance_level: "full_checksum",
+        source_checksum: "a",
+        target_checksum: "a",
+      },
     });
     const ack = computeJobTrustScore({
       status: "completed",
@@ -84,13 +113,46 @@ describe("computeJobTrustScore", () => {
       reconciliation: {
         passed: true,
         phase: "post_write_writer_ack",
+        assurance_level: "writer_ack",
         message: "Transfer verified by writer: 10 rows written (read-back verifier not available)",
         source_checksum: "abc",
       },
     });
     assert.ok(ack.score < full.score);
+    assert.notEqual(ack.grade, "A");
     const factor = ack.factors.find((f) => f.id === "reconcile");
     assert.ok(factor?.note.toLowerCase().includes("writer"));
     assert.ok((factor?.score as number) <= 58);
+  });
+
+  it("caps sample and file-export unproven below grade A", () => {
+    const sample = computeJobTrustScore({
+      status: "completed",
+      records_processed: 1000,
+      rejected_rows: 0,
+      reconciliation: {
+        passed: true,
+        assurance_level: "sample",
+        phase: "post_write_sample_verified",
+      },
+    });
+    assert.ok(sample.score <= 89);
+    assert.notEqual(sample.grade, "A");
+    const exportJob = computeJobTrustScore({
+      status: "completed",
+      records_processed: 10,
+      rejected_rows: 0,
+      reconciliation: {
+        passed: true,
+        unproven: true,
+        skipped_readback: true,
+        phase: "post_write_skipped",
+        assurance_level: "none",
+        message: "File/object export wrote successfully — Gate-8 cell fidelity unproven",
+      },
+    });
+    const factor = exportJob.factors.find((f) => f.id === "reconcile");
+    assert.ok((factor?.score as number) <= 45);
+    assert.ok(factor?.note.toLowerCase().includes("unproven"));
   });
 });
