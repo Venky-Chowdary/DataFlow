@@ -1179,9 +1179,20 @@ export function streamJobProgress(
       cdc_restart_lsn: raw.cdc_restart_lsn ? String(raw.cdc_restart_lsn) : null,
       cdc_min_lsn: raw.cdc_min_lsn ? String(raw.cdc_min_lsn) : null,
       cdc_max_lsn: raw.cdc_max_lsn ? String(raw.cdc_max_lsn) : null,
+      cdc_max_lsn_time: raw.cdc_max_lsn_time ? String(raw.cdc_max_lsn_time) : null,
       cdc_capture_instance: raw.cdc_capture_instance
         ? String(raw.cdc_capture_instance)
         : null,
+      cdc_capture_stall: raw.cdc_capture_stall == null ? null : Boolean(raw.cdc_capture_stall),
+      cdc_capture_stall_reason: raw.cdc_capture_stall_reason
+        ? String(raw.cdc_capture_stall_reason)
+        : null,
+      cdc_capture_stall_unknown:
+        raw.cdc_capture_stall_unknown == null ? null : Boolean(raw.cdc_capture_stall_unknown),
+      cdc_capture_latency_seconds:
+        raw.cdc_capture_latency_seconds != null
+          ? Number(raw.cdc_capture_latency_seconds)
+          : null,
       cdc_slot_active: raw.cdc_slot_active == null ? null : Boolean(raw.cdc_slot_active),
       cdc_slot_exists: raw.cdc_slot_exists == null ? null : Boolean(raw.cdc_slot_exists),
       cdc_wal_status: raw.cdc_wal_status ? String(raw.cdc_wal_status) : null,

@@ -194,8 +194,16 @@ export interface TransferJob {
   cdc_min_lsn?: string | null;
   /** SQL Server CDC capture max_lsn (capture head). */
   cdc_max_lsn?: string | null;
+  /** Wall time of max_lsn via fn_cdc_map_lsn_to_time. */
+  cdc_max_lsn_time?: string | null;
   /** SQL Server CDC capture instance name. */
   cdc_capture_instance?: string | null;
+  /** True when capture agent / log scan is stalled (reader-at-tip ≠ healthy). */
+  cdc_capture_stall?: boolean | null;
+  cdc_capture_stall_reason?: string | null;
+  cdc_capture_stall_unknown?: boolean | null;
+  /** DMV capture latency seconds (sys.dm_cdc_log_scan_sessions). */
+  cdc_capture_latency_seconds?: number | null;
   /** Live pg_replication_slots.active for this CDC job. */
   cdc_slot_active?: boolean | null;
   cdc_slot_exists?: boolean | null;

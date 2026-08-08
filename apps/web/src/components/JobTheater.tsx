@@ -1057,7 +1057,46 @@ export function JobTheaterView({
             <DtIcon name="database" size={16} />
             <div>
               <strong className="df2-mono">{String(job.cdc_max_lsn)}</strong>
-              <span>Capture max LSN</span>
+              <span>
+                Capture max LSN
+                {job.cdc_max_lsn_time
+                  ? ` · ${String(job.cdc_max_lsn_time).replace("T", " ").slice(0, 19)}`
+                  : ""}
+              </span>
+            </div>
+          </article>
+        )}
+        {job.cdc_capture_stall && (
+          <article
+            className="df2-theater-v3-metric df2-theater-v3-metric-warn"
+            title={String(
+              job.cdc_capture_stall_reason
+                || "CDC capture agent stalled — reader at frozen max_lsn is not catch-up",
+            )}
+          >
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>
+                {job.cdc_capture_latency_seconds != null
+                  ? `${Number(job.cdc_capture_latency_seconds).toFixed(0)}s latency`
+                  : "Stalled"}
+              </strong>
+              <span>Capture scan unhealthy</span>
+            </div>
+          </article>
+        )}
+        {job.cdc_capture_stall_unknown && !job.cdc_capture_stall && (
+          <article
+            className="df2-theater-v3-metric"
+            title={String(
+              job.cdc_capture_stall_reason
+                || "dm_cdc_log_scan_sessions unavailable — capture health unknown",
+            )}
+          >
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Unknown</strong>
+              <span>Capture scan health</span>
             </div>
           </article>
         )}

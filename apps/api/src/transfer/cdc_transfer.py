@@ -248,7 +248,7 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         out["cdc_wal_status"] = str(meta.get("wal_status"))
         # lost / unreserved is operator-critical — never look "healthy" on lag alone.
         wal = str(meta.get("wal_status") or "").strip().lower()
-        if wal in {"lost", "unreserved"} and out.get("cdc_freshness_severity") != "critical":
+        if wal in {"lost", "unreserved"}:
             out["cdc_freshness_severity"] = "critical"
             plugin_label = str(plugin or meta.get("plugin") or "cdc").strip().lower()
             if "mysql" in plugin_label or "mariadb" in plugin_label or "binlog" in plugin_label:
@@ -283,11 +283,49 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
             out["cdc_restart_lsn"] = str(meta.get("min_lsn"))
     if meta.get("max_lsn"):
         out["cdc_max_lsn"] = str(meta.get("max_lsn"))
+    if meta.get("max_lsn_time"):
+        out["cdc_max_lsn_time"] = str(meta.get("max_lsn_time"))
     capture_inst = meta.get("capture_instance") or meta.get("slot_name")
     if capture_inst:
         out["cdc_capture_instance"] = str(capture_inst)
         if not out.get("cdc_slot_name"):
             out["cdc_slot_name"] = str(capture_inst)
+    # Capture-stall: reader at frozen max_lsn is not catch-up.
+    if meta.get("capture_stall"):
+        out["cdc_capture_stall"] = True
+        if meta.get("capture_stall_reason"):
+            out["cdc_capture_stall_reason"] = str(meta.get("capture_stall_reason"))
+        if meta.get("capture_latency_seconds") is not None:
+            out["cdc_capture_latency_seconds"] = meta.get("capture_latency_seconds")
+        stall_sev = str(meta.get("capture_stall_severity") or "warn").lower()
+        if stall_sev == "critical" or out.get("cdc_freshness_severity") not in {
+            "critical",
+            "warn",
+        }:
+            out["cdc_freshness_severity"] = (
+                "critical" if stall_sev == "critical" else "warn"
+            )
+        elif stall_sev == "warn" and out.get("cdc_freshness_severity") != "critical":
+            out["cdc_freshness_severity"] = "warn"
+        # Clear invented 0s catch-up — tip equality under stall is false green.
+        if out.get("cdc_lag_seconds") == 0.0:
+            out["cdc_lag_seconds"] = None
+            out["cdc_lag_basis"] = "capture_scan"
+            out["cdc_lag_unknown_reason"] = (
+                out.get("cdc_lag_unknown_reason")
+                or out.get("cdc_capture_stall_reason")
+                or "capture stalled; reader at frozen max_lsn is not catch-up"
+            )
+        elif not out.get("cdc_lag_basis") or out.get("cdc_lag_basis") == "wal_bytes":
+            out["cdc_lag_basis"] = "capture_scan"
+            if not out.get("cdc_lag_unknown_reason") and out.get("cdc_capture_stall_reason"):
+                out["cdc_lag_unknown_reason"] = out["cdc_capture_stall_reason"]
+    elif meta.get("capture_stall_unknown"):
+        out["cdc_capture_stall_unknown"] = True
+        if meta.get("capture_stall_reason"):
+            out["cdc_capture_stall_reason"] = str(meta.get("capture_stall_reason"))
+    if meta.get("capture_latency_seconds") is not None and "cdc_capture_latency_seconds" not in out:
+        out["cdc_capture_latency_seconds"] = meta.get("capture_latency_seconds")
     if row_filter:
         out["cdc_row_filter"] = str(row_filter)
     try:

@@ -342,6 +342,8 @@ class SqlServerNativeCdc:
         )
         self._capture_catalog_cache: dict[str, Any] | None = None
         self._capture_catalog_cache_at: float = 0.0
+        self._stall_max_lsn: str | None = None
+        self._stall_max_lsn_at: float = 0.0
 
     def _acquire_cdc_lease(self) -> None:
         self._lease.ensure()
@@ -349,12 +351,81 @@ class SqlServerNativeCdc:
     def close(self) -> None:
         self._lease.release()
 
+    def _probe_log_scan_session(self, cur) -> dict[str, Any]:
+        """Read current CDC log scan session (session_id=0). Fail-open on privilege."""
+        out: dict[str, Any] = {
+            "dmv_available": False,
+            "latency": None,
+            "error_count": None,
+            "failed_sessions_count": None,
+            "empty_scan_count": None,
+            "last_commit_lsn": None,
+        }
+        try:
+            cur.execute(
+                """
+                SELECT latency, empty_scan_count, error_count,
+                       failed_sessions_count, last_commit_lsn
+                FROM sys.dm_cdc_log_scan_sessions
+                WHERE session_id = 0
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                out["dmv_available"] = True  # DMV readable, no current session row
+                return out
+            out["dmv_available"] = True
+            try:
+                out["latency"] = float(row[0]) if row[0] is not None else None
+            except (TypeError, ValueError):
+                out["latency"] = None
+            try:
+                out["empty_scan_count"] = int(row[1]) if row[1] is not None else None
+            except (TypeError, ValueError):
+                out["empty_scan_count"] = None
+            try:
+                out["error_count"] = int(row[2]) if row[2] is not None else None
+            except (TypeError, ValueError):
+                out["error_count"] = None
+            try:
+                out["failed_sessions_count"] = int(row[3]) if row[3] is not None else None
+            except (TypeError, ValueError):
+                out["failed_sessions_count"] = None
+            if len(row) > 4 and row[4] is not None:
+                out["last_commit_lsn"] = _lsn_to_hex(row[4])
+        except Exception as exc:
+            logger.debug("dm_cdc_log_scan_sessions probe failed: %s", exc)
+            out["probe_error"] = str(exc)[:200]
+        return out
+
+    def _map_lsn_to_time(self, cur, lsn_hex: str) -> str | None:
+        if not lsn_hex:
+            return None
+        try:
+            cur.execute(
+                "SELECT sys.fn_cdc_map_lsn_to_time(%s)",
+                (_hex_to_lsn(lsn_hex),),
+            )
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return None
+            val = row[0]
+            if isinstance(val, datetime):
+                if val.tzinfo is None:
+                    val = val.replace(tzinfo=timezone.utc)
+                return val.astimezone(timezone.utc).isoformat()
+            return str(val)
+        except Exception as exc:
+            logger.debug("fn_cdc_map_lsn_to_time failed: %s", exc)
+            return None
+
     def _capture_catalog_status(self, *, max_age_sec: float = 2.0) -> dict[str, Any]:
-        """Live capture min_lsn / max_lsn proof for Theater (PG/MySQL catalog parity).
+        """Live capture min_lsn / max_lsn / scan-stall proof for Theater.
 
         Returns ``min_lsn``, ``max_lsn``, ``capture_instance``, ``capture_exists``,
         ``restart_lsn`` (=min), ``confirmed_flush_lsn`` (=resume), ``wal_status``
-        ∈ {reserved, unreserved, lost} from retention classify.
+        ∈ {reserved, unreserved, lost}, plus capture-stall fields from
+        ``dm_cdc_log_scan_sessions`` (reader-at-tip ≠ capture healthy).
         """
         import time as _time
 
@@ -374,10 +445,15 @@ class SqlServerNativeCdc:
             "capture_instance": self.capture_instance,
             "min_lsn": None,
             "max_lsn": None,
+            "max_lsn_time": None,
             "restart_lsn": None,
             "confirmed_flush_lsn": None,
             "wal_status": None,
             "retention_status": None,
+            "capture_stall": False,
+            "capture_stall_severity": None,
+            "capture_stall_reason": None,
+            "capture_latency_seconds": None,
             "captures": dict(self._captures),
         }
         resume = _lsn_to_hex(self.start_lsn) if self.start_lsn else ""
@@ -428,6 +504,35 @@ class SqlServerNativeCdc:
                         self._cdc_retention = retention
                     except Exception:
                         pass
+
+                    # Capture-stall: max_lsn tip can freeze while source still commits.
+                    scan = self._probe_log_scan_session(cur)
+                    out["max_lsn_time"] = self._map_lsn_to_time(cur, max_lsn) if max_lsn else None
+                    prev_max = getattr(self, "_stall_max_lsn", None)
+                    if max_lsn and max_lsn == (prev_max or ""):
+                        frozen_for = now - float(getattr(self, "_stall_max_lsn_at", None) or now)
+                    else:
+                        self._stall_max_lsn = max_lsn or None
+                        self._stall_max_lsn_at = now
+                        frozen_for = 0.0
+                    from services.cdc_capture_stall import classify_mssql_capture_stall
+
+                    stall = classify_mssql_capture_stall(
+                        max_lsn=max_lsn or "",
+                        frozen_for_sec=frozen_for,
+                        scan_latency_sec=scan.get("latency"),
+                        error_count=scan.get("error_count"),
+                        failed_sessions_count=scan.get("failed_sessions_count"),
+                        dmv_available=bool(scan.get("dmv_available")),
+                    )
+                    out["capture_stall"] = bool(stall.get("capture_stall"))
+                    out["capture_stall_severity"] = stall.get("capture_stall_severity")
+                    out["capture_stall_reason"] = stall.get("capture_stall_reason")
+                    out["capture_latency_seconds"] = stall.get("capture_latency_seconds")
+                    out["scan_empty_count"] = scan.get("empty_scan_count")
+                    out["frozen_for_sec"] = frozen_for
+                    if stall.get("capture_stall_severity") == "unknown":
+                        out["capture_stall_unknown"] = True
         except Exception as exc:
             logger.debug("SQL Server capture catalog probe failed: %s", exc)
             out["probe_error"] = str(exc)[:200]
@@ -439,6 +544,11 @@ class SqlServerNativeCdc:
 
     def cdc_metadata(self) -> dict[str, Any]:
         catalog = self._capture_catalog_status()
+        freshness = None
+        if catalog.get("capture_stall"):
+            freshness = catalog.get("capture_stall_severity") or "warn"
+        elif catalog.get("wal_status") == "lost":
+            freshness = "critical"
         return {
             "plugin": "sqlserver_native_cdc",
             "phase": self.phase,
@@ -454,10 +564,17 @@ class SqlServerNativeCdc:
             "capture_exists": catalog.get("capture_exists"),
             "min_lsn": catalog.get("min_lsn"),
             "max_lsn": catalog.get("max_lsn"),
+            "max_lsn_time": catalog.get("max_lsn_time"),
             "restart_lsn": catalog.get("restart_lsn"),
             "confirmed_flush_lsn": catalog.get("confirmed_flush_lsn"),
             "wal_status": catalog.get("wal_status"),
             "retention_status": catalog.get("retention_status"),
+            "capture_stall": catalog.get("capture_stall"),
+            "capture_stall_severity": catalog.get("capture_stall_severity"),
+            "capture_stall_reason": catalog.get("capture_stall_reason"),
+            "capture_latency_seconds": catalog.get("capture_latency_seconds"),
+            "capture_stall_unknown": catalog.get("capture_stall_unknown"),
+            "freshness_severity": freshness,
             **self._lease.theater_fields(),
         }
 
