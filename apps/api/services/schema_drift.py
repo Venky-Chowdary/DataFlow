@@ -92,8 +92,15 @@ def _is_type_widen(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
 
 
 def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
+    """True when new_type can lose values of old_type (precision/range/domain).
+
+    Same-logical pairs must still consult ``is_lossy_coercion`` — first ``(p``
+    digit alone misses DECIMAL(10,4)→DECIMAL(10,2) and BIGINT→TINYINT.
+    """
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
+    if is_lossy_coercion(old_type, new_type, dest_db=dest_db):
+        return True
     if old_logical == new_logical:
         old_len = _type_length(old_type)
         new_len = _type_length(new_type)
@@ -102,7 +109,7 @@ def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
             and new_len is not None
             and new_len < old_len
         )
-    return is_lossy_coercion(old_type, new_type, dest_db=dest_db)
+    return False
 
 
 def classify_schema_change(
@@ -189,7 +196,9 @@ def classify_schema_change(
         old_t, new_t = old_cols[col], new_cols[col]
         same_logical = normalize_logical_type(old_t) == normalize_logical_type(new_t)
         same_length = _type_length(old_t) == _type_length(new_t)
-        if same_logical and same_length:
+        # Never short-circuit on same logical + same first-number length alone —
+        # DECIMAL(10,4)→DECIMAL(10,2) and BIGINT→TINYINT share that trap.
+        if same_logical and same_length and not _is_type_narrow(old_t, new_t, dest_db=dest_db):
             # Same declared type; nullability tighten is breaking.
             if col in old_null and col in new_null and old_null[col] and not new_null[col]:
                 breaking.append({

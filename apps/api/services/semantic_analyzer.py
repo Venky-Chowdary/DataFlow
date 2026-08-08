@@ -87,6 +87,7 @@ def _normalize(name: str) -> str:
 # (e.g. "state" in "State Legitimacy", "id" inside "idps").
 _WEAK_LEXICON_ROLES = frozenset({
     "state_code", "identifier", "status", "region_code", "quantity",
+    "country_code", "order_total",
 })
 
 
@@ -164,6 +165,21 @@ def _role_from_samples(samples: list[Any], inferred_type: str) -> tuple[str | No
         return "numeric_value", 0.66
     if id_like / n >= 0.5:
         return "identifier", 0.66
+    # Full names (Somalia, California) — not ISO codes — beat *_code lexicon.
+    alpha_words = sum(
+        1 for s in non_empty[:20]
+        if re.match(r"^[A-Za-z][A-Za-z .'-]{2,}$", s) and len(s) > 3
+    )
+    iso_codes = sum(
+        1 for s in non_empty[:20]
+        if re.match(r"^[A-Za-z]{2,3}$", s.strip())
+    )
+    if (
+        alpha_words / n >= 0.7
+        and iso_codes / n < 0.3
+        and inferred_type.upper() in {"VARCHAR", "TEXT", "STRING", "NVARCHAR"}
+    ):
+        return "proper_name_text", 0.72
     return None, 0.0
 
 
@@ -173,14 +189,20 @@ def analyze_column(name: str, inferred_type: str = "VARCHAR", samples: list[str]
     role_name, name_conf = _role_from_name(name)
     role_sample, sample_conf = _role_from_samples(samples, inferred_type)
 
-    # Numeric metric samples beat weak lexicon (FSI "P1: State Legitimacy" ≠ state_code).
+    # Numeric / proper-name samples beat weak lexicon
+    # (FSI "State Legitimacy" ≠ state_code; "Somalia" ≠ country_code; bare Total ≠ order).
     if (
         role_sample == "numeric_value"
         and sample_conf >= 0.66
         and role_name in _WEAK_LEXICON_ROLES
-        and name_conf < 0.98
     ):
         role, confidence, source = "numeric_value", max(sample_conf, 0.82), "value_pattern"
+    elif (
+        role_sample == "proper_name_text"
+        and sample_conf >= 0.7
+        and role_name in {"country_code", "state_code", "region_code", "city_name"}
+    ):
+        role, confidence, source = "description", max(sample_conf, 0.78), "value_pattern"
     elif role_sample and sample_conf > name_conf:
         role, confidence, source = role_sample, sample_conf, "value_pattern"
     elif role_name:
@@ -213,6 +235,7 @@ def _role_description(role: str) -> str:
         "updated_timestamp": "Update or modification timestamp",
         "date_value": "Generic date value",
         "numeric_value": "Generic numeric value",
+        "proper_name_text": "Proper name / label text (not an ISO code)",
         "identifier": "Generic record identifier",
         "order_number": "Order number or purchase order identifier",
         "invoice_number": "Invoice number or billing identifier",

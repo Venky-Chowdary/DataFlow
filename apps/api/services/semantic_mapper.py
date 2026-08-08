@@ -1921,18 +1921,32 @@ def _apply_create_new_risk_stamps(
                 fidelity=str(row.get("fidelity") or ""),
             )
         elif strategy == "create_compatible_new":
-            # Existing-table ADD COLUMN invent must stay under auto-approve (~0.85).
-            row["requires_review"] = True
-            try:
-                base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
-            except (TypeError, ValueError):
-                base = IDENTITY_PASSTHROUGH_CONFIDENCE
-            row["confidence"] = _calibrated_confidence(
-                base,
-                score_gap=float(row.get("score_gap") or 0.0),
-                requires_review=True,
-                hard_cap=0.84,
-            )
+            fid = str(row.get("fidelity") or "").strip().lower()
+            # Lossless ADD COLUMN (INTEGER→INTEGER) — Approve-eligible, not 70% spam.
+            # Still not silent Ready; operator confirms invent onto existing table.
+            if fid in {"preserve", "lossless"} and not risks:
+                row["requires_review"] = False
+                row["mapping_class"] = "equivalent_add_column"
+                try:
+                    base = float(row.get("confidence") or 0.93)
+                except (TypeError, ValueError):
+                    base = 0.93
+                # Cap under dest-proven identity (~0.95+) — ADD COLUMN is projected.
+                row["confidence"] = round(min(0.93, max(base, 0.90)), 3)
+            else:
+                # Existing-table ADD COLUMN invent must stay under auto-approve (~0.85).
+                row["requires_review"] = True
+                try:
+                    base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
+                except (TypeError, ValueError):
+                    base = IDENTITY_PASSTHROUGH_CONFIDENCE
+                row["confidence"] = _calibrated_confidence(
+                    base,
+                    score_gap=float(row.get("score_gap") or 0.0),
+                    requires_review=True,
+                    hard_cap=0.84,
+                    fidelity=fid,
+                )
         elif strategy == "identity_passthrough":
             fid = str(row.get("fidelity") or "").strip().lower()
             # Equivalent create-new (preserve) — high type certainty, still not

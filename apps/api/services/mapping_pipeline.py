@@ -535,15 +535,29 @@ def run_mapping_pipeline(
         src_type = schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
         src_type = ddl_carrier_type(str(src_type))
         tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
+        strategy = str(m.get("assignment_strategy") or "")
+        # Partial Studio: never invent dest types from source — Map/Validate must
+        # stay pending until live schema loads (false-green preserve cliff).
+        pending_dest = strategy == "pending_dest_schema"
         # Create-new / missing dest type: auto-widen unsigned widths.
         # Preserve DECIMAL(p,s) / VECTOR(n) / TIMESTAMPTZ carriers — never strip params.
-        if not tgt_type:
+        if pending_dest:
+            tgt_type = ""
+        elif not tgt_type:
             src_l = str(src_type).lower()
             if "unsigned" in src_l and ("bigint" in src_l or normalize_logical_type(src_type) == "decimal"):
                 tgt_type = "DECIMAL"
             elif "unsigned" in src_l:
                 # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
                 tgt_type = "BIGINT"
+            elif destination_db_type and (
+                strategy in {"identity_passthrough", "create_compatible_new"}
+                or destination_table_exists is False
+            ):
+                tgt_type = create_new_mapping_target_type(src_type, destination_db_type)
+            elif destination_db_type and destination_table_exists is True:
+                # Existing table, column missing from Studio — refuse invent.
+                tgt_type = ""
             elif destination_db_type:
                 tgt_type = create_new_mapping_target_type(src_type, destination_db_type)
             else:
@@ -563,14 +577,18 @@ def run_mapping_pipeline(
                 m["source"],
                 m["target"],
                 src_type,
-                tgt_type,
+                tgt_type or src_type,
                 source_samples=col_samples,
                 destination_db_type=destination_db_type,
             )
         # New/generic destinations: typed transforms must stamp *physical* DDL
         # for the destination (DATETIME(6)/CHAR(36)/JSONB) — never bare logical
         # tokens (DATETIME/UUID/JSON) that later false-block Validate.
-        if normalize_logical_type(tgt_type) in {"string", "text", "varchar", "unknown"}:
+        if (
+            not pending_dest
+            and tgt_type
+            and normalize_logical_type(tgt_type) in {"string", "text", "varchar", "unknown"}
+        ):
             typed_target = _TYPED_TRANSFORM_TARGET_TYPE.get(transform)
             if typed_target:
                 if typed_target == "DECIMAL" and normalize_logical_type(src_type) == "decimal":
@@ -595,10 +613,22 @@ def run_mapping_pipeline(
                 **m,
                 "transform": transform,
                 "source_type": src_type,
-                "target_type": tgt_type,
+                "target_type": tgt_type or "",
                 "reasoning": reasoning,
                 "agent": "MappingReasonerAgent",
                 "format_class": classification["format"],
+                **(
+                    {
+                        "requires_review": True,
+                        "fidelity": "cast",
+                        "fidelity_reason": (
+                            "Destination type pending Studio schema — refuse "
+                            "source_type invent for Map/Validate."
+                        ),
+                    }
+                    if pending_dest or (not tgt_type and strategy != "identity_passthrough")
+                    else {}
+                ),
             }
         )
 
@@ -694,6 +724,26 @@ def run_mapping_pipeline(
         enriched_mappings,
         destination_db_type=destination_db_type or "",
     )
+    # Reassert pending-Studio honesty after sample/quality boosts — never leave
+    # invented preserve @ 0.99 when dest schema was never loaded.
+    fixed_pending: list[dict] = []
+    for m in enriched_mappings:
+        row = dict(m)
+        if str(row.get("assignment_strategy") or "") == "pending_dest_schema":
+            row["target_type"] = ""
+            row["create_new"] = False
+            row["requires_review"] = True
+            row["fidelity"] = "cast"
+            row["fidelity_reason"] = (
+                "Destination type pending Studio schema — refuse source_type invent."
+            )
+            try:
+                row["confidence"] = min(float(row.get("confidence") or 0.55), 0.55)
+            except (TypeError, ValueError):
+                row["confidence"] = 0.55
+            row.pop("mapping_class", None)
+        fixed_pending.append(row)
+    enriched_mappings = fixed_pending
 
     from services.structural_array import (
         array_strategy_gate_issues,

@@ -45,7 +45,7 @@ _SAFE_PROMOTIONS = frozenset({
     ("integer", "double"),
     ("integer", "number"),
     ("float", "double"),
-    ("float", "decimal"),
+    # float→decimal is IEEE→fixed-point invent — not a safe promotion (lossy).
     ("float", "number"),
     ("date", "timestamp"),
     ("boolean", "integer"),
