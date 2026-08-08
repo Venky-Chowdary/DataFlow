@@ -17,6 +17,7 @@ import {
   editableFromPipelineMappings,
   engineStampedRiskChip,
   engineTransformToUi,
+  formatColumnProfileStrip,
   inferLogicalFromSample,
   isSafeNormalizeMapping,
   mappingAckLabel,
@@ -838,5 +839,45 @@ describe("destination schema honesty", () => {
     const pf = buildPreflightMappings([], withExists);
     assert.equal(pf[0].target_type, "INTEGER");
     assert.equal(pf[1].target_type, undefined);
+  });
+});
+
+describe("column profile Map strip", () => {
+  it("threads engine column_profile into EditableMapping", () => {
+    const editable = editableFromPipelineMappings(
+      [
+        {
+          source: "score",
+          target: "score",
+          confidence: 0.9,
+          source_type: "DECIMAL",
+          target_type: "NUMERIC(8,2)",
+          column_profile: {
+            null_rate: 0.1,
+            min: 66.75,
+            max: 100,
+            observed_precision: 5,
+            observed_scale: 2,
+            numeric_kind: "fixed_decimal",
+          },
+        },
+      ],
+      [],
+      [],
+      0.75,
+      {},
+    );
+    assert.equal(editable[0].columnProfile?.null_rate, 0.1);
+    assert.equal(editable[0].columnProfile?.observed_scale, 2);
+    const strip = formatColumnProfileStrip(editable[0].columnProfile);
+    assert.ok(strip);
+    assert.match(strip!, /null 10%/);
+    assert.match(strip!, /p5,s2/);
+    assert.match(strip!, /fixed/);
+  });
+
+  it("formatColumnProfileStrip returns null when empty", () => {
+    assert.equal(formatColumnProfileStrip(undefined), null);
+    assert.equal(formatColumnProfileStrip({}), null);
   });
 });

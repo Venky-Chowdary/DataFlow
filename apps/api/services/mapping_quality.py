@@ -192,7 +192,82 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
             bool_ratio >= 0.5 and _contains_term(name, {"flag", "is_", "has_", "active", "enabled", "verified"})
         )
 
+        # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
+        if numeric_ratio >= 0.5 or profile["likely_numeric"]:
+            try:
+                from services.decimal_observe import observe_numeric_samples
+
+                obs = observe_numeric_samples(vals)
+                if obs.get("kind") not in {None, "empty"}:
+                    profile["observed_precision"] = obs.get("precision")
+                    profile["observed_scale"] = obs.get("scale")
+                    profile["numeric_kind"] = obs.get("kind")
+                    profile["suggested_carrier"] = obs.get("carrier")
+                    profile["ieee_signals"] = obs.get("ieee_signals") or []
+            except Exception:
+                pass
+            nums: list[float] = []
+            for v in vals:
+                try:
+                    nums.append(float(v.replace(",", "").replace("$", "").replace("£", "").replace("€", "")))
+                except ValueError:
+                    continue
+            if nums:
+                profile["min"] = min(nums)
+                profile["max"] = max(nums)
+
     return profile
+
+
+def merge_column_profile(
+    base: dict[str, Any],
+    *,
+    schema_row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge analyzer profile with data_profiler statistics for Map strip SSOT."""
+    out = dict(base or {})
+    src = schema_row or {}
+    if src.get("null_rate") is not None:
+        out["null_rate"] = src.get("null_rate")
+    if src.get("distinct_ratio") is not None:
+        out["unique_ratio"] = src.get("distinct_ratio")
+    stats = src.get("statistics") if isinstance(src.get("statistics"), dict) else {}
+    for key in (
+        "min",
+        "max",
+        "mean",
+        "observed_precision",
+        "observed_scale",
+        "numeric_kind",
+        "suggested_carrier",
+        "ieee_signals",
+    ):
+        if stats.get(key) is not None and out.get(key) is None:
+            out[key] = stats.get(key)
+    return out
+
+
+def column_profile_for_map(profile: dict[str, Any] | None) -> dict[str, Any]:
+    """Compact column_profile stamped onto mappings for Map / Validate."""
+    p = profile or {}
+    keys = (
+        "null_rate",
+        "unique_ratio",
+        "min",
+        "max",
+        "observed_precision",
+        "observed_scale",
+        "numeric_kind",
+        "suggested_carrier",
+        "ieee_signals",
+        "likely_identifier",
+        "likely_email",
+        "likely_uuid",
+        "likely_date",
+        "likely_boolean",
+        "semantic_pattern_score",
+    )
+    return {k: p[k] for k in keys if k in p and p[k] is not None}
 
 
 def _logical_type(type_str: str) -> str:
@@ -452,7 +527,10 @@ def refine_mappings_with_quality(
         if src_name not in profile_cache:
             src = src_by_name.get(src_name, {})
             samples = [str(x) for x in (src.get("samples") or [])]
-            profile_cache[src_name] = analyze_column_profile(src_name, samples)
+            profile_cache[src_name] = merge_column_profile(
+                analyze_column_profile(src_name, samples),
+                schema_row=src,
+            )
         profile = profile_cache[src_name]
 
         delta, notes = score_mapping_pair(m, source_profile=profile)
@@ -478,19 +556,7 @@ def refine_mappings_with_quality(
                 out["requires_review"] = True
         if classification["confidence_class"] in {"weak_or_conflicted", "custom_transform_sparse"}:
             out["requires_review"] = True
-        out["column_profile"] = {
-            k: profile[k]
-            for k in (
-                "null_rate",
-                "unique_ratio",
-                "likely_identifier",
-                "likely_email",
-                "likely_uuid",
-                "likely_date",
-                "likely_boolean",
-                "semantic_pattern_score",
-            )
-        }
+        out["column_profile"] = column_profile_for_map(profile)
         refined.append(out)
     return refined
 

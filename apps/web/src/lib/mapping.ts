@@ -130,6 +130,65 @@ export interface EditableMapping {
   riskContract?: MigrationRiskContractDraft;
   /** Underscore-path collisions from STRUCT flatten — fail-closed, operator-visible. */
   flattenCollisions?: { flat: string; paths: string[][] }[];
+  /**
+   * Sample-aware column profile from Map pipeline (null%, min/max, observed p/s).
+   * Engine-stamped — never invent client-side invent from sample string alone.
+   */
+  columnProfile?: ColumnProfile;
+}
+
+/** Compact profiler strip from ``mapping_quality.column_profile_for_map``. */
+export interface ColumnProfile {
+  null_rate?: number;
+  unique_ratio?: number;
+  min?: number;
+  max?: number;
+  observed_precision?: number;
+  observed_scale?: number;
+  numeric_kind?: string;
+  suggested_carrier?: string;
+  ieee_signals?: string[];
+  likely_identifier?: boolean;
+  likely_email?: boolean;
+  likely_uuid?: boolean;
+  likely_date?: boolean;
+  likely_boolean?: boolean;
+  semantic_pattern_score?: number;
+}
+
+/** Operator-facing one-line Map strip from engine column_profile. */
+export function formatColumnProfileStrip(profile?: ColumnProfile | null): string | null {
+  if (!profile || typeof profile !== "object") return null;
+  const parts: string[] = [];
+  if (typeof profile.null_rate === "number" && Number.isFinite(profile.null_rate)) {
+    parts.push(`null ${(profile.null_rate * 100).toFixed(0)}%`);
+  }
+  if (
+    typeof profile.min === "number"
+    && typeof profile.max === "number"
+    && Number.isFinite(profile.min)
+    && Number.isFinite(profile.max)
+  ) {
+    const fmt = (n: number) =>
+      Math.abs(n) >= 1000 ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(n);
+    parts.push(`${fmt(profile.min)}–${fmt(profile.max)}`);
+  }
+  if (
+    typeof profile.observed_precision === "number"
+    && typeof profile.observed_scale === "number"
+  ) {
+    parts.push(`p${profile.observed_precision},s${profile.observed_scale}`);
+  } else if (profile.suggested_carrier) {
+    parts.push(String(profile.suggested_carrier));
+  }
+  if (profile.numeric_kind === "ieee_float") {
+    parts.push("IEEE float");
+  } else if (profile.numeric_kind === "fixed_decimal") {
+    parts.push("fixed");
+  } else if (profile.numeric_kind === "integer") {
+    parts.push("int");
+  }
+  return parts.length ? parts.join(" · ") : null;
 }
 
 /** Draft / signed Migration Risk Contract — mirrors apps/api migration_risk_contract. */
@@ -1467,6 +1526,7 @@ export function editableFromPipelineMappings(
     fidelity_reason?: string;
     type_narrowing?: boolean;
     create_new_risks?: Array<{ kind?: string; severity?: string; message?: string }>;
+    column_profile?: ColumnProfile | Record<string, unknown> | null;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -1541,6 +1601,43 @@ export function editableFromPipelineMappings(
             message: String(r.message || ""),
           }))
       : undefined;
+    const rawProfile = m.column_profile && typeof m.column_profile === "object"
+      ? m.column_profile as Record<string, unknown>
+      : null;
+    const columnProfile: ColumnProfile | undefined = rawProfile
+      ? {
+          null_rate: typeof rawProfile.null_rate === "number" ? rawProfile.null_rate : undefined,
+          unique_ratio: typeof rawProfile.unique_ratio === "number" ? rawProfile.unique_ratio : undefined,
+          min: typeof rawProfile.min === "number" ? rawProfile.min : undefined,
+          max: typeof rawProfile.max === "number" ? rawProfile.max : undefined,
+          observed_precision:
+            typeof rawProfile.observed_precision === "number"
+              ? rawProfile.observed_precision
+              : undefined,
+          observed_scale:
+            typeof rawProfile.observed_scale === "number"
+              ? rawProfile.observed_scale
+              : undefined,
+          numeric_kind: rawProfile.numeric_kind != null
+            ? String(rawProfile.numeric_kind)
+            : undefined,
+          suggested_carrier: rawProfile.suggested_carrier != null
+            ? String(rawProfile.suggested_carrier)
+            : undefined,
+          ieee_signals: Array.isArray(rawProfile.ieee_signals)
+            ? rawProfile.ieee_signals.map(String)
+            : undefined,
+          likely_identifier: Boolean(rawProfile.likely_identifier) || undefined,
+          likely_email: Boolean(rawProfile.likely_email) || undefined,
+          likely_uuid: Boolean(rawProfile.likely_uuid) || undefined,
+          likely_date: Boolean(rawProfile.likely_date) || undefined,
+          likely_boolean: Boolean(rawProfile.likely_boolean) || undefined,
+          semantic_pattern_score:
+            typeof rawProfile.semantic_pattern_score === "number"
+              ? rawProfile.semantic_pattern_score
+              : undefined,
+        }
+      : undefined;
     const lossyFidelity =
       engineFidelity === "lossy_cast"
       || engineFidelity === "mutate"
@@ -1585,6 +1682,7 @@ export function editableFromPipelineMappings(
       createNewRisks,
       structDerived: Boolean(m.struct_derived),
       structParent: m.struct_parent,
+      columnProfile,
     };
     if (isEnumToBooleanConflict(base)) {
       if (base.existsInDestination) {

@@ -438,11 +438,17 @@ def run_mapping_pipeline(
                 # re-guess them and lose precision or the numeric class.
                 authoritative_existing=source_types_authoritative,
             )
+            # profile_dataset returns columns as name→profile dict — attach for
+            # Map strip (null%/min/max/observed DECIMAL scale), not type invent only.
+            col_profiles = profiled.get("columns") or {}
             source_schemas = [
                 {
                     **s,
                     "inferred_type": merged_schema.get(s["name"], s.get("inferred_type", "VARCHAR")),
                     "samples": source_samples.get(s["name"], s.get("samples", []))[:8],
+                    "null_rate": (col_profiles.get(s["name"]) or {}).get("null_rate"),
+                    "distinct_ratio": (col_profiles.get(s["name"]) or {}).get("distinct_ratio"),
+                    "statistics": (col_profiles.get(s["name"]) or {}).get("statistics") or {},
                 }
                 for s in (source_schemas or [{"name": c, "inferred_type": "VARCHAR", "samples": []} for c in source_columns])
             ]

@@ -117,6 +117,22 @@
   line-height: 1.4;
 }
 
+.df2-column-sample-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.df2-column-profile-strip {
+  font-size: 11px;
+  line-height: 1.25;
+  color: var(--df2-text-muted, #64748b);
+  font-variant-numeric: tabular-nums;
+  white-space: normal;
+  word-break: break-word;
+}
+
 .df2-page-transfer-studio .df2-column-reason {
   max-width: 220px;
   font-size: 12px;

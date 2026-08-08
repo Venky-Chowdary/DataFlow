@@ -24,6 +24,7 @@ import {
   isStructLogicalType,
   createNewRiskDetail,
   engineStampedRiskChip,
+  formatColumnProfileStrip,
   hasCreateNewTypeRisk,
   mappingAckDoneLabel,
   mappingAckLabel,
@@ -718,8 +719,24 @@ export function ColumnReviewPanel({
                       )}
                     </div>
                   </td>
-                  <td className="df2-column-sample" title={m.sample}>
-                    {m.sample ? (m.sample.length > 40 ? `${m.sample.slice(0, 40)}…` : m.sample) : "—"}
+                  <td className="df2-column-sample">
+                    <div className="df2-column-sample-stack">
+                      <span title={m.sample}>
+                        {m.sample ? (m.sample.length > 40 ? `${m.sample.slice(0, 40)}…` : m.sample) : "—"}
+                      </span>
+                      {(() => {
+                        const strip = formatColumnProfileStrip(m.columnProfile);
+                        if (!strip) return null;
+                        return (
+                          <span
+                            className="df2-column-profile-strip"
+                            title="Sample profile from Map engine (null rate · range · observed precision/scale)"
+                          >
+                            {strip}
+                          </span>
+                        );
+                      })()}
+                    </div>
                   </td>
                   <td className={`df2-column-type ${typeBadgeClass(m.inferredType)}`}>
                     <span className="df2-type-badge">{m.inferredType ?? "string"}</span>
