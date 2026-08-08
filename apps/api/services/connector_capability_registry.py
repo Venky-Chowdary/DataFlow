@@ -55,7 +55,12 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "tier": TIER_HIGHEST,
         "pattern": "batch",
         "supports_cdc": True,
+        # F4: supports_streaming=False until START_REPLICATION is default + lag-proven.
+        # Opt-in transport: DATAFLOW_CDC_PG_TRANSPORT=streaming (falls back to peek).
         "supports_streaming": False,
+        "cdc_transport_default": "peek",
+        "cdc_streaming_status": "planned_opt_in",
+        "bulk_export_status": "implemented_pg_copy",
         "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
@@ -63,7 +68,12 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
-        "cdc_prerequisites": "Query-based CDC requires a monotonic cursor column. Log-based CDC uses logical decoding with the test_decoding output plugin; requires wal_level=logical and REPLICATION privileges.",
+        "cdc_prerequisites": (
+            "Query-based CDC requires a monotonic cursor column. Log-based CDC uses "
+            "logical decoding (default peek→apply→ack; streaming START_REPLICATION is "
+            "opt-in via CDC_PG_TRANSPORT=streaming — Planned until lag curves proven). "
+            "Requires wal_level=logical and REPLICATION privileges."
+        ),
         "auth_notes": "Standard host/port/user/password. Use SSL in production.",
         "common_issues": ["The destination table must exist or 'create table' must be enabled.", "Integer overflow when target column is smaller than source values."],
         "recommended_batch_size": 1000,
@@ -180,6 +190,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": True,
         "supports_binary": True,
         "supports_unstructured": True,
+        # F3: source unload/COPY INTO stage is Planned — writer COPY INTO is separate.
+        "bulk_export_status": "planned",
         "cdc_prerequisites": "Query-based CDC only: the source table must have a monotonic cursor column. Snowpipe Streaming/log-based CDC is not implemented.",
         "common_issues": ["Large TIMESTAMP values can exceed Snowflake range.", "VARIANT is preferred for semi-structured JSON."],
         "recommended_batch_size": 10000,
@@ -198,6 +210,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": True,
         "supports_binary": True,
         "supports_unstructured": True,
+        # F3: Storage Read API bulk source export is Planned (fail-closed stub).
+        "bulk_export_status": "planned",
         "cdc_prerequisites": "Query-based CDC only: the source table must have a monotonic cursor column. BigQuery Storage Write CDC is not implemented.",
         "common_issues": ["Object tables are required for unstructured binary payloads.", "Partitioning can only be set at table creation."],
         "recommended_batch_size": 10000,

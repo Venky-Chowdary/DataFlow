@@ -17,23 +17,25 @@ Operator proof: `dest_summary.pagination_mode` ∈ {`keyset`, `offset`, `bulk_co
 
 ## F3 — Bulk export
 
-| Engine | Path | Status |
-|--------|------|--------|
-| PostgreSQL | `COPY (SELECT…) TO STDOUT` CSV | **Implemented** (`connectors/bulk_export.py`) |
-| Snowflake | Stage `COPY INTO` + GET | Declared; `NotImplementedError` if forced |
-| BigQuery | Storage Read API | Declared; `NotImplementedError` if forced |
+| Engine | Path | Status | Capability label |
+|--------|------|--------|------------------|
+| PostgreSQL | `COPY (SELECT…) TO STDOUT` CSV | **Implemented** (`connectors/bulk_export.py`) | `bulk_export_status=implemented_pg_copy` |
+| Snowflake | Stage `COPY INTO` + GET | **Planned** — `NotImplementedError` if forced | `bulk_export_status=planned` |
+| BigQuery | Storage Read API | **Planned** — `NotImplementedError` if forced | `bulk_export_status=planned` |
 
-**Gate:** `DATAFLOW_BULK_EXPORT=0` (default). Set `1` / `force` for PostgreSQL COPY on full-refresh, unfiltered transfers.
+**Gate:** `DATAFLOW_BULK_EXPORT=0` (default). Set `1` / `force` for PostgreSQL COPY on full-refresh, unfiltered transfers. Do not claim Snowflake/BQ bulk source unload until those paths leave Planned.
 
 COPY currently materializes the CSV buffer then pages — safe for tens-of-GB migration jobs on well-sized API nodes; true streaming COPY writer is a follow-up before enabling `auto` in production fleets.
 
 ## F4 — PostgreSQL CDC transport
 
-| Mode | Env | Behavior |
-|------|-----|----------|
-| `peek` (default) | `DATAFLOW_CDC_PG_TRANSPORT=peek` | `pg_logical_slot_peek_*` + slot advance on ack |
-| `streaming` | `DATAFLOW_CDC_PG_TRANSPORT=streaming` | `START_REPLICATION`; feedback only after ack |
+| Mode | Env | Product status |
+|------|-----|----------------|
+| `peek` (default) | `DATAFLOW_CDC_PG_TRANSPORT=peek` | **Production default** — `pg_logical_slot_peek_*` + slot advance on ack |
+| `streaming` | `DATAFLOW_CDC_PG_TRANSPORT=streaming` | **Planned / opt-in** — `START_REPLICATION`; feedback only after ack; falls back to peek if connection fails |
 
-Streaming falls back to peek if the replication connection cannot open. At-least-once is preserved — confirmed LSN is never advanced on receive alone.
+Capability honesty: `cdc_transport_default=peek`, `cdc_streaming_status=planned_opt_in`, `supports_streaming=false` until lag curves are proven and streaming becomes default.
+
+At-least-once is preserved — confirmed LSN is never advanced on receive alone.
 
 Module: `connectors/postgresql_cdc_transport.py`.

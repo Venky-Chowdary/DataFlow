@@ -38,14 +38,16 @@ from typing import Any
 
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
-from services.type_system import (
+from services.decision_kernel import (
     ddl_type,
     is_lossy_coercion,
+    is_precision_collapse_coercion,
+    normalize_logical_type,
+)
+from services.type_system import (
     is_nested_document_collapse,
     is_nested_shape_collapse,
-    is_precision_collapse_coercion,
     is_unlimited_string_carrier,
-    normalize_logical_type,
 )
 from services.value_serializer import (
     DF_MISSING_SENTINEL,
@@ -87,10 +89,8 @@ def samples_coerce_mapping(
         raw = cell_to_string(row.get(src, ""))
         if not str(raw).strip():
             # Empty into typed sinks must not sample-clear (Map VARCHAR×INT cliff).
-            from services.type_system import (
-                normalize_logical_type,
-                specialty_carrier_base,
-            )
+            from services.decision_kernel import normalize_logical_type
+            from services.type_system import specialty_carrier_base
 
             tgt_type = str(item.get("target_type") or "")
             tgt_logical = normalize_logical_type(tgt_type)

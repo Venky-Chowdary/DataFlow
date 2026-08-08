@@ -132,11 +132,13 @@ def _check_coercion_safety(
         src = str(issue.get("source") or "")
         mapping = next((m for m in mappings if str(m.get("source") or "") == src), None)
         # Never sample-clear IEEE/precision collapses — head rows can look clean.
-        from services.type_system import is_precision_collapse_coercion
-
-        src_t = str(source_types.get(src) or "")
+        from services.decision_kernel import (
+            is_lossy_coercion,
+            is_precision_collapse_coercion,
+        )
         from services.type_system import resolve_mapping_target_type
 
+        src_t = str(source_types.get(src) or "")
         tgt_t = resolve_mapping_target_type(
             mapping or {"target": issue.get("target")},
             target_types=target_types,
@@ -146,8 +148,6 @@ def _check_coercion_safety(
         if mapping and is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_kind):
             hardened.append(issue)
             continue
-        from services.type_system import is_lossy_coercion
-
         from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
         risk_cleared = bool(mapping and mapping_has_clearing_risk_contract(mapping))

@@ -274,7 +274,7 @@ Each mergeable wave:
 5. **No catalog inflation** or marketing claims in the same PR.  
 6. **Do not mark complete** until Phase exit criteria for that ID are met.
 
-**Immediate next wave:** B8 mypy + C11/C12 FE pin shipped. Wave3 + claim-queue file staging + connector test-health SSOT + object-store purge-after-promote (purge failure cannot fail committed write) + BQ pre-DML abort. **C2 advanced** (writer invent imports via kernel). Still open: B1 real_bug→0; C2 god-module extract; F4 streaming default; F3 non-PG bulk Planned labels. Widen mypy; continue F8.
+**Immediate next wave:** Claim-queue file staging + connector test-health SSOT shipped (`0924f4e`). **C2 advanced** — Map/Validate/lossy + writer invent surface via `decision_kernel` (import-surface regression). **F3/F4 honesty** — SF/BQ `bulk_export_status=planned`; PG CDC `cdc_streaming_status=planned_opt_in` (default still peek). Still open: B1 real_bug→0; C2 invent body extract from `type_system`; F4 streaming default + lag proof; F3 SF/BQ unload implementation.
 
 ---
 
@@ -340,7 +340,7 @@ Success metric for the company: a migration programme owner can move Oracle/SQL 
 ## 10. Checklist — Phase C (complete)
 
 - [x] C1 Decision Artifact models + golden fixture (`decision_artifact_v1`) + hash fail-closed tests
-- [~] C2 Type invent/classify/DDL facades on `services.decision_kernel`; CREATE invent writers (BQ/MySQL/SF/SQLite/Iceberg) import kernel surface (`test_writer_invent_imports_use_decision_kernel_surface`); `writer_common` specialty helpers + invent body still in `type_system` (exit criterion open)
+- [~] C2 Type invent/classify/DDL facades on `services.decision_kernel`; writers + Map/Validate (`mapping_pipeline`/`semantic_mapper`/`coercion_probe`/`data_integrity`/`schema_drift`) import invent/lossy via kernel (`test_*_invent_imports_use_decision_kernel_surface`); invent **body** + specialty helpers still in `type_system` (exit criterion open)
 - [x] C3 Full ConversionClass set (identity/equivalent/widening/narrowing/… + Module 12 gates)
 - [x] C4 Structural Type Engine kernel facade (`StructuralStrategy`, never silent flatten)
 - [x] C5 Context-aware invent modes (`InventContext` + `invent_dest_type` refuse bind/CDC invent)
@@ -377,8 +377,8 @@ Success metric for the company: a migration programme owner can move Oracle/SQL 
 
 - [x] F1 Fingerprints during write pass (`checksum_mode=inline_write_pass`; opt-in `RECONCILE_SOURCE_REREAD`)
 - [x] F2 Keyset pagination: composite PK + SQL Server/Oracle (`services/keyset_pagination.py`; `pagination_mode` proof)
-- [x] F3 Bulk export — PG COPY implemented; Snowflake/BQ fail-closed stubs (product must keep Planned until live)
-- [~] F4 CDC `START_REPLICATION` transport (`postgresql_cdc_transport`; **default still peek** — streaming opt-in via `CDC_PG_TRANSPORT=streaming`)
+- [x] F3 Bulk export — PG COPY implemented; Snowflake/BQ fail-closed stubs + capability `bulk_export_status=planned`
+- [~] F4 CDC `START_REPLICATION` transport (`postgresql_cdc_transport`; **default still peek**; capability `cdc_streaming_status=planned_opt_in` — not certified until lag curves)
 - [x] F5 Durable distributed scheduler — Mongo `transfer_job_queue` + leases + fences (`scheduler_mode` local|claim|auto); API claim loop; `docs/DISTRIBUTED_SCHEDULER.md` (Temporal deferred — correctness via claim/lease)
 - [x] F6 Defaults + measured tuning guide — `PARALLEL_WORKERS` min(4,cpu), `TRANSFER_WORKERS` 8; `docs/TUNING_AND_BENCHMARKS.md` + `scripts/throughput_microbench.py` → `throughput_microbench.json`
 - [x] F7 Capability registry for all TRANSFER_READY unique drivers — profile hash + matrix artifact; Decision Artifact stamps `capability_*_hash` (`export_live_capability_matrix`)

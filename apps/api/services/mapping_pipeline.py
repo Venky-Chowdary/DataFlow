@@ -6,12 +6,12 @@ import re
 
 from services.semantic_mapper import map_columns
 from services.transform_engine import infer_transform_for_mapping
-from services.type_system import (
+from services.decision_kernel import (
     create_new_mapping_target_type,
-    ddl_carrier_type,
     ddl_type,
     normalize_logical_type,
 )
+from services.type_system import ddl_carrier_type
 
 CONFIDENCE_FLOOR = 0.72
 # Untyped VARCHAR with no samples — refuse inflated confidence (thin SaaS / failed introspect).
@@ -221,7 +221,6 @@ def _repair_unparseable_numeric_targets(
     ``id``, non-numeric samples must never stay on that column.
     """
     from services.schema_inference import samples_fit_logical_type
-    from services.type_system import ddl_type, normalize_logical_type
 
     src_by = {s["name"]: s for s in (source_schemas or [])}
     tgt_by = {s["name"]: s for s in (target_schemas or [])}

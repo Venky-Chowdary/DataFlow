@@ -108,3 +108,53 @@ def test_writer_invent_imports_use_decision_kernel_surface():
     assert not offenders, (
         "Writers must import invent/DDL via services.decision_kernel — " + ", ".join(offenders)
     )
+
+
+def test_map_validate_invent_imports_use_decision_kernel_surface():
+    """C2: Map/Validate/lossy paths must import invent surface via kernel, not type_system."""
+    from pathlib import Path
+    import re
+
+    services = Path(__file__).resolve().parents[1] / "services"
+    invent_names = (
+        "materialize_dest_ddl",
+        "ddl_type",
+        "create_new_mapping_target_type",
+        "is_lossy_coercion",
+        "is_precision_collapse_coercion",
+        "normalize_logical_type",
+    )
+    targets = (
+        "mapping_pipeline.py",
+        "semantic_mapper.py",
+        "coercion_probe.py",
+        "data_integrity.py",
+        "type_coercion_validator.py",
+        "schema_drift.py",
+    )
+    # schema_drift lives under connectors/
+    paths = {
+        "schema_drift.py": Path(__file__).resolve().parents[1]
+        / "connectors"
+        / "schema_drift.py",
+    }
+    for name in targets:
+        if name not in paths:
+            paths[name] = services / name
+
+    offenders: list[str] = []
+    for name, path in paths.items():
+        text = path.read_text(encoding="utf-8")
+        for m in re.finditer(
+            r"from\s+services\.type_system\s+import\s+\(([^)]+)\)|"
+            r"from\s+services\.type_system\s+import\s+([^\n]+)",
+            text,
+        ):
+            imported = (m.group(1) or m.group(2) or "").replace("\n", " ")
+            for invent in invent_names:
+                if re.search(rf"\b{invent}\b", imported):
+                    offenders.append(f"{name}:{invent}")
+    assert not offenders, (
+        "Map/Validate paths must import invent/lossy via services.decision_kernel — "
+        + ", ".join(offenders)
+    )

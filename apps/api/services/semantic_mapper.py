@@ -1018,7 +1018,8 @@ def _identity_onto_numeric_landmine(source: str, src_type: str, tgt_type: str) -
     Without samples the old mapper bound ``_id``→NUMBER ``id`` (~0.73). Hex
     ObjectIds never fit INTEGER/NUMBER — refuse that Map landmine up front.
     """
-    from services.type_system import normalize_logical_type, specialty_carrier_base
+    from services.decision_kernel import normalize_logical_type
+    from services.type_system import specialty_carrier_base
 
     tgt = normalize_logical_type(tgt_type)
     if tgt not in {"integer", "decimal", "float"}:
@@ -1044,7 +1045,7 @@ def _type_compat_penalty(
     Lossy pairs must not clear Map auto-approve / G4 after an Exact-name boost —
     demote hard enough that calibrated confidence stays ≤0.84.
     """
-    from services.type_system import is_lossy_coercion, normalize_logical_type
+    from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 
     if not src_type or not tgt_type:
         return 0.0
@@ -1067,7 +1068,7 @@ def _type_compat_penalty(
 
 def _type_aware_boost(src_type: str, tgt_type: str, *, dest_db: str = "") -> float:
     """Boost score for exact or highly compatible type matches."""
-    from services.type_system import is_lossy_coercion, normalize_logical_type
+    from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 
     if not src_type or not tgt_type:
         return 0.0
@@ -1452,8 +1453,10 @@ def map_columns(
     destination_table_exists: bool | None = None,
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
-    from services.decision_kernel import ddl_type
-    from services.type_system import create_new_mapping_target_type
+    from services.decision_kernel import (
+        create_new_mapping_target_type,
+        ddl_type,
+    )
 
     floor = max(0.55, threshold - 0.3)
     src_roles: dict[str, str] = {}
@@ -1882,13 +1885,13 @@ def _apply_create_new_risk_stamps(
         ieee_float_create_new_risk,
         observe_numeric_samples,
     )
-    from services.type_system import (
-        assess_create_new_type_risk,
+    from services.decision_kernel import (
         create_new_mapping_target_type,
         is_lossy_coercion,
         is_precision_collapse_coercion,
         normalize_logical_type as _nlt,
     )
+    from services.type_system import assess_create_new_type_risk
 
     samples_by_src = source_samples or {}
     out: list[dict] = []

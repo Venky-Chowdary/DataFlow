@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
-from services.type_system import is_lossy_coercion, normalize_logical_type
+from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 
 logger = logging.getLogger(__name__)
 

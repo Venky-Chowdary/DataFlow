@@ -62,3 +62,22 @@ def test_change_stream_wires_transport_helpers():
     assert "_peek_or_stream_rows" in src
     assert "_ensure_streaming_transport" in src
     assert "postgresql_cdc_transport" in src
+
+
+def test_pg_capability_marks_streaming_planned_opt_in():
+    """F4 honesty: default peek; streaming must not look certified via supports_streaming."""
+    from services.connector_capability_registry import get_connector_capability
+
+    cap = get_connector_capability("postgresql")
+    assert cap.get("cdc_transport_default") == "peek"
+    assert cap.get("cdc_streaming_status") == "planned_opt_in"
+    assert cap.get("supports_streaming") is False
+    assert cap.get("bulk_export_status") == "implemented_pg_copy"
+
+
+def test_warehouse_bulk_export_marked_planned():
+    """F3 honesty: Snowflake/BQ source unload stays Planned until wired."""
+    from services.connector_capability_registry import get_connector_capability
+
+    assert get_connector_capability("snowflake").get("bulk_export_status") == "planned"
+    assert get_connector_capability("bigquery").get("bulk_export_status") == "planned"
