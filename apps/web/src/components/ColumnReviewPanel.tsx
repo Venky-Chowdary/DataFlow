@@ -49,6 +49,11 @@ import {
   paginateMappings,
   totalPages,
 } from "../lib/columnWorkbench";
+import {
+  mapBandLabel,
+  partitionMapBands,
+  shouldCollapseSafeBand,
+} from "../lib/mapSafeBand";
 import { destTypeSelectOptions, normalizeDestTypeValue, typeBadgeClass } from "../lib/typeDisplay";
 
 interface ColumnReviewPanelProps {
@@ -141,6 +146,8 @@ export function ColumnReviewPanel({
   const [pageSize, setPageSize] = useState<ColumnPageSize>(50);
   const [previewPage, setPreviewPage] = useState(1);
   const [previewPageSize, setPreviewPageSize] = useState(12);
+  const [safeBandExpanded, setSafeBandExpanded] = useState(false);
+  const [readyBandExpanded, setReadyBandExpanded] = useState(false);
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
 
   const search = searchProp ?? internalSearch;
@@ -163,10 +170,26 @@ export function ColumnReviewPanel({
     [mappings, search, filter, sort, confidenceThreshold],
   );
 
-  const pages = totalPages(filtered.length, pageSize);
+  // Safe-band accordion only on unfiltered "all" — Issues filter stays flat.
+  const useSafeBands = filter === "all" && !search.trim();
+  const mapBands = useMemo(() => partitionMapBands(filtered), [filtered]);
+  const collapseSafe = useSafeBands && shouldCollapseSafeBand(mapBands) && !safeBandExpanded;
+  const collapseReady = useSafeBands && mapBands.ready.length >= 2 && !readyBandExpanded;
+
+  const displayItems = useMemo(() => {
+    if (!useSafeBands) return filtered;
+    return [
+      ...mapBands.attention,
+      ...(collapseSafe ? [] : mapBands.safe),
+      ...(collapseReady ? [] : mapBands.ready),
+      ...mapBands.omitted,
+    ];
+  }, [useSafeBands, filtered, mapBands, collapseSafe, collapseReady]);
+
+  const pages = totalPages(displayItems.length, pageSize);
   const pageItems = useMemo(
-    () => paginateMappings(filtered, page, pageSize),
-    [filtered, page, pageSize],
+    () => paginateMappings(displayItems, page, pageSize),
+    [displayItems, page, pageSize],
   );
 
   const needsReview = mappings.filter((m) => needsMappingReview(m, confidenceThreshold));
@@ -185,7 +208,13 @@ export function ColumnReviewPanel({
 
   useEffect(() => {
     setPage(1);
-  }, [search, filter, sort, pageSize, mappings.length]);
+  }, [search, filter, sort, pageSize, mappings.length, safeBandExpanded, readyBandExpanded]);
+
+  useEffect(() => {
+    // New Map payload — re-collapse safe band (Issues-first default).
+    setSafeBandExpanded(false);
+    setReadyBandExpanded(false);
+  }, [mappings.length]);
 
   useEffect(() => {
     setPreviewPage(1);
@@ -231,6 +260,15 @@ export function ColumnReviewPanel({
 
   const approveAll = () => {
     onChange(approveMappingsHonestly(mappings));
+  };
+
+  const approveAllSafe = () => {
+    const safeIndexes = new Set(mapBands.safe.map((item) => item.index));
+    if (safeIndexes.size === 0) return;
+    onChange(
+      mappings.map((m, i) => (safeIndexes.has(i) ? approveMappingHonestly(m) : m)),
+    );
+    setSafeBandExpanded(false);
   };
 
   const approveOne = (index: number) => {
@@ -307,8 +345,8 @@ export function ColumnReviewPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [mappings, onChange]);
 
-  const pageStart = filtered.length === 0 ? 0 : (page - 1) * pageSize + 1;
-  const pageEnd = Math.min(page * pageSize, filtered.length);
+  const pageStart = displayItems.length === 0 ? 0 : (page - 1) * pageSize + 1;
+  const pageEnd = Math.min(page * pageSize, displayItems.length);
 
   const previewRows = useMemo(() => {
     if (!sampleRows || sampleRows.length === 0) return [];
@@ -646,6 +684,53 @@ export function ColumnReviewPanel({
 
 
       </div>
+
+      {useSafeBands && (collapseSafe || collapseReady || safeBandExpanded || readyBandExpanded) && (
+        <div className="df2-map-band-bar" role="region" aria-label="Map safe-band groups">
+          {mapBands.attention.length > 0 && (
+            <span className="df2-map-band-chip is-attention">
+              {mapBandLabel("attention", mapBands.attention.length)}
+            </span>
+          )}
+          {mapBands.safe.length > 0 && (
+            <div className="df2-map-band-actions">
+              <button
+                type="button"
+                className={`df2-map-band-chip is-safe${collapseSafe ? " is-collapsed" : ""}`}
+                onClick={() => setSafeBandExpanded((v) => !v)}
+                aria-expanded={!collapseSafe}
+                title="Preserve / safe-normalize rows — collapse so Issues stay primary"
+              >
+                <DtIcon name={collapseSafe ? "chevron-right" : "chevron-down"} size={14} />
+                {mapBandLabel("safe", mapBands.safe.length)}
+                {collapseSafe ? " · Expand" : " · Collapse"}
+              </button>
+              {mapBands.safe.length > 0 && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm df2-btn-primary"
+                  onClick={approveAllSafe}
+                  title="Approve only preserve / safe-normalize rows — never risk or specialty"
+                >
+                  Approve safe ({mapBands.safe.length})
+                </button>
+              )}
+            </div>
+          )}
+          {mapBands.ready.length >= 2 && (
+            <button
+              type="button"
+              className={`df2-map-band-chip is-ready${collapseReady ? " is-collapsed" : ""}`}
+              onClick={() => setReadyBandExpanded((v) => !v)}
+              aria-expanded={!collapseReady}
+            >
+              <DtIcon name={collapseReady ? "chevron-right" : "chevron-down"} size={14} />
+              {mapBandLabel("ready", mapBands.ready.length)}
+              {collapseReady ? " · Expand" : " · Collapse"}
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="df2-column-review-table-wrap df2-column-review-scroll">
         <table className="df2-column-review-table df2-column-review-table-sticky">
@@ -1039,7 +1124,9 @@ export function ColumnReviewPanel({
             {pageItems.length === 0 && (
               <tr>
                 <td colSpan={showTransforms ? 9 : 8} className="df2-column-review-empty-row">
-                  No columns match your search or filter. Try clearing filters or broadening your search.
+                  {useSafeBands && collapseSafe && filtered.length > 0
+                    ? "Safe mappings are collapsed — expand the safe band above, or use Issues to focus risk rows."
+                    : "No columns match your search or filter. Try clearing filters or broadening your search."}
                 </td>
               </tr>
             )}
@@ -1047,16 +1134,22 @@ export function ColumnReviewPanel({
         </table>
       </div>
 
-      {(compact || filtered.length > pageSize) && (
+      {(compact || displayItems.length > pageSize) && (
         <div className="df2-column-review-footer df2-column-workbench-pagination">
           {compact && (
             <span>
-              {filtered.length === 0
-                ? "No matching columns"
-                : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`}
+              {displayItems.length === 0
+                ? (useSafeBands && collapseSafe && filtered.length > 0
+                  ? "Safe band collapsed"
+                  : "No matching columns")
+                : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${displayItems.length.toLocaleString()}${
+                  useSafeBands && (collapseSafe || collapseReady)
+                    ? ` (${filtered.length.toLocaleString()} total)`
+                    : ""
+                }`}
             </span>
           )}
-          {filtered.length > pageSize && (
+          {displayItems.length > pageSize && (
             <div className="df2-column-workbench-pagination">
               <button
                 type="button"

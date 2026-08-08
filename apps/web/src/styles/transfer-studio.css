@@ -1343,6 +1343,76 @@
   flex-shrink: 0;
 }
 
+/* Map safe-band accordion — Issues stay primary; preserve/normalize collapses */
+.df2-map-band-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 8px 12px;
+  margin: 0 0 8px;
+  border: 1px solid var(--df2-border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--df2-surface-muted, #f8fafc);
+}
+
+.df2-map-band-actions {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.df2-map-band-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.3;
+  background: transparent;
+  color: var(--df2-text-secondary, #475569);
+  cursor: default;
+}
+
+button.df2-map-band-chip {
+  cursor: pointer;
+}
+
+button.df2-map-band-chip:hover {
+  filter: brightness(0.98);
+}
+
+.df2-map-band-chip.is-attention {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #9a3412;
+}
+
+.df2-map-band-chip.is-safe {
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+  color: #065f46;
+}
+
+.df2-map-band-chip.is-safe.is-collapsed {
+  background: #f0fdf4;
+  border-style: dashed;
+}
+
+.df2-map-band-chip.is-ready {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+  color: #1e40af;
+}
+
+.df2-map-band-chip.is-ready.is-collapsed {
+  border-style: dashed;
+}
+
 .df2-map-visual-drawer-meta {
   margin-left: auto;
   font-size: 11px;
