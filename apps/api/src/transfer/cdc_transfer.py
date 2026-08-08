@@ -237,10 +237,36 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         out["cdc_freshness_severity"] = meta.get("freshness_severity")
     if meta.get("cdc_lag_unknown_reason"):
         out["cdc_lag_unknown_reason"] = meta.get("cdc_lag_unknown_reason")
+    # Live pg_replication_slots catalog (PG) beats in-memory consistent_point.
+    if meta.get("active") is not None:
+        out["cdc_slot_active"] = bool(meta.get("active"))
+    if meta.get("slot_exists") is not None:
+        out["cdc_slot_exists"] = bool(meta.get("slot_exists"))
+    if meta.get("restart_lsn"):
+        out["cdc_restart_lsn"] = str(meta.get("restart_lsn"))
+    if meta.get("wal_status"):
+        out["cdc_wal_status"] = str(meta.get("wal_status"))
+        # lost / unreserved is operator-critical — never look "healthy" on lag alone.
+        wal = str(meta.get("wal_status") or "").strip().lower()
+        if wal in {"lost", "unreserved"} and out.get("cdc_freshness_severity") != "critical":
+            out["cdc_freshness_severity"] = "critical"
+            out["cdc_lag_unknown_reason"] = (
+                out.get("cdc_lag_unknown_reason")
+                or f"pg_replication_slots.wal_status={wal}"
+            )
+    if meta.get("active") is False and out.get("cdc_freshness_severity") not in {
+        "critical",
+        "warn",
+    }:
+        # Inactive slot while job claims streaming — surface warn (lease/other consumer).
+        out["cdc_freshness_severity"] = "warn"
     # Retained WAL is the number an on-call engineer needs first: an idle slot
     # that stops advancing fills the primary's disk, and the job looks healthy
     # right up until the database stops accepting writes.
-    confirmed = getattr(cdc, "consistent_point_lsn", None)
+    confirmed = (
+        meta.get("confirmed_flush_lsn")
+        or getattr(cdc, "consistent_point_lsn", None)
+    )
     if confirmed:
         out["cdc_confirmed_flush_lsn"] = str(confirmed)
     if row_filter:

@@ -188,6 +188,15 @@ export interface TransferJob {
   replication_lag_bytes?: number | null;
   /** Slot confirmed_flush_lsn — the position holding WAL retention. */
   cdc_confirmed_flush_lsn?: string | null;
+  /** Slot restart_lsn — oldest WAL still needed by this slot. */
+  cdc_restart_lsn?: string | null;
+  /** Live pg_replication_slots.active for this CDC job. */
+  cdc_slot_active?: boolean | null;
+  cdc_slot_exists?: boolean | null;
+  /** PG13+ wal_status: reserved | extended | unreserved | lost. */
+  cdc_wal_status?: string | null;
+  cdc_freshness_severity?: string | null;
+  cdc_lag_unknown_reason?: string | null;
   cdc_heartbeat_at?: string | null;
   cdc_last_ddl_at?: string | null;
   mapping_review_required?: boolean | null;

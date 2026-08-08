@@ -1173,6 +1173,19 @@ export function streamJobProgress(
       cdc_heartbeat_age_sec:
         raw.cdc_heartbeat_age_sec != null ? Number(raw.cdc_heartbeat_age_sec) : null,
       replication_lag_bytes: raw.replication_lag_bytes != null ? Number(raw.replication_lag_bytes) : null,
+      cdc_confirmed_flush_lsn: raw.cdc_confirmed_flush_lsn
+        ? String(raw.cdc_confirmed_flush_lsn)
+        : null,
+      cdc_restart_lsn: raw.cdc_restart_lsn ? String(raw.cdc_restart_lsn) : null,
+      cdc_slot_active: raw.cdc_slot_active == null ? null : Boolean(raw.cdc_slot_active),
+      cdc_slot_exists: raw.cdc_slot_exists == null ? null : Boolean(raw.cdc_slot_exists),
+      cdc_wal_status: raw.cdc_wal_status ? String(raw.cdc_wal_status) : null,
+      cdc_freshness_severity: raw.cdc_freshness_severity
+        ? String(raw.cdc_freshness_severity)
+        : null,
+      cdc_lag_unknown_reason: raw.cdc_lag_unknown_reason
+        ? String(raw.cdc_lag_unknown_reason)
+        : null,
       cdc_heartbeat_at: raw.cdc_heartbeat_at ? String(raw.cdc_heartbeat_at) : null,
       cdc_last_ddl_at: raw.cdc_last_ddl_at ? String(raw.cdc_last_ddl_at) : null,
       mapping_review_required: raw.mapping_review_required == null ? null : Boolean(raw.mapping_review_required),

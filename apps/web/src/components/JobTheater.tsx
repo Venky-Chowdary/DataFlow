@@ -976,12 +976,40 @@ export function JobTheaterView({
             </div>
           </article>
         )}
+        {job.cdc_slot_active != null && (
+          <article
+            className="df2-theater-v3-metric"
+            title="Live pg_replication_slots.active — false means no consumer is attached to this slot"
+          >
+            <DtIcon name={job.cdc_slot_active ? "check" : "alert"} size={16} />
+            <div>
+              <strong>{job.cdc_slot_active ? "Active" : "Inactive"}</strong>
+              <span>
+                {job.cdc_wal_status
+                  ? `Slot · wal_status=${job.cdc_wal_status}`
+                  : "Replication slot"}
+              </span>
+            </div>
+          </article>
+        )}
         {job.cdc_confirmed_flush_lsn && (
           <article className="df2-theater-v3-metric" title="Slot confirmed_flush_lsn — WAL older than this can be recycled">
             <DtIcon name="database" size={16} />
             <div>
               <strong className="df2-mono">{String(job.cdc_confirmed_flush_lsn)}</strong>
               <span>Confirmed flush LSN</span>
+            </div>
+          </article>
+        )}
+        {job.cdc_restart_lsn && (
+          <article
+            className="df2-theater-v3-metric"
+            title="Slot restart_lsn — oldest WAL segment this slot still requires"
+          >
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong className="df2-mono">{String(job.cdc_restart_lsn)}</strong>
+              <span>Restart LSN</span>
             </div>
           </article>
         )}

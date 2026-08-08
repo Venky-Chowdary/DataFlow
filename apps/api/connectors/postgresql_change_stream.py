@@ -281,6 +281,8 @@ class PostgreSqlChangeStreamCdc:
         self._last_event_commit_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
         self._lag_observation: dict[str, Any] | None = None
+        self._slot_catalog_cache: dict[str, Any] | None = None
+        self._slot_catalog_cache_at: float = 0.0
         self._schema_ready = False
         self._pending_ack_lsn: str | None = None
         self._pgoutput_decoder = None
@@ -354,12 +356,104 @@ class PostgreSqlChangeStreamCdc:
             return "pgoutput"
         return preferred or "pgoutput"
 
+    def _slot_catalog_status(self, *, max_age_sec: float = 2.0) -> dict[str, Any]:
+        """Live ``pg_replication_slots`` proof for Theater / Freshness.
+
+        Returns ``active``, ``restart_lsn``, ``confirmed_flush_lsn``, ``wal_status``
+        (PG13+), ``plugin``, ``slot_exists``. Cached briefly so poll loops do not
+        open a connection per decoded row.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if (
+            self._slot_catalog_cache is not None
+            and (now - float(self._slot_catalog_cache_at or 0.0)) < max(0.25, float(max_age_sec))
+        ):
+            return dict(self._slot_catalog_cache)
+
+        out: dict[str, Any] = {
+            "slot_exists": False,
+            "active": None,
+            "restart_lsn": None,
+            "confirmed_flush_lsn": None,
+            "wal_status": None,
+            "plugin": self.output_plugin,
+        }
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    # PG13+ exposes wal_status (reserved/extended/unreserved/lost).
+                    row = None
+                    has_wal_status = False
+                    try:
+                        cur.execute(
+                            """
+                            SELECT active,
+                                   restart_lsn::text,
+                                   confirmed_flush_lsn::text,
+                                   plugin,
+                                   wal_status
+                            FROM pg_replication_slots
+                            WHERE slot_name = %s
+                            """,
+                            (self.slot_name,),
+                        )
+                        row = cur.fetchone()
+                        has_wal_status = True
+                    except Exception as col_exc:
+                        msg = str(col_exc).lower()
+                        if "wal_status" not in msg and "undefined" not in msg:
+                            raise
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        cur.execute(
+                            """
+                            SELECT active,
+                                   restart_lsn::text,
+                                   confirmed_flush_lsn::text,
+                                   plugin
+                            FROM pg_replication_slots
+                            WHERE slot_name = %s
+                            """,
+                            (self.slot_name,),
+                        )
+                        row = cur.fetchone()
+                    if row:
+                        out["slot_exists"] = True
+                        out["active"] = bool(row[0]) if row[0] is not None else None
+                        out["restart_lsn"] = str(row[1]) if row[1] else None
+                        out["confirmed_flush_lsn"] = str(row[2]) if row[2] else None
+                        if row[3]:
+                            out["plugin"] = str(row[3])
+                            self.output_plugin = str(row[3])
+                        if has_wal_status and len(row) > 4 and row[4]:
+                            out["wal_status"] = str(row[4])
+                try:
+                    conn.commit()
+                except Exception:
+                    pass
+        except Exception as exc:
+            _logger.debug("slot catalog probe failed for %s: %s", self.slot_name, exc)
+            out["probe_error"] = str(exc)[:200]
+
+        self._slot_catalog_cache = dict(out)
+        self._slot_catalog_cache_at = now
+        return out
+
     def cdc_metadata(self) -> dict[str, Any]:
         """Operator-visible CDC status for Job Theater / Validate."""
         lag_sec = self.replication_lag_seconds()
         obs = dict(self._lag_observation or {})
+        slot = self._slot_catalog_status()
+        confirmed = (
+            slot.get("confirmed_flush_lsn")
+            or self.consistent_point_lsn
+        )
         return {
-            "plugin": self.output_plugin,
+            "plugin": slot.get("plugin") or self.output_plugin,
             "slot_name": self.slot_name,
             "publication_name": self.publication_name if self.output_plugin == "pgoutput" else None,
             "phase": self.phase,
@@ -369,6 +463,11 @@ class PostgreSqlChangeStreamCdc:
             "cdc_lag_basis": obs.get("cdc_lag_basis"),
             "cdc_heartbeat_age_sec": obs.get("cdc_heartbeat_age_sec"),
             "freshness_severity": obs.get("freshness_severity"),
+            "active": slot.get("active"),
+            "slot_exists": slot.get("slot_exists"),
+            "restart_lsn": slot.get("restart_lsn"),
+            "confirmed_flush_lsn": confirmed,
+            "wal_status": slot.get("wal_status"),
             "delivery": "at-least-once",
             **self._lease.theater_fields(),
         }
