@@ -1492,7 +1492,9 @@ def map_columns(
         for src in source_columns:
             src_type = src_types.get(src, "VARCHAR")
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
-            map_target_type = create_new_mapping_target_type(src_type, dest_db)
+            map_target_type = create_new_mapping_target_type(
+                src_type, dest_db, samples=src_samples.get(src)
+            )
             if confirmed_missing:
                 out.append(
                     {
@@ -1756,7 +1758,9 @@ def map_columns(
                 )
                 continue
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
-            map_target_type = create_new_mapping_target_type(src_type, dest_db)
+            map_target_type = create_new_mapping_target_type(
+                src_type, dest_db, samples=src_samples.get(source)
+            )
             # Prefer the original source name for ADD COLUMN (_id stays _id).
             # Semantic form alone collapses _id → id, then id_text — a name that
             # operators did not approve and that often never gets DDL.
@@ -1839,14 +1843,22 @@ def map_columns(
         )
 
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
-    return _apply_create_new_risk_stamps(mappings, dest_db)
+    return _apply_create_new_risk_stamps(
+        mappings, dest_db, source_samples=src_samples
+    )
 
 
 def _apply_create_new_risk_stamps(
     mappings: list[dict],
     destination_db_type: str = "",
+    *,
+    source_samples: dict[str, list] | None = None,
 ) -> list[dict]:
     """Stamp create-new type risks without importing mapping_pipeline (cycle-safe)."""
+    from services.decimal_observe import (
+        ieee_float_create_new_risk,
+        observe_numeric_samples,
+    )
     from services.type_system import (
         assess_create_new_type_risk,
         create_new_mapping_target_type,
@@ -1855,6 +1867,7 @@ def _apply_create_new_risk_stamps(
         normalize_logical_type as _nlt,
     )
 
+    samples_by_src = source_samples or {}
     out: list[dict] = []
     for m in mappings:
         row = dict(m)
@@ -1874,9 +1887,14 @@ def _apply_create_new_risk_stamps(
         src = str(row.get("source_type") or "VARCHAR")
         db = destination_db_type or str(row.get("dest_db_type") or "")
         stamped = str(row.get("target_type") or "").strip()
-        physical_from_src = create_new_mapping_target_type(src, db) if db else ""
+        col_samples = samples_by_src.get(str(row.get("source") or "")) or None
+        physical_from_src = (
+            create_new_mapping_target_type(src, db, samples=col_samples) if db else ""
+        )
         if db and stamped:
-            physical_from_stamp = create_new_mapping_target_type(stamped, db)
+            physical_from_stamp = create_new_mapping_target_type(
+                stamped, db, samples=col_samples
+            )
             stamp_l = _nlt(stamped)
             src_phys_l = _nlt(physical_from_src or src)
             # Transform/pipeline may widen VARCHAR→DATETIME(6)/JSONB/UUID wire.
@@ -1891,7 +1909,12 @@ def _apply_create_new_risk_stamps(
             tgt = stamped or src
         if tgt and tgt != stamped:
             row["target_type"] = tgt
-        risks = assess_create_new_type_risk(src, tgt, destination_db_type=db)
+        risks = assess_create_new_type_risk(
+            src, tgt, destination_db_type=db, samples=col_samples
+        )
+        ieee = ieee_float_create_new_risk(observe_numeric_samples(col_samples))
+        if ieee and not any(r.get("kind") == "ieee_float_artifact" for r in risks):
+            risks = list(risks) + [ieee]
         if risks:
             row["create_new_risks"] = risks
             row["requires_review"] = True

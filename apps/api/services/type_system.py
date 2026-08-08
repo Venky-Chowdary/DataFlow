@@ -5830,14 +5830,46 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
 
 
 
-def create_new_mapping_target_type(src_type: str, dest_db_type: str = "") -> str:
+def create_new_mapping_target_type(
+    src_type: str,
+    dest_db_type: str = "",
+    *,
+    samples: list | None = None,
+) -> str:
     """Target type stamped on create-new mappings for Validate + writers.
 
     Stamp **physical** DDL whenever the destination has no native UUID type —
     even for exact ``CHAR(36)`` / ``VARCHAR(36)`` wires. Map must match CREATE
     (never silent-green UUID→UUID while writers emit VARCHAR). Native UUID /
     UNIQUEIDENTIFIER destinations keep the engine token.
+
+    When ``src_type`` is bare DECIMAL/NUMERIC and ``samples`` are provided,
+    invent observed ``DECIMAL(p,s)`` or ``FLOAT`` (IEEE residue) — never silent
+    platform floor ``DECIMAL(38,15)`` from an empty typmod.
     """
+    # Bare decimal / float invent from samples before specialty / UUID paths.
+    # Declared DECIMAL(p,s) wins; empty samples fall through (no fake (38,15)).
+    if samples and normalize_logical_type(src_type) in {LOGICAL_DECIMAL, "float"}:
+        p, _s = parse_numeric_precision_scale(src_type)
+        src_logical = normalize_logical_type(src_type)
+        if p is None or src_logical == "float":
+            from services.decimal_observe import (
+                create_new_decimal_carrier,
+                observe_numeric_samples,
+            )
+
+            obs = observe_numeric_samples(samples)
+            if obs.get("kind") not in {None, "empty"}:
+                carrier = create_new_decimal_carrier(
+                    samples, dest_db=dest_db_type, source_type=src_type
+                )
+                db = (dest_db_type or "").strip()
+                if db:
+                    return promote_create_new_temporal_stamp(
+                        carrier, ddl_type(db, carrier), dest_db_type
+                    )
+                return carrier
+
     if normalize_logical_type(src_type) == LOGICAL_UUID:
         db_uuid = (dest_db_type or "").strip()
         if not db_uuid:
@@ -8075,6 +8107,7 @@ def assess_create_new_type_risk(
     target_type: str,
     *,
     destination_db_type: str = "",
+    samples: list | None = None,
 ) -> list[dict]:
     """Risk chips for create-new columns before Validate/write.
 
@@ -8084,6 +8117,16 @@ def assess_create_new_type_risk(
     src = (source_type or "").strip() or "VARCHAR"
     tgt = (target_type or "").strip() or src
     db = (destination_db_type or "").strip().lower()
+
+    if samples:
+        from services.decimal_observe import (
+            ieee_float_create_new_risk,
+            observe_numeric_samples,
+        )
+
+        ieee = ieee_float_create_new_risk(observe_numeric_samples(samples))
+        if ieee:
+            risks.append(ieee)
 
     if is_precision_collapse_coercion(src, tgt, dest_db=db):
         risks.append({

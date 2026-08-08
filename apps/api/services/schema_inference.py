@@ -727,8 +727,23 @@ def infer_column(
     types = set(counts.keys())
 
     if types <= {"INTEGER", "DECIMAL"}:
-        inferred = "DECIMAL" if "DECIMAL" in types else "INTEGER"
+        # Sample-aware DECIMAL(p,s) / FLOAT invent — never bare DECIMAL → (38,15).
+        from services.decimal_observe import observe_numeric_samples
+
+        obs = observe_numeric_samples(non_empty)
+        inferred = str(obs.get("carrier") or ("DECIMAL" if "DECIMAL" in types else "INTEGER"))
         role = "numeric"
+        if obs.get("kind") == "ieee_float":
+            notes.append(
+                "IEEE/Excel float residue — invent FLOAT (not fake money DECIMAL)"
+            )
+        elif obs.get("kind") == "fixed_decimal":
+            notes.append(
+                f"observed DECIMAL({obs.get('precision')},{obs.get('scale')}) "
+                f"from samples (max_int={obs.get('max_int_digits')})"
+            )
+        elif obs.get("kind") == "integer":
+            notes.append("all integral samples")
     elif types <= {"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME"}:
         tz_count = counts.get("TIMESTAMPTZ", 0)
         # Promote to TIMESTAMPTZ only when the column is unanimously TZ-aware,

@@ -151,7 +151,18 @@ def mapping_fidelity(
         try:
             from services.type_system import create_new_mapping_target_type
 
-            tgt_type = str(create_new_mapping_target_type(src_type, dest) or "").strip()
+            proof_samples = None
+            for key in ("samples", "sample_values", "preview_values"):
+                raw = mapping.get(key)
+                if raw:
+                    proof_samples = [str(x) for x in list(raw)[:32]]
+                    break
+            tgt_type = str(
+                create_new_mapping_target_type(
+                    src_type, dest, samples=proof_samples
+                )
+                or ""
+            ).strip()
         except Exception:
             tgt_type = ""
         if not tgt_type:

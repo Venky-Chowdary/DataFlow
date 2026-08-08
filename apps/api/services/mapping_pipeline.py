@@ -541,12 +541,19 @@ def run_mapping_pipeline(
         pending_dest = strategy == "pending_dest_schema"
         # Create-new / missing dest type: auto-widen unsigned widths.
         # Preserve DECIMAL(p,s) / VECTOR(n) / TIMESTAMPTZ carriers — never strip params.
+        col_samples = [
+            str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
+        ] or None
+
         if pending_dest:
             tgt_type = ""
         elif not tgt_type:
             src_l = str(src_type).lower()
             if "unsigned" in src_l and ("bigint" in src_l or normalize_logical_type(src_type) == "decimal"):
-                tgt_type = "DECIMAL"
+                # Still sample-observe when possible — bare DECIMAL → (38,15) cliff.
+                tgt_type = create_new_mapping_target_type(
+                    "DECIMAL", destination_db_type or "", samples=col_samples
+                ) if destination_db_type or col_samples else "DECIMAL"
             elif "unsigned" in src_l:
                 # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
                 tgt_type = "BIGINT"
@@ -554,20 +561,43 @@ def run_mapping_pipeline(
                 strategy in {"identity_passthrough", "create_compatible_new"}
                 or destination_table_exists is False
             ):
-                tgt_type = create_new_mapping_target_type(src_type, destination_db_type)
+                tgt_type = create_new_mapping_target_type(
+                    src_type, destination_db_type, samples=col_samples
+                )
             elif destination_db_type and destination_table_exists is True:
                 # Existing table, column missing from Studio — refuse invent.
                 tgt_type = ""
             elif destination_db_type:
-                tgt_type = create_new_mapping_target_type(src_type, destination_db_type)
+                tgt_type = create_new_mapping_target_type(
+                    src_type, destination_db_type, samples=col_samples
+                )
             else:
-                tgt_type = src_type
+                # No dest dialect — still stamp observed DECIMAL(p,s) for Map honesty.
+                if col_samples and normalize_logical_type(src_type) in {"decimal", "float"}:
+                    tgt_type = create_new_mapping_target_type(
+                        src_type, "", samples=col_samples
+                    )
+                else:
+                    tgt_type = src_type
         else:
             tgt_type = ddl_carrier_type(str(tgt_type))
+            # Create-new already stamped bare DECIMAL/FLOAT — upgrade from samples.
+            if (
+                strategy in {"identity_passthrough", "create_compatible_new"}
+                or destination_table_exists is False
+            ) and col_samples:
+                from services.type_system import parse_numeric_precision_scale
 
-        col_samples = [
-            str(x) for x in (schema_by_name.get(m["source"], {}).get("samples") or [])[:8]
-        ] or None
+                bare = normalize_logical_type(tgt_type) in {"decimal", "float"}
+                p, _ = parse_numeric_precision_scale(str(tgt_type))
+                if bare and (p is None or normalize_logical_type(tgt_type) == "float"):
+                    upgraded = create_new_mapping_target_type(
+                        src_type or tgt_type,
+                        destination_db_type or "",
+                        samples=col_samples,
+                    )
+                    if upgraded:
+                        tgt_type = upgraded
         # LLM-invented transforms are held as suggested_transform until Map accept —
         # do not let deterministic infer silently re-apply the invent.
         if m.get("llm_invented_transform") and not m.get("user_override"):

@@ -2530,24 +2530,12 @@ def decimal_int_digits_and_scale(value: Any) -> tuple[int, int]:
     Fractional scale ignores trailing zeros in the wire representation
     (``52.310500000000000`` → scale 4) so DECIMAL fit matches PostgreSQL /
     warehouse bind capacity rather than string padding from MySQL DOUBLE dumps.
-    """
-    from decimal import Decimal, InvalidOperation, Overflow
 
-    try:
-        text = str(value).strip() if value is not None else ""
-        if not text:
-            return 0, 0
-        d = Decimal(text)
-        if not d.is_finite():
-            return 0, 0
-        # normalize() collapses trailing zeros; scientific form is fine for as_tuple.
-        d = d.normalize()
-        _sign, digits, exponent = d.as_tuple()
-        scale = -exponent if exponent < 0 else 0
-        int_digits = max(0, len(digits) + exponent)
-        return int_digits, scale
-    except (InvalidOperation, Overflow, ValueError, TypeError):
-        return 0, 0
+    SSOT: ``services.decimal_observe.cell_int_digits_and_scale``.
+    """
+    from services.decimal_observe import cell_int_digits_and_scale
+
+    return cell_int_digits_and_scale(value)
 
 
 PG_DECIMAL_ROUND_DIALECTS = frozenset({

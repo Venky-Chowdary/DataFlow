@@ -182,7 +182,10 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
 
     stats: dict[str, Any] = {}
     histogram: list[dict[str, Any]] = []
-    if best_type in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT"}:
+    from services.type_system import normalize_logical_type as _nlt_prof
+
+    numeric_logical = _nlt_prof(best_type) in {"integer", "decimal", "float"}
+    if numeric_logical or best_type in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT"}:
         stats = _numeric_stats(non_empty)
         if stats:
             nums = []
@@ -192,6 +195,19 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
                 except (InvalidOperation, ValueError):
                     pass
             histogram = _histogram(nums)
+        # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
+        from services.decimal_observe import observe_numeric_samples
+
+        obs = observe_numeric_samples(non_empty)
+        if obs.get("kind") not in {None, "empty"}:
+            stats = {
+                **stats,
+                "observed_precision": obs.get("precision"),
+                "observed_scale": obs.get("scale"),
+                "numeric_kind": obs.get("kind"),
+                "ieee_signals": obs.get("ieee_signals") or [],
+                "suggested_carrier": obs.get("carrier"),
+            }
 
     pattern = _infer_pattern(non_empty)
     pii = bool(re.search(r"email|phone|ssn|password|secret|name|address", name, re.I))
