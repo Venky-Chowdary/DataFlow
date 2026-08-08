@@ -274,7 +274,7 @@ Each mergeable wave:
 5. **No catalog inflation** or marketing claims in the same PR.  
 6. **Do not mark complete** until Phase exit criteria for that ID are met.
 
-**Immediate next wave:** Claim-queue file staging + connector test-health SSOT shipped (`0924f4e`). **C2 advanced** — Map/Validate/lossy + writer invent surface via `decision_kernel` (import-surface regression). **F3/F4 honesty** — SF/BQ `bulk_export_status=planned`; PG CDC `cdc_streaming_status=planned_opt_in` (default still peek). Still open: B1 real_bug→0; C2 invent body extract from `type_system`; F4 streaming default + lag proof; F3 SF/BQ unload implementation.
+**Immediate next wave:** Excel→PG false Resume closed (`resolve_reclaim_resume` + zero-writes from-zero + checkpoint progress parity). Prior: claim-queue file staging, C2 Map/Validate kernel surface, F3/F4 Planned labels. Still open: B1 real_bug→0 (wave5 sample); C2 invent body extract; F4 streaming default + lag proof; redeploy Railway for Resume + staging fixes.
 
 ---
 
