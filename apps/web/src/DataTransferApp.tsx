@@ -219,6 +219,12 @@ function AppShell({
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
+  const patchConnector = useCallback((id: string, patch: Partial<Connector>) => {
+    setConnectors((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+    );
+  }, []);
+
   const loadConnectors = useCallback(async (notifyOnError = true) => {
     try {
       setConnectors(await fetchConnectors());
@@ -443,7 +449,7 @@ function AppShell({
   const offlineCopy = apiOfflineMessage();
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
-  const unhealthyConnectorsCount = connectors.filter((c) => c.status === "error" || c.last_test_ok === false).length;
+  const unhealthyConnectorsCount = connectors.filter((c) => c.last_test_ok === false).length;
   return (
     <div className={`df2-app ${showCopilotRail ? "df2-app-with-rail" : ""} ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}>
       {mobileNavOpen && (
@@ -715,6 +721,7 @@ function AppShell({
                     onEdit={openEditModal}
                     onDelete={handleDeleteConnector}
                     onRefresh={loadConnectors}
+                    onConnectorPatch={patchConnector}
                     connectorEditorOpen={showModal && Boolean(editingConnector)}
                     onOpenTransfer={(connectorId) => {
                       if (connectorId) {

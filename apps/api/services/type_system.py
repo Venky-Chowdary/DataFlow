@@ -1272,9 +1272,34 @@ _ARRAY_NATIVE_ENGINES: Final[frozenset[str]] = frozenset({
 })
 
 
+# Iceberg physical scalar tokens (lowercase). Nested leaves already stamped in
+# invent (e.g. VECTOR → list<float>) must pass through — rematerializing bare
+# logical ``float`` via DDL_TYPES would widen to ``double`` and break Map≡CREATE.
+_ICEBERG_PHYSICAL_LEAVES: Final[frozenset[str]] = frozenset({
+    "boolean",
+    "int",
+    "long",
+    "float",
+    "double",
+    "string",
+    "binary",
+    "date",
+    "time",
+    "timestamp",
+    "timestamptz",
+    "uuid",
+})
+
+
 def _leaf_ddl_for_nested(db: str, leaf: str) -> str:
     """Map a nested leaf logical carrier to destination-native leaf DDL."""
     leaf = (leaf or "STRING").strip()
+    if db == "iceberg":
+        low = leaf.lower()
+        if low in _ICEBERG_PHYSICAL_LEAVES:
+            return low
+        if low.startswith("decimal"):
+            return low
     # Avoid recursion into nested helpers — leafs are scalars.
     logical = normalize_logical_type(leaf)
     if logical == LOGICAL_DECIMAL and db in _DECIMAL_PARAM_TEMPLATES:

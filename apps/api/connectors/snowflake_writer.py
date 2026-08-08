@@ -13,7 +13,7 @@ from decimal import Overflow
 from pathlib import Path
 from typing import Any, Callable
 
-from services.type_system import ddl_type, materialize_dest_ddl, normalize_logical_type
+from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
 from services.value_serializer import cell_to_string
 
 from connectors.driver_guard import stub_writes_allowed
@@ -340,7 +340,7 @@ def resolve_snowflake_create_types(
     unfit cells are quarantined instead. Bare DECIMAL rematerializes to
     ``NUMBER(38,10)`` via ``ddl_type`` — never batch-inferred invent.
     """
-    from services.type_system import ddl_type, normalize_logical_type
+    from services.decision_kernel import ddl_type, normalize_logical_type
 
     out: list[str] = []
     for i, t in enumerate(logical_types):

@@ -181,12 +181,31 @@ async def lifespan(app: FastAPI):
             for job in mongo.list_jobs(limit=200):
                 if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
                     payload = job["transfer_request"]
-                    if payload.get("requires_file_reupload"):
-                        mongo.update_job_status(job["_id"], "failed", error="File re-upload required after restart")
-                        continue
                     if lease_store.is_held(job["_id"]):
                         continue
                     request = transfer_request_from_dict(payload)
+                    try:
+                        from services.transfer_file_staging import (
+                            file_source_bytes_available,
+                            hydrate_file_source,
+                        )
+
+                        hydrate_file_source(request)
+                        if request.source.kind == "file" and not file_source_bytes_available(
+                            request
+                        ):
+                            mongo.update_job_status(
+                                job["_id"],
+                                "failed",
+                                error="File re-upload required after restart",
+                            )
+                            continue
+                    except Exception as hydrate_exc:
+                        logging.getLogger(__name__).warning(
+                            "Orphan resume hydrate failed for %s: %s",
+                            job.get("_id"),
+                            hydrate_exc,
+                        )
                     run_transfer_async(job["_id"], request, resume=True)
                     resumed += 1
             print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")

@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.type_system import materialize_dest_ddl
+from services.decision_kernel import materialize_dest_ddl
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
@@ -347,8 +347,13 @@ def _bq_apply_sparse_upsert(
     bq_types: list[str],
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
+    abort_on_reject: bool = False,
 ) -> tuple[int, int, list[tuple]]:
-    """Per-row BigQuery DML omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
+    """Per-row BigQuery DML omitting DF_MISSING — never SET col=NULL for absent CDC fields.
+
+    When ``abort_on_reject`` is True (strict fail policy), validate every sparse
+    row before the first DML so a bad key cannot leave a partial MERGE batch.
+    """
     from connectors.writer_common import (
         DF_LSN_COL,
         assert_sparse_upsert_has_pk,
@@ -368,6 +373,32 @@ def _bq_apply_sparse_upsert(
     written = 0
     skipped = 0
     checksum_rows: list[tuple] = []
+    if abort_on_reject:
+        # Dry-run all sparse rows before the first DML — fail-closed.
+        for row_idx, row in enumerate(sparse_rows):
+            raw_present = sparse_present_bindings(row, target_cols)
+            try:
+                present = _bq_normalize_present(raw_present, target_cols, bq_types)
+                assert_sparse_upsert_has_pk(present, conflict)
+            except ValueError as exc:
+                if rejected_details is not None:
+                    sample = ""
+                    try:
+                        sample = cell_to_string(
+                            next(iter(raw_present.values()), "")
+                        )[:120]
+                    except Exception:
+                        sample = ""
+                    rejected_details.append(
+                        {
+                            "row": row_idx,
+                            "column": "*",
+                            "value": sample,
+                            "reason": str(exc)[:300],
+                            "policy": policy,
+                        }
+                    )
+                return 0, 0, []
     for row_idx, row in enumerate(sparse_rows):
         raw_present = sparse_present_bindings(row, target_cols)
         # Pre-bind preferred. Residual refuse / empty PK → quarantine, not
@@ -380,6 +411,19 @@ def _bq_apply_sparse_upsert(
             )
             assert_sparse_upsert_has_pk(present, conflict)
         except ValueError as exc:
+            if abort_on_reject:
+                # Should not reach here after dry-run; refuse further DML.
+                if rejected_details is not None:
+                    rejected_details.append(
+                        {
+                            "row": row_idx,
+                            "column": "*",
+                            "value": "",
+                            "reason": str(exc)[:300],
+                            "policy": policy,
+                        }
+                    )
+                return written, skipped, checksum_rows
             if rejected_details is not None:
                 sample = ""
                 try:
@@ -1156,6 +1200,41 @@ def write_mapped_rows(
             )
 
         sparse_checksum_rows: list[tuple] = []
+        # Partition / sparse validation before any DML — strict/fail must not
+        # MERGE then _final_abort with rows_written>0 and empty checksum (Bugbot).
+        if use_merge and mapped_rows:
+            from connectors.writer_common import partition_dense_upsert_rows
+
+            before_dense = len(mapped_rows)
+            mapped_rows = partition_dense_upsert_rows(
+                mapped_rows,
+                conflict,
+                target_cols=target_cols,
+                rejected_details=rejected_details,
+                policy=policy,
+            )
+            rows_skipped += before_dense - len(mapped_rows)
+        _pre_dml_abort = reject_on_strict_policy(
+            policy, rejected_details, "BigQuery", transform_errors
+        )
+        if _pre_dml_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=dataset_id,
+                checksum="",
+                chunks_completed=0,
+                error=_pre_dml_abort,
+                rejected_rows=max(
+                    rejected_rows, len(data_rows) - len(mapped_rows) - rows_skipped
+                ),
+                rejected_details=rejected_details,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                warnings=transform_errors,
+            )
+
         if sparse_rows and use_merge:
             sparse_written, sparse_skipped, sparse_checksum = _bq_apply_sparse_upsert(
                 client,
@@ -1166,24 +1245,33 @@ def write_mapped_rows(
                 bq_types,
                 rejected_details=rejected_details,
                 policy=policy,
+                abort_on_reject=str(policy or "").lower() == "fail",
             )
             written += sparse_written
             rows_skipped += sparse_skipped
             sparse_checksum_rows = list(sparse_checksum)
+            _sparse_abort = reject_on_strict_policy(
+                policy, rejected_details, "BigQuery", transform_errors
+            )
+            if _sparse_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_sparse_abort,
+                    rejected_rows=max(
+                        rejected_rows, len(data_rows) - written - rows_skipped
+                    ),
+                    rejected_details=rejected_details,
+                    coerced_null_rows=coerced_null_rows,
+                    rows_skipped=rows_skipped,
+                    warnings=transform_errors,
+                )
 
         if use_merge:
-            if mapped_rows:
-                from connectors.writer_common import partition_dense_upsert_rows
-
-                before_dense = len(mapped_rows)
-                mapped_rows = partition_dense_upsert_rows(
-                    mapped_rows,
-                    conflict,
-                    target_cols=target_cols,
-                    rejected_details=rejected_details,
-                    policy=policy,
-                )
-                rows_skipped += before_dense - len(mapped_rows)
             # Ack checksum = rows that MERGE/land (partitioned dense + sparse images).
             rows_for_checksum = list(mapped_rows) + sparse_checksum_rows
             if mapped_rows:

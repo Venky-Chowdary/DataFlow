@@ -1,4 +1,9 @@
 import { ConnectorIcon } from "../../app/brand-icons";
+import {
+  connectorLooksHealthy,
+  connectorTestHealth,
+  connectorTestLabel,
+} from "../../lib/connectorHealth";
 import { Connector, PipelineSchedule, TransferJob } from "../../lib/types";
 import { DtIcon } from "../DtIcon";
 import { formatRelativeTime } from "../../lib/connectionWorkbench";
@@ -49,8 +54,9 @@ export function ConnectorCard({
   const displayRole = resolveDisplayRole(c, jobs, schedules);
   const roleLabel = formatConnectorRoleLabel(displayRole);
   const usage = resolveConnectorUsage(c, jobs, schedules);
-  const healthy = c.status !== "error" && c.last_test_ok !== false;
-  const neverTested = c.last_test_ok == null && c.status !== "error";
+  const healthy = connectorLooksHealthy(c);
+  const neverTested = connectorTestHealth(c) === "never_tested";
+  const testLabel = connectorTestLabel(c);
   const endpoint = c.host ? `${c.host}${c.port ? `:${c.port}` : ""}` : "";
   const roleClass =
     displayRole === "destination"
@@ -107,7 +113,7 @@ export function ConnectorCard({
         </span>
         <span className={`df2-connector-row-signal ${healthy ? "ok" : neverTested ? "" : "err"}`} title="Last connection test">
           <DtIcon name={healthy ? "check" : neverTested ? "activity" : "x"} size={12} />
-          <span className="df2-connector-row-signal-text">{neverTested ? "Never tested" : healthy ? "Test passed" : "Test failed"}</span>
+          <span className="df2-connector-row-signal-text">{testLabel}</span>
         </span>
         <span className="df2-connector-row-used" title="Last transfer that used this connection">
           {lastUsedAt ? formatRelativeTime(lastUsedAt) : "Not used"}

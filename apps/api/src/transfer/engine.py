@@ -4956,6 +4956,12 @@ class UniversalTransferEngine:
 
     def _create_pending_job(self, request: TransferRequest) -> str:
         self._resolve_saved_connectors(request)
+        # Claim-queue / HA: spill file bytes before Mongo serialize so workers
+        # can hydrate source_path (never mark requires_file_reupload on fresh submit).
+        if request.source.kind == "file" and request.source_content:
+            from services.transfer_file_staging import persist_file_source
+
+            persist_file_source(request)
         mongo = get_mongodb_service()
         source_name = (
             request.source_filename
@@ -5124,11 +5130,21 @@ class UniversalTransferEngine:
         self, request: TransferRequest
     ) -> tuple[list, list[str], dict[str, str]]:
         if request.source.kind == "file":
-            if not request.source_content:
+            from services.transfer_file_staging import hydrate_file_source
+
+            hydrate_file_source(request)
+            content = request.source_content or b""
+            if not content and request.source_path:
+                from pathlib import Path as _Path
+
+                p = _Path(request.source_path)
+                if p.is_file():
+                    content = p.read_bytes()
+            if not content:
                 raise ValueError("File content required for file source")
             enable_ocr = bool((request.source.extra or {}).get("enable_ocr"))
             return parse_file_content(
-                request.source_content,
+                content,
                 request.source_filename or "upload.csv",
                 enable_ocr=enable_ocr,
             )

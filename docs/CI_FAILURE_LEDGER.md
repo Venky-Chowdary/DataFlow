@@ -1,7 +1,7 @@
 # CI Failure Ledger (Phase B1)
 
 **Purpose:** Classify remaining suite failures so green CI is achievable without hiding real bugs.  
-**Updated:** 2026-08-08 (B1: 9108P / 12F sample — DECIMAL(p,s) infer, Zendesk raw_title, transform NameError)
+**Updated:** 2026-08-08 (file staging claim-queue; connector test health; purge-after-promote non-fatal)
 
 | Class | Meaning |
 |-------|---------|
@@ -118,6 +118,12 @@
 | Scale 100k 30s Windows budget | fixed | ``DATAFLOW_SCALE_MAX_SEC`` default 120 |
 | Quarantine DLQ class-identity pollution | fixed | tests bind ``services.quarantine_dlq`` module attrs |
 | C11 Studio Execute missing artifact pin | fixed | ``approved_decision_artifact_hash`` Form/JSON + TransferPage refuse missing 64-hex; Validate honesty renders artifact |
+| Streaming resume keyset without ``cursor_value`` | fixed (real_bug) | OFFSET fallback when resume has offset but no keyset bookmark — ``test_stream_sqlite_to_sqlite_resume_from_checkpoint`` |
+| Iceberg VECTOR invent ``list&lt;float&gt;`` → materialize ``list&lt;double&gt;`` | fixed (real_bug) | Iceberg physical nested leaves pass through — ``test_create_new_false_self_blocks_cleared`` |
+| Bare logical ``float`` → SA Float on Databricks Map path | fixed | exact lowercase logical → ``sa.Double`` never-narrower — ``test_generic_sql_float_is_double`` |
+| Sentinel NULL counted as ``failed`` (balanced block) | fixed | coercion_probe classifies Null-sentinel transform refuse as ``sentinel_nulls`` |
+| Bugbot ADLS/S3/GCS purge-before-upload | fixed | purge after staging→live; ``keep_part_count`` — ``test_object_store_multichunk_wave100`` |
+| Bugbot BQ strict mid-write then abort | fixed | partition/validate before DML; ``_pre_dml_abort`` ``rows_written=0`` — ``test_bigquery_writer`` |
 
 ## Open clusters
 
@@ -125,8 +131,8 @@
 
 | Cluster / node prefix | Class | Notes |
 |-----------------------|-------|-------|
-| Remaining suite after **9108P / 12F** (wave3 in flight; C11 FE pin closed) | mixed | Finish wave3 triage; B1 real_bug→0 |
-| Bugbot: ADLS purge-before-upload / BQ strict mid-write | real_bug | Pre-existing branch findings — schedule fail-closed rewrite |
+| Remaining suite after wave3 cluster close (next ``--maxfail=12`` sample) | mixed | B1 real_bug→0; continue triage |
+| C2 invent body still in ``type_system`` | architectural | Writers use ``decision_kernel`` invent surface; god-module extract open |
 | CDC / warehouse live matrices | skip_honest | B9 always publishes skip artifact |
 
 ## Method

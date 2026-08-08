@@ -173,6 +173,9 @@ def test_mongo_sparse_upsert_uses_set_not_replace():
         def __getitem__(self, name):
             return _Coll()
 
+        def list_collection_names(self, filter=None):  # noqa: A002
+            return []
+
     class _Client:
         def __getitem__(self, name):
             return _Db()
@@ -729,6 +732,9 @@ def test_mongo_sparse_upsert_preserves_df_missing_through_decimal_coercion():
     class _Db:
         def __getitem__(self, name):
             return _Coll()
+
+        def list_collection_names(self, filter=None):  # noqa: A002
+            return []
 
     class _Client:
         def __getitem__(self, name):

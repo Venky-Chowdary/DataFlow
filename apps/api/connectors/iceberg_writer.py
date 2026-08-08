@@ -67,12 +67,8 @@ def _logical_to_iceberg_type(logical: str) -> str:
     CREATE cannot leave bare ``DECIMAL`` (quarantine no-op) or pass through
     ``DECIMAL(40,10)`` that Arrow would silently clamp.
     """
-    from services.type_system import (
-        LOGICAL_DECIMAL,
-        ddl_type,
-        materialize_dest_ddl,
-        normalize_logical_type,
-    )
+    from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+    from services.type_system import LOGICAL_DECIMAL
 
     raw = (logical or "string").strip()
     norm = normalize_logical_type(raw)
@@ -104,7 +100,8 @@ def _ensure_iceberg_decimal_carrier(type_str: str) -> str:
     ``(p,s)``. Over Iceberg max precision → ``string`` (fail-closed) — never
     leave a bare or oversize stamp that Arrow would invent/clamp.
     """
-    from services.type_system import LOGICAL_DECIMAL, ddl_type, normalize_logical_type
+    from services.decision_kernel import ddl_type, normalize_logical_type
+    from services.type_system import LOGICAL_DECIMAL
 
     raw = (type_str or "string").strip()
     if normalize_logical_type(raw) != LOGICAL_DECIMAL:
@@ -181,12 +178,8 @@ def _decimal_target_types_for_iceberg_write(
         if not raw:
             raw = str(dest_types.get(col) or "string")
         # Preserve fixed(L) / BINARY(n) from mapped create-new carriers.
-        from services.type_system import (
-            LOGICAL_BINARY,
-            ddl_type,
-            normalize_logical_type,
-            parse_binary_carrier_width,
-        )
+        from services.decision_kernel import ddl_type, normalize_logical_type
+        from services.type_system import LOGICAL_BINARY, parse_binary_carrier_width
 
         if normalize_logical_type(raw) == LOGICAL_BINARY:
             width = parse_binary_carrier_width(raw)
@@ -654,7 +647,7 @@ def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
     if logical_n == LOGICAL_DECIMAL:
         # Map≡CREATE: honor ddl_type SSOT — bare → (38,10); oversize → string.
         # Never silently clamp DECIMAL(40,10) → decimal128(38,10).
-        from services.type_system import ddl_type
+        from services.decision_kernel import ddl_type
 
         wire = ddl_type("iceberg", raw)
         if normalize_logical_type(wire) != LOGICAL_DECIMAL:

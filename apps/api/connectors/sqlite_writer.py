@@ -62,7 +62,7 @@ def _sqlite_bind_carrier(map_carrier: str, physical_or_ddl: str = "") -> str:
     Quarantine and temporal refuse (audit §2.7 TZ→NTZ) must see the Map/Studio
     temporal stamp; CREATE DDL still uses ``sqlite_type``.
     """
-    from services.type_system import normalize_logical_type
+    from services.decision_kernel import normalize_logical_type
 
     map_c = (map_carrier or "").strip()
     phys = (physical_or_ddl or "").strip()

@@ -1601,6 +1601,21 @@ def stream_database_transfer(
             keyset_order_cols = [keyset_col] + (
                 [keyset_tiebreak] if keyset_tiebreak else []
             )
+    # Resume with a numeric offset but no keyset bookmark must not seek from the
+    # start of the table (cursor_after=None → full re-read). Fall back to OFFSET
+    # so checkpoint.offset remains authoritative for legacy / partial checkpoints.
+    if (
+        use_keyset
+        and (offset > 0 or chunk_idx > 0)
+        and keyset_after in (None, "")
+    ):
+        logger.warning(
+            "Resume checkpoint offset=%s chunk_index=%s has no keyset cursor_value — "
+            "falling back to OFFSET pagination to avoid re-reading committed rows.",
+            offset,
+            chunk_idx,
+        )
+        use_keyset = False
     pagination_mode = "keyset" if use_keyset else "offset"
     # Phase F3 — PostgreSQL COPY TO STDOUT bulk export (full refresh, no filter).
     bulk_export_iter = None

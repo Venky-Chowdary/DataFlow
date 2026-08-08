@@ -44,8 +44,11 @@ def invent_dest_type(
     * ``bind_existing`` / ``append`` / ``cdc_sparse``: require
       ``existing_dest_type``; never invent capacity from the source alone.
     """
-    from services.decision_kernel.types import ddl_type, materialize_dest_ddl
-    from services.type_system import create_new_mapping_target_type
+    from services.decision_kernel.types import (
+        create_new_mapping_target_type,
+        ddl_type,
+        materialize_dest_ddl,
+    )
 
     ctx = (
         context

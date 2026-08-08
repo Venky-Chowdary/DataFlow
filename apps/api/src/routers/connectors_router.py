@@ -569,13 +569,18 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, req
                 status_code=400,
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
-        if payload.get("requires_file_reupload"):
+        xfer_req = transfer_request_from_dict(payload)
+        from services.transfer_file_staging import (
+            file_source_bytes_available,
+            hydrate_file_source,
+        )
+
+        hydrate_file_source(xfer_req)
+        if xfer_req.source.kind == "file" and not file_source_bytes_available(xfer_req):
             raise HTTPException(
                 status_code=400,
                 detail="File uploads must be re-submitted from Transfer Studio.",
             )
-
-        xfer_req = transfer_request_from_dict(payload)
         # Retries from start also re-run preflight — never inherit skip_preflight.
         xfer_req.skip_preflight = False
         engine = get_transfer_engine()
@@ -624,7 +629,16 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
                 status_code=400,
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
-        if payload.get("requires_file_reupload"):
+        xfer_req_probe = transfer_request_from_dict(payload)
+        from services.transfer_file_staging import (
+            file_source_bytes_available,
+            hydrate_file_source,
+        )
+
+        hydrate_file_source(xfer_req_probe)
+        if xfer_req_probe.source.kind == "file" and not file_source_bytes_available(
+            xfer_req_probe
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="File uploads must be re-submitted from Transfer Studio.",
@@ -649,7 +663,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
                 },
             )
 
-        xfer_req = transfer_request_from_dict(payload)
+        xfer_req = xfer_req_probe
         # Resume must never inherit a stale skip_preflight flag — gates re-run.
         xfer_req.skip_preflight = False
         # Resume is the one sanctioned exit from a terminal status, and it must

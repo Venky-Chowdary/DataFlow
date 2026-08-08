@@ -140,10 +140,16 @@ def pytest_collection_modifyitems(config, items):
                     "postgresql_to_postgresql_incremental",
                     "postgresql_writer_dedupe",
                     "postgresql_writer_upsert_dedupes",
+                    "security_hardening_e2e",
+                    "live_duplicate_key_probe",
+                    "source_duplicate_probe_live",
+                    "csv_to_postgresql_hostile",
                 )
             ) or (
                 "postgresql_to_postgresql_incremental" in path
                 or "postgresql_writer_dedupe" in path
+                or "security_hardening_e2e" in path
+                or "source_duplicate_probe_live" in path
             ) or (
                 "live_emulator" in nid
                 and ("[postgresql]" in nid or "[pgvector]" in nid)

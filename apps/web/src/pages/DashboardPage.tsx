@@ -130,7 +130,7 @@ export function DashboardPage({
   const running = jobs.filter((j) => j.status === "running" || j.status === "pending");
   const totalRecords = completed.reduce((sum, j) => sum + (j.records_processed || 0), 0);
   const successRate = jobs.length ? Math.round((completed.length / jobs.length) * 100) : null;
-  const healthyConnectors = connectors.filter((c) => c.status !== "error" && c.last_test_ok !== false).length;
+  const healthyConnectors = connectors.filter((c) => c.last_test_ok !== false).length;
   const enabledPipelines = schedules.filter((s) => s.enabled).length;
   const cdcLagSeconds = useMemo(() => {
     const lags = [...running, ...completed]

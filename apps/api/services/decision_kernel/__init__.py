@@ -72,6 +72,7 @@ from services.decision_kernel.structural import (
     stamp_mapping_array_strategies,
 )
 from services.decision_kernel.types import (
+    create_new_mapping_target_type,
     ddl_invent_never_narrower_than_table,
     ddl_type,
     float_width_carrier,
@@ -125,6 +126,7 @@ __all__ = [
     "classify_mapping_conversion",
     "classify_structural_column",
     "compute_content_hash",
+    "create_new_mapping_target_type",
     "ddl_identity_report",
     "ddl_invent_never_narrower_than_table",
     "ddl_type",

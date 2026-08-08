@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from connectors.aws_common import boto3_client, is_local_endpoint, resolve_region
 from connectors.object_store_common import (
+    object_staging_key,
     purge_object_store_parts,
     resolve_object_store_write_dest_types,
     resolve_object_write_layout,
@@ -228,21 +229,40 @@ def write_mapped_rows(
                 raise RuntimeError(
                     f"S3 bucket {bucket!r} is missing or inaccessible and create_table is disabled"
                 ) from exc
-        # Full-refresh overwrite: clear stale parts once on the first chunk so a
-        # smaller re-run cannot leave orphaned parts (Redis/Iceberg clear-once).
+        # Staging→live before any purge: failed put must not wipe the prior export.
+        staging_key = object_staging_key(key)
+        client.put_object(
+            Bucket=bucket, Key=staging_key, Body=body, ContentType=content_type
+        )
+        client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
+        try:
+            client.delete_object(Bucket=bucket, Key=staging_key)
+        except Exception:
+            pass
+        # Full-refresh overwrite: clear stale parts once on the *last* chunk after
+        # promote. Purge must never fail-closed the committed write (Bugbot) —
+        # live object already holds the payload; orphan cleanup is best-effort.
+        purge_warnings: list[str] = []
         if layout.should_purge:
             from connectors.s3_reader import list_objects
 
-            purge_object_store_parts(
-                list_keys=lambda prefix: list_objects(cfg, bucket, prefix),
-                delete_key=lambda k: client.delete_object(Bucket=bucket, Key=k),
-                parts_prefix=layout.purge_prefix,
-                legacy_base_key=layout.purge_legacy_key,
-            )
-        client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
+            try:
+                purge_object_store_parts(
+                    list_keys=lambda prefix: list_objects(cfg, bucket, prefix),
+                    delete_key=lambda k: client.delete_object(Bucket=bucket, Key=k),
+                    parts_prefix=layout.purge_prefix,
+                    legacy_base_key=layout.purge_legacy_key,
+                    keep_part_count=layout.keep_part_count,
+                    keep_keys=[key, staging_key],
+                )
+            except Exception as purge_exc:
+                purge_warnings.append(
+                    f"S3 post-promote purge deferred (write committed): {purge_exc}"
+                )
         checksum = row_checksum(mapped_rows, target_cols, dest_db_type="s3")
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
+        warn_out = (errors[:10] + purge_warnings)[:20]
         _final_abort = reject_on_strict_policy(policy, rejected_details, "S3")
         if _final_abort:
             return WriteResult(
@@ -253,7 +273,7 @@ def write_mapped_rows(
                 checksum=checksum,
                 chunks_completed=1,
                 error=_final_abort,
-                warnings=errors[:10],
+                warnings=warn_out,
                 rejected_rows=len({d["row"] for d in rejected_details}) or max(0, len(data_rows) - len(mapped_rows)),
                 rejected_details=list(rejected_details),
             )
@@ -264,7 +284,7 @@ def write_mapped_rows(
             target_schema=bucket,
             checksum=checksum,
             chunks_completed=1,
-            warnings=errors[:10],
+            warnings=warn_out,
             rejected_rows=len({d["row"] for d in rejected_details}) or max(0, len(data_rows) - len(mapped_rows)),
             rejected_details=list(rejected_details),
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),

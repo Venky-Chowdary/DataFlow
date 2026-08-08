@@ -20,6 +20,7 @@ __all__ = [
     "normalize_object_base_key",
     "object_parts_prefix",
     "object_run_token",
+    "object_staging_key",
     "object_store_read_keys",
     "purge_object_store_parts",
     "read_object_from_store",
@@ -96,7 +97,12 @@ def resolve_object_write_key(
 
 @dataclass(frozen=True)
 class ObjectWriteLayout:
-    """Where one chunk writes, and what an overwrite must clear first."""
+    """Where one chunk writes, and what an overwrite must clear after commit.
+
+    ``should_purge`` is true on the *last* overwrite chunk only — writers must
+    promote staging→live successfully before deleting stale parts, so a failed
+    upload cannot leave the destination empty (Bugbot ADLS/S3/GCS class).
+    """
 
     base_key: str
     write_key: str
@@ -104,6 +110,16 @@ class ObjectWriteLayout:
     purge_prefix: str
     purge_legacy_key: str
     should_purge: bool
+    # When purging after a multi-part overwrite, keep part-00001..part-N.
+    keep_part_count: int = 0
+
+
+def object_staging_key(write_key: str) -> str:
+    """Sibling key for bytes that must land before the live object is replaced."""
+    key = (write_key or "").strip()
+    if not key:
+        return ".__df_staging__"
+    return f"{key}.__df_staging__"
 
 
 def resolve_object_write_layout(
@@ -118,8 +134,9 @@ def resolve_object_write_layout(
     """Single source of truth for S3/GCS/ADLS chunked object layout.
 
     Overwrite syncs reuse one stable part set and clear stale parts once, on
-    the first chunk. Append syncs isolate each run under a token so reruns
-    cannot interleave with a previous run's parts.
+    the *last* successful chunk (after staging→live promote). Append syncs
+    isolate each run under a token so reruns cannot interleave with a previous
+    run's parts.
 
     Raises ``ValueError`` when a multi-chunk append has no ``job_id`` to derive
     a run token from — writing colliding part keys would silently mix runs.
@@ -147,7 +164,9 @@ def resolve_object_write_layout(
         total_chunks=total,
         run_token=run_token,
     )
-    is_first_chunk = int(file_batch_idx or 0) in (0, 1)
+    idx = int(file_batch_idx or 0)
+    part_n = idx if idx >= 1 else 1
+    is_last_chunk = part_n >= total
     return ObjectWriteLayout(
         base_key=base,
         write_key=write_key,
@@ -156,7 +175,8 @@ def resolve_object_write_layout(
         # different chunk count (or a previous append run token) cannot survive.
         purge_prefix=object_parts_prefix(base),
         purge_legacy_key=base if total > 1 else "",
-        should_purge=overwrite and is_first_chunk,
+        should_purge=overwrite and is_last_chunk,
+        keep_part_count=total if (overwrite and total > 1) else 0,
     )
 
 
@@ -188,21 +208,37 @@ def purge_object_store_parts(
     delete_key: Callable[[str], None],
     parts_prefix: str,
     legacy_base_key: str = "",
+    keep_part_count: int = 0,
+    keep_keys: list[str] | tuple[str, ...] | None = None,
 ) -> list[str]:
     """Delete stale part objects (and optional legacy single-object key).
 
-    Called only on the first chunk of an overwrite sync so a smaller re-run
-    cannot leave orphaned parts from a larger previous run.
+    Called after a successful last-chunk overwrite promote so a failed upload
+    cannot wipe the previous export. ``keep_part_count`` preserves
+    ``part-00001``..``part-N`` from the run that just landed.
     """
     removed: list[str] = []
+    keep = {str(k) for k in (keep_keys or []) if k}
+    keep_n = max(0, int(keep_part_count or 0))
     if parts_prefix:
         for key in list_keys(parts_prefix):
+            if key in keep:
+                continue
             name = key.rsplit("/", 1)[-1]
             # Only delete part-* under the prefix — never wipe sibling objects.
-            if _PART_NAME_RE.match(name):
-                delete_key(key)
-                removed.append(key)
-    if legacy_base_key:
+            m = _PART_NAME_RE.match(name)
+            if not m:
+                continue
+            if keep_n > 0:
+                try:
+                    part_num = int(name[5:10])
+                except ValueError:
+                    part_num = -1
+                if 1 <= part_num <= keep_n:
+                    continue
+            delete_key(key)
+            removed.append(key)
+    if legacy_base_key and legacy_base_key not in keep:
         try:
             delete_key(legacy_base_key)
             removed.append(legacy_base_key)

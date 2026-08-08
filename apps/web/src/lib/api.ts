@@ -1,4 +1,5 @@
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, TransferJob, TransferPlan } from "./types";
+import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { clearSession, getAuthToken } from "./session";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
@@ -855,6 +856,8 @@ export async function fetchConnectors(): Promise<Connector[]> {
   const normalize = (c: Record<string, unknown>): Connector | null => {
     const id = String(c.id ?? c._id ?? "");
     if (!id) return null;
+    // Probe result is authoritative — never keep a sticky status=error after a pass.
+    const lastTestOk = coerceLastTestOk(c.last_test_ok);
     return {
       id,
       name: String(c.name ?? ""),
@@ -862,7 +865,7 @@ export async function fetchConnectors(): Promise<Connector[]> {
       host: String(c.host ?? ""),
       port: Number(c.port ?? 0),
       database: String(c.database ?? ""),
-      status: c.last_test_ok === false ? "error" : String(c.status ?? "configured"),
+      status: statusFromLastTest(lastTestOk),
       role: c.role ? String(c.role) : undefined,
       username: c.username ? String(c.username) : undefined,
       password: c.password ? String(c.password) : undefined,
@@ -876,9 +879,7 @@ export async function fetchConnectors(): Promise<Connector[]> {
       service_account: c.service_account ? String(c.service_account) : undefined,
       created_at: String(c.created_at ?? new Date().toISOString()),
       // Preserve tri-state: true / false / undefined (never tested).
-      // Coercing null→false made brand-new saves look like "Test failed".
-      last_test_ok:
-        c.last_test_ok === true ? true : c.last_test_ok === false ? false : undefined,
+      last_test_ok: lastTestOk,
     };
   };
 
@@ -1348,15 +1349,24 @@ export async function deleteConnector(id: string): Promise<void> {
   throw new Error(await parseApiError(res, "Failed to delete connector"));
 }
 
-export async function testSavedConnector(id: string): Promise<{ success: boolean; message: string }> {
+export async function testSavedConnector(id: string): Promise<{
+  success: boolean;
+  message: string;
+  last_test_ok: boolean;
+}> {
   const res = await apiFetch(`${API_BASE}/connectors/saved/${id}/test`, { method: "POST" });
   if (!res.ok) {
     throw new Error(await parseApiError(res, "Connection test failed"));
   }
   const data = await res.json();
+  const success = Boolean(data?.success);
+  // Prefer explicit last_test_ok from API; fall back to success so UI never
+  // sticks on a stale failed badge after a green probe.
+  const lastTestOk = coerceLastTestOk(data?.last_test_ok);
   return {
-    success: Boolean(data?.success),
-    message: String(data?.message || (data?.success ? "Connected" : "Connection failed")),
+    success,
+    message: String(data?.message || (success ? "Connected" : "Connection failed")),
+    last_test_ok: lastTestOk === undefined ? success : lastTestOk,
   };
 }
 

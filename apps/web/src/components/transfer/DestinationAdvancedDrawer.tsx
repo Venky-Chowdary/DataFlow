@@ -289,10 +289,28 @@ export function DestinationAdvancedDrawer({
             <strong>{activeMode.label}</strong>
             <p>{activeMode.detail}</p>
             {syncMode === "full_refresh_overwrite" && (
-              <p className="is-warn">Replaces destination rows — existing data is dropped before load.</p>
+              <p className="is-warn">Replaces destination rows — existing data is dropped before load. Do not use when you need to keep rows already in the table.</p>
             )}
             {syncMode === "full_refresh_append" && (
-              <p>Keeps existing destination rows and inserts the full snapshot again.</p>
+              <p>
+                <strong>Load more into an existing table:</strong> keeps every destination row and
+                inserts the full source snapshot again (100k existing + 100k file → 200k). Duplicate
+                primary keys will fail or quarantine — use Incremental deduped / Upsert when keys
+                may collide.
+              </p>
+            )}
+            {syncMode === "incremental_append" && (
+              <p>
+                Requires a <strong>cursor column</strong> (e.g. updated_at / id). Only rows newer than
+                the last watermark are inserted. Without a cursor, Validate blocks — pick Full append
+                to reload the whole file into an existing table.
+              </p>
+            )}
+            {syncMode === "incremental_deduped" && (
+              <p>
+                Cursor + <strong>primary key</strong> upserts: new keys insert, existing keys update.
+                Best when the destination table already has data and the source re-sends changed rows.
+              </p>
             )}
             {syncMode === "cdc" && (
               <p>Change delivery is <strong>at-least-once upsert</strong>. Exactly-once and at-most-once are not claimed.</p>

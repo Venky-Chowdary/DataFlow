@@ -14,6 +14,11 @@ import { PageToolbar } from "../components/ui/PageToolbar";
 import { LoadingBlock } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { testSavedConnector, type CatalogConnector } from "../lib/api";
+import {
+  connectorLooksHealthy,
+  connectorNeedsAttention,
+  statusFromLastTest,
+} from "../lib/connectorHealth";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { buildConnectionWorkbenchContext, lastUsedAtForConnector } from "../lib/connectionWorkbench";
@@ -28,6 +33,8 @@ interface ConnectorsPageProps {
   onEdit: (connector: Connector) => void;
   onDelete: (id: string) => void;
   onRefresh?: () => void | Promise<void>;
+  /** Immediate list patch after a probe so badges match the toast (no sticky fail). */
+  onConnectorPatch?: (id: string, patch: Partial<Connector>) => void;
   onOpenTransfer?: (connectorId?: string) => void;
   onOpenJob?: (jobId: string) => void;
   showConnectionsTab?: number;
@@ -49,6 +56,7 @@ export function ConnectorsPage({
   onEdit,
   onDelete,
   onRefresh,
+  onConnectorPatch,
   onOpenTransfer,
   onOpenJob,
   showConnectionsTab,
@@ -116,7 +124,9 @@ export function ConnectorsPage({
     const q = query.trim().toLowerCase();
     return connectors.filter((c) => {
       const statusOk = statusFilter === "all"
-        || (statusFilter === "error" ? c.status === "error" : c.status !== "error");
+        || (statusFilter === "error"
+          ? connectorNeedsAttention(c)
+          : connectorLooksHealthy(c));
       if (!statusOk) return false;
       if (!q) return true;
       return [c.name, c.type, c.host, c.database]
@@ -124,18 +134,26 @@ export function ConnectorsPage({
         .some((value) => String(value).toLowerCase().includes(q));
     });
   }, [connectors, query, statusFilter]);
-  const healthyCount = connectors.filter((c) => c.status !== "error" && c.last_test_ok !== false).length;
-  const errorCount = connectors.filter((c) => c.status === "error" || c.last_test_ok === false).length;
+  const healthyCount = connectors.filter((c) => connectorLooksHealthy(c)).length;
+  const errorCount = connectors.filter((c) => connectorNeedsAttention(c)).length;
   const selectedConnection = connectors.find((c) => c.id === selectedConnectionId) ?? null;
   const workbench = useMemo(
     () => (selectedConnection ? buildConnectionWorkbenchContext(selectedConnection, jobs, schedules) : null),
     [selectedConnection, jobs, schedules],
   );
 
+  const applyProbeResult = (id: string, lastTestOk: boolean) => {
+    onConnectorPatch?.(id, {
+      last_test_ok: lastTestOk,
+      status: statusFromLastTest(lastTestOk),
+    });
+  };
+
   const handleTest = async (id: string) => {
     setTestingId(id);
     try {
       const result = await testSavedConnector(id);
+      applyProbeResult(id, result.last_test_ok);
       toast({
         title: result.success ? "Connection OK" : "Connection failed",
         message: result.message,
@@ -143,6 +161,7 @@ export function ConnectorsPage({
       });
       await onRefresh?.();
     } catch (e) {
+      applyProbeResult(id, false);
       toast({
         title: "Test failed",
         message: e instanceof Error && e.message ? e.message : "Could not reach the connector probe.",
@@ -159,8 +178,10 @@ export function ConnectorsPage({
     let failed = 0;
     const failures: string[] = [];
     for (const c of connectors) {
+      setTestingId(c.id);
       try {
         const result = await testSavedConnector(c.id);
+        applyProbeResult(c.id, result.last_test_ok);
         if (result.success) {
           passed += 1;
         } else {
@@ -171,12 +192,14 @@ export function ConnectorsPage({
         }
       } catch (e) {
         failed += 1;
+        applyProbeResult(c.id, false);
         if (failures.length < 3) {
           const detail = e instanceof Error && e.message ? e.message : "probe error";
           failures.push(`${c.name}: ${detail}`);
         }
       }
     }
+    setTestingId(null);
     toast({
       title: "Connection tests finished",
       message: [

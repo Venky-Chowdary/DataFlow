@@ -287,7 +287,29 @@ def write_mapped_rows(
         client = _mongo_client(conn_str)
 
         db = client[db_name]
-        existing = set(db.list_collection_names(filter={"name": collection_name}))
+        try:
+            existing = set(db.list_collection_names(filter={"name": collection_name}))
+        except TypeError:
+            # Older pymongo / limited clients without filter=.
+            existing = {
+                n for n in db.list_collection_names() if n == collection_name
+            }
+        except AttributeError:
+            # Test doubles / stripped clients — allow create path; deny-create fails closed.
+            if not create_table:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=collection_name,
+                    target_schema=db_name,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "MongoDB client cannot list collections to verify "
+                        f"{collection_name!r} exists (create_table disabled)"
+                    ),
+                )
+            existing = set()
         collection_existed = collection_name in existing
         if not create_table and not collection_existed:
             # Mongo creates collections on first write — deny-create must probe first.

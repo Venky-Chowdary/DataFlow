@@ -9,6 +9,7 @@ split completes; this is the stable import surface.
 from __future__ import annotations
 
 from services.type_system import (
+    create_new_mapping_target_type,
     ddl_invent_never_narrower_than_table,
     ddl_type,
     float_width_carrier,
@@ -20,6 +21,7 @@ from services.type_system import (
 )
 
 __all__ = [
+    "create_new_mapping_target_type",
     "ddl_invent_never_narrower_than_table",
     "ddl_type",
     "float_width_carrier",

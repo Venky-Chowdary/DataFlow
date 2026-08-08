@@ -1085,7 +1085,10 @@ def _sa_type_for_logical(
         return _maybe_nullable(sa.Numeric())
     if t == LOGICAL_FLOAT:
         # Approximate IEEE float — never rewrite to fixed-point Numeric.
+        # Exact lowercase logical ``float`` → Double (never-narrower invent).
         # Honor Map REAL/FLOAT4/FLOAT stamps (sa.Double invents mantissa widen).
+        if (raw or "").strip() == LOGICAL_FLOAT:
+            return _maybe_nullable(sa.Double())
         float_u = raw.upper().split("(", 1)[0].strip()
         if float_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "BINARY_FLOAT", "FLOAT32"}:
             if dialect_name == "postgresql" and hasattr(postgresql, "REAL"):

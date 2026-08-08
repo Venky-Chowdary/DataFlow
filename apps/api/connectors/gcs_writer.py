@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from connectors.gcs_common import gcs_client
 from connectors.object_store_common import (
+    object_staging_key,
     purge_object_store_parts,
     resolve_object_store_write_dest_types,
     resolve_object_write_layout,
@@ -210,23 +211,40 @@ def write_mapped_rows(
                 raise RuntimeError(
                     f"Cannot verify GCS bucket {bucket!r}: {exc}"
                 ) from exc
+        # Staging→live before any purge: failed upload must not wipe the prior export.
+        staging_key = object_staging_key(key)
+        bucket_obj.blob(staging_key).upload_from_string(body, content_type=content_type)
+        blob = bucket_obj.blob(key)
+        blob.upload_from_string(body, content_type=content_type)
+        try:
+            bucket_obj.blob(staging_key).delete()
+        except Exception:
+            pass
+        # Purge after promote is best-effort — never fail a committed live write.
+        purge_warnings: list[str] = []
         if layout.should_purge:
             from connectors.gcs_reader import list_objects
 
             def _delete_gcs(k: str) -> None:
                 bucket_obj.blob(k).delete()
 
-            purge_object_store_parts(
-                list_keys=lambda prefix: list_objects(cfg, bucket, prefix),
-                delete_key=_delete_gcs,
-                parts_prefix=layout.purge_prefix,
-                legacy_base_key=layout.purge_legacy_key,
-            )
-        blob = bucket_obj.blob(key)
-        blob.upload_from_string(body, content_type=content_type)
+            try:
+                purge_object_store_parts(
+                    list_keys=lambda prefix: list_objects(cfg, bucket, prefix),
+                    delete_key=_delete_gcs,
+                    parts_prefix=layout.purge_prefix,
+                    legacy_base_key=layout.purge_legacy_key,
+                    keep_part_count=layout.keep_part_count,
+                    keep_keys=[key, staging_key],
+                )
+            except Exception as purge_exc:
+                purge_warnings.append(
+                    f"GCS post-promote purge deferred (write committed): {purge_exc}"
+                )
         checksum = row_checksum(mapped_rows, target_cols, dest_db_type="gcs")
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
+        warn_out = (errors[:10] + purge_warnings)[:20]
         _final_abort = reject_on_strict_policy(policy, rejected_details, "GCS")
         if _final_abort:
             return WriteResult(
@@ -237,7 +255,7 @@ def write_mapped_rows(
                 checksum=checksum,
                 chunks_completed=1,
                 error=_final_abort,
-                warnings=errors[:10],
+                warnings=warn_out,
                 rejected_rows=len({d["row"] for d in rejected_details}),
                 rejected_details=list(rejected_details),
             )
@@ -248,7 +266,7 @@ def write_mapped_rows(
             target_schema=bucket,
             checksum=checksum,
             chunks_completed=1,
-            warnings=errors[:10],
+            warnings=warn_out,
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),

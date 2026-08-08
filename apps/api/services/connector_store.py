@@ -541,13 +541,24 @@ def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool
 
 
 def mark_tested(connector_id: str, ok: bool) -> None:
+    """Persist probe result. ``last_test_ok`` is the authority for UI health."""
+    tested_at = _now()
+    patch = {"last_tested_at": tested_at, "last_test_ok": bool(ok)}
     if _use_mongo():
         try:
             coll = _mongo_collection()
-            coll.update_one(
-                {"_id": connector_id},
-                {"$set": {"last_tested_at": _now(), "last_test_ok": ok}},
-            )
+            coll.update_one({"_id": connector_id}, {"$set": patch})
+            # Keep file mirror in sync when present so dual-backend reads cannot
+            # resurrect a stale failed badge after a green probe.
+            try:
+                connectors = _load_all()
+                for i, c in enumerate(connectors):
+                    if c.id == connector_id:
+                        connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+                        _save_all(connectors)
+                        break
+            except Exception as mirror_exc:
+                logger.debug("File mirror mark_tested skipped: %s", mirror_exc)
             return
         except Exception as exc:
             logger.warning("MongoDB mark_tested failed, falling back to file: %s", exc)
@@ -555,9 +566,7 @@ def mark_tested(connector_id: str, ok: bool) -> None:
     connectors = _load_all()
     for i, c in enumerate(connectors):
         if c.id == connector_id:
-            connectors[i] = SavedConnector.from_dict(
-                {**c.to_dict(), "last_tested_at": _now(), "last_test_ok": ok}
-            )
+            connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
             _save_all(connectors)
             return
 

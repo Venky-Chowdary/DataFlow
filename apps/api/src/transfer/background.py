@@ -92,7 +92,14 @@ def run_fleet_job(job_id: str) -> None:
     payload = job.get("transfer_request")
     if not isinstance(payload, dict) or not payload:
         raise ValueError(f"Job {job_id} has no transfer_request — cannot execute on worker")
-    if payload.get("requires_file_reupload"):
+    request = transfer_request_from_dict(payload)
+    from services.transfer_file_staging import (
+        file_source_bytes_available,
+        hydrate_file_source,
+    )
+
+    hydrate_file_source(request)
+    if request.source.kind == "file" and not file_source_bytes_available(request):
         mongo.update_job_status(
             job_id,
             "failed",
@@ -100,7 +107,6 @@ def run_fleet_job(job_id: str) -> None:
             message="File re-upload required after restart — open Transfer Studio",
         )
         return
-    request = transfer_request_from_dict(payload)
     resume = bool(job.get("checkpoint")) or str(job.get("status") or "") in {
         "paused",
         "retrying",

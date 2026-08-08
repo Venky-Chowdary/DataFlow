@@ -536,7 +536,17 @@ def analyze_coercion(
                 continue
             observed_values.append(cell)
             converted, err = apply_transform(cell, transform)
-            if err:
+            # Transform refuse of null sentinels (N/A, "null", …) is non-null →
+            # NULL loss, not a bind failure. Count as sentinel_nulls so strict
+            # blocks and balanced warns — matching the severity model below.
+            if err and "Null sentinel" in err:
+                sentinel_nulls += 1
+                if len(sentinel_examples) < SAMPLE_FAILURE_LIMIT:
+                    sentinel_examples.append({"row": idx, "value": cell[:120]})
+                if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                    sample_failures.append({"row": idx, "value": cell[:120], "reason": err})
+                    raw_failure_values.append(cell[:120])
+            elif err:
                 failed += 1
                 if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
                     sample_failures.append({"row": idx, "value": cell[:120], "reason": err})

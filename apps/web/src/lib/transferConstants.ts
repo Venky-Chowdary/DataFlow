@@ -77,10 +77,10 @@ export const VALIDATION_MODES: {
 export type DateLocaleId = "" | "DMY" | "MDY";
 
 export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
-  { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Drop/replace destination, then load the full snapshot." },
-  { id: "full_refresh_append", label: "Full append", detail: "Keep existing rows; append the full snapshot (100k + 100k → 200k)." },
-  { id: "incremental_append", label: "Incremental append", detail: "Cursor-based new rows only — never rewrites history." },
-  { id: "incremental_deduped", label: "Incremental deduped", detail: "Cursor + primary key upserts for a final table." },
+  { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Drop/replace destination, then load the full snapshot. Destroys existing rows." },
+  { id: "full_refresh_append", label: "Full append", detail: "Keep existing rows; insert the full snapshot again (best for “load more” of a whole file)." },
+  { id: "incremental_append", label: "Incremental append", detail: "Cursor-based new rows only — requires a cursor column; never rewrites history." },
+  { id: "incremental_deduped", label: "Incremental deduped", detail: "Cursor + primary key upserts when the table already has keys you may update." },
   { id: "cdc", label: "CDC", detail: "Log-based changes with cursor + key; at-least-once upsert until proven otherwise." },
   { id: "scd2", label: "SCD Type 2", detail: "Versioned history with valid-from / valid-to; requires primary key." },
   { id: "mirror", label: "Mirror", detail: "Keep destination in sync with soft-deletes for missing keys; requires primary key." },

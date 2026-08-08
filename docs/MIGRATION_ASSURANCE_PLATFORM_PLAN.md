@@ -274,7 +274,7 @@ Each mergeable wave:
 5. **No catalog inflation** or marketing claims in the same PR.  
 6. **Do not mark complete** until Phase exit criteria for that ID are met.
 
-**Immediate next wave:** B8 mypy kernel gate shipped. B1 sample **9108P / 12F** @ maxfail=12 (wave3 in flight). **C11/C12 FE pin shipped:** Studio Execute sends ``approved_decision_artifact_hash`` from Validate and refuses run when missing; Validate honesty renders Decision Artifact. Still open: B1 real_bug→0; C2 invent extraction from ``type_system``; F4 streaming default; F3 non-PG bulk Planned labels; Bugbot ADLS purge / BQ strict mid-write (branch findings). Widen mypy; continue F8 extractions.
+**Immediate next wave:** B8 mypy + C11/C12 FE pin shipped. Wave3 + claim-queue file staging + connector test-health SSOT + object-store purge-after-promote (purge failure cannot fail committed write) + BQ pre-DML abort. **C2 advanced** (writer invent imports via kernel). Still open: B1 real_bug→0; C2 god-module extract; F4 streaming default; F3 non-PG bulk Planned labels. Widen mypy; continue F8.
 
 ---
 
@@ -340,7 +340,7 @@ Success metric for the company: a migration programme owner can move Oracle/SQL 
 ## 10. Checklist — Phase C (complete)
 
 - [x] C1 Decision Artifact models + golden fixture (`decision_artifact_v1`) + hash fail-closed tests
-- [~] C2 Type invent/classify/DDL facades on `services.decision_kernel` (re-export); writers still import `type_system` in places — extract invent engines (exit criterion open)
+- [~] C2 Type invent/classify/DDL facades on `services.decision_kernel`; CREATE invent writers (BQ/MySQL/SF/SQLite/Iceberg) import kernel surface (`test_writer_invent_imports_use_decision_kernel_surface`); `writer_common` specialty helpers + invent body still in `type_system` (exit criterion open)
 - [x] C3 Full ConversionClass set (identity/equivalent/widening/narrowing/… + Module 12 gates)
 - [x] C4 Structural Type Engine kernel facade (`StructuralStrategy`, never silent flatten)
 - [x] C5 Context-aware invent modes (`InventContext` + `invent_dest_type` refuse bind/CDC invent)

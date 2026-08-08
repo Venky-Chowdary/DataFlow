@@ -12,6 +12,7 @@ from services.value_serializer import cell_to_string, json_default
 
 from connectors.adls_common import blob_service_client
 from connectors.object_store_common import (
+    object_staging_key,
     purge_object_store_parts,
     resolve_object_store_write_dest_types,
     resolve_object_write_layout,
@@ -182,23 +183,41 @@ def write_mapped_rows(
                     error=f"ADLS container {container!r} is missing and create_table is disabled",
                 )
             container_client.create_container()
+        # Staging→live before any purge: failed upload must not wipe the prior export.
+        staging_key = object_staging_key(key)
+        staging_blob = client.get_blob_client(container, staging_key)
+        staging_blob.upload_blob(body, overwrite=True, content_type=content_type)
+        blob = client.get_blob_client(container, key)
+        blob.upload_blob(body, overwrite=True, content_type=content_type)
+        try:
+            staging_blob.delete_blob()
+        except Exception:
+            pass
+        # Purge after promote is best-effort — never fail a committed live write.
+        purge_warnings: list[str] = []
         if layout.should_purge:
             from connectors.adls_reader import list_objects
 
             def _delete_adls(k: str) -> None:
                 client.get_blob_client(container, k).delete_blob()
 
-            purge_object_store_parts(
-                list_keys=lambda prefix: list_objects(cfg, container, prefix),
-                delete_key=_delete_adls,
-                parts_prefix=layout.purge_prefix,
-                legacy_base_key=layout.purge_legacy_key,
-            )
-        blob = client.get_blob_client(container, key)
-        blob.upload_blob(body, overwrite=True, content_type=content_type)
+            try:
+                purge_object_store_parts(
+                    list_keys=lambda prefix: list_objects(cfg, container, prefix),
+                    delete_key=_delete_adls,
+                    parts_prefix=layout.purge_prefix,
+                    legacy_base_key=layout.purge_legacy_key,
+                    keep_part_count=layout.keep_part_count,
+                    keep_keys=[key, staging_key],
+                )
+            except Exception as purge_exc:
+                purge_warnings.append(
+                    f"ADLS post-promote purge deferred (write committed): {purge_exc}"
+                )
         checksum = row_checksum(mapped_rows, target_cols, dest_db_type="adls")
         if on_checkpoint:
             on_checkpoint(1, 1, len(records))
+        warn_out = (errors[:10] + purge_warnings)[:20]
         _final_abort = reject_on_strict_policy(policy, rejected_details, "ADLS")
         if _final_abort:
             return WriteResult(
@@ -209,7 +228,7 @@ def write_mapped_rows(
                 checksum=checksum,
                 chunks_completed=1,
                 error=_final_abort,
-                warnings=errors[:10],
+                warnings=warn_out,
                 rejected_rows=max(
                     _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
                     len(data_rows) - len(mapped_rows),
@@ -223,7 +242,7 @@ def write_mapped_rows(
             target_schema=container,
             checksum=checksum,
             chunks_completed=1,
-            warnings=errors[:10],
+            warnings=warn_out,
             rejected_rows=max(
                 _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
                 len(data_rows) - len(mapped_rows),
