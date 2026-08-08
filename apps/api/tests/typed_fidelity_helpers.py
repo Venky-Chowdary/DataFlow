@@ -227,14 +227,18 @@ def require_oracle_env() -> None:
 def seed_postgresql_typed(table: str) -> None:
     """Native PG types: NUMERIC vs DOUBLE PRECISION, NULL vs '', timestamptz, bool."""
     import psycopg2
+    import pytest
 
-    conn = psycopg2.connect(
-        host="localhost",
-        port=5432,
-        database="dataflow",
-        user="dataflow",
-        password="dataflow",
-    )
+    try:
+        conn = psycopg2.connect(
+            host="localhost",
+            port=5432,
+            database="dataflow",
+            user="dataflow",
+            password="dataflow",
+        )
+    except psycopg2.OperationalError as exc:
+        pytest.skip(f"PostgreSQL typed e2e unavailable: {exc}")
     conn.autocommit = True
     with conn.cursor() as cur:
         cur.execute(f'DROP TABLE IF EXISTS public."{table}"')

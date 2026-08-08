@@ -178,9 +178,22 @@ def test_append_expectations_do_not_block_on_duplicate_id():
 
     report = run_integrity_audit(
         source_columns=["id", "name"],
+        target_columns=["id", "name"],
         mappings=[
-            {"source": "id", "target": "id", "confidence": 0.95},
-            {"source": "name", "target": "name", "confidence": 0.95},
+            {
+                "source": "id",
+                "target": "id",
+                "source_type": "VARCHAR",
+                "target_type": "VARCHAR",
+                "confidence": 0.95,
+            },
+            {
+                "source": "name",
+                "target": "name",
+                "source_type": "VARCHAR",
+                "target_type": "VARCHAR",
+                "confidence": 0.95,
+            },
         ],
         sample_rows=[{"id": "a", "name": "1"}, {"id": "a", "name": "2"}],
         destination_db_type="postgresql",
@@ -199,9 +212,22 @@ def test_cdc_expectations_still_block_on_duplicate_id():
 
     report = run_integrity_audit(
         source_columns=["id", "name"],
+        target_columns=["id", "name"],
         mappings=[
-            {"source": "id", "target": "id", "confidence": 0.95},
-            {"source": "name", "target": "name", "confidence": 0.95},
+            {
+                "source": "id",
+                "target": "id",
+                "source_type": "VARCHAR",
+                "target_type": "VARCHAR",
+                "confidence": 0.95,
+            },
+            {
+                "source": "name",
+                "target": "name",
+                "source_type": "VARCHAR",
+                "target_type": "VARCHAR",
+                "confidence": 0.95,
+            },
         ],
         sample_rows=[{"id": "a", "name": "1"}, {"id": "a", "name": "2"}],
         destination_db_type="postgresql",

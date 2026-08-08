@@ -131,9 +131,21 @@
 
 | Cluster / node prefix | Class | Notes |
 |-----------------------|-------|-------|
-| Remaining suite after wave3 cluster close (next ``--maxfail=12`` sample) | mixed | B1 real_bug→0; continue triage |
-| C2 invent body still in ``type_system`` | architectural | Writers use ``decision_kernel`` invent surface; god-module extract open |
+| Remaining suite after wave4 cluster close (next ``--maxfail=25``) | mixed | Wave4: 11486 passed; late-12 triaged |
+| C2 invent body still in ``type_system`` | architectural | Map/Validate + writers use kernel surface; invent body extract open |
 | CDC / warehouse live matrices | skip_honest | B9 always publishes skip artifact |
+
+## Wave4 maxfail=12 triage
+
+| Node | Class | Resolution |
+|------|-------|------------|
+| ``test_dataflow_exceeds_competitive_baseline`` | env_variance | Floor default 600 |
+| ``test_module_size_budgets_script_ok`` | real_bug / F8 | Extract ``reconcile_heartbeat``; engine ≤5200 |
+| ``test_probe_placeholder_values_*`` | fixture_drift | Assert ``sentinel_nulls`` for N/A |
+| ``test_postgresql_to_*_typed_*`` | skip_honest | ``seed_postgresql_typed`` skips on auth fail |
+| ``test_type_mismatch_suggests_remap_not_strip`` | real_bug | Nested-paren type parse in validation_assistant |
+| ``test_append_expectations_do_not_block_on_duplicate_id`` | fixture_drift | Stamp Map target types |
+| ``test_wide_zero_scale_*`` / BQ STRUCT FLOAT | fixture_drift | Expect BIGINT / FLOAT64 (A1) |
 
 ## Method
 
@@ -144,6 +156,6 @@
 
 ## Next triage slice
 
-1. Fresh `--maxfail=25` after this wave (expect fewer early F's).  
+1. Fresh `--maxfail=25` after wave4 fixes.  
 2. Widen mypy beyond kernel (engine / reconciliation facades).  
 3. Continue god-module extractions under F8 freeze budgets.

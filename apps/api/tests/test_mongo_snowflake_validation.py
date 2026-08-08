@@ -78,7 +78,7 @@ def test_probe_clean_numeric_text_to_number_blocks_declared_collapse():
 
 
 def test_probe_placeholder_values_become_null_and_block_under_strict():
-    """N/A refuses silent NULL invent — counted as hard failure (fail-closed)."""
+    """N/A is sentinel→NULL loss — strict blocks (not a bind/format failure)."""
     report = analyze_coercion(
         sample_rows=[{"score": "10"}, {"score": "N/A"}, {"score": "20"}],
         mappings=[{"source": "score", "target": "score"}],
@@ -88,14 +88,15 @@ def test_probe_placeholder_values_become_null_and_block_under_strict():
         validation_mode="strict",
     )
     col = report["by_source"]["score"]
-    assert col["failed"] == 1
+    assert col["sentinel_nulls"] == 1
+    assert col["failed"] == 0
     assert col["severity"] == "block"
     assert report["has_blocking_failures"] is True
     assert any("N/A" in str(f.get("value") or "") for f in col.get("sample_failures") or [])
 
 
 def test_probe_placeholder_values_warn_under_balanced():
-    """Balanced still surfaces N/A as a sample failure (never invent NULL)."""
+    """Balanced counts N/A as sentinel_nulls; TEXT→NUMBER still blocks without Risk Contract."""
     report = analyze_coercion(
         sample_rows=[{"score": "10"}, {"score": "N/A"}, {"score": "20"}],
         mappings=[{"source": "score", "target": "score"}],
@@ -105,7 +106,9 @@ def test_probe_placeholder_values_warn_under_balanced():
         validation_mode="balanced",
     )
     col = report["by_source"]["score"]
-    assert col["failed"] == 1
+    assert col["sentinel_nulls"] == 1
+    assert col["failed"] == 0
+    # Declared TEXT→NUMBER is fidelity_collapse — B10 requires Risk Contract to soft-warn.
     assert col["severity"] == "block"
     assert report["has_blocking_failures"] is True
 

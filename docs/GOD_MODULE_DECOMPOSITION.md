@@ -42,4 +42,10 @@ Artifact: `apps/api/data/proofs/module_size_budgets.json`
 | `services/reconciliation.py` | 5900 | 5920 | Gate-8 upsert keyed checksum + Mongo keyed fingerprint (product correctness) |
 | `connectors/writer_common.py` | 5100 | 5120 | `gate8_writer_meta` / written_ids stamping for upsert reconcile |
 
+## ADR — extract 2026-08-08 (wave4)
+
+| Module | Change | Why |
+|--------|--------|-----|
+| `src/transfer/engine.py` | 5212 → ≤5200 | Extracted `reconcile_phase_heartbeat` → `src/transfer/reconcile_heartbeat.py` |
+
 Next extraction must lower these ceilings after moving keyed-verify helpers into `reconciliation_api` / `writer_common_api`.
