@@ -340,6 +340,8 @@ class SqlServerNativeCdc:
                 "shared_reader": self._shared,
             },
         )
+        self._capture_catalog_cache: dict[str, Any] | None = None
+        self._capture_catalog_cache_at: float = 0.0
 
     def _acquire_cdc_lease(self) -> None:
         self._lease.ensure()
@@ -347,16 +349,115 @@ class SqlServerNativeCdc:
     def close(self) -> None:
         self._lease.release()
 
+    def _capture_catalog_status(self, *, max_age_sec: float = 2.0) -> dict[str, Any]:
+        """Live capture min_lsn / max_lsn proof for Theater (PG/MySQL catalog parity).
+
+        Returns ``min_lsn``, ``max_lsn``, ``capture_instance``, ``capture_exists``,
+        ``restart_lsn`` (=min), ``confirmed_flush_lsn`` (=resume), ``wal_status``
+        ∈ {reserved, unreserved, lost} from retention classify.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if (
+            self._capture_catalog_cache is not None
+            and (now - float(self._capture_catalog_cache_at or 0.0))
+            < max(0.25, float(max_age_sec))
+        ):
+            return dict(self._capture_catalog_cache)
+
+        out: dict[str, Any] = {
+            "plugin": "sqlserver_native_cdc",
+            "slot_exists": False,
+            "capture_exists": False,
+            "active": bool(getattr(self._lease, "acquired", False)),
+            "capture_instance": self.capture_instance,
+            "min_lsn": None,
+            "max_lsn": None,
+            "restart_lsn": None,
+            "confirmed_flush_lsn": None,
+            "wal_status": None,
+            "retention_status": None,
+            "captures": dict(self._captures),
+        }
+        resume = _lsn_to_hex(self.start_lsn) if self.start_lsn else ""
+        if resume:
+            out["confirmed_flush_lsn"] = resume
+
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    try:
+                        self._resolve_all_captures(cur)
+                    except Exception as exc:
+                        logger.debug("capture resolve during catalog probe: %s", exc)
+                    capture = self.capture_instance or self._captures.get(self.table) or ""
+                    out["capture_instance"] = capture
+                    out["captures"] = dict(self._captures)
+                    min_lsn = self._min_lsn_for(cur, capture) if capture else ""
+                    max_lsn = self._max_lsn(cur)
+                    out["min_lsn"] = min_lsn or None
+                    out["max_lsn"] = max_lsn or None
+                    out["restart_lsn"] = min_lsn or None
+                    out["capture_exists"] = bool(min_lsn)
+                    out["slot_exists"] = bool(min_lsn)
+                    if self._shared and self._captures:
+                        per: dict[str, str] = {}
+                        for tbl, cap in self._captures.items():
+                            try:
+                                per[tbl] = self._min_lsn_for(cur, cap) or ""
+                            except Exception:
+                                per[tbl] = ""
+                        out["min_lsn_by_table"] = per
+
+                    from services.cdc_retention_probe import classify_lsn_retention
+
+                    retention = classify_lsn_retention(
+                        resume, min_lsn, cursor_key=self.cursor_key
+                    )
+                    out["retention_status"] = retention.status
+                    if retention.status == "gap":
+                        out["wal_status"] = "lost"
+                    elif retention.status == "at_risk":
+                        out["wal_status"] = "unreserved"
+                    elif retention.status == "ok":
+                        out["wal_status"] = "reserved"
+                    elif out["slot_exists"]:
+                        out["wal_status"] = "reserved"
+                    try:
+                        self._cdc_retention = retention
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.debug("SQL Server capture catalog probe failed: %s", exc)
+            out["probe_error"] = str(exc)[:200]
+
+        out["active"] = bool(getattr(self._lease, "acquired", False))
+        self._capture_catalog_cache = dict(out)
+        self._capture_catalog_cache_at = now
+        return out
+
     def cdc_metadata(self) -> dict[str, Any]:
+        catalog = self._capture_catalog_status()
         return {
             "plugin": "sqlserver_native_cdc",
             "phase": self.phase,
             "delivery": "at-least-once",
-            "capture_instance": self.capture_instance,
-            "captures": dict(self._captures),
+            "capture_instance": catalog.get("capture_instance") or self.capture_instance,
+            "captures": dict(catalog.get("captures") or self._captures),
             "tables": list(self.tables),
             "cdc_row_filter": self.row_filter,
             "shared_reader": self._shared,
+            "slot_name": catalog.get("capture_instance") or self.capture_instance,
+            "active": catalog.get("active"),
+            "slot_exists": catalog.get("slot_exists"),
+            "capture_exists": catalog.get("capture_exists"),
+            "min_lsn": catalog.get("min_lsn"),
+            "max_lsn": catalog.get("max_lsn"),
+            "restart_lsn": catalog.get("restart_lsn"),
+            "confirmed_flush_lsn": catalog.get("confirmed_flush_lsn"),
+            "wal_status": catalog.get("wal_status"),
+            "retention_status": catalog.get("retention_status"),
             **self._lease.theater_fields(),
         }
 

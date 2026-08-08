@@ -251,11 +251,12 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         if wal in {"lost", "unreserved"} and out.get("cdc_freshness_severity") != "critical":
             out["cdc_freshness_severity"] = "critical"
             plugin_label = str(plugin or meta.get("plugin") or "cdc").strip().lower()
-            reason_prefix = (
-                "mysql_binlog"
-                if "mysql" in plugin_label or "mariadb" in plugin_label or "binlog" in plugin_label
-                else "pg_replication_slots"
-            )
+            if "mysql" in plugin_label or "mariadb" in plugin_label or "binlog" in plugin_label:
+                reason_prefix = "mysql_binlog"
+            elif "sqlserver" in plugin_label or "mssql" in plugin_label:
+                reason_prefix = "sqlserver_cdc"
+            else:
+                reason_prefix = "pg_replication_slots"
             out["cdc_lag_unknown_reason"] = (
                 out.get("cdc_lag_unknown_reason")
                 or f"{reason_prefix}.wal_status={wal}"
@@ -275,6 +276,18 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
     )
     if confirmed:
         out["cdc_confirmed_flush_lsn"] = str(confirmed)
+    # SQL Server native CDC capture window (parity with PG restart / MySQL oldest).
+    if meta.get("min_lsn"):
+        out["cdc_min_lsn"] = str(meta.get("min_lsn"))
+        if not out.get("cdc_restart_lsn"):
+            out["cdc_restart_lsn"] = str(meta.get("min_lsn"))
+    if meta.get("max_lsn"):
+        out["cdc_max_lsn"] = str(meta.get("max_lsn"))
+    capture_inst = meta.get("capture_instance") or meta.get("slot_name")
+    if capture_inst:
+        out["cdc_capture_instance"] = str(capture_inst)
+        if not out.get("cdc_slot_name"):
+            out["cdc_slot_name"] = str(capture_inst)
     if row_filter:
         out["cdc_row_filter"] = str(row_filter)
     try:

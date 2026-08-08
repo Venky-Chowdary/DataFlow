@@ -190,6 +190,12 @@ export interface TransferJob {
   cdc_confirmed_flush_lsn?: string | null;
   /** Slot restart_lsn — oldest WAL still needed by this slot. */
   cdc_restart_lsn?: string | null;
+  /** SQL Server CDC capture min_lsn (retention edge). */
+  cdc_min_lsn?: string | null;
+  /** SQL Server CDC capture max_lsn (capture head). */
+  cdc_max_lsn?: string | null;
+  /** SQL Server CDC capture instance name. */
+  cdc_capture_instance?: string | null;
   /** Live pg_replication_slots.active for this CDC job. */
   cdc_slot_active?: boolean | null;
   cdc_slot_exists?: boolean | null;

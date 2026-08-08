@@ -979,45 +979,94 @@ export function JobTheaterView({
         {job.cdc_slot_active != null && (
           <article
             className="df2-theater-v3-metric"
-            title="Live pg_replication_slots.active — false means no consumer is attached to this slot"
+            title={
+              String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                ? "SQL Server CDC lease / capture catalog — inactive means another worker may hold the capture"
+                : "Live pg_replication_slots.active — false means no consumer is attached to this slot"
+            }
           >
             <DtIcon name={job.cdc_slot_active ? "check" : "alert"} size={16} />
             <div>
               <strong>{job.cdc_slot_active ? "Active" : "Inactive"}</strong>
               <span>
-                {job.cdc_wal_status
-                  ? `${
-                      String(job.cdc_plugin || "").toLowerCase().includes("mysql")
-                        || String(job.cdc_plugin || "").toLowerCase().includes("binlog")
-                        ? "Binlog"
-                        : "Slot"
-                    } · wal_status=${job.cdc_wal_status}`
-                  : (String(job.cdc_plugin || "").toLowerCase().includes("mysql")
-                      || String(job.cdc_plugin || "").toLowerCase().includes("binlog")
-                      ? "Binlog catalog"
-                      : "Replication slot")}
+                {(() => {
+                  const p = String(job.cdc_plugin || "").toLowerCase();
+                  const catalog = p.includes("mysql") || p.includes("binlog")
+                    ? "Binlog"
+                    : p.includes("sqlserver") || p.includes("mssql")
+                      ? "Capture"
+                      : "Slot";
+                  if (job.cdc_wal_status) return `${catalog} · wal_status=${job.cdc_wal_status}`;
+                  return catalog === "Binlog"
+                    ? "Binlog catalog"
+                    : catalog === "Capture"
+                      ? "Capture catalog"
+                      : "Replication slot";
+                })()}
               </span>
             </div>
           </article>
         )}
         {job.cdc_confirmed_flush_lsn && (
-          <article className="df2-theater-v3-metric" title="Slot confirmed_flush_lsn — WAL older than this can be recycled">
-            <DtIcon name="database" size={16} />
-            <div>
-              <strong className="df2-mono">{String(job.cdc_confirmed_flush_lsn)}</strong>
-              <span>Confirmed flush LSN</span>
-            </div>
-          </article>
-        )}
-        {job.cdc_restart_lsn && (
           <article
             className="df2-theater-v3-metric"
-            title="Slot restart_lsn — oldest WAL segment this slot still requires"
+            title={
+              String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                ? "Consumer resume LSN — changes at/after this position are still unread or in flight"
+                : "Slot confirmed_flush_lsn — WAL older than this can be recycled"
+            }
           >
             <DtIcon name="database" size={16} />
             <div>
-              <strong className="df2-mono">{String(job.cdc_restart_lsn)}</strong>
-              <span>Restart LSN</span>
+              <strong className="df2-mono">{String(job.cdc_confirmed_flush_lsn)}</strong>
+              <span>
+                {String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                  ? "Resume LSN"
+                  : "Confirmed flush LSN"}
+              </span>
+            </div>
+          </article>
+        )}
+        {(job.cdc_min_lsn || job.cdc_restart_lsn) && (
+          <article
+            className="df2-theater-v3-metric"
+            title={
+              job.cdc_min_lsn || String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                ? "Capture min_lsn — oldest change still retained; resume below this is a gap"
+                : "Slot restart_lsn — oldest WAL segment this slot still requires"
+            }
+          >
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong className="df2-mono">
+                {String(job.cdc_min_lsn || job.cdc_restart_lsn)}
+              </strong>
+              <span>
+                {job.cdc_min_lsn || String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                  ? "Min LSN (retention)"
+                  : "Restart LSN"}
+              </span>
+            </div>
+          </article>
+        )}
+        {job.cdc_max_lsn && (
+          <article
+            className="df2-theater-v3-metric"
+            title="Capture max_lsn — highest LSN committed into CDC tables (scan progress)"
+          >
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong className="df2-mono">{String(job.cdc_max_lsn)}</strong>
+              <span>Capture max LSN</span>
+            </div>
+          </article>
+        )}
+        {job.cdc_capture_instance && (
+          <article className="df2-theater-v3-metric" title="SQL Server CDC capture instance">
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong className="df2-mono">{String(job.cdc_capture_instance)}</strong>
+              <span>Capture instance</span>
             </div>
           </article>
         )}
