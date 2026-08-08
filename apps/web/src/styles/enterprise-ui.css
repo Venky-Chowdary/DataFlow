@@ -8121,9 +8121,32 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-items: flex-start;
   gap: 0.75rem;
   padding: 0.85rem 1rem;
+  margin-bottom: 0.75rem;
   border: 1px solid color-mix(in srgb, var(--df-warn, #b45309) 35%, transparent);
   border-radius: 12px;
   background: color-mix(in srgb, var(--df-warn, #b45309) 8%, white);
+  order: -2;
+}
+
+.df2-banner-dismiss {
+  flex-shrink: 0;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: 0.25rem;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--df-text-muted, #64748b);
+  cursor: pointer;
+}
+
+.df2-banner-dismiss:hover {
+  background: color-mix(in srgb, var(--df-text-muted, #64748b) 12%, transparent);
+  color: var(--df-text, #0f172a);
 }
 
 .df2-overview-attention strong {
@@ -8148,6 +8171,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   cursor: pointer;
 }
 
+.df2-overview-attention .df2-banner-dismiss {
+  margin-left: 0;
+}
+
 .df2-freshness-slo {
   display: flex;
   align-items: flex-start;
@@ -8157,6 +8184,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border: 1px solid var(--df-border, #e2e8f0);
   background: color-mix(in srgb, var(--df-surface, #fff) 92%, var(--df-bg, #f8fafc));
   margin-bottom: 0.75rem;
+  order: -1;
 }
 
 .df2-freshness-slo.is-ok {

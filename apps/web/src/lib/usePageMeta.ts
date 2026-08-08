@@ -19,7 +19,13 @@ function upsertMeta(attr: "name" | "property", key: string, content: string) {
 
 function upsertLink(rel: string, href: string, extra?: Record<string, string>) {
   if (!href) return;
-  let el = document.head.querySelector(`link[rel="${rel}"]`) as HTMLLinkElement | null;
+  // Prefer type/sizes so SVG + PNG favicons coexist (same geometry as DtLogo).
+  const type = extra?.type || "";
+  const sizes = extra?.sizes || "";
+  let selector = `link[rel="${CSS.escape(rel)}"]`;
+  if (type) selector += `[type="${CSS.escape(type)}"]`;
+  if (sizes) selector += `[sizes="${CSS.escape(sizes)}"]`;
+  let el = document.head.querySelector(selector) as HTMLLinkElement | null;
   if (!el) {
     el = document.createElement("link");
     el.rel = rel;
@@ -78,8 +84,12 @@ export function applyPageMeta(meta: PageMeta) {
   upsertMeta("name", "twitter:image:alt", "Datawrap — Universal data transfer platform");
 
   upsertLink("canonical", pageUrl);
-  upsertLink("icon", "/favicon.svg", { type: "image/svg+xml" });
-  upsertLink("apple-touch-icon", "/apple-touch-icon.png");
+  // Cache-bust so browsers pick up the workspace mark (same geometry as DtLogo).
+  const iconVer = "dw-mark-1";
+  upsertLink("icon", `/favicon.svg?v=${iconVer}`, { type: "image/svg+xml" });
+  upsertLink("icon", `/favicon-32.png?v=${iconVer}`, { type: "image/png", sizes: "32x32" });
+  upsertLink("icon", `/favicon-64.png?v=${iconVer}`, { type: "image/png", sizes: "64x64" });
+  upsertLink("apple-touch-icon", `/apple-touch-icon.png?v=${iconVer}`, { sizes: "180x180" });
   upsertLink("manifest", "/site.webmanifest");
 
   upsertJsonLd(meta, siteUrl, title, description);

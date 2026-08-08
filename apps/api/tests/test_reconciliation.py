@@ -12,6 +12,24 @@ def test_reconcile_pass():
     assert d["post_write_pending"] is False
 
 
+def test_canonicalize_ieee_float_matches_decimal_sink():
+    """Excel IEEE residue must not false-fail Gate-8 vs DECIMAL 106.6."""
+    from services.reconciliation import normalize_cell, sample_compare_rows
+
+    assert normalize_cell(106.60000000000001) == "106.6"
+    assert normalize_cell("106.60000000000001") == "106.6"
+    assert normalize_cell("106.6") == "106.6"
+
+    cmp = sample_compare_rows(
+        [{"id": "1", "Total": 106.60000000000001}],
+        [{"id": "1", "total": "106.6"}],
+        [{"source": "Total", "target": "total"}],
+        sort_key="id",
+    )
+    assert cmp["passed"] is True
+    assert cmp["compared"] >= 1
+
+
 def test_stamp_writer_ack_phase():
     from services.reconciliation import stamp_post_write_phase
 

@@ -3321,7 +3321,9 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     if isinstance(value, _date):
         return _datetime.combine(value, _time.min).strftime("%Y-%m-%dT%H:%M:%S")
     if isinstance(value, float):
-        return _canonicalize_number(str(value)) or "nan"
+        # Pass the float through — str(float) keeps IEEE residue and false-fails
+        # Gate-8 vs DECIMAL sinks (106.60000000000001 vs 106.6).
+        return _canonicalize_number(value) or "nan"
     if isinstance(value, int):
         return str(value)
     if isinstance(value, Decimal):
@@ -3497,10 +3499,57 @@ def _checksum_datetime_utc_z(iso_text: str) -> str:
     return _checksum_datetime_utc_wall(iso_text)
 
 
+def _decimal_from_ieee_float(value: float) -> Decimal | None:
+    """Collapse IEEE binary residue (Excel ``106.60000000000001`` → ``106.6``).
+
+    Double has ~15–17 significant digits; formatting with 15 significant figures
+    matches Airbyte/Fivetran-class compare and avoids Gate-8 false fails when
+    DECIMAL sinks store the human value.
+    """
+    import math
+
+    if math.isnan(value):
+        return None
+    if math.isinf(value):
+        return Decimal("Infinity") if value > 0 else Decimal("-Infinity")
+    return Decimal(format(value, ".15g"))
+
+
 def _canonicalize_number(value: Any) -> str | None:
-    """Return a canonical string for numeric values so 9.5 == 9.5000000000."""
+    """Return a canonical string for numeric values so 9.5 == 9.5000000000.
+
+    Also collapses IEEE float residue so Excel/JSON floats match DECIMAL sinks.
+    """
     try:
-        d = Decimal(value) if not isinstance(value, Decimal) else value
+        if isinstance(value, float):
+            d = _decimal_from_ieee_float(value)
+            if d is None:
+                return None
+        elif isinstance(value, Decimal):
+            d = value
+            # Decimal(float(...)) keeps binary noise — collapse long mantissas.
+            if d.is_finite():
+                digits = d.as_tuple().digits
+                exp = d.as_tuple().exponent
+                if len(digits) > 15 or (isinstance(exp, int) and exp < -12):
+                    try:
+                        d = _decimal_from_ieee_float(float(d)) or d
+                    except (OverflowError, ValueError):
+                        pass
+        else:
+            text = str(value).strip().replace(",", "")
+            if not text:
+                return None
+            d = Decimal(text)
+            # String form of float residue (common from Excel/CSV readers).
+            if d.is_finite() and ("." in text or "e" in text.lower()):
+                head = text.split("e")[0].split("E")[0]
+                frac = head.split(".")[-1] if "." in head else ""
+                if len(frac.rstrip("0")) > 12:
+                    try:
+                        d = _decimal_from_ieee_float(float(d)) or d
+                    except (OverflowError, ValueError):
+                        pass
         if d.is_nan():
             return None
         from services.value_serializer import safe_decimal_text

@@ -1,5 +1,7 @@
+import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
+import { dismissBanner, isBannerDismissed } from "../../lib/dismissibleBanner";
 
 export type FreshnessAlert = {
   severity: string;
@@ -36,7 +38,8 @@ function formatLagBytes(n: number): string {
  * Closed-loop freshness SLO surface for Overview — lag/heartbeat alerts with
  * Open schedule / Open job CTAs (same pattern as quarantine / lease next steps).
  *
- * Heartbeat alone never claims catch-up; unknown SLO stays visible as honesty.
+ * Heartbeat alone never claims catch-up; unknown SLO stays visible as honesty
+ * until the operator dismisses. Hidden when there is no CDC activity (n_a).
  */
 export function FreshnessSloPanel({
   sloStatus,
@@ -50,18 +53,54 @@ export function FreshnessSloPanel({
   onOpenPipeline,
   onOpenJob,
 }: FreshnessSloPanelProps) {
-  if (!sloStatus) return null;
+  const signature = useMemo(
+    () =>
+      [
+        sloStatus || "",
+        String(staleCount),
+        String(criticalCount),
+        String(worstLagSeconds ?? ""),
+        alerts.map((a) => `${a.severity}:${a.schedule_id || ""}:${a.job_id || ""}`).join("|"),
+      ].join("::"),
+    [sloStatus, staleCount, criticalCount, worstLagSeconds, alerts],
+  );
+  const [dismissed, setDismissed] = useState(false);
+  useEffect(() => {
+    setDismissed(isBannerDismissed("overview.freshness", signature));
+  }, [signature]);
+
+  if (!sloStatus || sloStatus === "n_a") return null;
+  if (dismissed) return null;
+
+  const onDismiss = () => {
+    dismissBanner("overview.freshness", signature);
+    setDismissed(true);
+  };
+
   if (sloStatus === "unknown") {
     return (
-      <div className="df2-freshness-slo is-warn" role="status" aria-label="CDC freshness SLO unknown">
+      <div className="df2-freshness-slo is-warn" role="status" aria-label="CDC freshness not measured">
         <DtIcon name="alert" size={16} />
-        <div>
-          <strong>Freshness SLO unknown</strong>
+        <div className="df2-freshness-slo-body">
+          <strong>CDC lag not measured yet</strong>
           <p>
-            No proven commit lag or WAL/binlog byte probe — heartbeat is liveness only,
-            not catch-up. Open the CDC job and confirm slot/plugin lag.
+            Freshness SLO tracks how far behind a live CDC pipeline is (seconds from
+            the last source commit, or WAL/binlog bytes still to catch up). Right now
+            we only see that a consumer heartbeated — that proves the worker is alive,
+            not that data is caught up. Open a CDC job in Theater and check Slot /
+            Binlog / Capture chips. Batch transfers (Excel → MySQL, etc.) do not use
+            this ribbon.
           </p>
         </div>
+        <button
+          type="button"
+          className="df2-banner-dismiss"
+          onClick={onDismiss}
+          aria-label="Dismiss CDC lag notice"
+          title="Dismiss until this status changes"
+        >
+          <DtIcon name="x" size={14} />
+        </button>
       </div>
     );
   }
@@ -69,14 +108,23 @@ export function FreshnessSloPanel({
     return (
       <div className="df2-freshness-slo is-ok" role="status" aria-label="CDC freshness SLO">
         <DtIcon name="check" size={16} />
-        <div>
-          <strong>Freshness SLO met</strong>
+        <div className="df2-freshness-slo-body">
+          <strong>CDC freshness OK</strong>
           <p>
             {worstLagSeconds != null
-              ? `Worst proven CDC lag ${worstLagSeconds.toFixed(1)}s (warn ${warnSeconds}s).`
+              ? `Worst proven CDC lag ${worstLagSeconds.toFixed(1)}s (warn at ${warnSeconds}s).`
               : `Pipelines within warn (${warnSeconds}s) / WAL catch-up band.`}
           </p>
         </div>
+        <button
+          type="button"
+          className="df2-banner-dismiss"
+          onClick={onDismiss}
+          aria-label="Dismiss freshness OK notice"
+          title="Dismiss until this status changes"
+        >
+          <DtIcon name="x" size={14} />
+        </button>
       </div>
     );
   }
@@ -91,7 +139,7 @@ export function FreshnessSloPanel({
       <DtIcon name="alert" size={16} />
       <div className="df2-freshness-slo-body">
         <strong>
-          {sloStatus === "critical" ? "Freshness SLO critical" : "Freshness SLO warn"}
+          {sloStatus === "critical" ? "CDC lag critical" : "CDC lag above SLO"}
           {criticalCount > 0 ? ` · ${criticalCount} critical` : ""}
           {staleCount > 0 ? ` · ${staleCount} stale` : ""}
         </strong>
@@ -139,6 +187,15 @@ export function FreshnessSloPanel({
           </ul>
         )}
       </div>
+      <button
+        type="button"
+        className="df2-banner-dismiss"
+        onClick={onDismiss}
+        aria-label="Dismiss freshness alert"
+        title="Dismiss until this status changes"
+      >
+        <DtIcon name="x" size={14} />
+      </button>
     </div>
   );
 }

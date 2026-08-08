@@ -25,6 +25,7 @@ import {
   FreshnessSloPanel,
   type FreshnessAlert,
 } from "../components/overview/FreshnessSloPanel";
+import { dismissBanner, isBannerDismissed } from "../lib/dismissibleBanner";
 import { buildDataPlaneTopology } from "../lib/topologyUtils";
 
 interface DashboardPageProps {
@@ -179,7 +180,7 @@ export function DashboardPage({
     failed.length > 0 ? `${failed.length} failed job${failed.length === 1 ? "" : "s"}` : null,
     dlqCount != null && dlqCount > 0 ? `${dlqCount} DLQ event${dlqCount === 1 ? "" : "s"}` : null,
     freshnessStale
-      ? `Freshness SLO ${freshness?.slo_status || "warn"}${
+      ? `CDC lag ${freshness?.slo_status === "critical" ? "critical" : "above SLO"}${
           freshness?.stale_count ? ` · ${freshness.stale_count} pipeline${freshness.stale_count === 1 ? "" : "s"}` : ""
         }`
       : cdcLagSeconds != null && cdcLagSeconds > 60
@@ -187,6 +188,13 @@ export function DashboardPage({
         : null,
     pausedPipelines > 0 ? `${pausedPipelines} paused pipeline${pausedPipelines === 1 ? "" : "s"}` : null,
   ].filter(Boolean) as string[];
+  const attentionSignature = attentionItems.join(" · ");
+  const [attentionDismissed, setAttentionDismissed] = useState(false);
+  useEffect(() => {
+    setAttentionDismissed(
+      attentionSignature ? isBannerDismissed("overview.attention", attentionSignature) : false,
+    );
+  }, [attentionSignature]);
 
   return (
     <PageShell
@@ -197,12 +205,12 @@ export function DashboardPage({
       description="Live health, throughput, and recent migrations for this workspace."
     >
       <PageFrame className="df2-overview-v3">
-        {attentionItems.length > 0 && (
+        {attentionItems.length > 0 && !attentionDismissed && (
           <div className="df2-overview-attention" role="status">
             <DtIcon name="alert" size={16} />
             <div>
               <strong>Needs attention</strong>
-              <p>{attentionItems.join(" · ")}</p>
+              <p>{attentionSignature}</p>
             </div>
             {failed.length > 0 && onOpenJobs && (
               <button type="button" className="df2-overview-attention-action" onClick={onOpenJobs}>
@@ -218,6 +226,18 @@ export function DashboardPage({
                 Open pipeline
               </button>
             )}
+            <button
+              type="button"
+              className="df2-banner-dismiss"
+              aria-label="Dismiss needs attention"
+              title="Dismiss until these counts change"
+              onClick={() => {
+                dismissBanner("overview.attention", attentionSignature);
+                setAttentionDismissed(true);
+              }}
+            >
+              <DtIcon name="x" size={14} />
+            </button>
           </div>
         )}
         <FreshnessSloPanel

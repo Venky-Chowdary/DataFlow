@@ -343,7 +343,8 @@ def freshness_summary(
     elif pipelines:
         slo_status = "ok"
     else:
-        slo_status = "unknown"
+        # No CDC poll samples — not a freshness failure (batch Excel→SQL etc.).
+        slo_status = "n_a"
 
     return {
         "worst_lag_seconds": worst,
@@ -354,6 +355,7 @@ def freshness_summary(
         "heartbeat_stale_seconds": heartbeat_stale_seconds,
         "stale_count": stale_count,
         "critical_count": critical_count,
+        "unknown_count": unknown_count,
         "slo_status": slo_status,
         "alerts": alerts[:50],
         "pipelines": pipelines[:100],
