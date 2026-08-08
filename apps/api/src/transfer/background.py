@@ -117,9 +117,10 @@ def run_transfer_async(
 ) -> Any:
     """Execute transfer on the durable scheduler and return immediately.
 
-    When ``DATAFLOW_WORKER_FLEET=1`` and Mongo queue is available, the job is
-    enqueued for a dedicated Railway worker process. Otherwise it runs on the
-    local API thread pool (dev / single-service mode).
+    Phase F5 — when claim-queue mode is active (``SCHEDULER_MODE=claim`` /
+    ``auto`` on multi-replica, or ``WORKER_FLEET=1``), the job is enqueued to
+    Mongo ``transfer_job_queue`` for claim under worker leases. Otherwise it
+    runs on the local API thread pool (single-replica / demo).
     """
     if resume_from_job_id and resume:
         try:
@@ -131,8 +132,10 @@ def run_transfer_async(
             logger.exception("Could not copy checkpoint from %s onto %s", resume_from_job_id, job_id)
 
     try:
-        from services.worker_fleet import enqueue_job, fleet_enabled
         from services.platform_config import is_production
+        from services.scheduler_mode import scheduler_mode
+        from services.worker_fleet import enqueue_job, fleet_enabled
+        from services.worker_leases import requires_distributed_backend
 
         if fleet_enabled():
             ok = enqueue_job(
@@ -140,25 +143,32 @@ def run_transfer_async(
                 payload={"resume": resume, "resume_from_job_id": resume_from_job_id or ""},
             )
             if ok:
-                logger.info("Enqueued transfer job %s to worker fleet", job_id)
+                logger.info(
+                    "Enqueued transfer job %s (scheduler_mode=%s)",
+                    job_id,
+                    scheduler_mode(),
+                )
                 future: concurrent.futures.Future[Any] = concurrent.futures.Future()
                 future.set_result(None)
                 return future
-            # Production + fleet: fail closed — do not silently run on API (hides missing Worker).
-            if is_production():
+            # Multi-replica / production: fail closed — never dual-run on API.
+            if is_production() or requires_distributed_backend():
                 mongo = get_mongodb_service()
                 mongo.update_job_status(
                     job_id,
                     "failed",
-                    error="Worker fleet enabled but enqueue failed — check Mongo queue and Worker service",
-                    message="Worker fleet enqueue failed",
+                    error=(
+                        "Claim-queue scheduler enabled but enqueue failed — "
+                        "check Mongo transfer_job_queue and worker/API claim loop"
+                    ),
+                    message="Scheduler enqueue failed",
                 )
                 raise RuntimeError(
-                    f"DATAFLOW_WORKER_FLEET enabled but could not enqueue job {job_id}. "
-                    "Deploy the Worker service and verify MONGODB_URI."
+                    f"Claim-queue scheduler could not enqueue job {job_id}. "
+                    "Verify MONGODB_URI and that an API claim loop or Worker is running."
                 )
             logger.warning(
-                "DATAFLOW_WORKER_FLEET=1 but enqueue failed for %s — falling back to local executor",
+                "Claim-queue enqueue failed for %s — falling back to local executor",
                 job_id,
             )
     except RuntimeError:

@@ -518,6 +518,42 @@ def run_connector_query(
                     success=False,
                     error="Only read-only SQL is allowed (SELECT / WITH / SHOW / DESCRIBE / EXPLAIN).",
                 )
+            # Phase D6 — refuse invented identifiers (LLM cannot probe arbitrary columns).
+            head = sql.lstrip().split(None, 1)[0].lower() if sql.strip() else ""
+            if head in ("select", "with"):
+                try:
+                    from services.copilot_sql_guard import (
+                        assert_identifiers_allowed,
+                        schema_allowlist,
+                    )
+                    from .schema_tools import introspect_connector_table
+
+                    listed = list_connector_objects(connector_id=cid, connector_name="")
+                    table_names = _object_names_from_list(listed)
+                    columns: list[Any] = []
+                    # Prefer explicit collection/table hint; else first FROM ident if known.
+                    table_hint = (collection or "").strip()
+                    if not table_hint:
+                        m = re.search(
+                            r"\bfrom\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)",
+                            sql,
+                            re.I,
+                        )
+                        if m:
+                            table_hint = m.group(1)
+                    if table_hint:
+                        try:
+                            sch = introspect_connector_table(
+                                conn, table_hint, purpose="source"
+                            )
+                            columns = list(sch.get("columns") or [])
+                        except Exception as exc:
+                            _LOG = logging.getLogger(__name__)
+                            _LOG.info("copilot sql guard introspect skipped: %s", exc)
+                    allowed = schema_allowlist(columns, table_names)
+                    assert_identifiers_allowed(sql, allowed=allowed)
+                except ValueError as exc:
+                    return _tool_result(tool, success=False, error=str(exc))
             body = QueryExecuteRequest(connector_id=cid, query=sql, limit=limit)
 
         rows, columns, schema, truncated = _run_query(saved, body)

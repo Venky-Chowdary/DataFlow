@@ -2090,6 +2090,10 @@ export async function runUniversalTransfer(options: {
   fkRiskAcknowledged?: boolean;
   acknowledgmentActor?: string;
   acknowledgmentReason?: string;
+  /** Phase C11 — 64-hex Decision Artifact content_hash from last green Validate. */
+  approvedDecisionArtifactHash?: string;
+  /** Optional full artifact payload (content_hash must match approved hash). */
+  decisionArtifact?: Record<string, unknown>;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2165,6 +2169,13 @@ export async function runUniversalTransfer(options: {
   }
   if (options.acknowledgmentReason) {
     formData.append("acknowledgment_reason", options.acknowledgmentReason);
+  }
+  const approvedHash = (options.approvedDecisionArtifactHash || "").trim();
+  if (approvedHash) {
+    formData.append("approved_decision_artifact_hash", approvedHash);
+  }
+  if (options.decisionArtifact && Object.keys(options.decisionArtifact).length) {
+    formData.append("decision_artifact_json", JSON.stringify(options.decisionArtifact));
   }
   // A fresh key per click still lets the server fingerprint catch a double-submit
   // of the same intent; the header itself makes HTTP-level retries of this call
@@ -2244,6 +2255,8 @@ export async function executeTransferJson(payload: {
   fkRiskAcknowledged?: boolean;
   acknowledgmentActor?: string;
   acknowledgmentReason?: string;
+  approvedDecisionArtifactHash?: string;
+  decisionArtifact?: Record<string, unknown>;
 }) {
   const idempotencyKey =
     payload.idempotencyKey?.trim() ||
@@ -2272,6 +2285,9 @@ export async function executeTransferJson(payload: {
       fk_risk_acknowledged: payload.fkRiskAcknowledged === true,
       acknowledgment_actor: payload.acknowledgmentActor || undefined,
       acknowledgment_reason: payload.acknowledgmentReason || undefined,
+      approved_decision_artifact_hash:
+        (payload.approvedDecisionArtifactHash || "").trim() || undefined,
+      decision_artifact: payload.decisionArtifact || undefined,
     }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });

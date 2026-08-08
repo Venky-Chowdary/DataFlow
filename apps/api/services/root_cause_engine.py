@@ -324,6 +324,15 @@ def _is_duplicate_signal(
     gate_id: str,
 ) -> bool:
     details = details or {}
+    # Missing Map PK is a set-identity remediation — not a duplicate-key finding.
+    # ``Identity key required`` otherwise matches ``identity.?key`` in ``_DUP_RE``.
+    rule_id = str(details.get("rule_id") or "")
+    if (
+        rule_id.endswith("missing_identity")
+        or details.get("remediation_kind") == "set_primary_key"
+        or re.search(r"identity key required", str(message or ""), re.I)
+    ):
+        return False
     if details.get("duplicate_keys") or details.get("identity_duplicates"):
         return True
     blob = _blob(message, details)

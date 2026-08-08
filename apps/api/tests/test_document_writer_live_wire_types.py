@@ -42,13 +42,26 @@ def test_redis_normalize_uses_tgt_types_list():
     assert out["qty"] == 7
 
 
-def test_mongo_insert_refuses_content_hash_id_invent():
+def test_mongo_insert_allows_server_objectid_without_content_hash_invent():
+    """Missing ``_id`` must use Mongo ObjectId assignment — never a content hash."""
+    from connectors.mongodb_writer import _idempotent_insert_many
+
+    coll = MagicMock()
+    coll.insert_many.return_value = MagicMock(inserted_ids=["x", "y"])
+    docs = [{"name": "a"}, {"name": "b"}]
+    assert _idempotent_insert_many(coll, docs) == 2
+    coll.insert_many.assert_called_once()
+    passed = coll.insert_many.call_args[0][0]
+    assert all("_id" not in d for d in passed), "must not invent content-hash _id"
+
+
+def test_mongo_insert_refuses_null_id_invent():
     from connectors.mongodb_writer import _idempotent_insert_many
     import pytest
 
     coll = MagicMock()
-    with pytest.raises(ValueError, match="content-hash|without `_id`"):
-        _idempotent_insert_many(coll, [{"name": "a"}, {"name": "b"}])
+    with pytest.raises(ValueError, match="null `_id`"):
+        _idempotent_insert_many(coll, [{"_id": None, "name": "a"}])
     coll.insert_many.assert_not_called()
 
 

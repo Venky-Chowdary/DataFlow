@@ -33,9 +33,19 @@ export interface ConversionClassHonesty {
   note: string;
 }
 
+export interface DecisionArtifactHonesty {
+  present: boolean;
+  contentHash: string | null;
+  schemaVersion: string | null;
+  headline: string;
+  note: string;
+}
+
 export interface ValidateHonestyControls {
   referentialIntegrity: ReferentialIntegrityHonesty;
   conversionClasses: ConversionClassHonesty;
+  /** Phase C11/C12 — Decision Artifact authority from Validate. */
+  decisionArtifact: DecisionArtifactHonesty;
   /** Opt-in population orphan scan — expensive; default false. */
   populationScanRequested: boolean;
   migrationProven: boolean;
@@ -108,7 +118,13 @@ export function buildConversionClassHonesty(
 
   const needsApproval = counts["needs_user_approval"] || 0;
   const unsupported = counts["unsupported"] || 0;
-  const lossless = counts["lossless"] || 0;
+  const lossless =
+    (counts["lossless"] || 0)
+    + (counts["identity"] || 0)
+    + (counts["equivalent"] || 0)
+    + (counts["widening"] || 0)
+    + (counts["representation"] || 0)
+    + (counts["normalization"] || 0);
 
   let headline: string;
   if (columns.length === 0) {
@@ -118,7 +134,7 @@ export function buildConversionClassHonesty(
   } else if (unsupported > 0) {
     headline = `${unsupported} unsupported conversion(s) — remap required`;
   } else {
-    headline = `${lossless} lossless · ${columns.length} column(s) classified`;
+    headline = `${lossless} safe-path · ${columns.length} column(s) classified`;
   }
 
   return {
@@ -143,6 +159,22 @@ export function buildValidateHonestyControls(
   const migrationProven = Boolean(preflight?.proof_bundle?.migration_proven);
   const ddlIdentityHash =
     preflight?.proof_bundle?.ddl_identity?.ddl_identity_hash || null;
+  const art = preflight?.proof_bundle?.decision_artifact;
+  const artHash =
+    preflight?.proof_bundle?.decision_artifact_hash
+    || art?.content_hash
+    || null;
+  const artPresent = Boolean(artHash && String(artHash).length === 64);
+  const decisionArtifact: DecisionArtifactHonesty = {
+    present: artPresent,
+    contentHash: artHash ? String(artHash) : null,
+    schemaVersion: art?.schema_version ? String(art.schema_version) : null,
+    headline: artPresent
+      ? `Decision Artifact stamped (${String(artHash).slice(0, 12)}…)`
+      : "Decision Artifact missing — re-run Validate before Execute",
+    note:
+      "Execute consumes this immutable artifact hash — UI never re-derives invent/risk.",
+  };
   const hsRaw =
     (preflight?.proof_bundle as Record<string, unknown> | undefined)?.historical_success
     ?? (preflight as Record<string, unknown> | null | undefined)?.historical_success;
@@ -168,6 +200,7 @@ export function buildValidateHonestyControls(
   return {
     referentialIntegrity: ri,
     conversionClasses,
+    decisionArtifact,
     populationScanRequested: Boolean(opts?.populationScanRequested),
     migrationProven,
     ddlIdentityHash,

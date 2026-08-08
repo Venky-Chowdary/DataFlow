@@ -6,6 +6,8 @@ Migration honesty (Airbyte/Fivetran-class):
 * Prefer observed integer digits + scale from ``Decimal.normalize()``.
 * Detect Excel/IEEE residue (``111.89999999999999``) — do not treat as money scale.
 * Platform caps applied via ``type_system.ddl_type`` at stamp time.
+* Currency / locale numeric text MUST reuse ``transform_engine`` normalize helpers —
+  never a second money-strip regex that invents wrong scale (``€2.000,50`` ≠ ``2.00050``).
 """
 
 from __future__ import annotations
@@ -19,30 +21,68 @@ _IEEE_SCALE_HARD = 12
 # When median scale is low but max is high, treat high tail as float noise.
 _IEEE_SCALE_TAIL = 8
 _SCI_RE = re.compile(r"[eE][+-]?\d+")
-_MONEY_CLEAN = re.compile(r"[\s,$£€¥]")
+
+
+def _canonical_numeric_text(value: Any) -> str | None:
+    """Locale/currency-aware decimal text via transform_engine SSOT.
+
+    Returns ``None`` when the cell is empty / unparseable (do not invent 0).
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        return format(value.normalize(), "f")
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            return format(Decimal(str(value)).normalize(), "f")
+        except (InvalidOperation, Overflow, ValueError):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    from services.transform_engine import (
+        _normalize_locale_separators,
+        _normalize_numeric_text,
+    )
+
+    cleaned = _normalize_numeric_text(text)
+    if not cleaned:
+        return None
+    return _normalize_locale_separators(cleaned)
 
 
 def cell_int_digits_and_scale(value: Any) -> tuple[int, int]:
-    """Return (integer_digits, fractional_scale) using Decimal.normalize().
+    """Return (integer_digits, fractional_scale) for create-new invent.
 
-    Trailing zeros collapse (``52.310500000000000`` → scale 4) so invent matches
-    warehouse bind capacity, not MySQL DOUBLE dump padding.
+    Preserves explicit money scale (``1000.00`` → 2). Collapses only IEEE /
+    Excel residue pads (``52.310500000000000`` → 4) via ``normalize()`` when
+    raw scale is in the float-tail band.
     """
     try:
-        text = str(value).strip() if value is not None else ""
+        text = _canonical_numeric_text(value)
         if not text:
-            return 0, 0
-        text = _MONEY_CLEAN.sub("", text)
-        if not text or text in {".", "+", "-", "+.", "-."}:
             return 0, 0
         d = Decimal(text)
         if not d.is_finite():
             return 0, 0
-        d = d.normalize()
         _sign, digits, exponent = d.as_tuple()
-        scale = -exponent if exponent < 0 else 0
+        raw_scale = -exponent if exponent < 0 else 0
         int_digits = max(0, len(digits) + exponent)
-        return int_digits, scale
+        if raw_scale >= _IEEE_SCALE_TAIL:
+            d = d.normalize()
+            _sign, digits, exponent = d.as_tuple()
+            scale = -exponent if exponent < 0 else 0
+            int_digits = max(0, len(digits) + exponent)
+            return int_digits, scale
+        return int_digits, raw_scale
     except (InvalidOperation, Overflow, ValueError, TypeError):
         return 0, 0
 
@@ -94,18 +134,18 @@ def observe_numeric_samples(
     ieee_signals: list[str] = []
     parsed = 0
     for raw in rows[:500]:
-        text = str(raw).strip()
-        cleaned = _MONEY_CLEAN.sub("", text)
-        if _SCI_RE.search(cleaned):
+        text = _canonical_numeric_text(raw)
+        if not text:
+            continue
+        if _SCI_RE.search(str(raw)):
             ieee_signals.append("scientific_notation")
-        idig, scale = cell_int_digits_and_scale(cleaned)
-        # Unparseable → skip (parse_rate reflects this).
         try:
-            d = Decimal(cleaned)
+            d = Decimal(text)
             if not d.is_finite():
                 continue
         except (InvalidOperation, Overflow, ValueError):
             continue
+        idig, scale = cell_int_digits_and_scale(text)
         parsed += 1
         int_digits_list.append(idig)
         scales.append(scale)
@@ -169,7 +209,11 @@ def observe_numeric_samples(
         # Honest approximate wire — FLOAT invent, not fake money DECIMAL(38,15).
         # Still expose a cleaned DECIMAL suggestion for operators who need fixed.
         carrier = "FLOAT"
-        notes.append(f"suggested_fixed=DECIMAL({precision},{scale})" if scale else f"suggested_fixed=DECIMAL({precision},0)")
+        notes.append(
+            f"suggested_fixed=DECIMAL({precision},{scale})"
+            if scale
+            else f"suggested_fixed=DECIMAL({precision},0)"
+        )
     else:
         carrier = f"DECIMAL({precision},{scale_out})"
 
@@ -184,7 +228,9 @@ def observe_numeric_samples(
         "sample_count": len(rows),
         "ieee_signals": sorted(set(ieee_signals)),
         "notes": notes,
-        "suggested_fixed": f"DECIMAL({precision},{scale})" if kind == "ieee_float" else carrier,
+        "suggested_fixed": (
+            f"DECIMAL({precision},{scale})" if kind == "ieee_float" else carrier
+        ),
     }
 
 

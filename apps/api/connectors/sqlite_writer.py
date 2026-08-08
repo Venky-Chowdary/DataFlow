@@ -11,7 +11,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any, Callable
 
-from services.type_system import ddl_type, materialize_dest_ddl
+from services.decision_kernel import materialize_dest_ddl
 from services.value_serializer import json_default
 
 from connectors.sqlite_common import sqlite_file_path
@@ -55,18 +55,70 @@ def sqlite_type(inferred: str) -> str:
     return materialize_dest_ddl("sqlite", inferred)
 
 
+def _sqlite_bind_carrier(map_carrier: str, physical_or_ddl: str = "") -> str:
+    """Bind/quarantine carrier — never collapse Map DATETIME→TEXT affinity.
+
+    SQLite stores DATETIME as TEXT/NUMERIC affinity (``sqlite_type`` / PRAGMA).
+    Quarantine and temporal refuse (audit §2.7 TZ→NTZ) must see the Map/Studio
+    temporal stamp; CREATE DDL still uses ``sqlite_type``.
+    """
+    from services.type_system import normalize_logical_type
+
+    map_c = (map_carrier or "").strip()
+    phys = (physical_or_ddl or "").strip()
+    map_logical = normalize_logical_type(map_c) if map_c else ""
+    if map_logical in {"datetime", "date", "time"}:
+        phys_u = phys.upper()
+        # Vague SQLite affinities must not erase NTZ/TZ polarity for quarantine.
+        if not phys or phys_u in {
+            "TEXT",
+            "NUMERIC",
+            "INTEGER",
+            "REAL",
+            "BLOB",
+            "ANY",
+            "",
+        }:
+            return map_c
+        phys_logical = normalize_logical_type(phys)
+        if phys_logical in {"datetime", "date", "time"}:
+            return phys
+        return map_c
+    return phys or map_c
+
+
 def _to_sqlite_value(value: Any, source_type: str) -> Any:
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import is_missing_sentinel, safe_decimal_text
 
     # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
     if is_missing_sentinel(value):
         return value
     if value is None:
         return None
+    # SQLite has no Decimal affinity — always bind exact decimal text (currency /
+    # DECIMAL / MONEY carriers and TEXT affinity after semantic currency normalize).
+    if isinstance(value, Decimal):
+        text = safe_decimal_text(value)
+        if text is None:
+            raise ValueError(
+                f"SQLite refused non-finite Decimal {value!r} "
+                "(refuse silent NULL / float invent)"
+            )
+        return text
     upper = source_type.upper()
-    if upper in {"DECIMAL", "NUMERIC", "DOUBLE", "REAL", "FLOAT"}:
-        if isinstance(value, Decimal):
-            return str(value)
+    if upper in {
+        "DECIMAL",
+        "NUMERIC",
+        "NUMBER",
+        "MONEY",
+        "SMALLMONEY",
+        "BIGNUMERIC",
+        "BIGDECIMAL",
+        "CURRENCY",
+        "DOUBLE",
+        "REAL",
+        "FLOAT",
+    } or upper.startswith(("DECIMAL(", "NUMERIC(", "NUMBER(", "BIGNUMERIC(")):
         return value
     if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
         if isinstance(value, (dict, list)):
@@ -99,7 +151,19 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
         "DATE",
         "TIME",
     }:
-        from connectors.sql_temporal import coerce_sql_temporal, format_wire_value
+        from connectors.sql_temporal import (
+            coerce_sql_temporal,
+            format_wire_value,
+            input_has_timezone,
+        )
+
+        # NTZ carriers refuse Z/offset — never silent strip (audit §2.7).
+        ntz = upper in {"DATETIME", "TIMESTAMP", "TIMESTAMP_NTZ"}
+        if ntz and input_has_timezone(value):
+            raise ValueError(
+                f"SQLite {upper} refuses timezone-aware wire (would strip offset). "
+                "Map to TIMESTAMPTZ or provide a naive wall-clock value."
+            )
 
         try:
             coerced = coerce_sql_temporal(
@@ -432,12 +496,17 @@ def write_mapped_rows(
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="SQLite",
     )
-    target_types = []
+    # ddl_types → CREATE/ALTER affinity; tgt_types → Map carriers for quarantine/bind
+    # (DATETIME must not collapse to TEXT before TZ→NTZ refuse — audit §2.7).
+    target_types: list[str] = []
+    tgt_types: list[str] = []
     for i, c in enumerate(target_cols):
         carrier = str(dest_types.get(c) or "").strip()
         if not carrier and not studio_err:
             carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
-        target_types.append(sqlite_type(carrier) if carrier else "")
+        bind_c = _sqlite_bind_carrier(carrier)
+        tgt_types.append(bind_c)
+        target_types.append(sqlite_type(bind_c) if bind_c else "")
     policy = transform_error_policy(error_policy)
 
     mapped_rows: list[tuple] = []
@@ -450,10 +519,6 @@ def write_mapped_rows(
     rows_for_checksum: list[tuple] = []
     sparse_rows: list[tuple] = []
     conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
-    tgt_types = [
-        str(target_types[i] if i < len(target_types) else "")
-        for i in range(len(target_cols))
-    ]
 
     try:
         # Probe before Map so create-new refuse / rematerialize win over
@@ -662,14 +727,20 @@ def write_mapped_rows(
             need_remap = carriers_differ or (bool(studio_err) and not mapped_rows)
             if need_remap:
                 # Rematerialize from source against live DDL (no Map VARCHAR invent).
+                # Keep Map temporal stamps over TEXT/NUMERIC affinity for bind
+                # fidelity (PRAGMA cannot express DATETIME vs TIMESTAMPTZ).
+                map_dest_before = dict(dest_types or {})
                 dest_types = live_dest_types
                 target_types = []
+                tgt_types = []
                 for i, c in enumerate(target_cols):
-                    carrier = str(dest_types.get(c) or "").strip()
-                    if not carrier and not studio_err:
-                        carrier = str(
+                    live_c = str(dest_types.get(c) or "").strip()
+                    map_c = str(map_dest_before.get(c) or "").strip()
+                    if not map_c and not studio_err:
+                        map_c = str(
                             logical_types[i] if i < len(logical_types) else ""
                         ).strip()
+                    carrier = _sqlite_bind_carrier(map_c, live_c)
                     if not carrier and studio_err:
                         return WriteResult(
                             ok=False,
@@ -685,6 +756,9 @@ def write_mapped_rows(
                             rejected_details=rejected_details,
                             warnings=transform_errors,
                         )
+                    if carrier:
+                        dest_types[c] = carrier
+                    tgt_types.append(carrier)
                     target_types.append(sqlite_type(carrier) if carrier else "")
                 mapped_rows, transform_errors, rejected_details = (
                     build_mapped_rows_with_details(
@@ -703,10 +777,6 @@ def write_mapped_rows(
                         ),
                     )
                 )
-                tgt_types = [
-                    str(target_types[i] if i < len(target_types) else "")
-                    for i in range(len(target_cols))
-                ]
                 mapped_rows = apply_write_quarantine_matrix(
                     mapped_rows,
                     target_cols,
@@ -997,6 +1067,11 @@ def write_mapped_rows(
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 warnings=transform_errors,
+                meta=gate8_writer_meta(
+                    rows_for_checksum,
+                    target_cols,
+                    conflict_columns=conflict_cols or None,
+                ),
             )
         finally:
             conn.close()

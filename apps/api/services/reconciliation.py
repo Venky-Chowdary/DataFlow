@@ -395,11 +395,12 @@ class FingerprintAccumulator:
         yield from heapq.merge(*streams, key=lambda x: (x[0], x[1]))
 
     def digest(self) -> str:
+        """Full SHA-256 hex digest (audit §2.8 — never truncate to 64 bits)."""
         h = hashlib.sha256()
         for _, fp in self._sorted_stream():
             h.update(fp.encode("utf-8"))
         self.close()
-        return h.hexdigest()[:16]
+        return h.hexdigest()
 
     def close(self) -> None:
         if self._tempdir is not None:
@@ -428,7 +429,7 @@ def _hash_fingerprints(fingerprints: list[tuple[str, str]]) -> str:
     h = hashlib.sha256()
     for _, fp in fingerprints:
         h.update(fp.encode("utf-8"))
-    return h.hexdigest()[:16]
+    return h.hexdigest()
 
 
 def canonical_checksum(
@@ -451,7 +452,7 @@ def canonical_checksum(
     read-back share write-path bind fingerprints (bool/JSON parity).
     """
     if not rows:
-        return hashlib.sha256(b"").hexdigest()[:16]
+        return hashlib.sha256(b"").hexdigest()
     return _hash_fingerprints(
         list(
             _iter_fingerprints(
@@ -585,7 +586,14 @@ def reconcile(
 
     if sample_compare and not sample_compare.get("passed", True):
         mismatches = sample_compare.get("mismatches") or []
-        detail = mismatches[0] if mismatches else "value mismatch in read-back sample"
+        first = mismatches[0] if mismatches else None
+        if isinstance(first, dict):
+            detail = (
+                f"column {first.get('source')}→{first.get('target')}: "
+                f"source={first.get('source_value')!r} dest={first.get('target_value')!r}"
+            )
+        else:
+            detail = first if first else "value mismatch in read-back sample"
         return ReconciliationReport(
             passed=False,
             source_rows=source_rows,
@@ -705,6 +713,8 @@ def verify_postgres_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
     try:
         from connectors.postgresql_conn import get_connection
@@ -718,7 +728,7 @@ def verify_postgres_table(
             connection_string=connection_string,
             ssl=ssl,
         )
-        from connectors.sql_identifiers import quote_table_ref
+        from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
 
         table_ref = quote_table_ref(
             table_name, schema or "public", dialect="postgresql"
@@ -726,7 +736,18 @@ def verify_postgres_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+            ids = [
+                str(x) for x in (written_ids or []) if x is not None and str(x) != ""
+            ][:500]
+            pk = (pk_column or "").strip()
+            if ids and pk:
+                pk_q = quote_sql_identifier(pk)
+                cur.execute(
+                    f"SELECT * FROM {table_ref} WHERE {pk_q} = ANY(%s)",  # nosec B608
+                    (ids,),
+                )
+            else:
+                cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
@@ -2111,8 +2132,15 @@ def verify_sqlite_table(
     host: str = "",
     target_columns: list[str] | None = None,
     limit: int = 0,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Reconcile a SQLite target by reading the local file."""
+    """Reconcile a SQLite target by reading the local file.
+
+    When ``written_ids`` + ``pk_column`` are set (upsert/append batch proof),
+    the checksum fingerprints only those keys while ``count`` remains the
+    full-table cardinality for operator visibility.
+    """
     try:
         import sqlite3
 
@@ -2121,14 +2149,26 @@ def verify_sqlite_table(
         path = sqlite_file_path(database, connection_string, host)
         if not path:
             return -1, ""
-        from connectors.sql_identifiers import quote_table_ref
+        from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
 
         table_ref = quote_table_ref(table_name, dialect="sqlite")
         conn = sqlite3.connect(str(path))
         cur = conn.cursor()
         cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
         count = cur.fetchone()[0]
-        cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+        ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][
+            :500
+        ]
+        pk = (pk_column or "").strip()
+        if ids and pk:
+            pk_q = quote_sql_identifier(pk)
+            placeholders = ",".join("?" for _ in ids)
+            cur.execute(
+                f"SELECT * FROM {table_ref} WHERE {pk_q} IN ({placeholders})",  # nosec B608
+                ids,
+            )
+        else:
+            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
         columns = names or target_columns or []
         checksum = canonical_checksum_from_iter(
@@ -2365,8 +2405,14 @@ def verify_mongodb_collection(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Reconcile a MongoDB target by counting and fingerprinting documents."""
+    """Reconcile a MongoDB target by counting and fingerprinting documents.
+
+    When ``written_ids`` + ``pk_column`` are set, the checksum fingerprints only
+    those keys while ``count`` remains full-collection cardinality (upsert Gate-8).
+    """
     try:
         from connectors.mongodb_common import (
             _mongo_client,
@@ -2387,17 +2433,33 @@ def verify_mongodb_collection(
         db = client[database or "test"]
         coll = db[table_name]
         count = coll.count_documents({})
+        ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][
+            :500
+        ]
+        pk = (pk_column or "").strip()
+        query: dict[str, Any] = {}
+        if ids and pk:
+            # Match string or numeric id forms (CSV upserts often land as int).
+            expanded: list[Any] = []
+            for raw in ids:
+                expanded.append(raw)
+                try:
+                    if str(int(raw)) == raw:
+                        expanded.append(int(raw))
+                except (TypeError, ValueError):
+                    pass
+            query = {pk: {"$in": expanded}}
 
         def _doc_iter():
             yielded = 0
-            for doc in coll.find({}):
+            for doc in coll.find(query):
                 if limit and yielded >= limit:
                     break
                 yield doc
                 yielded += 1
 
         columns = target_columns or sorted(
-            set(k for doc in coll.find({}).limit(100) for k in doc.keys())
+            set(k for doc in coll.find(query).limit(100) for k in doc.keys())
         )
         checksum = canonical_checksum_from_iter(
             _doc_iter(),
@@ -2679,17 +2741,23 @@ def verify_target(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
     """Independent destination read-back for Gate-8.
 
     ``written_ids`` (from writer meta) enables keyed fetch for vector / SaaS
     destinations where full-table scan is unavailable — Fivetran HVR Compare
     class: prove the batch we wrote, not an opaque index count alone.
+
+    For SQL upsert/append, ``written_ids`` + ``pk_column`` fingerprint only the
+    batch keys while returning full-table cardinality.
     """
     # Prefer explicit arg; allow dest cfg stash from reconcile_step.
     ids = written_ids
     if ids is None and isinstance(dest.get("written_ids"), list):
         ids = [str(x) for x in dest["written_ids"] if x is not None]
+    pk = (pk_column or dest.get("pk_column") or dest.get("gate8_pk_column") or "")
+    pk = str(pk).strip() or None
 
     if db_type == "iceberg":
         count, chk = verify_iceberg_table(
@@ -2713,6 +2781,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "dynamodb":
         from connectors.aws_common import resolve_endpoint_url
@@ -2736,6 +2806,8 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "duckdb":
         count, chk = verify_duckdb_table(
@@ -2758,6 +2830,8 @@ def verify_target(
                 table_name=table_name,
                 target_columns=target_columns,
                 limit=limit,
+                written_ids=ids,
+                pk_column=pk,
             )
         elif "duckdb" in conn or conn.endswith(".duckdb") or conn.endswith(".duck"):
             count, chk = verify_duckdb_table(
@@ -2856,6 +2930,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "redis":
         count, chk = verify_redis_prefix(

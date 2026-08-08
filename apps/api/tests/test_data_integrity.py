@@ -27,13 +27,22 @@ from services.transform_engine import apply_transform  # noqa: E402
         ("1.5E+3", "integer", 1500),
         ("  42  ", "integer", 42),
         ("true", "boolean", True),
-        ("N", "boolean", False),
+        ("false", "boolean", False),
+        ("0", "boolean", False),
+        ("f", "boolean", False),
     ],
 )
 def test_transform_parses_critical_formats(raw: str, transform: str, expected):
     value, err = apply_transform(raw, transform)
     assert err is None, f"Failed to parse {raw!r}: {err}"
     assert str(value) == str(expected) or value == expected
+
+
+def test_transform_refuses_informal_boolean_N():
+    """Canonical boolean wire is true/t/1 and false/f/0 — refuse Airbyte-class Y/N invent."""
+    _, err = apply_transform("N", "boolean")
+    assert err is not None
+    assert "Invalid boolean" in err
 
 
 def test_transform_rejects_invalid_decimal():
@@ -150,11 +159,15 @@ def test_integrity_blocks_duplicate_primary_keys():
         {"order_id": "ORD-2"},
     ]
     mappings = [{"source": "order_id", "target": "order_id", "confidence": 0.99}]
+    # Uniqueness resolution no longer invents PK from ``*_id`` alone — upsert
+    # sync (or an explicit destination PK) is required to enforce duplicates.
     report = run_integrity_audit(
         source_columns=["order_id"],
         mappings=mappings,
         sample_rows=rows,
         validation_mode="strict",
+        sync_mode="upsert",
+        destination_pk_columns=["order_id"],
     )
     dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
     assert dup_check is not None

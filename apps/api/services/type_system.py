@@ -125,8 +125,8 @@ CANONICAL_TYPES: Final[dict[str, str]] = {
     "uuid": LOGICAL_UUID,
     "guid": LOGICAL_UUID,
     "objectid": LOGICAL_OBJECTID,  # MongoDB ObjectId — first-class logical
+    "object_id": LOGICAL_OBJECTID,
     "object id": LOGICAL_OBJECTID,
-    "object_id": LOGICAL_STRING,
     "json": LOGICAL_JSON,
     "jsonb": LOGICAL_JSON,
     # Opaque semi-structured document carriers (Airbyte Destinations V2 JSON path).
@@ -484,7 +484,9 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_DECIMAL: "DECIMAL(38,10)",
         LOGICAL_BOOLEAN: "BOOLEAN",
         LOGICAL_DATE: "DATE",
-        LOGICAL_DATETIME: "TIMESTAMP",
+        # Align with _TZ_NAIVE_DDL — TIMESTAMP is session-TZ aware on Databricks;
+        # bare logical datetime must stamp TIMESTAMP_NTZ (never invent LTZ).
+        LOGICAL_DATETIME: "TIMESTAMP_NTZ",
         LOGICAL_TIME: "STRING",
         LOGICAL_UUID: "STRING",
         LOGICAL_JSON: "STRING",
@@ -899,9 +901,13 @@ def zero_scale_fits_signed_bigint(precision: int | None) -> bool:
 
 
 def zero_scale_numeric_carrier(precision: int) -> str:
-    """Introspect carrier for zero-scale numerics — preserve wide DECIMAL(p,0)."""
+    """Introspect carrier for zero-scale numerics — preserve wide DECIMAL(p,0).
+
+    Values that fit signed BIGINT use the ``BIGINT`` carrier (never bare
+    ``INTEGER`` / INT32) so create-new cannot silently narrow snowflake IDs.
+    """
     if zero_scale_fits_signed_bigint(precision):
-        return "INTEGER"
+        return "BIGINT"
     return f"DECIMAL({int(precision)},0)"
 
 
@@ -2295,9 +2301,11 @@ def ddl_carrier_type(inferred: str | None) -> str:
             return f"VECTOR({dim})"
         return "VECTOR"
     if logical == LOGICAL_FLOAT:
-        return "FLOAT"
+        # Preserve REAL / DOUBLE PRECISION polarity — never collapse to bare FLOAT.
+        return float_width_carrier(raw) or "DOUBLE"
     if logical == LOGICAL_INTEGER:
-        return "INTEGER"
+        # Preserve TINYINT/SMALLINT/INTEGER/BIGINT — never collapse bigint→INTEGER.
+        return integer_width_carrier(raw) or "BIGINT"
     if logical == LOGICAL_BOOLEAN:
         return "BOOLEAN"
     if logical == LOGICAL_DATE:
@@ -4478,8 +4486,11 @@ _UNBOUNDED_STRING_RE = re.compile(
     re.I,
 )
 _UNBOUNDED_TEXT_RE = re.compile(
+    # Bare logical ``string`` is NOT unbounded — invent uses DDL_TYPES
+    # (Oracle VARCHAR2(4000)). Spark/Hive STRING LOB is handled via TEXT /
+    # CLOB / VARCHAR(MAX) carriers or normalize → LOGICAL_TEXT paths.
     r"^(?:n?text|clob|nclob|longtext|mediumtext|tinytext|long\s+varchar|"
-    r"string|bytes)\b(?!\s*\()",
+    r"bytes)\b(?!\s*\()",
     re.I,
 )
 
@@ -5600,6 +5611,13 @@ def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> b
             return True
         m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
         return bool(m and int(m.group(1)) >= 45)
+    # SQL Server ROWVERSION → opaque binary (Estuary/HVR BYTEA mapping). Not a
+    # specialty collapse — temporal TIMESTAMP invent is the fail-closed path.
+    if spec == "ROWVERSION":
+        bare = re.sub(r"\s*\(\s*\d+\s*\)", "", upper).strip()
+        if bare in {"BYTEA", "BINARY", "VARBINARY", "BLOB", "RAW", "IMAGE", "BYTES", "VARBYTE"}:
+            return True
+        return upper.startswith(("BINARY(", "VARBINARY(", "RAW(", "BYTES(", "VARBYTE("))
     return False
 
 
@@ -5847,12 +5865,14 @@ def create_new_mapping_target_type(
     invent observed ``DECIMAL(p,s)`` or ``FLOAT`` (IEEE residue) — never silent
     platform floor ``DECIMAL(38,15)`` from an empty typmod.
     """
-    # Bare decimal / float invent from samples before specialty / UUID paths.
+    # Bare DECIMAL/NUMERIC invent from samples before specialty / UUID paths.
     # Declared DECIMAL(p,s) wins; empty samples fall through (no fake (38,15)).
-    if samples and normalize_logical_type(src_type) in {LOGICAL_DECIMAL, "float"}:
+    # Declared FLOAT/DOUBLE/REAL must never invent DECIMAL from samples — that
+    # collapses IEEE polarity (audit §2.1 twin). Sample→DECIMAL only for bare
+    # fixed-point or open text sources (observe path elsewhere).
+    if samples and normalize_logical_type(src_type) == LOGICAL_DECIMAL:
         p, _s = parse_numeric_precision_scale(src_type)
-        src_logical = normalize_logical_type(src_type)
-        if p is None or src_logical == "float":
+        if p is None:
             from services.decimal_observe import (
                 create_new_decimal_carrier,
                 observe_numeric_samples,
@@ -5860,7 +5880,7 @@ def create_new_mapping_target_type(
 
             obs = observe_numeric_samples(samples)
             if obs.get("kind") not in {None, "empty"}:
-                carrier = create_new_decimal_carrier(
+                carrier: str = create_new_decimal_carrier(
                     samples, dest_db=dest_db_type, source_type=src_type
                 )
                 db = (dest_db_type or "").strip()
@@ -7441,9 +7461,22 @@ def bfile_locator_would_collapse(source_type: str, target_type: str) -> bool:
 
 
 def integer_bit_width(inferred: str | None) -> int | None:
-    """Signed bit width; UNSIGNED adds +1 so INT UNSIGNED is wider than INT."""
+    """Signed bit width; UNSIGNED adds +1 so INT UNSIGNED is wider than INT.
+
+    Bare logical family token ``integer`` (exact, any case-folded match to
+    ``LOGICAL_INTEGER`` with no INT4/BIGINT/… carrier spelling) returns
+    ``None`` — width unknown. Create-new then invents via ``DDL_TYPES``
+    (64-bit default). Explicit ``INTEGER`` / ``INT`` / ``INT4`` carriers
+    remain 32-bit so true INT32 sources are not invent-widened silently.
+    """
     raw = strip_identity_qualifier(inferred)
     if not raw:
+        return None
+    # Bare logical family token only (exact lowercase ``integer`` from
+    # ``LOGICAL_INTEGER`` / harness). Uppercase ``INTEGER`` remains INT32.
+    # Introspect must emit uppercase carriers so PG ``integer`` (int4) is not
+    # confused with the logical family token.
+    if raw.strip() == LOGICAL_INTEGER:
         return None
     # ClickHouse Int8/UInt8/… — case-sensitive; must not collide with PG INT8≡BIGINT.
     m_ch = re.match(r"^(U?Int)(8|16|32|64)\b", raw)
@@ -7502,6 +7535,107 @@ def integer_bit_width(inferred: str | None) -> int | None:
     return base
 
 
+def integer_width_carrier(native: str | None) -> str | None:
+    """Width-preserving integer carrier for introspect / Map / DDL invent.
+
+    SSOT for native→carrier integer spelling. Returns ``None`` when ``native``
+    is not an integer family type. Bare logical ``integer`` → ``BIGINT``
+    (never-narrower invent default). Explicit INT32 spellings stay ``INTEGER``.
+    """
+    raw = strip_identity_qualifier(native)
+    if not raw:
+        return None
+    if normalize_logical_type(raw) != LOGICAL_INTEGER:
+        # YEAR / SERIAL handled as integer logical — normalize covers them.
+        # Unsigned BIGINT travels as DECIMAL logical — keep token.
+        if _is_unsigned_integer_decimal_carrier(raw):
+            return strip_identity_qualifier(raw).strip().upper().replace("  ", " ")
+        return None
+    upper = raw.upper().strip()
+    unsigned = "UNSIGNED" in upper or bool(re.search(r"\bUINT\d*\b", upper))
+    # ClickHouse case-sensitive wires.
+    m_ch = re.match(r"^(U?Int)(8|16|32|64)\b", raw.strip())
+    if m_ch:
+        return m_ch.group(0)
+    width = integer_bit_width(raw)
+    if width is None:
+        # Bare logical family → safe 64-bit carrier.
+        return "BIGINT"
+    # Map width → canonical SQL carrier (UNSIGNED polarity preserved).
+    if width <= 8 or (unsigned and width == 9):
+        return "TINYINT UNSIGNED" if unsigned else "TINYINT"
+    if width == 9 and not unsigned:
+        return "TINYINT"
+    if width <= 16 or (unsigned and width == 17):
+        return "SMALLINT UNSIGNED" if unsigned else "SMALLINT"
+    if "MEDIUMINT" in upper or width in {24, 25}:
+        return "MEDIUMINT UNSIGNED" if unsigned else "MEDIUMINT"
+    if width <= 32 or (unsigned and width == 33):
+        # Prefer INT UNSIGNED token when source said INT/INTEGER UNSIGNED.
+        if unsigned:
+            return "INT UNSIGNED" if re.search(r"\bINT\b", upper) and "INTEGER" not in upper else "INTEGER UNSIGNED"
+        # INT4 / INTEGER / INT / INT32 → INTEGER; keep INT when source was bare INT.
+        if re.search(r"\bINT32\b", upper) or "INTEGER" in upper or re.search(r"\bINT4\b", upper):
+            return "INTEGER"
+        if re.search(r"\bINT\b", upper):
+            return "INT"
+        return "INTEGER"
+    # 64-bit (and unsigned 64 → DECIMAL path usually; if still integer logical)
+    if unsigned:
+        return "BIGINT UNSIGNED"
+    if "BIGSERIAL" in upper:
+        return "BIGSERIAL"
+    if "SERIAL" in upper and "BIG" not in upper and "SMALL" not in upper:
+        return "SERIAL"
+    return "BIGINT"
+
+
+def float_width_carrier(native: str | None) -> str | None:
+    """Width-preserving float carrier — REAL/FLOAT32 vs DOUBLE/FLOAT64.
+
+    Bare logical ``float`` → ``DOUBLE`` (never-narrower invent default).
+    Explicit single-precision tokens stay ``REAL`` / ``FLOAT`` / ``FLOAT32``.
+    """
+    raw = strip_identity_qualifier(native)
+    if not raw:
+        return None
+    if normalize_logical_type(raw) != LOGICAL_FLOAT:
+        return None
+    if raw.strip() == LOGICAL_FLOAT:
+        return "DOUBLE"
+    upper = re.sub(r"\bUNSIGNED\b", "", raw.upper()).strip()
+    compact = upper.replace(" ", "")
+    if compact in {"HALF", "HALFFLOAT", "FLOAT16"} or compact.startswith("HALFFLOAT"):
+        return "FLOAT16"
+    if compact in {"REAL", "FLOAT4", "FLOAT32", "BINARY_FLOAT"} or compact.startswith("REAL("):
+        if compact == "BINARY_FLOAT":
+            return "BINARY_FLOAT"
+        if compact in {"FLOAT32"}:
+            return "FLOAT32"
+        return "REAL"
+    m = re.match(r"^FLOAT\((\d+)\)$", compact)
+    if m:
+        return f"FLOAT({m.group(1)})"
+    if compact in {
+        "DOUBLE",
+        "DOUBLEPRECISION",
+        "FLOAT8",
+        "FLOAT64",
+        "BINARY_DOUBLE",
+    } or compact.startswith("DOUBLE"):
+        if compact == "BINARY_DOUBLE":
+            return "BINARY_DOUBLE"
+        if compact == "FLOAT64":
+            return "FLOAT64"
+        if "PRECISION" in upper:
+            return "DOUBLE PRECISION"
+        return "DOUBLE"
+    # Bare FLOAT carrier — keep token (dialect-default invent in ddl_type).
+    if compact == "FLOAT" or compact.startswith("FLOAT"):
+        return "FLOAT"
+    return "DOUBLE"
+
+
 def integer_storage_bounds(inferred: str | None) -> tuple[int, int] | None:
     """Inclusive (lo, hi) for a signed/unsigned integer carrier, else None.
 
@@ -7514,7 +7648,8 @@ def integer_storage_bounds(inferred: str | None) -> tuple[int, int] | None:
     unsigned = "UNSIGNED" in upper or bool(re.search(r"\bUINT\d*\b", upper))
     width = integer_bit_width(inferred)
     if width is None:
-        width = 32
+        # Bare logical integer — assume signed 64-bit (never-narrower invent).
+        width = 64
         unsigned = False
     if unsigned:
         nominal = max(1, width - 1)
@@ -7538,17 +7673,26 @@ def integer_width_would_narrow(source_type: str, target_type: str) -> bool:
 def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | None:
     """IEEE significand bits for float carriers (53=double, 24=single, 11=half).
 
-    Bare ``FLOAT`` is dialect-dependent: SQL Server / Snowflake FLOAT is IEEE-64;
-    MySQL FLOAT is IEEE-32. When ``dest_db`` is known, use the dialect default so
-    DOUBLE→FLOAT create-new on those engines is not a false mantissa collapse.
+    Bare logical family token ``float`` returns ``None`` (width unknown) so
+    create-new invents via ``DDL_TYPES`` / ``_FLOAT_DDL`` (IEEE-64 default).
+
+    Bare carrier ``FLOAT`` is dialect-dependent: SQL Server / Snowflake FLOAT is
+    IEEE-64; MySQL FLOAT is IEEE-32. When ``dest_db`` is known, use the dialect
+    default so DOUBLE→FLOAT create-new on those engines is not a false mantissa
+    collapse.
     """
     if normalize_logical_type(inferred) != LOGICAL_FLOAT:
+        return None
+    raw = strip_identity_qualifier(inferred)
+    # Bare logical family token only (exact lowercase ``float``).
+    # Uppercase ``FLOAT`` keeps dialect-default mantissa rules.
+    if raw.strip() == LOGICAL_FLOAT:
         return None
     # Strip UNSIGNED so REAL UNSIGNED / FLOAT UNSIGNED keep single-width tokens.
     upper = re.sub(
         r"\bUNSIGNED\b",
         "",
-        strip_identity_qualifier(inferred).upper(),
+        raw.upper(),
     ).strip().replace(" ", "")
     # IEEE half / float16 (~10 explicit + 1 implicit significand bits).
     if upper in {"HALF", "HALFFLOAT", "FLOAT16"} or upper.startswith("HALFFLOAT"):
@@ -7573,12 +7717,14 @@ def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | Non
         "BINARY_DOUBLE",
     } or upper.startswith("DOUBLE"):
         return 53
-    # Bare FLOAT is dialect-dependent.
+    # Bare FLOAT carrier is dialect-dependent.
     if upper == "FLOAT" or upper.startswith("FLOAT"):
         db = (dest_db or "").strip().lower()
-        if db in {"sqlserver", "mssql", "snowflake"}:
+        if db in {"sqlserver", "mssql", "snowflake", "postgresql", "postgres",
+                  "redshift", "duckdb", "bigquery", "spanner"}:
             return 53
-        # Fail-closed single so DOUBLE→FLOAT never silent-greens without dest.
+        # Fail-closed single so DOUBLE→FLOAT never silent-greens without dest
+        # on engines where FLOAT ≡ IEEE-32 (MySQL, Iceberg, ClickHouse, …).
         return 24
     return 53
 
@@ -7595,6 +7741,54 @@ def float_mantissa_would_narrow(
     if src_b is None or tgt_b is None:
         return False
     return src_b > tgt_b
+
+
+def ddl_invent_bit_width(dest_db: str, carrier_or_logical: str | None) -> int | None:
+    """Effective signed integer bit width of ``ddl_type(dest, carrier)`` invent."""
+    physical = ddl_type(dest_db, carrier_or_logical)
+    return integer_bit_width(physical)
+
+
+def ddl_invent_never_narrower_than_table(
+    dest_db: str,
+    logical: str,
+) -> bool:
+    """True when ``ddl_type(dest, logical)`` is at least as wide as ``DDL_TYPES``.
+
+    Audit P0 / harness gate: bare logical invent must not undercut the
+    destination table default (e.g. logical integer → INT32 while DDL_TYPES
+    says BIGINT/Int64/long).
+    """
+    table = (DDL_TYPES.get(dest_db) or {}).get(logical)
+    if not table:
+        return True
+    invented = ddl_type(dest_db, logical)
+    if logical == LOGICAL_INTEGER:
+        tw = integer_bit_width(table)
+        iw = integer_bit_width(invented)
+        # Table BIGINT / Int64 → treat missing width on dialect tokens via parse.
+        def _wide_token(s: str) -> bool:
+            u = (s or "").upper()
+            if u.strip() in {"N", "LONG", "INT64", "BIGINT", "I64"}:
+                return True
+            return any(
+                tok in u for tok in ("BIGINT", "INT64", "NUMBER(38", "INT8")
+            ) or bool(re.search(r"\bLONG\b", u))
+
+        if tw is None:
+            tw = 64 if _wide_token(str(table)) else 32
+        if iw is None:
+            iw = 64 if _wide_token(str(invented)) else 32
+        return iw >= tw
+    if logical == LOGICAL_FLOAT:
+        tb = float_mantissa_bits(table, dest_db=dest_db)
+        ib = float_mantissa_bits(invented, dest_db=dest_db)
+        if tb is None:
+            tb = 53
+        if ib is None:
+            ib = 53
+        return ib >= tb
+    return True
 
 
 def specialty_polarity_mismatch(source_type: str, target_type: str) -> bool:

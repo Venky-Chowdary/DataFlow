@@ -61,14 +61,16 @@ def test_normalize_sql_bind_timestamptz_precision_ddl():
 
 
 def test_generic_sql_to_sa_value_uses_ddl_tz_polarity():
-    from connectors.generic_sql import _to_sa_value
+    from connectors.generic_sql import _sa_type_for_logical, _to_sa_value
 
-    # logical collapsed to datetime must still honor ddl_type WITH TIME ZONE.
+    # Logical collapsed to datetime must still honor SA timezone=True from DDL.
+    sa_t = _sa_type_for_logical("TIMESTAMP WITH TIME ZONE", "postgresql", "postgresql")
+    assert getattr(sa_t, "timezone", False) is True
     got = _to_sa_value(
         "2024-08-09T01:58:42Z",
         "datetime",
-        None,
-        "TIMESTAMP WITH TIME ZONE",
+        sa_t,
+        "postgresql",
         "postgresql",
     )
     assert isinstance(got, datetime)

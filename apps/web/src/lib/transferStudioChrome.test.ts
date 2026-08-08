@@ -73,13 +73,14 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /validate-rail-primary-fix[\s\S]*width:\s*100%/);
   });
 
-  it("ValidateActionsRail labels review-grade passes as review, not ready", () => {
+  it("ValidateActionsRail labels review-grade passes as Review-grade, not ready", () => {
     const src = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
     assert.match(src, /reviewGrade/);
-    assert.match(src, /scoreLabel = reviewGrade \? "review"/);
+    assert.match(src, /statusLabel/);
+    assert.match(src, /reviewGrade\s*\n\s*\? "Review-grade"/);
     assert.match(src, /executeDisabled[\s\S]*reviewGrade/);
     assert.match(src, /Execute \(review\)/);
-    assert.match(src, /Review-grade result/);
+    assert.match(src, /Review-grade \/ local preflight/);
     assert.doesNotMatch(src, /span>\{passed \? "ready" : "blocked"\}/);
   });
 

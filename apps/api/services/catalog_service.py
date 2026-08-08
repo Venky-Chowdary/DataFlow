@@ -177,6 +177,12 @@ def catalog_summary() -> dict:
     )
     source_only = sum(1 for c in enriched if c.get("certification_tier") == "source_only")
     planned_tier = sum(1 for c in enriched if c.get("certification_tier") == "planned")
+    alias_tiles = sum(1 for c in enriched if c.get("is_hosted_alias"))
+    roadmap_tiles = sum(
+        1
+        for c in enriched
+        if c.get("certification_tier") == "planned" or c.get("effective_status") == "planned"
+    )
 
     try:
         from src.transfer.connector_capabilities import transfer_live_driver_types
@@ -186,7 +192,9 @@ def catalog_summary() -> dict:
         unique_types = []
 
     return {
+        # Marketplace tile count (includes Planned roadmap + hosted aliases).
         "total": data.get("total", len(data.get("connectors", []))),
+        "catalog_tile_total": len(enriched),
         # Primary honesty metric: unique package-available drivers (not alias tiles).
         "live": len(unique_types),
         "beta": by_status.get("beta", 0),
@@ -195,6 +203,9 @@ def catalog_summary() -> dict:
         "unique_drivers": len(unique_types),
         "unique_driver_types": unique_types,
         "catalog_tiles": catalog_tiles,
+        # Phase E1 — never market alias tiles as distinct engines.
+        "alias_tiles": alias_tiles,
+        "roadmap_tiles": roadmap_tiles,
         # Backward-compatible alias — prefer unique_drivers in UI.
         "transfer_live": len(unique_types),
         "transfer_live_tiles": catalog_tiles,
@@ -205,6 +216,10 @@ def catalog_summary() -> dict:
         "certified_tiles": certified_tiles,
         "source_only": source_only,
         "planned_count": planned_tier,
+        "honesty_note": (
+            "Public live/certified counts are unique engines (unique_drivers). "
+            "catalog_tile_total includes Planned roadmap and hosted aliases."
+        ),
     }
 
 

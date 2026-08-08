@@ -56,14 +56,15 @@ def test_ch_tuple_map_array_nested():
     from services.type_system import ddl_type, is_nested_document_collapse
 
     assert _ch_to_logical("Array(String)") == "ARRAY<TEXT>"
-    assert _ch_to_logical("Map(String, Int64)") == "MAP<TEXT,INTEGER>"
-    assert _ch_to_logical("Tuple(Int64, String)") == "STRUCT<_0:INTEGER, _1:TEXT>"
+    # Width-preserving nested carriers (audit §2.1) — Int64 must not collapse to INTEGER.
+    assert _ch_to_logical("Map(String, Int64)") == "MAP<TEXT,Int64>"
+    assert _ch_to_logical("Tuple(Int64, String)") == "STRUCT<_0:Int64, _1:TEXT>"
 
     assert ddl_type("clickhouse", "Array(String)") == "Array(String)"
     assert ddl_type("clickhouse", "Map(String, Int64)") == "Map(String, Int64)"
     assert ddl_type("clickhouse", "Tuple(Int64, String)").startswith("Tuple(")
     assert ddl_type("postgresql", "Tuple(Int64, String)") == "JSONB"
-    assert is_nested_document_collapse("STRUCT<_0:INTEGER, _1:TEXT>", "JSON") is True
+    assert is_nested_document_collapse("STRUCT<_0:Int64, _1:TEXT>", "JSON") is True
 
 
 def test_ch_ipv4_ipv6_to_inet():

@@ -69,7 +69,8 @@ FIDELITY_RECORDS = [
         "name": "فاطمة",
         "amount": "123456789012345.12345",
         "active": "0",
-        "created_at": "2024-07-14",
+        # Date-only → naive midnight invents UTC under TIMESTAMPTZ; keep Z.
+        "created_at": "2024-07-14T00:00:00Z",
         "payload": '{"emoji":"🚀"}',
         "note": "rtl-ar",
     },
@@ -229,7 +230,12 @@ def run_fidelity_proof() -> dict[str, Any]:
             connection_string=str(db_path),
             table="fidelity",
         )
-        mappings = [{"source": c, "target": c} for c in FIDELITY_COLUMNS]
+        mappings = []
+        for c in FIDELITY_COLUMNS:
+            m = {"source": c, "target": c}
+            if c == "amount":
+                m["target_type"] = "DECIMAL(38,10)"
+            mappings.append(m)
         from services.conversion_contract import approved_mapping_ddl_fingerprint
 
         ddl_fp = approved_mapping_ddl_fingerprint(mappings, dest_db="sqlite")

@@ -22,7 +22,8 @@ from src.transfer.models import EndpointConfig, TransferRequest
 EXPECTED = [
     {"id": "1", "name": "Alice", "amount": "100.50", "active": "1", "created_at": "2024-01-15T09:30:00Z"},
     {"id": "2", "name": "Bob", "amount": "250.00", "active": "0", "created_at": "2024-06-01 14:00:00+00:00"},
-    {"id": "3", "name": "Carol", "amount": "1,000.00", "active": "1", "created_at": "2024-12-31"},
+    # Date-only / naive wall-clock must not invent UTC under TIMESTAMPTZ maps.
+    {"id": "3", "name": "Carol", "amount": "1,000.00", "active": "1", "created_at": "2024-12-31T00:00:00Z"},
 ]
 
 

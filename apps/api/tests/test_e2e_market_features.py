@@ -9,6 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
 
 from src.transfer.adapters import write_destination_database
 from src.transfer.connector_dispatch import has_reader, has_writer, load_writer
@@ -37,6 +38,7 @@ def test_validate_transfer_allows_iceberg_and_saas_activation() -> None:
 
 
 def test_e2e_adapter_write_file_to_iceberg(tmp_path: Path) -> None:
+    pytest.importorskip("pyiceberg")
     warehouse = tmp_path / "wh"
     dest = EndpointConfig(
         kind="database",
@@ -66,6 +68,7 @@ def test_e2e_adapter_write_file_to_iceberg(tmp_path: Path) -> None:
 
 
 def test_e2e_stream_write_batch_iceberg(tmp_path: Path) -> None:
+    pytest.importorskip("pyiceberg")
     warehouse = tmp_path / "stream_wh"
     dest = EndpointConfig(
         kind="database",
@@ -126,14 +129,31 @@ def test_e2e_adapter_write_salesforce_reverse_etl(mock_req: MagicMock) -> None:
         host="example.my.salesforce.com",
         table="Account",
         api_key="session-token",
-        extra={"activation_batch_size": 200},
+        extra={
+            "activation_batch_size": 200,
+            # Offline: Studio-typed carriers so Describe DNS is not required.
+            "destination_column_types": {
+                "External_Id__c": "string",
+                "Name": "string",
+            },
+        },
     )
     records = [
         {"External_Id__c": "e1", "Name": "Acme"},
         {"External_Id__c": "e2", "Name": "Beta"},
     ]
     columns = ["External_Id__c", "Name"]
-    mappings = [{"source": c, "target": c} for c in columns]
+    # Stamp types so offline runners need not hit Salesforce Describe (DNS).
+    mappings = [
+        {
+            "source": c,
+            "target": c,
+            "source_type": "string",
+            "target_type": "string",
+            "inferredType": "string",
+        }
+        for c in columns
+    ]
 
     written, ddl, summary = write_destination_database(
         dest,
@@ -159,7 +179,18 @@ def test_e2e_stream_write_hubspot(mock_req: MagicMock) -> None:
     mock_resp.json.return_value = {"results": [{"id": "1"}], "errors": []}
     mock_req.return_value = mock_resp
 
-    dest = EndpointConfig(kind="database", format="hubspot", table="contacts", api_key="pat")
+    dest = EndpointConfig(
+        kind="database",
+        format="hubspot",
+        table="contacts",
+        api_key="pat",
+        extra={
+            "destination_column_types": {
+                "email": "string",
+                "firstname": "string",
+            },
+        },
+    )
     cfg = {
         "host": "",
         "port": 443,
@@ -170,6 +201,7 @@ def test_e2e_stream_write_hubspot(mock_req: MagicMock) -> None:
         "connection_string": "",
         "ssl": True,
         "api_key": "pat",
+        "extra": dict(dest.extra or {}),
     }
     written, _, summary = _write_batch(
         "hubspot",
@@ -178,7 +210,22 @@ def test_e2e_stream_write_hubspot(mock_req: MagicMock) -> None:
         "contacts",
         ["email", "firstname"],
         [["a@x.com", "Ada"]],
-        [{"source": "email", "target": "email"}, {"source": "firstname", "target": "firstname"}],
+        [
+            {
+                "source": "email",
+                "target": "email",
+                "source_type": "string",
+                "target_type": "string",
+                "inferredType": "string",
+            },
+            {
+                "source": "firstname",
+                "target": "firstname",
+                "source_type": "string",
+                "target_type": "string",
+                "inferredType": "string",
+            },
+        ],
         {"email": "string", "firstname": "string"},
         False,
         None,

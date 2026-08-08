@@ -297,8 +297,15 @@ _ledger_lock = threading.Lock()
 
 
 def get_ack_ledger() -> PilotAckLedger:
+    """Return the process ledger, rebinding when ``PILOT_ACK_PATH`` changes.
+
+    Tests (and rare ops overrides) set the brand env after first import; a
+    sticky singleton would stage acks on the default path while callers peek
+    a tmp_path ledger — silent Confirm loss.
+    """
     global _ledger
     with _ledger_lock:
-        if _ledger is None:
-            _ledger = PilotAckLedger()
+        desired = _default_path()
+        if _ledger is None or Path(_ledger.path).resolve() != Path(desired).resolve():
+            _ledger = PilotAckLedger(path=desired)
         return _ledger

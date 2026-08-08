@@ -1193,7 +1193,10 @@ def _bq_to_logical(
 
     d = upper
     if d in {"INT64", "INTEGER", "SMALLINT", "BIGINT", "TINYINT", "BYTEINT"}:
-        return "INTEGER"
+        from services.type_system import integer_width_carrier
+
+        # INT64/BIGINT → BIGINT carrier; SMALLINT stays SMALLINT (never INT32 collapse).
+        return integer_width_carrier(d) or "BIGINT"
     if d in {"BIGNUMERIC", "BIGDECIMAL"}:
         if precision is not None and scale is not None:
             return f"BIGNUMERIC({int(precision)},{int(scale)})"
@@ -1207,7 +1210,9 @@ def _bq_to_logical(
             return f"DECIMAL({int(precision)})"
         return "DECIMAL"
     if d in {"FLOAT64", "FLOAT", "DOUBLE"}:
-        return "FLOAT"
+        from services.type_system import float_width_carrier
+
+        return float_width_carrier(d) or "DOUBLE"
     if d == "BOOL":
         return "BOOLEAN"
     if d == "DATE":
@@ -2128,10 +2133,32 @@ def _pg_elem_to_logical(elem: str) -> str:
         if m.group(3) is not None:
             return f"DECIMAL({m.group(2)},{m.group(3)})"
         return f"DECIMAL({m.group(2)})"
-    if e in {"integer", "int", "int4", "smallint", "int2", "bigint", "int8", "serial", "bigserial"}:
-        return "INTEGER"
-    if e in {"real", "float4", "double precision", "float8"}:
-        return "FLOAT"
+    # Uppercase width carriers — never leave lowercase ``integer`` (ambiguous
+    # with LOGICAL_INTEGER) in inferred_type.
+    _elem_int = {
+        "bigint": "BIGINT",
+        "int8": "BIGINT",
+        "bigserial": "BIGSERIAL",
+        "integer": "INTEGER",
+        "int": "INTEGER",
+        "int4": "INTEGER",
+        "serial": "SERIAL",
+        "smallint": "SMALLINT",
+        "int2": "SMALLINT",
+        "smallserial": "SMALLSERIAL",
+    }
+    if e in _elem_int:
+        return _elem_int[e]
+    _elem_float = {
+        "real": "REAL",
+        "float4": "REAL",
+        "double precision": "DOUBLE PRECISION",
+        "float8": "DOUBLE PRECISION",
+        "double": "DOUBLE",
+        "float": "DOUBLE PRECISION",
+    }
+    if e in _elem_float:
+        return _elem_float[e]
     if e in {"boolean", "bool"}:
         return "BOOLEAN"
     if e == "date":
@@ -2214,11 +2241,22 @@ def _pg_to_logical(dtype: str) -> str:
         return "TID"
     if d == "pg_lsn":
         return "PG_LSN"
-    if d in ("integer", "smallint", "bigint"):
+    # Width-preserving uppercase carriers (audit P0: never bigint→INTEGER).
+    # Must not emit lowercase ``integer`` — that token is LOGICAL_INTEGER.
+    if d in ("bigint", "int8"):
+        return "BIGINT"
+    if d in ("smallint", "int2"):
+        return "SMALLINT"
+    if d in ("integer", "int", "int4"):
         return "INTEGER"
-    # IEEE floats stay FLOAT — never silently rewrite to fixed-point DECIMAL.
-    if d in ("real", "double precision", "double", "float", "float4", "float8"):
-        return "FLOAT"
+    # IEEE floats keep REAL vs DOUBLE polarity — never silently rewrite to DECIMAL.
+    if d in ("real", "float4"):
+        return "REAL"
+    if d in ("double precision", "float8", "double"):
+        return "DOUBLE PRECISION"
+    if d == "float":
+        # PostgreSQL FLOAT without precision ≡ DOUBLE PRECISION.
+        return "DOUBLE PRECISION"
     if d == "money":
         # PostgreSQL money ≈ fixed-scale currency — mirror SQL Server MONEY fidelity.
         return "DECIMAL(19,4)"
@@ -2407,12 +2445,24 @@ def _mysql_to_logical(dtype: str) -> str:
         # (non-strict MySQL silently stores invalid years as 0000).
         return "YEAR"
     # Preserve MEDIUMINT range (−8388608..8388607) for bind quarantine.
+    # Order matters: ``"int" in "bigint"`` is true — check bigint/smallint/tinyint first.
+    if "bigint" in d:
+        return "BIGINT"
     if "mediumint" in d:
         return "MEDIUMINT"
-    if "int" in d:
+    if "smallint" in d:
+        return "SMALLINT"
+    if "tinyint" in d:
+        # tinyint(1) boolean handled earlier in this mapper when present.
+        return "TINYINT"
+    if re.search(r"\bint\b", d) or d == "int":
         return "INTEGER"
-    # IEEE float/double/real — distinct from DECIMAL(p,s).
-    if "double" in d or "float" in d or "real" in d:
+    # IEEE float/double/real — preserve DOUBLE vs FLOAT polarity.
+    if "double" in d:
+        return "DOUBLE"
+    if "real" in d:
+        return "REAL"
+    if "float" in d:
         return "FLOAT"
     if "bool" in d:
         return "BOOLEAN"
@@ -2475,9 +2525,13 @@ def _oracle_to_logical(dtype: str) -> str:
     if d == "NUMBER" or d.startswith("NUMBER("):
         return "DECIMAL"
     if d in {"BINARY_FLOAT", "BINARY_DOUBLE"} or d.startswith("FLOAT"):
-        return "FLOAT"
+        from services.type_system import float_width_carrier
+
+        return float_width_carrier(d) or ("BINARY_DOUBLE" if "DOUBLE" in d else "FLOAT")
     if d in {"INTEGER", "INT", "SMALLINT", "BIGINT"}:
-        return "INTEGER"
+        from services.type_system import integer_width_carrier
+
+        return integer_width_carrier(d) or "BIGINT"
     if d == "BOOLEAN":
         return "BOOLEAN"
     if d == "DATE":
@@ -2568,9 +2622,13 @@ def _sqlserver_to_logical(dtype: str) -> str:
     if d == "smallmoney":
         return "SMALLMONEY"
     if d in {"float", "real"}:
-        return "FLOAT"
+        from services.type_system import float_width_carrier
+
+        return float_width_carrier(d) or "FLOAT"
     if d in {"int", "bigint", "smallint", "tinyint"}:
-        return "INTEGER"
+        from services.type_system import integer_width_carrier
+
+        return integer_width_carrier(d) or "BIGINT"
     if d == "bit":
         return "BOOLEAN"
     if d == "date":
@@ -3141,12 +3199,25 @@ def _ch_to_logical(dtype: str) -> str:
             return f"DECIMAL({prec},{int(m_scale.group(2))})"
         return "DECIMAL"
     if upper in {"FLOAT32", "FLOAT64", "FLOAT", "DOUBLE"}:
-        return "FLOAT"
+        from services.type_system import float_width_carrier
+
+        return float_width_carrier(upper) or "DOUBLE"
+    # ClickHouse Int*/UInt* — preserve wire width (Int64 ≠ Int32).
+    m_ch = re.match(r"^(U?Int)(8|16|32|64|128|256)$", raw.strip())
+    if m_ch:
+        bits = int(m_ch.group(2))
+        if bits > 64:
+            return f"DECIMAL({76 if bits >= 256 else 38},0)"
+        from services.type_system import integer_width_carrier
+
+        return integer_width_carrier(m_ch.group(0)) or "BIGINT"
     if re.match(
         r"^(U?INT\d*|INT8|INT16|INT32|INT64|INT128|INT256|UINT8|UINT16|UINT32|UINT64)$",
         upper,
     ):
-        return "INTEGER"
+        from services.type_system import integer_width_carrier
+
+        return integer_width_carrier(upper) or "BIGINT"
     # FixedString(n) is a fixed-length byte string (CH) — BINARY(n), not TEXT.
     if upper.startswith("FIXEDSTRING("):
         m_fs = re.match(r"^FIXEDSTRING\((\d+)\)$", upper)
@@ -3280,10 +3351,18 @@ def _sf_to_logical(
         r"^(INT|INTEGER|BIGINT|SMALLINT|TINYINT|BYTEINT)(\s*\(|$)",
         d,
     ):
-        return "INTEGER"
-    # Snowflake FLOAT / DOUBLE / REAL — approximate IEEE, not NUMBER.
+        from services.type_system import integer_width_carrier
+
+        tok = re.match(
+            r"^(INT|INTEGER|BIGINT|SMALLINT|TINYINT|BYTEINT)",
+            d,
+        )
+        return integer_width_carrier(tok.group(1) if tok else d) or "BIGINT"
+    # Snowflake FLOAT / DOUBLE / REAL — preserve IEEE width polarity.
     if d in {"FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLE PRECISION", "REAL"} or d.startswith("FLOAT"):
-        return "FLOAT"
+        from services.type_system import float_width_carrier
+
+        return float_width_carrier(d) or "DOUBLE"
     if "BOOLEAN" in d:
         return "BOOLEAN"
     if d == "DATE":
@@ -3332,9 +3411,10 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int):
-        return "INTEGER"
+        # Python int is unbounded — never stamp INT32; BIGINT is safe invent.
+        return "BIGINT" if abs(value) > 2_147_483_647 else "INTEGER"
     if isinstance(value, float):
-        return "FLOAT"
+        return "DOUBLE"
     # BSON ObjectId / Binary before generic str/bytes fallthrough.
     try:
         from bson import ObjectId as _BsonObjectId
@@ -3786,9 +3866,19 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
 
 def _es_mapping_type(es_type: str) -> str:
     t = (es_type or "text").lower()
-    if t in ("long", "integer", "short", "byte"):
+    if t == "long":
+        return "BIGINT"
+    if t == "integer":
         return "INTEGER"
-    if t in ("float", "double", "half_float"):
+    if t == "short":
+        return "SMALLINT"
+    if t == "byte":
+        return "TINYINT"
+    if t == "double":
+        return "DOUBLE"
+    if t == "half_float":
+        return "FLOAT16"
+    if t == "float":
         return "FLOAT"
     if t == "scaled_float":
         # Elasticsearch scaled_float is fixed-point-like — keep as DECIMAL.
@@ -4035,19 +4125,21 @@ def salesforce_field_to_logical(
     t = (field_type or "string").strip().lower()
     if t in {"boolean"}:
         return "BOOLEAN"
-    if t in {"int", "long", "integer"}:
+    if t in {"long"}:
+        return "BIGINT"
+    if t in {"int", "integer"}:
         return "INTEGER"
     if t in {"double", "currency", "percent"}:
         if precision is not None and scale is not None:
             p, s = int(precision), int(scale)
             if s == 0 and p <= 18:
-                return "INTEGER"
+                return "BIGINT"
             return f"DECIMAL({p},{s})"
         if t == "currency":
             return "DECIMAL(18,2)"
         if t == "percent":
             return "DECIMAL(18,2)"
-        return "FLOAT"
+        return "DOUBLE"
     if t == "date":
         return "DATE"
     if t == "datetime":
@@ -4544,9 +4636,9 @@ def _kafka_value_to_logical(value: Any) -> str:
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int) and not isinstance(value, bool):
-        return "INTEGER"
+        return "BIGINT" if abs(value) > 2_147_483_647 else "INTEGER"
     if isinstance(value, float):
-        return "FLOAT"
+        return "DOUBLE"
     if isinstance(value, dict):
         return "JSON"
     if isinstance(value, list):

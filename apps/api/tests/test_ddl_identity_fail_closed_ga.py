@@ -33,6 +33,7 @@ def test_enforce_ddl_identity_skips_without_preflight_when_no_mappings():
 
 
 def test_enforce_ddl_identity_fails_without_preflight_when_mappings_present():
+    """UI Execute without Validate still fails closed (skip_preflight=False)."""
     err = _enforce_ddl_identity(
         None,
         [{"source": "a", "target": "a", "target_type": "TEXT"}],
@@ -40,6 +41,17 @@ def test_enforce_ddl_identity_fails_without_preflight_when_mappings_present():
     )
     assert err is not None
     assert "preflight" in err.lower() or "validate" in err.lower()
+
+
+def test_enforce_ddl_identity_inline_stamp_when_skip_preflight():
+    """API/CLI/scheduler: skip_preflight stamps fingerprint inline (audit §2.2)."""
+    err = _enforce_ddl_identity(
+        None,
+        [{"source": "a", "target": "a", "target_type": "TEXT"}],
+        dest_db="postgresql",
+        skip_preflight=True,
+    )
+    assert err is None
 
 
 def test_enforce_ddl_identity_accepts_stamped_hash_without_preflight():

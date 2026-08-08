@@ -158,6 +158,18 @@ async def lifespan(app: FastAPI):
 
             start_transfer_scheduler()
 
+            # Phase F5 — claim-queue pull on API when SCHEDULER_MODE resolves to claim.
+            try:
+                from services.scheduler_mode import scheduler_mode
+                from services.worker_fleet import start_api_claim_loop
+
+                if start_api_claim_loop():
+                    print(f"[+] API claim loop started (scheduler_mode={scheduler_mode()})")
+                else:
+                    print(f"[+] Transfer scheduler local mode (scheduler_mode={scheduler_mode()})")
+            except Exception as claim_exc:
+                print(f"[!] API claim loop not started: {claim_exc}")
+
             from .services.mongodb_service import get_mongodb_service
             from .services.worker_leases import get_worker_lease_store
             from .transfer.background import run_transfer_async

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.type_system import (
+from services.decision_kernel import (
     is_lossy_coercion,
     is_precision_collapse_coercion,
     normalize_logical_type,
+)
+from services.type_system import (
     resolve_mapping_target_type,
     specialty_carrier_base,
     specialty_wire_preserves_value,
@@ -32,10 +34,11 @@ def validate_mapping_coercions(
     confidence or whether the coercion is usually lossy. This prevents silent
     data loss from schema drift.
 
-    Declared lossy coercions always block under strict unless a verified
-    continue-policy Migration Risk Contract clears the mapping (aligned with
-    G3/G4/G6). Boolean ``risk_acknowledged`` alone never softens. Balanced/
-    review may still warn for Map-time advisory without a contract.
+    Declared lossy coercions always block unless a verified continue-policy
+    Migration Risk Contract clears the mapping (aligned with G3/G4/G6 and the
+    data-rule matrix). Boolean ``risk_acknowledged`` alone never softens.
+    Balanced/review must not soft-green VARCHAR→NUMBER / precision collapses —
+    only a clearing Risk Contract demotes to warn.
 
     Same-logical pairs still run precision-collapse checks (DECIMAL/VARCHAR/TZ
     narrowing) — an early ``continue`` used to green G9 while G3/G6 blocked.
@@ -121,11 +124,9 @@ def validate_mapping_coercions(
             from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
             risk_cleared = mapping_has_clearing_risk_contract(m)
-            # Balanced Map-time advisory may warn; strict needs clearing contract.
-            if risk_cleared or balanced:
-                severity = "warn"
-            else:
-                severity = "block"
+            # Declared lossy always needs a clearing Risk Contract — balanced
+            # must not soft-green VARCHAR→NUMBER (data-rule matrix / G3 parity).
+            severity = "warn" if risk_cleared else "block"
         elif src_logical == tgt_logical:
             # Unreachable when precision_collapse is False (continued above).
             continue

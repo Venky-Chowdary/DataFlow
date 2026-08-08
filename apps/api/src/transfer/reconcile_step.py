@@ -259,6 +259,27 @@ def run_reconciliation(
         or dest_summary.get("conflict_columns")
         or []
     )
+    # Quarantine replay / upsert writers may stamp written_ids without PK meta.
+    # Resolve identity from Map so keyed Gate-8 can re-scope the target digest.
+    if not pk_cols and mapping_dicts:
+        try:
+            from services.primary_key import resolve_identity_key
+
+            _src_pk, tgt_pk = resolve_identity_key(
+                mappings=mapping_dicts,
+                source_columns=list(columns or []),
+                dest_kind=str(db_type or endpoint.format or ""),
+                validation_mode=validation_mode,
+                purpose="uniqueness",
+            )
+            if tgt_pk:
+                pk_cols = [str(tgt_pk)]
+                dest_summary.setdefault("primary_key_columns", list(pk_cols))
+                dest_summary.setdefault("conflict_columns", list(pk_cols))
+        except Exception as exc:
+            logging.getLogger(__name__).debug(
+                "Gate-8 identity resolve skipped: %s", exc, exc_info=exc
+            )
     source_checksum = _compute_source_checksum(
         records,
         columns,
@@ -305,26 +326,23 @@ def run_reconciliation(
     # the negative row count and surface a softer "writer only" result.
     # Strict/maximum modes verify the whole target table; balanced samples 5000 rows.
     checksum_limit = 0 if validation_mode in ("strict", "maximum") else 5000
-    target_rows, target_checksum = verify_target(
-        db_type,
-        cfg,
-        schema=schema,
-        table_name=table_name,
-        fallback_rows=-1,
-        fallback_checksum="",
-        target_columns=target_cols,
-        limit=checksum_limit,
-        dest_types=dest_types,
-        written_ids=[
-            str(x)
-            for x in (dest_summary.get("written_ids") or [])
-            if x is not None and str(x) != ""
-        ]
-        or None,
+
+    from services.sync_cursor import is_overwrite_sync
+
+    sync_mode_early = str(
+        dest_summary.get("sync_mode")
+        or dest_summary.get("effective_sync_mode")
+        or ""
     )
-
-    strict_checksum = validation_mode in ("strict", "maximum")
-
+    allow_extra_early = (
+        not is_overwrite_sync(sync_mode_early)
+        and sync_mode_early.lower() not in {"full_refresh_mirror", "mirror", "scd2"}
+    )
+    written_ids = [
+        str(x)
+        for x in (dest_summary.get("written_ids") or [])
+        if x is not None and str(x) != ""
+    ] or None
     # Streaming transfers pass records=[] — use the bounded sample the writer
     # stashed so append/upsert Gate-8 can still prove key-aligned fidelity.
     sample_records = list(records or [])
@@ -336,6 +354,37 @@ def run_reconciliation(
         )
         if isinstance(stashed, list):
             sample_records = [r for r in stashed if isinstance(r, dict)]
+    pk_column = str(pk_cols[0]) if len(pk_cols) == 1 else None
+    if allow_extra_early and pk_column and not written_ids and sample_records:
+        written_ids = [
+            str(x)
+            for x in _source_key_values(
+                sample_records,
+                sort_key=pk_column,
+                mappings=mapping_dicts,
+                limit=500,
+            )
+            if x is not None and str(x) != ""
+        ] or None
+
+    # Always full-table first for SQL. Keyed batch proof is a fallback when the
+    # sink legitimately has extras (upsert/append into non-empty) — never for a
+    # first load where target_rows == source_rows (would fingerprint a sample).
+    target_rows, target_checksum = verify_target(
+        db_type,
+        cfg,
+        schema=schema,
+        table_name=table_name,
+        fallback_rows=-1,
+        fallback_checksum="",
+        target_columns=target_cols,
+        limit=checksum_limit,
+        dest_types=dest_types,
+        written_ids=None,
+        pk_column=None,
+    )
+
+    strict_checksum = validation_mode in ("strict", "maximum")
 
     sample_compare = None
     if sample_records and table_name and target_cols:
@@ -546,13 +595,7 @@ def run_reconciliation(
     # We have a verified read-back. Extra dest rows are legitimate for append /
     # upsert into a non-empty sink; overwrite/mirror/replace must not soft-pass
     # extras (Airbyte/Fivetran-class honesty: mode-aware reconcile).
-    from services.sync_cursor import is_overwrite_sync
-
-    sync_mode = str(
-        dest_summary.get("sync_mode")
-        or dest_summary.get("effective_sync_mode")
-        or ""
-    )
+    sync_mode = sync_mode_early
     allow_extra = not is_overwrite_sync(sync_mode)
     if sync_mode.lower() in {"full_refresh_mirror", "mirror", "scd2"}:
         allow_extra = False
@@ -585,6 +628,41 @@ def run_reconciliation(
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
         ).to_dict()
+
+    # Upsert/append into a larger sink: whole-table digests are not comparable to
+    # the batch. Re-fingerprint destination WHERE pk IN (batch keys) while keeping
+    # full-table cardinality for the operator report.
+    expected_batch = max(source_rows - dropped_rows - rows_skipped, 0)
+    # Upsert/append/quarantine-replay into a non-empty table: whole-table digests
+    # are not comparable. Keyed fingerprint of written_ids proves the batch for
+    # balanced and strict alike (strict_checksum only governs fail-closed severity
+    # inside reconcile(), not whether we may re-scope the target digest).
+    if (
+        allow_extra
+        and pk_column
+        and written_ids
+        and target_rows > expected_batch
+        and source_checksum
+        and target_checksum
+        and source_checksum != target_checksum
+        and db_type
+        in {"sqlite", "postgresql", "redshift", "generic_sql", "mongodb"}
+    ):
+        _keyed_rows, keyed_checksum = verify_target(
+            db_type,
+            cfg,
+            schema=schema,
+            table_name=table_name,
+            fallback_rows=target_rows,
+            fallback_checksum=target_checksum,
+            target_columns=target_cols,
+            limit=checksum_limit,
+            dest_types=dest_types,
+            written_ids=written_ids,
+            pk_column=pk_column,
+        )
+        if keyed_checksum:
+            target_checksum = keyed_checksum
 
     report = reconcile(
         source_rows=source_rows,

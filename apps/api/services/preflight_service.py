@@ -1376,34 +1376,70 @@ def run_file_preflight(
         acknowledgment_reason=acknowledgment_reason,
     )
 
-    # Module 12 — Conversion Contract + Map→DDL identity stamp (never invent green).
+    # Module 12 + Phase C11 — Conversion Contract, DDL identity, Decision Artifact.
     try:
-        from services.conversion_contract import (
-            classify_mapping,
+        from services.decision_kernel import (
+            assess_mapping_risk,
+            build_artifact_from_mappings,
             ddl_identity_report,
+            orchestrate_validation_summary,
         )
 
         dest_for_ddl = (destination_db_type or "").strip().lower()
+        src_for_cap = (source_connector_id or "").strip().lower()
+        decision_art = build_artifact_from_mappings(
+            list(mappings or []),
+            dest_db=dest_for_ddl,
+            source_db=src_for_cap,
+            route_id=f"validate:{dest_for_ddl or 'unknown'}",
+            sync_mode=str(sync_mode or "full_refresh_overwrite"),
+        )
+        conv_cols = [
+            {
+                "source": m.get("source"),
+                "target": m.get("target"),
+                **assess_mapping_risk(m, destination_db_type=dest_for_ddl),
+            }
+            for m in (mappings or [])[:80]
+            if isinstance(m, dict)
+        ]
+        art_dict = decision_art.to_dict()
+        # Gates already ran — classify into Validation Orchestrator buckets.
+        def _gate_row(g) -> dict:
+            if isinstance(g, dict):
+                return {
+                    "id": str(g.get("id") or g.get("gate_id") or ""),
+                    "status": str(g.get("status") or ""),
+                    "message": str(g.get("message") or ""),
+                }
+            gid = getattr(g, "gate_id", "")
+            status = getattr(g, "status", "")
+            return {
+                "id": str(getattr(gid, "value", gid) or ""),
+                "status": str(getattr(status, "value", status) or ""),
+                "message": str(getattr(g, "message", "") or ""),
+            }
+
+        validation_orch = orchestrate_validation_summary(
+            decision_artifact=art_dict,
+            gates=[_gate_row(g) for g in list(getattr(result, "gates", None) or [])],
+            blockers=[
+                {**_gate_row(b), "status": "block"}
+                for b in list(getattr(result, "blockers", None) or [])
+            ],
+        )
         proof_bundle = {
             **proof_bundle,
             "ddl_identity": ddl_identity_report(
                 list(mappings or []),
                 dest_db=dest_for_ddl,
             ),
+            "decision_artifact": art_dict,
+            "decision_artifact_hash": decision_art.content_hash,
+            "validation_orchestrator": validation_orch,
             "conversion_contract": {
                 "version": "conversion_contract.v1",
-                "columns": [
-                    {
-                        "source": m.get("source"),
-                        "target": m.get("target"),
-                        **classify_mapping(
-                            m,
-                            destination_db_type=dest_for_ddl,
-                        ),
-                    }
-                    for m in (mappings or [])[:80]
-                    if isinstance(m, dict)
-                ],
+                "columns": conv_cols,
             },
         }
     except Exception as conv_exc:

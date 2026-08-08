@@ -156,7 +156,9 @@ def _zendesk_live_carriers(
         carrier = zendesk_field_to_carrier(f)
         if not str(carrier or "").strip():
             continue
-        for key in (f.get("name"), f.get("title"), f.get("id")):
+        # Zendesk Ticket Fields API uses raw_title (system key) + title (label);
+        # live Describe fixtures and admin payloads may omit ``name``.
+        for key in (f.get("name"), f.get("raw_title"), f.get("title"), f.get("id")):
             if key is None or key == "":
                 continue
             live[str(key)] = carrier

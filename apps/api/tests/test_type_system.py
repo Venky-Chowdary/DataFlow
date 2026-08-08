@@ -29,8 +29,10 @@ def test_oracle_sdo_geometry_normalizes_to_geography():
 
 
 def test_type_system_redshift_ddl():
-    # Width-preserving invent — INTEGER stays INTEGER, not invent-widen BIGINT.
-    assert ddl_type("redshift", "integer") == "INTEGER"
+    # Bare logical integer invents 64-bit (DDL_TYPES / never-narrower).
+    # Explicit INT32 carrier ``INTEGER`` stays width-preserving.
+    assert ddl_type("redshift", "integer") == "BIGINT"
+    assert ddl_type("redshift", "INTEGER") == "INTEGER"
     assert ddl_type("redshift", "json") == "SUPER"
     assert ddl_type("postgresql", "JSON") == "JSONB"
     assert ddl_type("snowflake", "ARRAY") == "VARIANT"
@@ -40,10 +42,13 @@ def test_type_system_redshift_ddl():
 
 
 def test_type_system_lakehouse_ddl():
-    assert ddl_type("databricks", "integer") == "INT"
+    # Bare logical → 64-bit; explicit INT32 carrier stays INT/int.
+    assert ddl_type("databricks", "integer") == "BIGINT"
+    assert ddl_type("databricks", "INTEGER") == "INT"
     assert ddl_type("databricks", "json") == "STRING"
-    assert ddl_type("delta", "TIMESTAMP") == "TIMESTAMP"
-    assert ddl_type("iceberg", "integer") == "int"
+    assert ddl_type("delta", "TIMESTAMP") == "TIMESTAMP_NTZ"
+    assert ddl_type("iceberg", "integer") == "long"
+    assert ddl_type("iceberg", "INTEGER") == "int"
     assert ddl_type("apache_iceberg", "json") == "string"
     assert ddl_type("iceberg", "UUID") == "uuid"
     assert ddl_type("unity_catalog", "DECIMAL") == "DECIMAL(38,10)"

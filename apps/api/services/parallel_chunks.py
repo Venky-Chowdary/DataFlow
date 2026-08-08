@@ -27,7 +27,8 @@ from typing import TypeVar
 T = TypeVar("T")
 R = TypeVar("R")
 
-DEFAULT_WORKERS = int(getenv_brand("PARALLEL_WORKERS", "1"))
+# Phase F6 — library default follows stream (env unset → 4, not 1).
+DEFAULT_WORKERS = int(getenv_brand("PARALLEL_WORKERS", "4") or "4")
 DEFAULT_PREFETCH = int(getenv_brand("PARALLEL_QUEUE", str(max(DEFAULT_WORKERS * 2, 4))))
 
 

@@ -881,7 +881,10 @@ def stream_file_to_database(
         )
     drift_detector = BatchDriftDetector()
 
-    max_workers = int(getenv_brand("PARALLEL_WORKERS", str(min(2, os.cpu_count() or 1))))
+    # Phase F6 — align with stream.py (min(4, CPUs); was 2).
+    max_workers = int(
+        getenv_brand("PARALLEL_WORKERS", str(min(4, os.cpu_count() or 1)))
+    )
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
     # Snowflake COPY INTO uses a named temporary stage per table; concurrent batches
     # overwrite each other's stage files, so it must also be sequential.
@@ -1081,7 +1084,7 @@ def stream_file_to_database(
     batch_enum = enumerate(batch_iter, start=first_index)
 
     def _apply_file_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, coerced_null_total, last_checksum
+        nonlocal written, rejected_total, coerced_null_total, last_checksum, dest_summary
         if result["fingerprints"]:
             fp_accumulator.add_many(result["fingerprints"])
         written += result["batch_written"]
@@ -1093,6 +1096,24 @@ def stream_file_to_database(
         ]
         rejected_details.extend(new_details)
         last_checksum = result["last_checksum"] or last_checksum
+        batch_summary = result.get("dest_summary")
+        if isinstance(batch_summary, dict) and batch_summary:
+            # Merge batch writer meta; accumulate written_ids across chunks.
+            prior_ids = list(dest_summary.get("written_ids") or [])
+            dest_summary = dict(batch_summary)
+            batch_ids = list(batch_summary.get("written_ids") or [])
+            if prior_ids or batch_ids:
+                merged: list[str] = []
+                seen: set[str] = set()
+                for x in prior_ids + batch_ids:
+                    s = str(x)
+                    if not s or s in seen:
+                        continue
+                    seen.add(s)
+                    merged.append(s)
+                    if len(merged) >= 500:
+                        break
+                dest_summary["written_ids"] = merged
 
         # Persist batch quarantine before continuing — crash must not lose DLQ.
         if new_details and job_id:
@@ -1114,7 +1135,12 @@ def stream_file_to_database(
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
         checkpoint.status = "running"
-        checkpoint_service.require_save(checkpoint)
+        # Durable resume requires a real job id. Path / ad-hoc streams with an
+        # empty job_id must not hard-fail on job-store reject (no resume contract).
+        durable_job = str(job_id or getattr(checkpoint, "job_id", "") or "").strip()
+        if durable_job:
+            checkpoint.job_id = durable_job
+            checkpoint_service.require_save(checkpoint)
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
@@ -1185,6 +1211,10 @@ def stream_file_to_database(
     dest_summary["rejected_details_sample"] = list(rejected_details)[:200]
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
+    dest_summary["sync_mode"] = effective_sync
+    if pk_target_cols:
+        dest_summary["conflict_columns"] = list(pk_target_cols)
+        dest_summary["primary_key_columns"] = list(pk_target_cols)
     # Stash a bounded source sample so append/upsert Gate-8 reconciliation can
     # perform key-aligned read-back verification instead of failing closed.
     if sample_rows:
@@ -1192,6 +1222,20 @@ def stream_file_to_database(
         if source_filter:
             filtered_sample = apply_row_filter(sample_rows, source_filter)
         dest_summary["reconcile_sample"] = (filtered_sample or [])[:50]
+        # Batch PK ids for keyed Gate-8 (full-table digests are not comparable
+        # for upsert/append into a non-empty sink).
+        if (
+            len(pk_target_cols) == 1
+            and not dest_summary.get("written_ids")
+            and filtered_sample
+        ):
+            from connectors.writer_common import written_ids_from_mapped_rows
+
+            dest_summary["written_ids"] = written_ids_from_mapped_rows(
+                list(filtered_sample),
+                list(filtered_sample[0].keys()) if filtered_sample else [],
+                pk_target_cols,
+            )
     # Source row count must include quarantined hold-outs so Gate-8 expects
     # written == source - held_out. Never set this to `written` alone under
     # quarantine (that double-subtracts rejected and falsely fails reconcile).

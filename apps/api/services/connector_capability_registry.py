@@ -861,6 +861,119 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": ["Custom connectors need a spec or SDK. Document pagination, auth, and rate limits."],
         "recommended_batch_size": 100,
     },
+    # Phase F7 — file line formats (TRANSFER_READY unique drivers)
+    "jsonl": {
+        "transfer_ready": True,
+        "tier": TIER_HIGHEST,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": False,
+        "supports_unstructured": True,
+        "common_issues": ["One JSON object per line; schema inferred from samples."],
+        "recommended_batch_size": 10000,
+    },
+    "ndjson": {
+        "transfer_ready": True,
+        "tier": TIER_HIGHEST,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": False,
+        "supports_unstructured": True,
+        "common_issues": ["Alias of JSON Lines; prefer jsonl catalog id when possible."],
+        "recommended_batch_size": 10000,
+    },
+    # Phase F7 — vector engines (TRANSFER_READY unique drivers)
+    "pgvector": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": True,
+        "requires_schema": True,
+        "supports_binary": True,
+        "common_issues": [
+            "Vector dimension must be declared — refuse inventing 1536.",
+            "Rides PostgreSQL driver; extension must be installed on the target.",
+        ],
+        "recommended_batch_size": 500,
+    },
+    "qdrant": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": True,
+        "common_issues": ["Point id + vector required; payload schema is soft."],
+        "recommended_batch_size": 500,
+    },
+    "weaviate": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": True,
+        "supports_binary": True,
+        "common_issues": ["Class schema must exist or be auto-created with explicit vectorizer config."],
+        "recommended_batch_size": 500,
+    },
+    "pinecone": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": True,
+        "common_issues": ["Index dimension is fixed at create time — mismatch fails closed."],
+        "recommended_batch_size": 100,
+        "rate_limit_notes": "Respect Pinecone upsert QPS; batch under recommended_batch_size.",
+    },
+    "milvus": {
+        "transfer_ready": True,
+        "tier": TIER_HIGH,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": True,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": True,
+        "supports_binary": True,
+        "common_issues": ["Collection schema + index required before search-quality loads."],
+        "recommended_batch_size": 500,
+    },
 }
 
 
@@ -1016,6 +1129,107 @@ def is_schemaless(key: str) -> bool:
 
 def recommended_batch_size(key: str) -> int:
     return int(get_connector_capability(key).get("recommended_batch_size", 1000))
+
+
+# Fields that affect Migration Decision Kernel / Execution Plan choices.
+# Hash is stable across process restarts; marketing prose is excluded.
+_KERNEL_CAPABILITY_HASH_FIELDS: tuple[str, ...] = (
+    "normalized_key",
+    "driver_type",
+    "transfer_ready",
+    "tier",
+    "pattern",
+    "supports_cdc",
+    "supports_streaming",
+    "supports_upsert",
+    "supports_append",
+    "supports_overwrite",
+    "supports_merge",
+    "supports_lsn_guard",
+    "requires_schema",
+    "supports_binary",
+    "supports_unstructured",
+    "pagination",
+    "recommended_batch_size",
+    "write_strategy",
+)
+
+
+def capability_profile_hash(key: str) -> str:
+    """Deterministic SHA-256 of kernel-relevant capability fields (Phase F7)."""
+    import hashlib
+    import json
+
+    cap = get_connector_capability(key)
+    body = {f: cap.get(f) for f in _KERNEL_CAPABILITY_HASH_FIELDS}
+    # Include a compact, sorted view of driver_capabilities write/source flags.
+    caps = cap.get("driver_capabilities") or {}
+    if isinstance(caps, dict):
+        body["driver_flags"] = {
+            k: caps.get(k)
+            for k in sorted(
+                (
+                    "read",
+                    "write",
+                    "source_only",
+                    "dest_only",
+                    "preflight",
+                    "cdc",
+                    "certified",
+                )
+            )
+            if k in caps
+        }
+    raw = json.dumps(body, sort_keys=True, separators=(",", ":"), default=str).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(raw).hexdigest()
+
+
+def export_live_capability_matrix() -> dict[str, Any]:
+    """Machine-readable capability matrix for all TRANSFER_READY unique drivers."""
+    from datetime import datetime, timezone
+
+    from src.transfer.connector_capabilities import (
+        TRANSFER_READY_CATALOG_IDS,
+        resolve_driver_type,
+    )
+
+    drivers = sorted({resolve_driver_type(cid) for cid in TRANSFER_READY_CATALOG_IDS})
+    engines: list[dict[str, Any]] = []
+    for driver in drivers:
+        cap = get_connector_capability(driver)
+        engines.append(
+            {
+                "engine_id": driver,
+                "in_static_registry": driver in CAPABILITY_REGISTRY
+                or _normalize_connector_id(driver) in CAPABILITY_REGISTRY,
+                "capability_profile_hash": capability_profile_hash(driver),
+                "transfer_ready": bool(cap.get("transfer_ready")),
+                "supports_cdc": bool(cap.get("supports_cdc")),
+                "supports_upsert": bool(cap.get("supports_upsert")),
+                "supports_merge": bool(cap.get("supports_merge")),
+                "requires_schema": bool(cap.get("requires_schema")),
+                "pagination": cap.get("pagination") or "none",
+                "recommended_batch_size": int(cap.get("recommended_batch_size") or 1000),
+                "tier": cap.get("tier"),
+            }
+        )
+    missing_static = [
+        e["engine_id"] for e in engines if not e["in_static_registry"]
+    ]
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "unique_driver_count": len(engines),
+        "catalog_transfer_ready_tile_count": len(TRANSFER_READY_CATALOG_IDS),
+        "missing_static_registry": missing_static,
+        "engines": engines,
+        "honesty_note": (
+            "unique_driver_count is the public live count — not catalog tile count. "
+            "transfer_ready is forced from connector_capabilities SSOT."
+        ),
+    }
 
 
 STRUCTURED_FILE_FORMATS: set[str] = {

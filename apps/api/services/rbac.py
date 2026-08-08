@@ -98,11 +98,13 @@ _PUBLIC_PATHS = {
     "/openapi.json",
     "/redoc",
     "/api/v1/auth/login",
+    "/api/v1/auth/logout",
     "/api/v1/auth/bootstrap",
     "/api/v1/auth/sso/providers",
     "/api/v1/auth/sso/start",
     "/api/v1/auth/sso/callback",
     "/auth/login",
+    "/auth/logout",
     "/auth/bootstrap",
     "/auth/sso/providers",
     "/api/v1/transfer/capabilities",
@@ -144,14 +146,16 @@ _PATH_RULES: list[tuple[str, str, str]] = [
 
 
 def normalize_role(role: str | None) -> str:
+    """Map role labels to the closed set {admin, editor, operator, viewer}.
+
+    Phase D5 — unknown / legacy labels (including ``Workspace tester``) fail
+    closed to **viewer**, never escalate to editor.
+    """
     if not role:
         return "viewer"
     role = str(role).strip().lower()
     if role in ("admin", "editor", "operator", "viewer"):
         return role
-    # Map legacy/test roles to editor so the dev user keeps working.
-    if "tester" in role or "test" in role:
-        return "editor"
     return "viewer"
 
 

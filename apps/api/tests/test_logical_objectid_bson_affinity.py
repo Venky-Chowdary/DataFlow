@@ -114,7 +114,22 @@ def test_g3_schemaless_bson_affinity_blocks_objectid_to_integer():
     blob = str((blocked.details or {}).get("issues", [])) + blocked.message
     assert "affinity" in blob.lower() or "ObjectId" in blob or "objectid" in blob.lower()
 
+    # Boolean risk_acknowledged alone must never clear affinity — signed continue
+    # Migration Risk Contract only (fail-closed GA).
+    from services.migration_risk_contract import create_migration_risk_contract
+
     plan.mappings[0].risk_acknowledged = True
+    still_blocked = gate_g3_schema_contract(PreflightContext(plan=plan))
+    assert still_blocked.status == GateStatus.BLOCK
+
+    plan.mappings[0].risk_contract = create_migration_risk_contract(
+        column="_id",
+        source_type="OBJECTID",
+        destination_type="INTEGER",
+        approved_by="admin@dataflow.app",
+        reason="ObjectId→INTEGER affinity acknowledged for legacy key",
+        execution_policy="CAST_AND_CONTINUE",
+    ).to_dict()
     cleared = gate_g3_schema_contract(PreflightContext(plan=plan))
     assert cleared.status == GateStatus.SKIP
     assert (cleared.details or {}).get("bson_affinity") or "affinity" in cleared.message.lower()

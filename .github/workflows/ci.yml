@@ -51,6 +51,12 @@ jobs:
         run: |
           python -m pytest tests/test_evidence_pack.py -q --tb=short
 
+      - name: God-module size budgets (Phase F8)
+        working-directory: apps/api
+        run: |
+          python scripts/check_module_size_budgets.py
+          python scripts/connector_capability_matrix_report.py
+
       - name: Upload evidence artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -61,6 +67,8 @@ jobs:
             apps/api/data/proofs/EVIDENCE_CATALOG.md
             apps/api/data/proofs/abbreviation_coverage.json
             apps/api/data/proofs/mapping_connector_pair_matrix/
+            apps/api/data/proofs/module_size_budgets.json
+            apps/api/data/proofs/connector_capability_matrix.json
 
   # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
   gitops:
@@ -279,6 +287,7 @@ jobs:
           PY
 
       - name: Run tests
+        id: api_tests
         run: npm run test
         env:
           DATAFLOW_JOB_STORE: memory
@@ -292,7 +301,11 @@ jobs:
           PGPASSWORD: dataflow
           PGDATABASE: dataflow
 
+      # Phase B9 — proof steps MUST run even when Run tests fails (audit §3.2).
+      # Never silently omit CDC / warehouse evidence from the CI record.
       - name: CDC matrix report
+        id: cdc_matrix
+        if: ${{ !cancelled() && (success() || failure()) }}
         run: npm run test:cdc
         env:
           DATAFLOW_JOB_STORE: memory
@@ -311,31 +324,116 @@ jobs:
           DATAFLOW_CDC_LEASE_REDIS_URL: redis://127.0.0.1:6379/15
 
       - name: Warehouse SKU proof report
+        id: warehouse_sku
+        if: ${{ !cancelled() && (success() || failure()) }}
         # Always-on Snowflake (fakesnow) + BigQuery (goccy emulator) proof.
         # SaaS reverse-ETL destinations (Salesforce/HubSpot) skip without creds.
         working-directory: apps/api
         run: |
-          python -m pytest \
-            tests/test_production_sku_matrix.py \
-            tests/test_execute_tracked_csv_to_bigquery.py \
-            tests/test_execute_tracked_csv_to_bigquery_upsert.py \
-            tests/test_execute_tracked_csv_to_snowflake_upsert.py \
-            -k "snowflake or bigquery" \
-            -q --tb=short --durations=0 \
-            | tee warehouse_sku_report.txt
-          passed=$(grep -oP '^\d+(?= passed)' warehouse_sku_report.txt | head -1 || echo "0")
-          skipped=$(grep -oP '^\d+(?= skipped)' warehouse_sku_report.txt | head -1 || echo "0")
+          set +e
+          python scripts/warehouse_sku_report.py
+          code=$?
           echo "### Warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ${passed:-0} passed, ${skipped:-0} skipped (Snowflake via fakesnow, BigQuery via emulator)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- SaaS reverse-ETL endpoints (Salesforce/HubSpot) skipped when credentials are absent" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f data/proofs/warehouse_sku_report.json ]; then
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path("data/proofs/warehouse_sku_report.json")
+          d = json.loads(p.read_text(encoding="utf-8"))
+          print(f"- **{'PASS' if d.get('exit_code') == 0 else 'FAIL'}** — {d.get('passed', 0)} passed, {d.get('failed', 0)} failed, {d.get('skipped', 0)} skipped")
+          for reason in d.get("skip_reasons") or []:
+              print(f"- skip: {reason}")
+          print("- Artifact: `apps/api/data/proofs/warehouse_sku_report.json`")
+          PY
+          else
+            echo "- **NO ARTIFACT** — warehouse_sku_report.py did not write proof JSON" >> "$GITHUB_STEP_SUMMARY"
+            code=1
+          fi
+          exit $code
         env:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
           DATAFLOW_PII_HASH_KEY: test-pii-key
           DATAFLOW_ALLOW_STUB_WRITES: "1"
+          DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
+
+      - name: TRANSFER_READY certification matrix
+        id: transfer_ready_matrix
+        if: ${{ !cancelled() && (success() || failure()) }}
+        # Phase E2 — publish PRODUCTION_SKU × unique_drivers honesty artifact.
+        working-directory: apps/api
+        run: |
+          python scripts/transfer_ready_matrix_report.py
+          echo "### TRANSFER_READY matrix" >> "$GITHUB_STEP_SUMMARY"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path("data/proofs/transfer_ready_matrix.json")
+          d = json.loads(p.read_text(encoding="utf-8"))
+          print(f"- unique_drivers: {d.get('unique_driver_count')}")
+          print(f"- PRODUCTION_SKU routes: {d.get('production_sku_route_count')}")
+          print("- Artifact: `apps/api/data/proofs/transfer_ready_matrix.json`")
+          PY
+
+      - name: Upload migration proof artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-proof-ci
+          if-no-files-found: warn
+          path: |
+            apps/api/data/proofs/cdc_matrix_report.json
+            apps/api/data/proofs/warehouse_sku_report.json
+            apps/api/data/proofs/transfer_ready_matrix.json
+
+      - name: Frontend unit contracts
+        id: frontend_tests
+        if: ${{ !cancelled() && (success() || failure()) }}
+        run: npm run test:web
 
       - name: Build web
+        id: web_build
+        if: ${{ !cancelled() && (success() || failure()) }}
         run: npm run build
+
+      - name: Frontend chunk budgets (Phase F9)
+        id: chunk_budgets
+        if: ${{ !cancelled() && steps.web_build.outcome == 'success' }}
+        working-directory: apps/web
+        run: node scripts/check_chunk_budgets.mjs
+
+      # Surface which gate failed when earlier steps failed but proofs still ran.
+      - name: Fail job if api tests or proof gates failed
+        if: ${{ always() && !cancelled() }}
+        run: |
+          api="${{ steps.api_tests.outcome }}"
+          cdc="${{ steps.cdc_matrix.outcome }}"
+          wh="${{ steps.warehouse_sku.outcome }}"
+          trm="${{ steps.transfer_ready_matrix.outcome }}"
+          fe="${{ steps.frontend_tests.outcome }}"
+          web="${{ steps.web_build.outcome }}"
+          echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web"
+          fail=0
+          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web"; do
+            name="${name_out%%:*}"
+            out="${name_out##*:}"
+            # skipped only acceptable when job cancelled mid-flight; otherwise require success
+            if [ "$out" != "success" ]; then
+              fail=1
+            fi
+          done
+          echo "### Merge gate (B9)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- api_tests: \`$api\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- cdc_matrix: \`$cdc\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- warehouse_sku: \`$wh\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- transfer_ready_matrix: \`$trm\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- frontend_tests: \`$fe\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- web_build: \`$web\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$fail" -ne 0 ]; then
+            echo "Red CI blocks merge — fix failing gates before claiming production readiness." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "- All required gates green (api + CDC + warehouse SKU + TRANSFER_READY matrix + frontend + web build)." >> "$GITHUB_STEP_SUMMARY"
 
   # Separate job: SQL Server image is large/slow; keep main CI lean.
   cdc-sqlserver:
@@ -583,8 +681,29 @@ jobs:
 
       - name: Install audit tools and default API deps
         run: |
-          python -m pip install --upgrade pip pip-audit bandit
+          python -m pip install --upgrade pip pip-audit bandit ruff mypy
           python -m pip install -r apps/api/requirements.txt
+
+      - name: Ruff baseline (Phase B8 allowlist)
+        # Start narrow — BLE001/S110/DTZ001/F401 on Decision Kernel + Phase A/B paths.
+        # Expand allowlist as modules are cleaned; full tree is not yet green.
+        working-directory: apps/api
+        run: >
+          ruff check
+          --config ruff.toml
+          services/decision_kernel
+          services/auth_rate_limit.py
+          services/auto_create_lifecycle.py
+          src/services/auth_service.py
+          connectors/elasticsearch_writer.py
+          connectors/sqlite_writer.py
+
+      - name: Mypy Decision Kernel (Phase B8)
+        # Strict on services.decision_kernel; type_system follows as a skip-import smoke.
+        working-directory: apps/api
+        run: |
+          python -m mypy --config-file mypy.ini --follow-imports=skip services/decision_kernel
+          python -m mypy --config-file mypy.ini --follow-imports=skip services/type_system.py
 
       - name: Assert optional RAG deps are not in default install
         run: |

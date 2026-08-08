@@ -65,6 +65,10 @@ def test_es_insert_uses_create_op_type():
         def refresh(self, index):
             return None
 
+        def get_mapping(self, index):
+            # Empty properties = dynamic mapping (Map stamps bind).
+            return {index: {"mappings": {"properties": {}}}}
+
     class FakeClient:
         indices = FakeIndices()
 

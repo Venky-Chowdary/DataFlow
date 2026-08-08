@@ -75,6 +75,15 @@ def _logical_to_iceberg_type(logical: str) -> str:
     )
 
     raw = (logical or "string").strip()
+    norm = normalize_logical_type(raw)
+    # Bare logical vocabulary → DDL_TYPES SSOT (harness: writer ≡ ddl_type).
+    if (
+        "(" not in raw
+        and "<" not in raw
+        and "[" not in raw
+        and raw.strip().lower() == norm
+    ):
+        return ddl_type("iceberg", raw)
     # Nested ARRAY/LIST/T[] stamps go through materialize so list<float> spelling
     # and float leaves stay authoritative (no dual ddl_type invent path).
     stamped = materialize_dest_ddl("iceberg", raw)
@@ -83,9 +92,7 @@ def _logical_to_iceberg_type(logical: str) -> str:
     if bare in {"REAL", "FLOAT4", "FLOAT32", "HALF", "FLOAT16", "FLOAT"}:
         return "float"
     # Map≡CREATE decimal honesty: bare → decimal(38,10); oversize → string.
-    if normalize_logical_type(raw) == LOGICAL_DECIMAL or normalize_logical_type(
-        stamped
-    ) == LOGICAL_DECIMAL:
+    if norm == LOGICAL_DECIMAL or normalize_logical_type(stamped) == LOGICAL_DECIMAL:
         return ddl_type("iceberg", raw)
     return stamped
 

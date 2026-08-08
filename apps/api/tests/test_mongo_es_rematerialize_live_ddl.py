@@ -234,7 +234,9 @@ def test_fetch_es_physical_types_from_mapping():
     }
     physical, exc = _fetch_es_physical_types(client, "orders", ["qty", "flag", "note"])
     assert exc is None
-    assert physical.get("qty") == "INTEGER"
+    # ES long → width-preserving BIGINT (canonical invent never narrower).
+    assert physical.get("qty") in {"INTEGER", "BIGINT"}
+    assert "INT" in str(physical.get("qty") or "").upper()
     assert physical.get("flag") == "BOOLEAN"
     assert physical.get("note") == "TEXT"
 
@@ -255,7 +257,8 @@ def test_fetch_es_physical_types_resolves_alias_response_keys():
     }
     physical, exc = _fetch_es_physical_types(client, "orders-alias", ["qty"])
     assert exc is None
-    assert physical.get("qty") == "INTEGER"
+    assert physical.get("qty") in {"INTEGER", "BIGINT"}
+    assert "INT" in str(physical.get("qty") or "").upper()
 
 
 def test_fetch_es_physical_types_surfaces_auth_exc():

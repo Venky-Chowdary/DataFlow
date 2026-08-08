@@ -350,9 +350,19 @@ def records_for_bigquery(
                     )
                 else:
                     rec[col] = val
-            except ValueError:
-                # Leave raw for upstream bind quarantine / BQ row-error holdout —
-                # never invent NULL mid-record.
+            except ValueError as exc:
+                # Never leave datetime/Decimal/bytes on the JSON wire — that
+                # aborts the whole batch with TypeError at ``json.dumps`` and
+                # bypasses quarantine. Propagate so the writer holds the row out.
+                from datetime import date as _date
+                from datetime import datetime as _dt
+                from decimal import Decimal as _Decimal
+                from uuid import UUID as _UUID
+
+                if isinstance(
+                    val, (_dt, _date, _Decimal, bytes, bytearray, memoryview, _UUID)
+                ):
+                    raise ValueError(f"BigQuery JSON wire refused {col}: {exc}") from exc
                 rec[col] = val
         records.append(rec)
     return records

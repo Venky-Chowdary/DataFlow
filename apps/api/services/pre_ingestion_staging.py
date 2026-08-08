@@ -249,6 +249,9 @@ def write_via_pre_ingestion_staging(
     summary["staged_rows"] = int(staged_n or 0)
     summary["promoted_rows"] = int(promoted_n or 0)
     summary["rejected_rows"] = len(rejected_row_nums)
+    # Gate-8 population = rows offered to staging, not the already-filtered
+    # promote batch. Using promote source_row_count double-subtracts rejects.
+    summary["source_row_count"] = int(staged_n or 0)
     summary["coerced_null_rows"] = 0
     summary["rejected_details"] = list(rejected_details)
     summary["rejected_details_sample"] = list(rejected_details)[:200]

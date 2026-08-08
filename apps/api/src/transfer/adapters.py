@@ -2294,6 +2294,7 @@ def write_destination_file(
             for r in rows
         ]
 
+    export_mime = ""
     if fmt == "csv":
         buf = io.StringIO()
         writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
@@ -2303,6 +2304,7 @@ def write_destination_file(
         )
         content = buf.getvalue().encode("utf-8")
         filename = "export.csv"
+        export_mime = "text/csv"
     elif fmt == "tsv":
         buf = io.StringIO()
         writer = csv.DictWriter(
@@ -2314,6 +2316,7 @@ def write_destination_file(
         )
         content = buf.getvalue().encode("utf-8")
         filename = "export.tsv"
+        export_mime = "text/tab-separated-values"
     elif fmt == "jsonl":
         records = _json_export_records(export_records)
         lines = [
@@ -2322,13 +2325,14 @@ def write_destination_file(
         ]
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
+        export_mime = "application/x-ndjson"
     elif fmt == "excel":
-        content, _ = convert_rows(
+        content, export_mime = convert_rows(
             export_columns, grid, source_format="csv", target_format=fmt
         )
         filename = "export.xlsx"
     elif fmt == "parquet":
-        content, _ = convert_rows(
+        content, export_mime = convert_rows(
             export_columns, grid, source_format="csv", target_format=fmt
         )
         filename = "export.parquet"
@@ -2338,10 +2342,11 @@ def write_destination_file(
             records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
         ).encode("utf-8")
         filename = "export.json"
+        export_mime = "application/json"
     return (
         content,
         filename,
-        _export_summary(filename),
+        _export_summary(filename, mime=export_mime or None),
     )
 
 

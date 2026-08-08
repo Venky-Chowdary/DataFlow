@@ -388,6 +388,12 @@ class MongoDBService:
 
         collection = db["transfer_jobs"]
 
+        # Honor caller-supplied job id (execute_tracked / resume / fleet claim).
+        explicit = job_data.get("_id") or job_data.get("job_id")
+        if explicit and "_id" not in job_data:
+            job_data = dict(job_data)
+            job_data["_id"] = str(explicit)
+
         job_data["status"] = "pending"
         job_data["created_at"] = datetime.now(timezone.utc)
         job_data["started_at"] = None
@@ -1103,8 +1109,8 @@ class MemoryMongoDBService:
         return {"success": True, "document_count": 0, "sample_documents": []}
 
     def create_transfer_job(self, job_data: dict) -> str:
-        oid = self._new_id()
         job = dict(job_data)
+        oid = str(job.get("_id") or job.get("job_id") or self._new_id())
         job["_id"] = oid
         job.setdefault("status", "pending")
         job.setdefault("created_at", datetime.now(timezone.utc))
@@ -1121,7 +1127,12 @@ class MemoryMongoDBService:
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         rec = self._jobs.get(job_id)
         if not rec:
-            return False
+            # Fail-closed resume requires a job shell — mint one for programmatic
+            # execute_tracked(job_id=…) callers (memory store / tests / CLI).
+            self.create_transfer_job({"_id": job_id, "status": status or "pending"})
+            rec = self._jobs.get(job_id)
+            if not rec:
+                return False
         previous_status = rec.get("status")
         fence = kwargs.pop("lease_fence", None)
         if fence is None:

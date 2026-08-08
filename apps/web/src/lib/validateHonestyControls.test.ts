@@ -111,4 +111,27 @@ describe("validateHonestyControls", () => {
     assert.equal(honesty.historicalSuccess.successRate, 0.97);
     assert.match(honesty.historicalSuccess.headline, /97\.0%/);
   });
+
+  it("Phase C12 — Decision Artifact honesty from Validate proof_bundle", () => {
+    const hash = "a".repeat(64);
+    const preflight = {
+      proof_bundle: {
+        decision_artifact_hash: hash,
+        decision_artifact: {
+          schema_version: "decision_artifact_v1",
+          content_hash: hash,
+        },
+      },
+    } as unknown as PreflightResult;
+    const honesty = buildValidateHonestyControls(preflight);
+    assert.equal(honesty.decisionArtifact.present, true);
+    assert.equal(honesty.decisionArtifact.contentHash, hash);
+    assert.match(honesty.decisionArtifact.headline, /Decision Artifact stamped/i);
+
+    const missing = buildValidateHonestyControls({
+      proof_bundle: {},
+    } as unknown as PreflightResult);
+    assert.equal(missing.decisionArtifact.present, false);
+    assert.match(missing.decisionArtifact.headline, /missing/i);
+  });
 });

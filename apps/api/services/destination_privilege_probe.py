@@ -1199,16 +1199,32 @@ def _probe_mongodb(
     auth_info = (status or {}).get("authInfo") or {}
     privileges = list(auth_info.get("authenticatedUserPrivileges") or [])
     roles = list(auth_info.get("authenticatedUserRoles") or [])
+    auth_users = list(auth_info.get("authenticatedUsers") or [])
 
-    # Unauthenticated local / empty privilege list: cannot assert deny.
+    # Empty privilege catalog: distinguish unauthenticated mongod (full local
+    # access, CREATE/WRITE assumed from connectivity) from an authenticated
+    # session that returned no grant rows (restricted — cannot prove CREATE).
     if not privileges and not roles:
+        if not auth_users:
+            return PrivilegeProbeResult(
+                can_write=True,
+                can_create_table=True,
+                status="ok",
+                detail=(
+                    "MongoDB session is unauthenticated — privilege catalog empty; "
+                    "CREATE/WRITE assumed from connectivity (enable auth for "
+                    "catalog-verified grants)"
+                ),
+                engine="mongodb",
+                method="connectionStatus.unauthenticated",
+            )
         return PrivilegeProbeResult(
             can_write=None,
             can_create_table=None,
             status="unavailable",
             detail=(
-                "MongoDB returned no privilege catalog (unauthenticated or restricted); "
-                "G2 falls back to connectivity"
+                "MongoDB returned no privilege catalog for an authenticated user "
+                "(restricted); G2 falls back to connectivity"
             ),
             engine="mongodb",
             method="connectionStatus.showPrivileges",

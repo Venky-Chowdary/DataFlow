@@ -574,6 +574,23 @@ export interface PreflightProofBundle {
     matches_approved?: boolean;
     note?: string;
   };
+  /** Phase C11 — Decision Artifact content hash from Validate. */
+  decision_artifact_hash?: string;
+  decision_artifact?: {
+    schema_version?: string;
+    content_hash?: string;
+    artifact_id?: string;
+    ddl?: { ddl_identity_hash?: string };
+  };
+  /** Phase C8 — Validation Orchestrator class buckets. */
+  validation_orchestrator?: {
+    orchestrator?: string;
+    decision_artifact_hash?: string | null;
+    decision_artifact_present?: boolean;
+    blocked_classes?: string[];
+    population_note?: string;
+    by_class?: Record<string, Array<{ id?: string; status?: string; message?: string }>>;
+  };
   /** Module 12 — per-column ConversionClass stamps. */
   conversion_contract?: {
     version?: string;
@@ -584,6 +601,7 @@ export interface PreflightProofBundle {
       invents_capacity?: boolean;
       requires_risk_contract?: boolean;
       reason?: string;
+      risk_level?: string;
     }>;
   };
 }

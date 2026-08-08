@@ -779,6 +779,14 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     out["connect_only"] = is_connect_only
     out["capability_label"] = label
     out["certification_tier"] = tier
+    # Phase E1 — hosted SKU twins / regional tiles are aliases, not distinct engines.
+    is_alias = bool(
+        catalog_id in CATALOG_ID_ALIASES
+        or catalog_id in _TRANSFER_READY_HOSTED_TWINS
+        or (catalog_id and driver and catalog_id != driver and ready)
+    )
+    out["is_hosted_alias"] = is_alias
+    out["alias_of"] = driver if is_alias else None
     return out
 
 

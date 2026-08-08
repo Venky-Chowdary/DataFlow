@@ -286,6 +286,8 @@ class PostgreSqlChangeStreamCdc:
         self._schema_ready = False
         self._pending_ack_lsn: str | None = None
         self._pgoutput_decoder = None
+        self._streaming_transport = None
+        self._streaming_attempted = False
         self.publication_name = _publication_name(self.database, slot_table, cursor_key)
         self._processed_signal_ids: set[str] = set()
         self.signal_table = str(cfg.get("signal_table") or "dataflow_signal")
@@ -1082,6 +1084,74 @@ class PostgreSqlChangeStreamCdc:
                     exc,
                 )
 
+    def _ensure_streaming_transport(self) -> Any:
+        """Phase F4 — optional START_REPLICATION transport (feature-flagged)."""
+        if self._streaming_attempted:
+            return self._streaming_transport
+        self._streaming_attempted = True
+        try:
+            from connectors.postgresql_cdc_transport import (
+                open_streaming_transport_or_none,
+                selected_pg_cdc_transport,
+            )
+
+            if selected_pg_cdc_transport() != "streaming":
+                return None
+            dsn = {
+                "host": self.cfg.get("host"),
+                "port": int(self.cfg.get("port") or 5432),
+                "dbname": self.cfg.get("database") or self.database,
+                "user": self.cfg.get("username"),
+                "password": self.cfg.get("password"),
+            }
+            if self.cfg.get("connection_string"):
+                # Prefer DSN string when operators supply it.
+                dsn = {"dsn": self.cfg["connection_string"]}
+            self._streaming_transport = open_streaming_transport_or_none(
+                dsn_kwargs=dsn,
+                slot_name=self.slot_name,
+                publication_name=self.publication_name,
+                output_plugin=self.output_plugin,
+            )
+        except Exception as exc:
+            _logger.warning("CDC streaming transport init failed: %s", exc)
+            self._streaming_transport = None
+        return self._streaming_transport
+
+    def _peek_or_stream_rows(self, cur: Any) -> list[tuple[Any, Any]]:
+        """Return ``(lsn, payload)`` rows from streaming transport or peek SQL."""
+        transport = self._ensure_streaming_transport()
+        if transport is not None:
+            changes = transport.poll(limit=self.batch_size)
+            if changes:
+                return [(c.lsn, c.payload) for c in changes]
+            # Empty poll — still valid; do not fall through to peek on the same
+            # slot (would race with the replication connection).
+            return []
+        if self.output_plugin == "pgoutput":
+            cur.execute(
+                """
+                SELECT lsn::text, data
+                FROM pg_logical_slot_peek_binary_changes(
+                    %s, NULL, %s,
+                    'proto_version', '1',
+                    'publication_names', %s
+                )
+                """,
+                (self.slot_name, self.batch_size, self.publication_name),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT lsn::text, data
+                FROM pg_logical_slot_peek_changes(
+                    %s, NULL, %s, 'include-xids', '1'
+                )
+                """,
+                (self.slot_name, self.batch_size),
+            )
+        return list(cur.fetchall() or [])
+
     def ack(self, resume_token: Any = None) -> None:
         """Advance the slot confirmed_flush_lsn after successful destination apply.
 
@@ -1101,6 +1171,22 @@ class PostgreSqlChangeStreamCdc:
                 lsn = token_lsn
         if not lsn:
             return
+        # Phase F4 — streaming: confirmed flush via replication feedback only
+        # (slot_advance on a second connection races the replication session).
+        if self._streaming_transport is not None:
+            try:
+                self._streaming_transport.ack(lsn)
+                self.consistent_point_lsn = lsn
+                self._pending_ack_lsn = None
+                return
+            except Exception as exc:
+                _logger.warning(
+                    "CDC streaming ack feedback failed for slot %s at %s: %s",
+                    self.slot_name,
+                    lsn,
+                    exc,
+                )
+                raise
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
@@ -1359,29 +1445,7 @@ class PostgreSqlChangeStreamCdc:
 
         with self._conn() as conn:
             with conn.cursor() as cur:
-                if self.output_plugin == "pgoutput":
-                    cur.execute(
-                        """
-                        SELECT lsn::text, data
-                        FROM pg_logical_slot_peek_binary_changes(
-                            %s, NULL, %s,
-                            'proto_version', '1',
-                            'publication_names', %s
-                        )
-                        """,
-                        (self.slot_name, self.batch_size, self.publication_name),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT lsn::text, data
-                        FROM pg_logical_slot_peek_changes(
-                            %s, NULL, %s, 'include-xids', '1'
-                        )
-                        """,
-                        (self.slot_name, self.batch_size),
-                    )
-                rows = cur.fetchall()
+                rows = self._peek_or_stream_rows(cur)
             conn.commit()
 
         buf = MultiTableTransactionBuffer()

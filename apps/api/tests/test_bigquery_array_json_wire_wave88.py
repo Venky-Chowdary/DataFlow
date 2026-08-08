@@ -89,21 +89,25 @@ def test_binary_uuid_and_float_carriers_are_json_safe():
 
 
 def test_whole_typed_record_serializes_with_json_dumps():
+    from datetime import timezone
+
     cols = ["id", "amt", "big", "blob", "guid", "ts"]
     types = ["INT64", "BIGNUMERIC", "INT64", "BYTES", "STRING", "TIMESTAMP"]
+    # TIMESTAMP requires offset/Z — naive wall-clock is refuse (no UTC invent).
     row = (
         1,
         Decimal("10.5000"),
         9223372036854775807,
         b"\x00\xff",
         uuid.UUID("a1b2c3d4-e5f6-7890-abcd-ef1234567890"),
-        datetime(2024, 3, 10, 12, 34, 56, 123456),
+        datetime(2024, 3, 10, 12, 34, 56, 123456, tzinfo=timezone.utc),
     )
     rec = records_for_bigquery([row], cols, types)[0]
 
     # allow_nan=False mirrors what the transport actually accepts.
     assert json.dumps(rec, allow_nan=False)
     assert rec["amt"] == "10.5000", "trailing scale carries the declared precision"
+    assert isinstance(rec["ts"], str) and rec["ts"].endswith("Z")
 
 
 # --------------------------------------------------------------------------

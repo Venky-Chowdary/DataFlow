@@ -61,10 +61,9 @@ def test_build_mapped_rows_allows_staging_coerce_null() -> None:
     )
     assert len(mapped) == 3
     assert any(d.get("policy") == "coerce_null" for d in details)
-    from services.value_serializer import is_missing_sentinel
-
-    # Bad age cell is DF_MISSING (omit-from-SET), not SQL NULL wipe.
-    assert any(is_missing_sentinel(row[1]) for row in mapped)
+    # Job coerce_null = dense SQL NULL for INSERT/full-refresh (staging diagnose).
+    # STOP_COLUMN / sparse CDC uses DF_MISSING omit-from-SET — separate path.
+    assert any(row[1] is None for row in mapped)
 
 
 def test_cast_and_continue_default_is_quarantine_not_write() -> None:

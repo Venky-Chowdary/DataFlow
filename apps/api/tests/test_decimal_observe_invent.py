@@ -89,6 +89,24 @@ def test_money_with_currency_symbols():
     assert obs["parse_rate"] >= 0.9
 
 
+def test_money_locale_and_currency_codes_widen_for_population():
+    """EU decimal comma + USD codes must not invent DECIMAL(11,6) from mis-strip."""
+    samples = ["$1,000.00", "€2.000,50", "USD 1000000.89"]
+    assert cell_int_digits_and_scale(samples[0]) == (4, 2)
+    assert cell_int_digits_and_scale(samples[1]) == (4, 2)
+    assert cell_int_digits_and_scale(samples[2]) == (7, 2)
+    obs = observe_numeric_samples(samples)
+    assert obs["kind"] == "fixed_decimal"
+    assert obs["parse_rate"] == 1.0
+    assert obs["max_int_digits"] == 7
+    p, s = parse_numeric_precision_scale(obs["carrier"])
+    assert p is not None and s is not None
+    # 7 int digits + margin + scale≥2 must fit 1000000.89 (never 11,6 cliff).
+    assert p - s >= 7
+    assert s >= 2
+    assert p >= 11
+
+
 def test_empty_samples_no_fake_invent_via_create_new():
     # Without samples, bare DECIMAL still uses platform ddl path — not our invent.
     stamped = create_new_mapping_target_type("DECIMAL", "mysql", samples=None)

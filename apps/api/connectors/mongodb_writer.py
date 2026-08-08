@@ -172,18 +172,22 @@ def _connection_string(
 def _idempotent_insert_many(coll, docs: list[dict]) -> int:
     """Insert documents; duplicate-key errors count as already-present.
 
-    Documents without ``_id`` are refused — never invent a content-hash PK
-    (silent identity invent collapses natural keys and hides collisions).
-    Map ``_id`` or use upsert with ``conflict_columns``.
+    Missing ``_id`` is allowed — MongoDB assigns ObjectIds. We never invent a
+    content-hash ``_id`` from row bytes (that collapsed natural keys and hid
+    collisions). For deterministic identity, map ``_id`` or use upsert with
+    ``conflict_columns`` (at-least-once insert may duplicate on replay).
     """
     from pymongo.errors import BulkWriteError
 
-    missing_id = [i for i, doc in enumerate(docs) if "_id" not in doc]
-    if missing_id:
-        raise ValueError(
-            f"MongoDB insert refused {len(missing_id)} document(s) without `_id` — "
-            "refuse content-hash PK invent (map `_id` or upsert with conflict_columns)"
-        )
+    # Defense-in-depth: never inject synthetic identity keys before insert.
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        if "_id" in doc and doc["_id"] is None:
+            raise ValueError(
+                "MongoDB insert refused null `_id` — map a real identity or omit "
+                "`_id` for server-assigned ObjectId (refuse null PK invent)"
+            )
 
     try:
         result = coll.insert_many(docs, ordered=False)
@@ -598,10 +602,15 @@ def write_mapped_rows(
             }:
                 from connectors.sql_temporal import coerce_sql_temporal
 
-                coerced = coerce_sql_temporal(value, "DATETIME")
+                # BSON Date is a UTC instant. Coerce as TIMESTAMPTZ so ISO-Z keeps
+                # tzinfo — DATETIME would strip offset to naive then falsely refuse.
+                try:
+                    coerced = coerce_sql_temporal(value, "TIMESTAMPTZ")
+                except ValueError:
+                    coerced = coerce_sql_temporal(value, "DATETIME")
                 if isinstance(coerced, _datetime):
-                    # BSON Date is a UTC instant — never invent UTC on a naive
-                    # wall-clock (would silently shift polarity). Require offset/Z.
+                    # Never invent UTC on a naive wall-clock (would silently shift
+                    # polarity). Require offset/Z from the wire or prior coerce.
                     if coerced.tzinfo is None:
                         raise ValueError(
                             "MongoDB date/time refused naive wall-clock — "

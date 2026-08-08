@@ -701,6 +701,47 @@ def null_safe_merge_on(
     return " AND ".join(parts)
 
 
+def written_ids_from_mapped_rows(
+    mapped_rows: list[Any],
+    target_cols: list[str],
+    conflict_columns: list[str] | None,
+    *,
+    id_limit: int = 500,
+) -> list[str] | None:
+    """Extract single-column PK values for keyed Gate-8 read-back.
+
+    Composite PKs return ``None`` (full-table checksum remains the authority).
+    Upsert/append into a non-empty sink must fingerprint only the batch keys —
+    whole-table digests are not comparable to a partial batch (Airbyte/Fivetran
+    honesty: prove what we wrote, report full cardinality separately).
+    """
+    if not mapped_rows or not target_cols or not conflict_columns:
+        return None
+    if len(conflict_columns) != 1:
+        return None
+    pk = str(conflict_columns[0] or "").strip()
+    if not pk or pk not in target_cols:
+        return None
+    idx = target_cols.index(pk)
+    out: list[str] = []
+    seen: set[str] = set()
+    for row in mapped_rows:
+        if isinstance(row, dict):
+            raw = row.get(pk)
+        else:
+            raw = row[idx] if idx < len(row) else None
+        if raw is None or raw == "":
+            continue
+        marker = str(raw)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        out.append(marker)
+        if len(out) >= max(0, int(id_limit)):
+            break
+    return out or None
+
+
 def gate8_writer_meta(
     mapped_rows: list[Any],
     target_cols: list[str],
@@ -708,6 +749,7 @@ def gate8_writer_meta(
     *,
     sample_limit: int = 50,
     id_limit: int = 500,
+    conflict_columns: list[str] | None = None,
 ) -> dict[str, Any]:
     """Stamp Gate-8 reconcile_sample / written_ids onto WriteResult.meta.
 
@@ -726,12 +768,17 @@ def gate8_writer_meta(
                     for i, c in enumerate(target_cols)
                 }
             )
+    ids = written_ids
+    if ids is None and conflict_columns:
+        ids = written_ids_from_mapped_rows(
+            mapped_rows, target_cols, conflict_columns, id_limit=id_limit
+        )
     meta: dict[str, Any] = {
         "reconcile_sample": sample,
         "source_row_count": len(mapped_rows),
     }
-    if written_ids is not None:
-        meta["written_ids"] = [str(x) for x in written_ids[: max(0, int(id_limit))]]
+    if ids is not None:
+        meta["written_ids"] = [str(x) for x in ids[: max(0, int(id_limit))]]
     return meta
 
 
@@ -1664,10 +1711,14 @@ def build_mapped_rows_with_details(
             pass
         src = m["source"]
         tgt = sanitize_identifier(m["target"], preserve_case=preserve_case)
+        # Never pass source ``column_types`` as dest_types — that invents a
+        # "live" VARCHAR dest and suppresses Map ``target_type`` coercion
+        # (INTEGER/BOOLEAN/DECIMAL stamps become trim_id/none). Empty dest
+        # means create-new / unknown physical: honor Map target_type.
         transform = resolve_transform(
             m,
             column_types=column_types,
-            dest_types=dest_types or column_types,
+            dest_types=dest_types if dest_types is not None else {},
         )
         src_idx = source_indices.get(src)
         if src_idx is None:
@@ -1844,17 +1895,20 @@ def build_mapped_rows_with_details(
                         row_action = "quarantine"
                     converted = None
                 elif cell_policy == "stop_column":
-                    # Omit this cell from SET/INSERT projection (DF_MISSING), never
+                    # Omit this cell from SET/INSERT projection (Missing), never
                     # invent SQL NULL — upsert NULL would wipe a prior good value.
                     if row_action == "ok":
                         row_action = "stop_column"
-                    converted = DF_MISSING_SENTINEL
+                    from services.value_serializer import Missing
+
+                    converted = Missing
                 elif cell_policy == "coerce_null":
-                    # Same omit-from-SET as STOP_COLUMN — upsert NULL would wipe a
-                    # prior good destination value. Dense INSERT materializes to NULL.
+                    # Job coerce_null = dense SQL NULL (INSERT / full-refresh).
+                    # Upsert omit-from-SET must use STOP_COLUMN / sparse CDC Missing —
+                    # never leak the ``__DF_MISSING__`` wire string into mapped rows.
                     if row_action == "ok":
                         row_action = "coerce_null"
-                    converted = DF_MISSING_SENTINEL
+                    converted = None
                 else:
                     continue
                 # Write-time NOT NULL parity with G3: refuse NULL invent / omit-as-NULL
@@ -1897,8 +1951,18 @@ def build_mapped_rows_with_details(
         if row_has_error and row_action == "ok" and policy in {"fail", "quarantine"}:
             # Legacy path when resolve unavailable — keep prior job semantics.
             continue
-        # stop_column: DF_MISSING omit-from-SET; coerce_null: NULL cell kept.
-        mapped.append(tuple(out))
+        # stop_column: Missing omit-from-SET; coerce_null: dense NULL cell.
+        # Never emit the ``__DF_MISSING__`` wire string into public mapped tuples.
+        from services.value_serializer import Missing, public_mapped_cell
+
+        mapped.append(
+            tuple(
+                public_mapped_cell(c, dense_null=False)
+                if c is not None
+                else None
+                for c in out
+            )
+        )
 
     return mapped, errors, rejected_details
 
@@ -4995,10 +5059,28 @@ def require_physical_types_for_existing_table(
         return None
     label = (dialect_label or "destination").strip() or "destination"
     if not physical:
+        label_l = label.lower()
+        if label_l in {
+            "elasticsearch",
+            "opensearch",
+            "amazon_elasticsearch",
+            "elastic_cloud",
+        }:
+            hint = (
+                "Re-check index mapping privileges (get_mapping) and that mapped "
+                "fields exist on the index, then retry."
+            )
+        elif label_l in {"mongodb", "dynamodb", "couchbase", "redis"}:
+            hint = (
+                "Re-check collection/table describe privileges and that mapped "
+                "fields are present, then retry."
+            )
+        else:
+            hint = "Re-check grants / information_schema visibility and retry."
         return (
             f"{label} physical DDL introspection returned empty for an existing "
             "table — refuse silent Map VARCHAR bind (empty→NULL invent risk). "
-            "Re-check grants / information_schema visibility and retry."
+            f"{hint}"
         )
     if target_cols:
         missing = [

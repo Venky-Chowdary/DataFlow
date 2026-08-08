@@ -23,11 +23,28 @@ CONVERSION_CONTRACT_VERSION = "conversion_contract.v1"
 
 
 class ConversionClass(str, Enum):
-    """Charter 7-class taxonomy — never collapse to silent green."""
+    """Conversion taxonomy (Phase C3) — never collapse to silent green.
 
+    Charter gate classes (``needs_*`` / ``lossy`` / ``unsupported``) remain the
+    Execute blockers. Safe-path subclasses refine former ``lossless`` so Map
+    cells explain *why* the path is safe (identity / widen / equivalent / …).
+    """
+
+    # --- Safe-path detail (Phase C3 full set) ---
+    IDENTITY = "identity"
+    EQUIVALENT = "equivalent"
     LOSSLESS = "lossless"
+    REPRESENTATION = "representation"
+    NORMALIZATION = "normalization"
+    WIDENING = "widening"
+    # --- Risk / fidelity ---
+    NARROWING = "narrowing"
+    SEMANTIC = "semantic"
+    POTENTIALLY_LOSSY = "potentially_lossy"
     LOSSY = "lossy"
     UNSUPPORTED = "unsupported"
+    MANUAL = "manual"
+    # --- Gate / operator action (Module 12 charter — keep stable) ---
     NEEDS_TRANSFORM = "needs_transform"
     NEEDS_USER_APPROVAL = "needs_user_approval"
     NEEDS_QUARANTINE = "needs_quarantine"
@@ -72,7 +89,7 @@ class DdlIdentityError(Exception):
 
 
 def _logical(src: str, tgt: str) -> tuple[str, str]:
-    from services.type_system import normalize_logical_type
+    from services.decision_kernel.types import normalize_logical_type
 
     return normalize_logical_type(src), normalize_logical_type(tgt)
 
@@ -84,12 +101,12 @@ def invents_unproven_capacity(
     dest_db: str = "",
 ) -> bool:
     """True when dest stamp invents precision/scale/TZ the source never proved."""
+    from services.decision_kernel.types import normalize_logical_type
     from services.type_system import (
         LOGICAL_DECIMAL,
         bignumeric_capacity_would_invent,
         decimal_params_would_narrow,
         is_timezone_polarity_loss,
-        normalize_logical_type,
         parse_numeric_precision_scale,
     )
 
@@ -133,6 +150,42 @@ def invents_unproven_capacity(
     return False
 
 
+def _safe_path_conversion_class(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> ConversionClass:
+    """Refine a non-lossy path into Identity / Widening / Equivalent / …"""
+    from services.decision_kernel.types import normalize_logical_type
+    from services.type_system import integer_bit_width
+
+    src_u = (source_type or "").strip().upper().replace(" ", "")
+    tgt_u = (target_type or "").strip().upper().replace(" ", "")
+    if src_u and src_u == tgt_u:
+        return ConversionClass.IDENTITY
+
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if src_l == tgt_l:
+        sw = integer_bit_width(source_type)
+        tw = integer_bit_width(target_type)
+        if sw is not None and tw is not None:
+            if tw > sw:
+                return ConversionClass.WIDENING
+            if tw < sw:
+                return ConversionClass.NARROWING
+        # Same logical family, different native spelling (e.g. INT8 vs BIGINT).
+        if src_u != tgt_u:
+            return ConversionClass.EQUIVALENT
+        return ConversionClass.IDENTITY
+
+    # Cross-logical but oracle said non-lossy (e.g. specialty wire preserve).
+    if src_l in {"string", "text"} and tgt_l in {"string", "text"}:
+        return ConversionClass.REPRESENTATION
+    return ConversionClass.LOSSLESS
+
+
 def classify_conversion(
     source_type: str,
     target_type: str,
@@ -144,10 +197,11 @@ def classify_conversion(
 ) -> dict[str, Any]:
     """Classify one source→target path into the charter ConversionClass.
 
-    Never returns lossless when invent / lossy / unsupported evidence exists.
+    Never returns a safe-path class when invent / lossy / unsupported evidence
+    exists. Safe paths are refined (identity/widening/…) per Phase C3.
     """
+    from services.decision_kernel.types import is_lossy_coercion
     from services.mapping_proof import transform_fidelity
-    from services.type_system import is_lossy_coercion
 
     src = (source_type or "").strip()
     tgt = (target_type or "").strip()
@@ -190,6 +244,7 @@ def classify_conversion(
         }
 
     if lossy and not risk_acknowledged:
+        detail = _safe_path_conversion_class(src, tgt, dest_db=dest_db)
         return {
             "conversion_class": ConversionClass.NEEDS_USER_APPROVAL.value,
             "reason": (
@@ -199,12 +254,19 @@ def classify_conversion(
             "invents_capacity": invent,
             "lossy": True,
             "requires_risk_contract": True,
+            "detail_class": detail.value,
             "contract_version": CONVERSION_CONTRACT_VERSION,
         }
 
     if lossy and risk_acknowledged:
+        detail = _safe_path_conversion_class(src, tgt, dest_db=dest_db)
+        ack_class = (
+            ConversionClass.NARROWING
+            if detail is ConversionClass.NARROWING
+            else ConversionClass.LOSSY
+        )
         return {
-            "conversion_class": ConversionClass.LOSSY.value,
+            "conversion_class": ack_class.value,
             "reason": f"{src} → {tgt} is lossy under an approved Risk Contract.",
             "invents_capacity": invent,
             "lossy": True,
@@ -235,9 +297,10 @@ def classify_conversion(
             "contract_version": CONVERSION_CONTRACT_VERSION,
         }
 
+    safe = _safe_path_conversion_class(src, tgt, dest_db=dest_db)
     return {
-        "conversion_class": ConversionClass.LOSSLESS.value,
-        "reason": f"{src} → {tgt} round-trips without invent or declared loss.",
+        "conversion_class": safe.value,
+        "reason": f"{src} → {tgt} round-trips without invent or declared loss ({safe.value}).",
         "invents_capacity": False,
         "lossy": False,
         "requires_risk_contract": False,
@@ -296,7 +359,7 @@ def approved_mapping_ddl_fingerprint(
     Map → materialize must equal Execute CREATE/ALTER stamps. Any drift changes
     this fingerprint and requires re-validation.
     """
-    from services.type_system import materialize_dest_ddl
+    from services.decision_kernel.types import materialize_dest_ddl
 
     rows: list[dict[str, str]] = []
     for m in mappings or []:

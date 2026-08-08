@@ -1,8 +1,11 @@
+from __future__ import annotations
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from services.platform_config import docs_enabled
+from services.tenant_bind import principal_allowed_for_tenant
 
 from ..services.auth_service import auth_required, lookup_user, verify_token
 
@@ -10,10 +13,12 @@ _PUBLIC_PREFIXES = (
     "/health",
     "/api/v1/health",
     "/api/v1/auth/login",
+    "/api/v1/auth/logout",
     "/api/v1/auth/bootstrap",
     "/api/v1/auth/sso/providers",
     # Alias paths when the web client omits /api/v1 (mis-set VITE_API_BASE).
     "/auth/login",
+    "/auth/logout",
     "/auth/bootstrap",
     "/auth/sso/providers",
     # Marketing / docs / landing need catalog stats without a session.
@@ -64,14 +69,42 @@ def _attach_user(request: Request, token: str) -> bool:
     key_info = verify_workspace_api_key(token)
     if key_info:
         request.state.user_email = key_info.get("created_by") or "api-key"
-        request.state.user = {
+        user = {
             "email": request.state.user_email,
             "role": key_info.get("role") or "viewer",
         }
+        # Workspace API keys may carry tenant binding (same claims as users).
+        if key_info.get("tenant_id"):
+            user["tenant_id"] = key_info["tenant_id"]
+        if key_info.get("tenant_ids"):
+            user["tenant_ids"] = key_info["tenant_ids"]
+        request.state.user = user
         request.state.api_key_id = key_info["id"]
         request.state.api_key_auth = True
         return True
     return False
+
+
+def _tenant_bind_forbidden(request: Request) -> JSONResponse | None:
+    """Phase D2 — Host tenant must match authenticated identity claims."""
+    tenant_id = getattr(request.state, "tenant_id", None) or ""
+    if not tenant_id:
+        return None
+    user = getattr(request.state, "user", None)
+    if not user:
+        return None
+    if principal_allowed_for_tenant(user, tenant_id):
+        return None
+    return JSONResponse(
+        status_code=403,
+        content={
+            "detail": (
+                "Tenant Host does not match authenticated identity — "
+                "cross-tenant access refused (re-auth on the correct domain)."
+            ),
+            "tenant_id": tenant_id,
+        },
+    )
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
@@ -87,6 +120,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not auth_required():
             if token:
                 _attach_user(request, token)
+                forbidden = _tenant_bind_forbidden(request)
+                if forbidden is not None:
+                    return forbidden
             return await call_next(request)
 
         path = request.url.path
@@ -101,9 +137,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # (MCP tools/call uses this; discovery works without a token).
             if token:
                 _attach_user(request, token)
+                forbidden = _tenant_bind_forbidden(request)
+                if forbidden is not None:
+                    return forbidden
             return await call_next(request)
 
         if not token or not _attach_user(request, token):
             return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+
+        forbidden = _tenant_bind_forbidden(request)
+        if forbidden is not None:
+            return forbidden
 
         return await call_next(request)

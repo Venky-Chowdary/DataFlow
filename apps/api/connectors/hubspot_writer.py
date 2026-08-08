@@ -97,16 +97,20 @@ def coerce_hubspot_datetime_wire(value: Any) -> str | None:
         return coerce_hubspot_datetime_wire(int(text))
     from connectors.sql_temporal import coerce_sql_temporal
 
-    coerced = coerce_sql_temporal(value, "TIMESTAMPTZ")
-    from datetime import datetime
+    from datetime import datetime, timezone as _tz
 
+    # HubSpot CRM Properties API documents datetime as UTC epoch millis.
+    # Prefer offset/Z; when the wire is a naive ISO civil clock, treat it as UTC
+    # (SaaS contract — not a silent SQL TIMESTAMPTZ invent across engines).
+    try:
+        coerced = coerce_sql_temporal(value, "TIMESTAMPTZ")
+    except ValueError:
+        coerced = coerce_sql_temporal(value, "DATETIME")
     if not isinstance(coerced, datetime):
         raise ValueError(
             f"HubSpot datetime cannot parse {text[:64]!r} — refuse invent"
         )
     if coerced.tzinfo is None:
-        from datetime import timezone as _tz
-
         coerced = coerced.replace(tzinfo=_tz.utc)
     return str(int(coerced.timestamp() * 1000))
 

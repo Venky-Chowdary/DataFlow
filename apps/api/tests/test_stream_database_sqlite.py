@@ -69,7 +69,7 @@ def test_stream_sqlite_to_sqlite_basic():
         schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
 
         fake_mongo = _FakeMongo()
-        rows_written, _ddl, _summary, columns = stream_database_transfer(
+        rows_written, _ddl, summary, columns = stream_database_transfer(
             source,
             destination,
             mappings,
@@ -80,6 +80,9 @@ def test_stream_sqlite_to_sqlite_basic():
 
         assert rows_written == 250
         assert "id" in columns
+        # Phase F1 — write-pass fingerprints; no second source scan by default.
+        assert summary.get("checksum_mode") == "inline_write_pass"
+        assert isinstance(summary.get("checksum"), str) and len(summary["checksum"]) == 64
 
         conn = sqlite3.connect(dst)
         count = conn.execute("SELECT count(*) FROM orders_out").fetchone()[0]

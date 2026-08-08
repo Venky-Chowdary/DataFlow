@@ -2797,6 +2797,17 @@ export function ValidateDashboard({
               <strong>Historical success</strong>
               <span>{honestyControls.historicalSuccess.headline}</span>
             </li>
+            <li>
+              <strong>Decision Artifact</strong>
+              <span
+                title={honestyControls.decisionArtifact.contentHash || undefined}
+              >
+                {honestyControls.decisionArtifact.headline}
+                {honestyControls.decisionArtifact.schemaVersion
+                  ? ` · ${honestyControls.decisionArtifact.schemaVersion}`
+                  : ""}
+              </span>
+            </li>
             {honestyControls.ddlIdentityHash ? (
               <li>
                 <strong>DDL identity</strong>

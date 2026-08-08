@@ -99,6 +99,23 @@ def _endpoint_reachable(endpoint: EndpointConfig) -> bool:
             return True
         except Exception:
             return False
+    if driver in {"postgresql", "postgres", "timescaledb", "citus"}:
+        # Port open ≠ role/password valid (common on shared localhost:5432).
+        try:
+            import psycopg2
+
+            conn = psycopg2.connect(
+                host=host,
+                port=int(port),
+                dbname=endpoint.database or "postgres",
+                user=endpoint.username or "postgres",
+                password=endpoint.password or "",
+                connect_timeout=3,
+            )
+            conn.close()
+            return True
+        except Exception:
+            return False
     return True
 
 

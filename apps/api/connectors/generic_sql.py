@@ -1438,10 +1438,25 @@ def _to_sa_value(
         return coerce_binary_wire(value)
 
     # Temporal: same parse/coerce path as MySQL/Postgres writers (ISO-Z → bind).
-    ddl_type = logical_to_temporal_ddl(t) or logical_to_temporal_ddl(logical)
+    # Prefer the *carrier* spelling (TIMESTAMPTZ) before the collapsed logical
+    # family (datetime) — otherwise SQL Server TIMESTAMPTZ invents DATETIME NTZ
+    # and the naive-datetime guard fires on aware UTC (audit §2.6).
+    ddl_type = logical_to_temporal_ddl(logical) or logical_to_temporal_ddl(t)
     if ddl_type:
-        coerced = coerce_sql_temporal(value, ddl_type)
-        base = ddl_type.upper()
+        # SA timezone=True (from physical TIMESTAMP WITH TIME ZONE) must win over
+        # a collapsed Map logical of "datetime" — otherwise coerce_sql_temporal
+        # strips Z to naive DATETIME and the TZ guard refuses the value.
+        sa_tz = bool(getattr(sa_type, "timezone", False))
+        coerce_ddl = ddl_type
+        if sa_tz and str(ddl_type).upper() in {
+            "DATETIME",
+            "TIMESTAMP",
+            "DATETIME2",
+            "SMALLDATETIME",
+        }:
+            coerce_ddl = "TIMESTAMPTZ"
+        coerced = coerce_sql_temporal(value, coerce_ddl)
+        base = str(coerce_ddl).upper()
 
         def _ensure_utc(dt: datetime) -> datetime:
             if dt.tzinfo is None:
@@ -1477,8 +1492,8 @@ def _to_sa_value(
         # are naive wall clocks. Never invent tzinfo=UTC on naive values — that
         # silently shifts polarity for every generic_sql destination.
         # TIMESTAMPTZ / DATETIMEOFFSET carriers must keep aware UTC (refuse naive).
-        raw_lower = f"{logical or ''} {ddl_type or ''}".lower()
-        is_tz_aware = (
+        raw_lower = f"{logical or ''} {coerce_ddl or ''} {ddl_type or ''}".lower()
+        is_tz_aware = sa_tz or (
             "timestamptz" in raw_lower
             or "datetimeoffset" in raw_lower
             or "timestamp_tz" in raw_lower
@@ -2444,14 +2459,19 @@ def read_table_cursor_batch(
     columns: list[str] | None = None,
     limit: int = 20_000,
     cursor_primary_key: str | None = None,
+    cursor_key_columns: list[str] | None = None,
 ) -> ReadBatch:
     """Cursor/keyset pagination for incremental and streaming transfers.
 
-    Optional ``cursor_primary_key`` enables lexicographic ``(cursor, pk)`` so
-    timestamp ties are not skipped forever (parity with PG/MySQL).
+    ``cursor_key_columns`` (Phase F2) is the ordered composite key for seek
+    pagination — N-col OR/AND, portable to SQL Server / Oracle. When omitted,
+    ``cursor_column`` + optional ``cursor_primary_key`` keep the legacy 1-/2-col
+    path (including ``cursor|pk`` bookmarks).
     """
     if not SQLALCHEMY_AVAILABLE:
         raise RuntimeError("SQLAlchemy is not installed")
+
+    from services.keyset_pagination import sqlalchemy_keyset_clause
 
     cfg = _cfg_from_params(
         host,
@@ -2473,51 +2493,36 @@ def read_table_cursor_batch(
                 with contextlib.suppress(Exception):
                     conn.execute(sa.text("FLUSH"))
             table_obj = _reflect_table(engine, table, schema_name, columns)
-            if cursor_column not in table_obj.c:
-                raise ValueError(
-                    f"Cursor column '{cursor_column}' not found in table {table}"
-                )
-            cursor_col = table_obj.c[cursor_column]
             selected_cols = list(table_obj.c)
             if columns:
                 selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
             else:
-                columns = selected_cols = list(table_obj.c)
+                columns = [c.name for c in selected_cols]
 
-            pk = (cursor_primary_key or "").strip()
-            pk_col = (
-                table_obj.c[pk]
-                if pk and pk != cursor_column and pk in table_obj.c
-                else None
-            )
+            # Resolve ordered key columns for seek.
+            key_names: list[str] = []
+            if cursor_key_columns:
+                key_names = [c for c in cursor_key_columns if c and c in table_obj.c]
+            else:
+                if cursor_column and cursor_column in table_obj.c:
+                    key_names = [cursor_column]
+                pk = (cursor_primary_key or "").strip()
+                if pk and pk != cursor_column and pk in table_obj.c:
+                    key_names.append(pk)
+            if not key_names:
+                raise ValueError(
+                    f"Cursor/keyset columns not found in table {table} "
+                    f"(cursor_column={cursor_column!r}, "
+                    f"cursor_key_columns={cursor_key_columns!r})"
+                )
 
+            key_cols = [table_obj.c[n] for n in key_names]
             stmt = sa.select(*selected_cols)
             if cursor_after:
-                if pk_col is not None:
-                    if "|" in str(cursor_after):
-                        cur_val, pk_val = str(cursor_after).split("|", 1)
-                    else:
-                        cur_val, pk_val = cursor_after, ""
-                    cur_marker = sa.cast(sa.literal(cur_val), cursor_col.type)
-                    pk_marker = sa.cast(sa.literal(pk_val), pk_col.type)
-                    # Row-value ``(a,b) > (x,y)`` is not portable (SQL Server).
-                    # Expand to OR/AND so composite watermarks resume correctly.
-                    stmt = stmt.where(
-                        sa.or_(
-                            cursor_col > cur_marker,
-                            sa.and_(cursor_col == cur_marker, pk_col > pk_marker),
-                        )
-                    )
-                    stmt = stmt.order_by(cursor_col, pk_col).limit(limit)
-                else:
-                    marker = sa.cast(sa.literal(cursor_after), cursor_col.type)
-                    stmt = stmt.where(cursor_col > marker)
-                    stmt = stmt.order_by(cursor_col).limit(limit)
-            else:
-                if pk_col is not None:
-                    stmt = stmt.order_by(cursor_col, pk_col).limit(limit)
-                else:
-                    stmt = stmt.order_by(cursor_col).limit(limit)
+                stmt = stmt.where(
+                    sqlalchemy_keyset_clause(sa, key_cols, str(cursor_after))
+                )
+            stmt = stmt.order_by(*key_cols).limit(limit)
 
             fetched = conn.execute(stmt).fetchall()
             headers = [c.name for c in selected_cols]

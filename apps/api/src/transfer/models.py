@@ -138,6 +138,10 @@ class TransferRequest:
     # Map→DDL fingerprint from Validate (or ledger proof). Required when
     # skip_preflight + mappings so Execute still fail-closes on stamp drift.
     approved_ddl_identity_hash: str = ""
+    # Phase C11 — Decision Artifact content_hash from Validate / ledger.
+    # Programmatic skip_preflight stamps inline when empty.
+    approved_decision_artifact_hash: str = ""
+    decision_artifact: dict = field(default_factory=dict)
 
     @property
     def operation(self) -> str:
@@ -287,6 +291,8 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "acknowledgment_actor": request.acknowledgment_actor or "",
         "acknowledgment_reason": request.acknowledgment_reason or "",
         "approved_ddl_identity_hash": request.approved_ddl_identity_hash or "",
+        "approved_decision_artifact_hash": request.approved_decision_artifact_hash or "",
+        "decision_artifact": dict(request.decision_artifact or {}),
         "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
     }
 
@@ -366,6 +372,10 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         approved_ddl_identity_hash=str(
             data.get("approved_ddl_identity_hash") or ""
         ).strip(),
+        approved_decision_artifact_hash=str(
+            data.get("approved_decision_artifact_hash") or ""
+        ).strip(),
+        decision_artifact=dict(data.get("decision_artifact") or {}),
     )
 
 

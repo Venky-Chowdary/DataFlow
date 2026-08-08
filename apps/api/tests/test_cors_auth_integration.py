@@ -16,10 +16,19 @@ if str(_API_ROOT) not in sys.path:
 def client(monkeypatch):
     # Force auth so the protected routes require a token, and use the default
     # localhost CORS origin so we do not depend on the Railway regex/env.
+    # auth_required() reads env via _read_require_auth — patch the function SSOT.
     import src.services.auth_service as auth_mod
 
+    monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("DATAWRAP_REQUIRE_AUTH", "1")
+    monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "cors-test-secret-value-not-dev-default")
+    monkeypatch.setenv("DATAWRAP_AUTH_SECRET", "cors-test-secret-value-not-dev-default")
+    monkeypatch.setattr(auth_mod, "auth_required", lambda: True)
     monkeypatch.setattr(auth_mod, "_REQUIRE_AUTH", True)
-    monkeypatch.setattr(auth_mod, "_REAUTH_SECRET", "cors-test-secret-value")
+    monkeypatch.setattr(auth_mod, "_REAUTH_SECRET", "cors-test-secret-value-not-dev-default")
+    monkeypatch.setattr(
+        auth_mod, "_token_secret", lambda: "cors-test-secret-value-not-dev-default"
+    )
 
     from fastapi.testclient import TestClient
 

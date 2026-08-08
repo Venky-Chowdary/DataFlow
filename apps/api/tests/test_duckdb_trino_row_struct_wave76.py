@@ -55,8 +55,9 @@ def test_trino_row_form():
         ("b", "varchar"),
     ]
     assert normalize_logical_type("row(a integer, b varchar)") == "struct"
+    # Bare nested ``integer`` invents never-narrower bigint (audit §2.1).
     assert ddl_type("trino", "row(a integer, b varchar)") == (
-        "row(a integer, b varchar)"
+        "row(a bigint, b varchar)"
     )
     assert ddl_type("duckdb", "ROW(a INTEGER, b VARCHAR)") == (
         "STRUCT(a INTEGER, b VARCHAR)"
@@ -76,7 +77,7 @@ def test_ch_nested_and_enum():
     )
 
     assert _ch_to_logical("Nested(x String, y Int64)") == (
-        "ARRAY<STRUCT<x:TEXT, y:INTEGER>>"
+        "ARRAY<STRUCT<x:TEXT, y:Int64>>"
     )
     assert normalize_logical_type("Nested(x String, y Int64)") == "array"
     assert ddl_type("clickhouse", "Nested(x String, y Int64)") == (

@@ -47,6 +47,12 @@ SKU_MAPPINGS = [
     {"source": "id", "target": "id", "confidence": 0.99},
     {"source": "amount", "target": "amount", "confidence": 0.99},
 ]
+# Mongo is key-addressed: Map must bind an identity. Business ``id`` → ``_id``
+# (server ObjectId invent is insert-only; Validate still requires a Map PK).
+SKU_MAPPINGS_MONGODB = [
+    {"source": "id", "target": "_id", "confidence": 0.99},
+    {"source": "amount", "target": "amount", "confidence": 0.99},
+]
 
 
 @pytest.mark.parametrize(
@@ -78,6 +84,7 @@ def test_production_sku_transfer(route: tuple[str, str, str, str], tmp_path: Pat
             pytest.skip(python_xml_runtime_skip_reason())
 
     validation_mode = "balanced" if dst_fmt in _NO_INDEPENDENT_VERIFIER else "strict"
+    mappings = SKU_MAPPINGS_MONGODB if dst_fmt == "mongodb" else SKU_MAPPINGS
     request = TransferRequest(
         source=source,
         destination=destination,
@@ -87,7 +94,7 @@ def test_production_sku_transfer(route: tuple[str, str, str, str], tmp_path: Pat
         # Preflight ON — PRODUCTION_SKU proves Validate + transfer, not write-only.
         skip_preflight=False,
         validation_mode=validation_mode,
-        mappings=SKU_MAPPINGS,
+        mappings=mappings,
     )
 
     if _uses_snowflake(source, destination):

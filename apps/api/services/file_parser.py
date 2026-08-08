@@ -956,6 +956,22 @@ class FileParser:
             import xmltodict
 
             text = content.decode("utf-8") if isinstance(content, bytes) else content
+            # Phase D6 — reject XXE / entity expansion before xmltodict (expat).
+            try:
+                from defusedxml import ElementTree as DET
+
+                DET.fromstring(text)  # nosec B314 — defusedxml, not stdlib
+            except ImportError:
+                pass
+            except Exception as exc:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error=f"XML rejected (unsafe or malformed): {exc}",
+                    file_type="xml",
+                )
             root = xmltodict.parse(text)
 
             records, selected_path, ambiguity = FileParser._extract_xml_records(root)

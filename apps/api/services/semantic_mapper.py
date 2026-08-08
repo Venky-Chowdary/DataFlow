@@ -1452,7 +1452,8 @@ def map_columns(
     destination_table_exists: bool | None = None,
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
-    from services.type_system import create_new_mapping_target_type, ddl_type
+    from services.decision_kernel import ddl_type
+    from services.type_system import create_new_mapping_target_type
 
     floor = max(0.55, threshold - 0.3)
     src_roles: dict[str, str] = {}
@@ -1582,7 +1583,8 @@ def map_columns(
         src_type = src_types.get(source, "VARCHAR")
         tgt_type = tgt_types.get(target, "VARCHAR")
         try:
-            from services.type_system import is_lossy_coercion
+            from services.decision_kernel import is_lossy_coercion
+
             lossy_pair = is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
         except Exception:
             # Fail closed — unknown type authority must not green-path remaps.
@@ -1606,6 +1608,7 @@ def map_columns(
                 ),
                 "reasoning": reason,
                 "user_override": False,
+                # May be relabeled to hungarian_with_greedy_patch after later passes.
                 "assignment_strategy": "optimal_bipartite_hungarian",
                 "alternatives": alternatives,
                 "score_gap": score_gap,
@@ -1614,6 +1617,10 @@ def map_columns(
                 "target_type": tgt_type,
             }
         )
+
+    # Audit §4.1 — greedy / near-form patches mean the global solution is no
+    # longer pure Hungarian; never keep the "optimal" label if we patch.
+    greedy_patched = False
 
     for source in source_columns:
         if source in assigned_sources:
@@ -1652,12 +1659,16 @@ def map_columns(
             near_sample = _sample_consistency_boost(
                 src_samples.get(source), src_type, near_tgt_type,
             )
-            if near_penalty >= 0.20 or near_sample <= -0.50:
+            # Only hard landmines (ObjectId→DECIMAL ≈0.92) clear near-form.
+            # Temporal polarity demotion (BQ TIMESTAMP ntz→instant ≈0.5) must still
+            # prefer the synonym column with review over inventing DATETIME.
+            if near_penalty >= 0.85 or near_sample <= -0.50:
                 near_tgt, near_ratio = "", 0.0
         if near_tgt and near_ratio >= 0.62 and (not best_target or best_score < floor or near_ratio > best_score):
             # Promote near form match into the assignment set.
             near_score = max(best_score, 0.55 + near_ratio * 0.40)
             if near_score >= floor or near_ratio >= 0.70:
+                greedy_patched = True
                 used_targets.add(near_tgt)
                 assigned_sources.add(source)
                 winner = alternatives[0]["confidence"] if alternatives else near_score
@@ -1666,7 +1677,8 @@ def map_columns(
                 requires_review = near_ratio < 0.85
                 near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
                 try:
-                    from services.type_system import is_lossy_coercion
+                    from services.decision_kernel import is_lossy_coercion
+
                     near_lossy = is_lossy_coercion(src_type, near_tgt_type, dest_db=dest_db)
                 except Exception:
                     near_lossy = True
@@ -1702,6 +1714,7 @@ def map_columns(
         if (not best_target or best_score < floor) and target_columns:
             # Existing table + names-only (no typed schema) — refuse invent ADD COLUMN.
             if destination_table_exists is True and not target_schemas:
+                greedy_patched = True
                 mappings.append(
                     {
                         "source": source,
@@ -1727,10 +1740,12 @@ def map_columns(
             # Final gate: if any unused dest is a reasonable form match, map there
             # with review instead of inventing (avoids ph_number when phone exists).
             if near_tgt and near_ratio >= 0.50:
+                greedy_patched = True
                 used_targets.add(near_tgt)
                 near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
                 try:
-                    from services.type_system import is_lossy_coercion
+                    from services.decision_kernel import is_lossy_coercion
+
                     near_lossy = is_lossy_coercion(src_type, near_tgt_type, dest_db=dest_db)
                 except Exception:
                     near_lossy = True
@@ -1757,6 +1772,7 @@ def map_columns(
                     }
                 )
                 continue
+            greedy_patched = True
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
             map_target_type = create_new_mapping_target_type(
                 src_type, dest_db, samples=src_samples.get(source)
@@ -1798,6 +1814,7 @@ def map_columns(
                 }
             )
             continue
+        greedy_patched = True
         if not best_target:
             best_target = _semantic_form(source)
             best_score = 0.55
@@ -1812,7 +1829,8 @@ def map_columns(
         src_type = src_types.get(source, "VARCHAR")
         tgt_type = tgt_types.get(best_target, "VARCHAR") if best_target else "VARCHAR"
         try:
-            from services.type_system import is_lossy_coercion
+            from services.decision_kernel import is_lossy_coercion
+
             lossy_pair = bool(
                 best_target and is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
             )
@@ -1841,6 +1859,11 @@ def map_columns(
                 "target_type": tgt_type,
             }
         )
+
+    if greedy_patched:
+        for row in mappings:
+            if row.get("assignment_strategy") == "optimal_bipartite_hungarian":
+                row["assignment_strategy"] = "hungarian_with_greedy_patch"
 
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
     return _apply_create_new_risk_stamps(

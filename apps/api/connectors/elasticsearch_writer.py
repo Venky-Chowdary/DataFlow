@@ -94,6 +94,8 @@ def _es_rematerialize_if_physical_differs(
     """Rebuild mapped rows when live mapping carriers differ from Map stamps.
 
     ``force_remap`` covers deferred Map under partial Studio (invent risk).
+    Requires full live coverage of ``target_cols`` (no Map VARCHAR gap-fill).
+    Callers may overlay known dynamic-mapping props onto ``dest_types`` first.
     """
     from connectors.writer_common import rematerialize_live_dest_types
 
@@ -375,7 +377,10 @@ def write_mapped_rows(
             from connectors.saas_common import is_auth_error
 
             physical, map_exc = _fetch_es_physical_types(client, index, target_cols)
-            if map_exc is not None and is_auth_error(map_exc):
+            if map_exc is not None:
+                # Document store — never cite information_schema. Auth and other
+                # get_mapping failures both refuse (cannot prove live field types).
+                kind = "auth" if is_auth_error(map_exc) else "probe"
                 return WriteResult(
                     ok=False,
                     rows_written=0,
@@ -384,15 +389,15 @@ def write_mapped_rows(
                     checksum="",
                     chunks_completed=0,
                     error=(
-                        f"Elasticsearch get_mapping auth failed: {map_exc} — "
-                        "refuse Map VARCHAR bind (empty→NULL invent risk)."
+                        f"Elasticsearch get_mapping {kind} failed: {map_exc} — "
+                        "refuse Map bind without index mapping (get_mapping)."
                     ),
                 )
             mapped_data_cols = [c for c in target_cols if c and c != "_id"]
-            # Partial mapping must not leave Map VARCHAR on missing props
-            # (dynamic mapping invent). Studio may fill gaps; else require_physical.
-            from connectors.writer_common import require_physical_types_for_existing_table
-
+            # ES/OpenSearch is not relational: empty/partial properties mean
+            # dynamic mapping, not SQL empty→NULL invent. Overlay Studio + live
+            # props when present; unmapped fields keep Map stamps. Partial Studio
+            # still fail-closes via force_remap below (audit §2.5).
             effective_physical = dict(physical)
             if isinstance(live_dest, dict):
                 for c in mapped_data_cols:
@@ -403,23 +408,16 @@ def write_mapped_rows(
                     st = str(live_dest.get(c) or "").strip()
                     if st:
                         effective_physical[c] = st
-            if mapped_data_cols:
-                phys_err = require_physical_types_for_existing_table(
-                    table_existed=True,
-                    physical=effective_physical,
-                    dialect_label="Elasticsearch",
-                    target_cols=mapped_data_cols,
+            # Dynamic mapping: overlay known props onto Map stamps without
+            # requiring full relational coverage (unmapped fields stay Map).
+            for c in mapped_data_cols:
+                hit = (
+                    effective_physical.get(c)
+                    or effective_physical.get(str(c).lower())
+                    or effective_physical.get(str(c).upper())
                 )
-                if phys_err:
-                    return WriteResult(
-                        ok=False,
-                        rows_written=0,
-                        table_name=index,
-                        target_schema=host or "localhost",
-                        checksum="",
-                        chunks_completed=0,
-                        error=phys_err,
-                    )
+                if hit and str(hit).strip():
+                    dest_types[c] = str(hit).strip()
             _force_remap = bool(studio_err)
             remat = _es_rematerialize_if_physical_differs(
                 physical=effective_physical if effective_physical else physical,
@@ -697,13 +695,15 @@ def write_mapped_rows(
             fail_closed = True
         err_msg = None
         if fail_closed:
-            if _final_abort:
-                err_msg = _final_abort
-            elif identity_missing and written == 0:
+            # Identity failure is the primary operator signal (audit §2.5) —
+            # prefer it over the generic strict-policy summary.
+            if identity_missing and written == 0:
                 err_msg = (
                     f"elasticsearch blocked: {identity_missing} row(s) "
                     "lack document identity — set Primary key on Map"
                 )
+            elif _final_abort:
+                err_msg = _final_abort
             elif bulk_errors:
                 err_msg = f"elasticsearch bulk rejected {len(bulk_errors)} item(s)"
             else:

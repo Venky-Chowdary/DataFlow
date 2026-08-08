@@ -355,15 +355,18 @@ def _enforce_ddl_identity(
     *,
     dest_db: str,
     approved_ddl_identity_hash: str = "",
+    skip_preflight: bool = False,
 ) -> str | None:
     """Module 12 / GA — fail closed when Map→DDL fingerprint drifts after Validate.
 
     Returns an error message when identity fails. When Validate preflight is
     present, a missing ``ddl_identity_hash`` also fails closed (no soft-skip).
 
-    Enterprise GA: mappings without a Validate preflight **or** an explicit
-    ``approved_ddl_identity_hash`` (stamped at Validate / ledger proof) fail
-    closed — never skip Map→DDL identity on a silent ``pf is None`` path.
+    Programmatic callers (``skip_preflight=True``: API/CLI/scheduler/tests) may
+    omit Validate when no operator-approved hash is present: the engine stamps
+    the Map→DDL fingerprint **inline** from the current mappings and verifies
+    materialize is deterministic. UI Validate→Execute still requires a stamped
+    hash (preflight proof or ``approved_ddl_identity_hash``).
     """
     has_maps = bool(mappings)
     approved = ""
@@ -374,6 +377,22 @@ def _enforce_ddl_identity(
     if not approved:
         approved = (approved_ddl_identity_hash or "").strip()
     if not pf and not approved:
+        if has_maps and skip_preflight:
+            # Inline stamp — refuse only when fingerprint cannot be computed.
+            try:
+                from services.decision_kernel import approved_mapping_ddl_fingerprint
+
+                stamped = approved_mapping_ddl_fingerprint(
+                    mappings, dest_db=dest_db or ""
+                )
+                if not str(stamped or "").strip():
+                    return (
+                        "DDL identity inline stamp produced an empty fingerprint — "
+                        "refuse write (check Map target_type stamps)."
+                    )
+            except Exception as exc:  # pragma: no cover
+                return f"DDL identity inline stamp failed closed: {exc}"
+            return None
         if has_maps:
             return (
                 "DDL identity requires Validate preflight before Execute — "
@@ -386,7 +405,7 @@ def _enforce_ddl_identity(
             "(Map→DDL identity not stamped; re-run Validate)."
         )
     try:
-        from services.conversion_contract import DdlIdentityError, assert_ddl_identity
+        from services.decision_kernel import DdlIdentityError, assert_ddl_identity
 
         assert_ddl_identity(str(approved), mappings, dest_db=dest_db or "")
     except DdlIdentityError as exc:
@@ -394,6 +413,66 @@ def _enforce_ddl_identity(
     except Exception as exc:  # pragma: no cover — never invent soft-pass on check crash
         return f"DDL identity check failed closed: {exc}"
     return None
+
+
+def _request_decision_artifact_payload(request) -> dict | None:
+    raw = getattr(request, "decision_artifact", None)
+    if isinstance(raw, dict) and raw:
+        return raw
+    return None
+
+
+def _enforce_decision_artifact(
+    pf: dict | None,
+    mappings: list,
+    *,
+    dest_db: str,
+    approved_decision_artifact_hash: str = "",
+    decision_artifact: dict | None = None,
+    skip_preflight: bool = False,
+    sync_mode: str = "full_refresh_overwrite",
+    error_policy: str = "quarantine",
+) -> tuple[str | None, dict | None]:
+    """Phase C11 — refuse Execute without Decision Artifact authority.
+
+    Returns ``(error, artifact_dict)``. Programmatic ``skip_preflight`` stamps
+    an inline artifact (parity with DDL identity). Validate paths may carry
+    ``proof_bundle.decision_artifact`` or ``approved_decision_artifact_hash``.
+    """
+    from services.decision_kernel import enforce_decision_artifact
+
+    approved = (approved_decision_artifact_hash or "").strip()
+    payload = decision_artifact if isinstance(decision_artifact, dict) and decision_artifact else None
+    if pf and not payload:
+        pb = (pf.get("proof_bundle") or {}).get("decision_artifact")
+        if isinstance(pb, dict) and pb:
+            payload = pb
+    if pf and not approved:
+        approved = str(
+            ((pf.get("proof_bundle") or {}).get("decision_artifact") or {}).get(
+                "content_hash"
+            )
+            or (pf.get("proof_bundle") or {}).get("decision_artifact_hash")
+            or ""
+        ).strip()
+    # C11 tightened: Validate preflight must carry Decision Artifact (or hash).
+    # Only programmatic skip_preflight may inline-stamp. No transitional soft-skip.
+    if pf and not approved and not payload:
+        return (
+            "Decision Artifact missing from Validate proof_bundle — refuse Execute "
+            "(re-run Validate to stamp decision_artifact.content_hash).",
+            None,
+        )
+    err, art = enforce_decision_artifact(
+        mappings=list(mappings or []),
+        dest_db=dest_db or "",
+        approved_content_hash=approved,
+        artifact_payload=payload,
+        skip_preflight=bool(skip_preflight),
+        sync_mode=sync_mode,
+        error_policy=error_policy,
+    )
+    return err, (art.to_dict() if art is not None else None)
 
 
 def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
@@ -1955,8 +2034,63 @@ class UniversalTransferEngine:
         opened inside the stream nests under this one, and the resulting
         ``trace_id`` is folded into ``destination_summary`` so the UI can
         deep-link an operator from a job card into their APM.
+
+        Auto-created destination shells with zero durable writes are rolled
+        back on failure (audit §2.3 orphan DDL).
         """
+        from services.auto_create_lifecycle import (
+            bind_auto_create_job,
+            clear_auto_create_job,
+            mark_auto_create_committed,
+            rollback_uncommitted_auto_creates,
+        )
+
+        with bind_auto_create_job(job_id):
+            result = self._execute_tracked_inner(request, job_id, resume=resume)
+        try:
+            written = int(
+                getattr(result, "rows_written", 0)
+                or getattr(result, "records_transferred", 0)
+                or 0
+            )
+            if getattr(result, "success", False) and written > 0:
+                mark_auto_create_committed(job_id)
+                clear_auto_create_job(job_id)
+            elif not getattr(result, "success", False) and written == 0:
+                dropped = rollback_uncommitted_auto_creates(job_id)
+                if dropped:
+                    details = dict(getattr(result, "error_details", None) or {})
+                    details["auto_create_rolled_back"] = dropped
+                    try:
+                        result.error_details = details
+                    except Exception:
+                        pass
+            else:
+                clear_auto_create_job(job_id)
+        except Exception:
+            logger.debug("auto_create finalize failed", exc_info=True)
+        return result
+
+    def _execute_tracked_inner(
+        self, request: TransferRequest, job_id: str, resume: bool = False
+    ) -> TransferResult:
+        """Core transfer engine body (see :meth:`execute_tracked`)."""
         self._resolve_saved_connectors(request)
+        # Programmatic callers (tests/CLI/fleet) may pass a job_id that is not yet
+        # in the store. Mint a pending shell so checkpoint persistence cannot
+        # fail-closed solely because the document is missing.
+        try:
+            mongo_boot = get_mongodb_service()
+            if not mongo_boot.get_job(job_id):
+                mongo_boot.create_transfer_job(
+                    {
+                        "_id": job_id,
+                        "status": "pending",
+                        "message": "Execute started (job shell)",
+                    }
+                )
+        except Exception:
+            logger.debug("job shell bootstrap skipped for %s", job_id, exc_info=True)
         # Hard-block Execute when Map still has unresolved requires_review rows —
         # skip_preflight must never green-path ambiguous remaps into a write.
         # Also refuse impossible CDC delivery guarantees (exactly_once / at_most_once).
@@ -2590,11 +2724,13 @@ class UniversalTransferEngine:
             # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
             if pf is None and approved_hash:
                 identity_maps = list(request.mappings or []) or mappings
+            dest_db_fmt = str(getattr(request.destination, "format", None) or "")
             ddl_err = _enforce_ddl_identity(
                 pf,
                 identity_maps,
-                dest_db=str(getattr(request.destination, "format", None) or ""),
+                dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
+                skip_preflight=bool(getattr(request, "skip_preflight", False)),
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -2610,6 +2746,43 @@ class UniversalTransferEngine:
                     operation=request.operation,
                     job_id=job_id,
                 )
+            art_err, art_dict = _enforce_decision_artifact(
+                pf,
+                identity_maps,
+                dest_db=dest_db_fmt,
+                approved_decision_artifact_hash=str(
+                    getattr(request, "approved_decision_artifact_hash", "") or ""
+                ),
+                decision_artifact=_request_decision_artifact_payload(request),
+                skip_preflight=bool(getattr(request, "skip_preflight", False)),
+                sync_mode=str(getattr(request, "sync_mode", "") or ""),
+                error_policy="quarantine",
+            )
+            if art_err:
+                mongo.update_job_status(
+                    job_id, "failed", error=art_err, phase="failed", progress_pct=0
+                )
+                return TransferResult(
+                    success=False,
+                    error=art_err,
+                    error_details={
+                        "reason": "decision_artifact_mismatch",
+                        "remediation": "Re-run Validate to stamp a Decision Artifact.",
+                    },
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+            if art_dict:
+                try:
+                    mongo.update_job_fields(
+                        job_id,
+                        {
+                            "decision_artifact": art_dict,
+                            "decision_artifact_hash": art_dict.get("content_hash"),
+                        },
+                    )
+                except Exception:
+                    pass
             if pf:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
@@ -3136,6 +3309,15 @@ class UniversalTransferEngine:
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
+                    # Gate-8 keyed upsert proof needs PK on the summary even when
+                    # the writer omits written_ids (SQLite/PG historically did).
+                    if conflict_columns:
+                        dest_summary.setdefault(
+                            "conflict_columns", list(conflict_columns)
+                        )
+                        dest_summary.setdefault(
+                            "primary_key_columns", list(conflict_columns)
+                        )
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=records,
@@ -3553,11 +3735,13 @@ class UniversalTransferEngine:
             # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
             if pf is None and approved_hash:
                 identity_maps = list(request.mappings or []) or mappings
+            dest_db_fmt = str(getattr(request.destination, "format", None) or "")
             ddl_err = _enforce_ddl_identity(
                 pf,
                 identity_maps,
-                dest_db=str(getattr(request.destination, "format", None) or ""),
+                dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
+                skip_preflight=bool(getattr(request, "skip_preflight", False)),
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -3573,6 +3757,43 @@ class UniversalTransferEngine:
                     operation=request.operation,
                     job_id=job_id,
                 )
+            art_err, art_dict = _enforce_decision_artifact(
+                pf,
+                identity_maps,
+                dest_db=dest_db_fmt,
+                approved_decision_artifact_hash=str(
+                    getattr(request, "approved_decision_artifact_hash", "") or ""
+                ),
+                decision_artifact=_request_decision_artifact_payload(request),
+                skip_preflight=bool(getattr(request, "skip_preflight", False)),
+                sync_mode=str(getattr(request, "sync_mode", "") or ""),
+                error_policy="quarantine",
+            )
+            if art_err:
+                mongo.update_job_status(
+                    job_id, "failed", error=art_err, phase="failed", progress_pct=0
+                )
+                return TransferResult(
+                    success=False,
+                    error=art_err,
+                    error_details={
+                        "reason": "decision_artifact_mismatch",
+                        "remediation": "Re-run Validate to stamp a Decision Artifact.",
+                    },
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+            if art_dict:
+                try:
+                    mongo.update_job_fields(
+                        job_id,
+                        {
+                            "decision_artifact": art_dict,
+                            "decision_artifact_hash": art_dict.get("content_hash"),
+                        },
+                    )
+                except Exception:
+                    pass
             if pf:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
@@ -4264,11 +4485,13 @@ class UniversalTransferEngine:
             # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
             if pf is None and approved_hash:
                 identity_maps = list(request.mappings or []) or mappings
+            dest_db_fmt = str(getattr(request.destination, "format", None) or "")
             ddl_err = _enforce_ddl_identity(
                 pf,
                 identity_maps,
-                dest_db=str(getattr(request.destination, "format", None) or ""),
+                dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
+                skip_preflight=bool(getattr(request, "skip_preflight", False)),
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -4284,6 +4507,43 @@ class UniversalTransferEngine:
                     operation=request.operation,
                     job_id=job_id,
                 )
+            art_err, art_dict = _enforce_decision_artifact(
+                pf,
+                identity_maps,
+                dest_db=dest_db_fmt,
+                approved_decision_artifact_hash=str(
+                    getattr(request, "approved_decision_artifact_hash", "") or ""
+                ),
+                decision_artifact=_request_decision_artifact_payload(request),
+                skip_preflight=bool(getattr(request, "skip_preflight", False)),
+                sync_mode=str(getattr(request, "sync_mode", "") or ""),
+                error_policy="quarantine",
+            )
+            if art_err:
+                mongo.update_job_status(
+                    job_id, "failed", error=art_err, phase="failed", progress_pct=0
+                )
+                return TransferResult(
+                    success=False,
+                    error=art_err,
+                    error_details={
+                        "reason": "decision_artifact_mismatch",
+                        "remediation": "Re-run Validate to stamp a Decision Artifact.",
+                    },
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+            if art_dict:
+                try:
+                    mongo.update_job_fields(
+                        job_id,
+                        {
+                            "decision_artifact": art_dict,
+                            "decision_artifact_hash": art_dict.get("content_hash"),
+                        },
+                    )
+                except Exception:
+                    pass
             if pf:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
@@ -4474,6 +4734,16 @@ class UniversalTransferEngine:
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
                     dest_summary.setdefault("streaming", True)
+                    # File-stream upsert needs PK stamps for keyed Gate-8.
+                    file_pk: list[str] = []
+                    if stream_contract and stream_contract.primary_key:
+                        file_pk = [
+                            map_source_to_target(col, mappings)
+                            for col in stream_contract.primary_key_columns()
+                        ]
+                    if file_pk:
+                        dest_summary.setdefault("conflict_columns", list(file_pk))
+                        dest_summary.setdefault("primary_key_columns", list(file_pk))
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],

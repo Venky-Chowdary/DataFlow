@@ -33,7 +33,7 @@ def test_pg_to_logical_redshift_super_varbyte():
     assert _pg_to_logical("varbyte") == "BINARY"
     assert _pg_to_logical("varbyte(1024)") == "BINARY"
     # Existing PG floats still honest.
-    assert _pg_to_logical("double precision") == "FLOAT"
+    assert _pg_to_logical("double precision") == "DOUBLE PRECISION"
     assert _pg_to_logical("numeric(12,4)") == "DECIMAL(12,4)"
 
 

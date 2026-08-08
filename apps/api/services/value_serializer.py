@@ -29,12 +29,47 @@ SQL_NULL_SENTINEL = "__DF_SQL_NULL__"
 
 # Document field absent (Mongo/Dynamo schemaless) — distinct from explicit null.
 # Sparse CDC upsert: omit the key from SET (never wipe destination with NULL).
-# Dense INSERT/COPY/full-refresh: materialize as SQL NULL (union schema).
+# Dense INSERT/COPY/full-refresh / coerce_null: materialize as SQL NULL.
+#
+# In-memory cells use the ``Missing`` singleton (never a customer-visible string).
+# ``DF_MISSING_SENTINEL`` remains the quarantine/wire spelling for durable JSON;
+# ``is_missing_sentinel`` accepts both. Mapped-row public APIs must never return
+# the bare string (audit §2.4).
+class _MissingType:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "Missing"
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __eq__(self, other: object) -> bool:
+        return other is self or other == "__DF_MISSING__"
+
+    def __hash__(self) -> int:
+        return hash("__DF_MISSING__")
+
+
+Missing = _MissingType()
 DF_MISSING_SENTINEL = "__DF_MISSING__"
 
 
 def is_missing_sentinel(value: Any) -> bool:
-    return value == DF_MISSING_SENTINEL
+    return value is Missing or value == DF_MISSING_SENTINEL
+
+
+def public_mapped_cell(value: Any, *, dense_null: bool = False) -> Any:
+    """Normalize a mapped cell for public / writer consumption.
+
+    ``dense_null=True`` (INSERT / coerce_null): Missing → None.
+    Otherwise keep ``Missing`` singleton (omit-from-SET); never the wire string.
+    """
+    if value is Missing:
+        return None if dense_null else Missing
+    if value == DF_MISSING_SENTINEL:
+        return None if dense_null else Missing
+    return value
 
 
 def safe_decimal_text(value: Decimal) -> str | None:

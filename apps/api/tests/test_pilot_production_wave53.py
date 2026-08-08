@@ -77,9 +77,12 @@ def test_run_schedule_now_stages_ack_ledger(tmp_path, monkeypatch):
 
     from services import connector_store, schedule_store
     from services.schedule_store import PipelineSchedule
+    import src.ai.copilot.ack_ledger as ack_mod
 
     connector_store._backend_choice = None
     schedule_store._backend_choice = None  # type: ignore[attr-defined]
+    # Force rebind onto tmp ack path (suite may have warmed the singleton).
+    ack_mod._ledger = None
 
     # Minimal schedule in file store if supported; otherwise mock resolve.
     tools = DataPilotTools()

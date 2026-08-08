@@ -117,7 +117,7 @@ def test_infer_schema_map_choke_point():
     assert schema["status"] == "VARCHAR"
     assert intel["status"]["semantic_role"] == "string_enum"
     assert schema["deviceVerified"] == "BOOLEAN"
-    assert schema["amount"] == "DECIMAL"
+    assert str(schema["amount"]).startswith("DECIMAL")
 
 
 def test_status_samples_do_not_fit_boolean():

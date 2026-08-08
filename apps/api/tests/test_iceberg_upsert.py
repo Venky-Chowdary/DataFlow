@@ -45,6 +45,20 @@ def test_iceberg_parquet_preserves_decimal_arrow_type(tmp_path: Path) -> None:
     assert "10.5000" in vals[0] or vals[0].startswith("10.5")
 
 
+def test_windows_local_path_infers_filesystem_catalog() -> None:
+    """Drive-letter warehouses must not invent a SQL catalog (Windows CI)."""
+    from connectors.iceberg_catalog import _infer_catalog_type
+
+    assert (
+        _infer_catalog_type(r"C:\tmp\iceberg_wh", "", "", {}) == "filesystem"
+    )
+    assert _infer_catalog_type("/var/lib/iceberg", "", "", {}) == "filesystem"
+    assert (
+        _infer_catalog_type("sqlite:///C:/tmp/catalog.db", "", r"C:\wh", {})
+        == "sql"
+    )
+
+
 def test_iceberg_upsert_requires_explicit_pk(tmp_path: Path) -> None:
     warehouse = str(tmp_path / "wh")
     mappings = [

@@ -1476,7 +1476,10 @@ class DataPilotTools:
             scores["pii_compliance"] = scores.get("pii_compliance", 0) + 2
         if re.search(r"\b(?:fail|error|broke|troubleshoot|job)\b", lower):
             scores["troubleshooting"] = scores.get("troubleshooting", 0) + 2
-        if re.search(r"\b(?:dataflow|datatransfer|what is|what'?s different|airbyte|fivetran)\b", lower):
+        if re.search(
+            r"\b(?:dataflow|datawrap|datatransfer|what is|what'?s different|airbyte|fivetran)\b",
+            lower,
+        ):
             scores["product_help"] = scores.get("product_help", 0) + 3
         if re.search(r"\b(?:count|aggregate|analy[sz]e|how many|sql)\b", lower):
             scores["analytics_help"] = scores.get("analytics_help", 0) + 2
@@ -2190,8 +2193,13 @@ _META_PILOT_PHRASES = (
     "what can pilot",
     "help me with data pilot",
     "help with data pilot",
+    "help me with datawrap pilot",
+    "help with datawrap pilot",
+    "help me with dataflow pilot",
+    "help with dataflow pilot",
     "describe yourself",
     "describe data pilot",
+    "describe datawrap pilot",
     "tell me about yourself",
     "what tools do you have",
     "your tools",
@@ -2215,6 +2223,12 @@ def _is_meta_pilot_question(lower: str) -> bool:
         return True
     if re.search(r"\btell me what you can\b", lower):
         return True
+    # Brand-agnostic Pilot help ("help me with Datawrap Pilot", etc.)
+    if re.search(
+        r"\bhelp(?:\s+me)?\s+with\s+(?:data(?:wrap|flow|pilot)\s+)?pilot\b",
+        lower,
+    ):
+        return True
     return False
 
 
@@ -2234,7 +2248,7 @@ def _looks_like_product_howto(lower: str) -> bool:
     )
     product = bool(
         re.search(
-            r"\b(?:dataflow|datatransfer|data transfer|transfer studio|preflight|"
+            r"\b(?:dataflow|datawrap|datatransfer|data transfer|transfer studio|preflight|"
             r"mapping|connector|pipeline|validate|quarantine|sso|pii|gdpr|"
             r"hipaa|airbyte|fivetran|gates?|move (?:my |the )?data|sync data|"
             r"schema types?|semantic types?|type system|logical types?|"
@@ -2246,8 +2260,8 @@ def _looks_like_product_howto(lower: str) -> bool:
     )
     if howto and product:
         return True
-    # Bare product identity questions
-    if re.search(r"\bwhat is data(?:flow|transfer)\b", text):
+    # Bare product identity questions (legacy DataFlow + current Datawrap brand)
+    if re.search(r"\bwhat is data(?:flow|wrap|transfer)\b", text):
         return True
     if re.search(r"\bhow do i (?:transfer|move|sync|map|connect|validate)\b", text):
         return True
@@ -2463,7 +2477,8 @@ def _looks_like_unsupported_mutation(lower: str) -> bool:
             "create a new schedule", "create schedule", "create a pipeline",
             "new nightly", "build a cron", "cron pipeline",
             "schedule this transfer", "schedule this nightly", "schedule it nightly",
-            "schedule nightly", "nightly schedule",
+            # Do NOT match bare "schedule nightly" / "nightly schedule" —
+            # those collide with show/open schedule named "Nightly …".
         )
     ):
         return True
@@ -2476,7 +2491,16 @@ def _looks_like_unsupported_mutation(lower: str) -> bool:
         return True
     if re.search(r"\bremove\s+(?:the\s+)?[\w\s.-]+\s+connector\b", lower):
         return True
-    if re.search(r"\bschedule\b.+\b(?:nightly|daily|hourly|every\s+\d+|cron)\b", lower):
+    # Create-schedule only — do not refuse show/run/open schedule <name>.
+    if re.search(
+        r"\b(?:create|new|build|make)\b.+\b(?:nightly|daily|hourly|cron)\b.+\bschedule\b",
+        lower,
+    ):
+        return True
+    if re.search(
+        r"\bschedule\s+this\b.+\b(?:nightly|daily|hourly|every\s+\d+|cron)\b",
+        lower,
+    ):
         return True
     return False
 
@@ -2908,6 +2932,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     message = re.sub(r"\bdbs\b", "databases", message or "", flags=re.I)
     lower = message.lower()
     planned: list[tuple[str, dict]] = []
+
+    # Delete/export/schedule paraphrases must not plan list/search tools —
+    # "Warehouse connector" otherwise matches connector inventory routing.
+    if _looks_like_unsupported_mutation(lower):
+        return []
 
     if _is_meta_pilot_question(lower):
         planned.append(("describe_pilot", {}))

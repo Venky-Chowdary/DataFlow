@@ -21,8 +21,20 @@ def test_lossless_same_decimal_params():
         dest_db="postgresql",
         transform="none",
     )
-    assert result["conversion_class"] == ConversionClass.LOSSLESS.value
+    # Phase C3 — identical stamps are Identity (still a safe path).
+    assert result["conversion_class"] == ConversionClass.IDENTITY.value
     assert result["requires_risk_contract"] is False
+
+
+def test_integer_widen_is_widening_class():
+    result = classify_conversion(
+        "INTEGER",
+        "BIGINT",
+        dest_db="postgresql",
+        transform="none",
+    )
+    assert result["conversion_class"] == ConversionClass.WIDENING.value
+    assert result["lossy"] is False
 
 
 def test_bare_decimal_invent_needs_user_approval():

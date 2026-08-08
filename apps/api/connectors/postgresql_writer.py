@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Any
 
 from services.schema_inference import infer_type
-from services.type_system import materialize_dest_ddl
+from services.decision_kernel import materialize_dest_ddl
 from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
@@ -1377,6 +1377,27 @@ def write_mapped_rows(
                     col_defs,
                 )
             )
+            # Track empty shell for orphan rollback if job fails before first ack.
+            try:
+                from services.auto_create_lifecycle import register_auto_create
+
+                register_auto_create(
+                    db_type="postgresql" if engine not in {"redshift", "amazon_redshift"} else "redshift",
+                    table=table_name,
+                    schema=schema,
+                    config={
+                        "host": host,
+                        "port": port,
+                        "user": username,
+                        "username": username,
+                        "password": password,
+                        "database": database,
+                        "connection_string": connection_string,
+                    },
+                    job_id=job_id,
+                )
+            except Exception:
+                logger.debug("auto_create register skipped", exc_info=True)
 
         if backfill_new_fields:
             cursor.execute(
@@ -1954,6 +1975,13 @@ def write_mapped_rows(
 
                 written += chunk_written
                 chunks_completed = chunk_idx + 1
+                if written > 0 and job_id:
+                    try:
+                        from services.auto_create_lifecycle import mark_auto_create_committed
+
+                        mark_auto_create_committed(job_id)
+                    except Exception:
+                        logger.debug("auto_create commit mark skipped", exc_info=True)
                 if on_checkpoint:
                     on_checkpoint(chunks_completed, chunks, written)
 
@@ -2024,13 +2052,18 @@ def write_mapped_rows(
                 warnings=transform_errors,
                 load_method="copy" if use_copy else "insert",
             )
+        from connectors.writer_common import gate8_writer_meta
+
+        _checksum_rows = (
+            rows_for_checksum if "rows_for_checksum" in locals() else mapped_rows
+        )
         return WriteResult(
             ok=True,
             rows_written=written,
             table_name=table_name,
             target_schema=schema,
             checksum=row_checksum(
-                rows_for_checksum if "rows_for_checksum" in locals() else mapped_rows,
+                _checksum_rows,
                 target_cols,
                 dest_db_type="postgresql",
                 dest_types={c: target_types[i] for i, c in enumerate(target_cols)},
@@ -2042,6 +2075,11 @@ def write_mapped_rows(
             rows_skipped=rows_skipped,
             warnings=transform_errors,
             load_method="copy" if use_copy else "insert",
+            meta=gate8_writer_meta(
+                _checksum_rows,
+                target_cols,
+                conflict_columns=conflict_columns or None,
+            ),
         )
     except Exception as exc:
         if close_connection:

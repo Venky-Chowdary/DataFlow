@@ -17,7 +17,8 @@ class TestInferType:
         "samples,expected",
         [
             (["1", "2", "100"], "INTEGER"),
-            (["1.5", "2.0", "100.99"], "DECIMAL"),
+            # Sample-aware DECIMAL(p,s) — bare DECIMAL invents (38,15) floors.
+            (["1.5", "2.0", "100.99"], "DECIMAL(8,4)"),
             (["true", "false"], "BOOLEAN"),
             (["0", "1"], "INTEGER"),
             (["2024-01-15"], "DATE"),
@@ -44,7 +45,7 @@ class TestInferType:
         assert infer_type(samples) == expected
 
     def test_mixed_numeric_defaults_decimal(self) -> None:
-        assert infer_type(["1", "2.5", "3"]) == "DECIMAL"
+        assert infer_type(["1", "2.5", "3"]).startswith("DECIMAL")
 
     def test_empty_samples_varchar(self) -> None:
         assert infer_type(["", "  "]) == "VARCHAR"
@@ -82,7 +83,7 @@ class TestSchemaTypesFixture:
         record = store_upload("sample_schema_types.csv", path.read_bytes())
         types = {c["name"]: c["inferred_type"] for c in record["columns"]}
         assert types["row_id"] == "INTEGER"
-        assert types["amount"] == "DECIMAL"
+        assert str(types["amount"]).startswith("DECIMAL")
         assert types["is_active"] == "BOOLEAN"
         assert types["created_at"] == "TIMESTAMPTZ"
         assert types["birth_date"] == "DATE"

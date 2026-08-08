@@ -101,14 +101,6 @@ import {
   type EditableMapping,
   type MappingTransform,
 } from "../lib/mapping";
-
-/** Remediations must not clear fidelity/STRUCT risk without Accept risk. */
-function sealRemediationApproval(m: EditableMapping): EditableMapping {
-  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) {
-    return { ...m, approved: false, requiresReview: true };
-  }
-  return m;
-}
 import {
   Connector,
   EnhancedAnalysis,
@@ -137,121 +129,34 @@ import {
   streamContractsNeedReview,
   type StreamFieldContract,
 } from "../lib/streamContracts";
-
-interface TransferPageProps {
-  connectors: Connector[];
-  /** True while the first connectors fetch has not settled yet. */
-  connectorsLoading?: boolean;
-  onTransferComplete: () => void;
-  onOpenSchedules?: () => void;
-  /** Jump to Contracts after Save as contract so the draft is visible immediately. */
-  onOpenContracts?: () => void;
-  /** Remount studio and clear prior transfer cache (source, map, result). */
-  onFreshTransfer?: () => void;
-  /** Pre-select a saved connection as the Transfer Studio source (from Connectors drawer). */
-  seedSourceConnector?: { connectorId: string; token: number } | null;
-  /** Jobs → Studio deep-link: land on Validate/Map with optional repair + mappings. */
-  seedStudioIntent?: {
-    token: number;
-    step?: "validate" | "map" | "source";
-    repairProposalId?: string;
-    jobId?: string;
-    preflight?: import("../lib/types").PreflightResult;
-    validationMode?: string;
-    mappings?: Array<{
-      source?: string;
-      destination?: string;
-      destination_type?: string;
-      target_type?: string;
-      transform?: string;
-      transforms?: { type?: string }[];
-      [key: string]: unknown;
-    }>;
-  } | null;
-}
-
-/** File formats are never listed as database sources. */
-const FILE_FORMAT_SOURCE_TYPES = new Set([
-  "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
-  "pdf", "docx", "html",
-]);
-
-const STEP_SOURCE = 1;
-const STEP_DESTINATION = 2;
-const STEP_MAP = 3;
-const STEP_VALIDATE = 4;
-const STEP_RUN = 5;
-
-const STEPS = [
-  { n: STEP_SOURCE, label: "Source", shortLabel: "Src", icon: "upload" },
-  { n: STEP_DESTINATION, label: "Destination", shortLabel: "Dest", icon: "connectors" },
-  { n: STEP_MAP, label: "Map", shortLabel: "Map", icon: "sparkle" },
-  { n: STEP_VALIDATE, label: "Validate", shortLabel: "Gate", icon: "gate" },
-  { n: STEP_RUN, label: "Run", shortLabel: "Run", icon: "transfer" },
-];
-
-const RUN_LAUNCH_STAGES = [
-  "Submitting governed job request",
-  "Locking approved mapping revision",
-  "Provisioning destination writer",
-  "Opening live telemetry stream",
-] as const;
-
-const CLOUD_SOURCE_TYPES = new Set(["s3", "gcs", "google_cloud_storage", "azure_blob", "adls"]);
-
-const FALLBACK_DEST_TYPES = ["mongodb", "postgresql", "mysql", "snowflake", "bigquery"] as const;
-const FALLBACK_EXPORT_FORMATS = ["csv", "json", "jsonl"] as const;
-
-const ACCEPTED_UPLOAD_EXTENSIONS = new Set([
-  "csv", "json", "jsonl", "tsv", "parquet", "pdf", "docx", "html", "htm", "xlsx", "xls", "xml",
-]);
-const MAX_UPLOAD_BYTES = 250 * 1024 * 1024;
-const UPLOAD_FORMATS = ["JSON", "CSV", "JSONL", "TSV", "Excel", "Parquet", "PDF", "DOCX", "HTML"] as const;
-
-function formatFileSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
+import type { TransferPageProps } from "./transfer/TransferPageProps";
+import {
+  ACCEPTED_UPLOAD_EXTENSIONS,
+  CLOUD_SOURCE_TYPES,
+  FALLBACK_DEST_TYPES,
+  FALLBACK_EXPORT_FORMATS,
+  FILE_FORMAT_SOURCE_TYPES,
+  MAX_UPLOAD_BYTES,
+  RUN_LAUNCH_STAGES,
+  STEP_DESTINATION,
+  STEP_MAP,
+  STEP_RUN,
+  STEP_SOURCE,
+  STEP_VALIDATE,
+  STEPS,
+  UPLOAD_FORMATS,
+} from "./transfer/studioConstants";
+import {
+  analysisFromPipeline,
+  fileExtension,
+  findColumn,
+  formatFileSize,
+  sealRemediationApproval,
+} from "./transfer/studioHelpers";
 
 type SyncMode = SyncModeId;
 type SchemaPolicy = SchemaPolicyId;
 type ValidationMode = ValidationModeId;
-
-function findColumn(columns: string[], patterns: RegExp[]) {
-  return columns.find((col) => patterns.some((pattern) => pattern.test(col))) || "";
-}
-
-function fileExtension(name: string) {
-  return name.split(".").pop()?.toLowerCase() ?? "";
-}
-
-function analysisFromPipeline(
-  columns: string[],
-  schema: Record<string, string>,
-  pipelineColumns: { source: string; target: string; confidence: number; reasoning?: string }[],
-): EnhancedAnalysis {
-  const bySource = Object.fromEntries(pipelineColumns.map((m) => [m.source, m]));
-  return {
-    columns: columns.map((column_name) => ({
-      column_name,
-      inferred_type: schema[column_name] || "string",
-      confidence: bySource[column_name]?.confidence ?? 0.7,
-      is_pii: /email|phone|ssn|name/i.test(column_name),
-      compliance: [],
-      reasoning_steps: [bySource[column_name]?.reasoning || "Semantic mapping pipeline"],
-      method: "mapping_pipeline",
-    })),
-    pii_columns: columns.filter((c) => /email|phone|ssn/i.test(c)),
-    quality_score: pipelineColumns.length
-      ? Math.round(
-          (pipelineColumns.reduce((s, m) => s + m.confidence, 0) / pipelineColumns.length) * 100,
-        )
-      : 70,
-    recommendations: ["Review column mappings before executing."],
-    method: "mapping_pipeline",
-  };
-}
 
 export function TransferPage({
   connectors,
@@ -3707,6 +3612,24 @@ export function TransferPage({
     }
 
     const enforcePreflight = true;
+    const approvedDecisionArtifactHash = String(
+      preflight?.proof_bundle?.decision_artifact_hash
+        || preflight?.proof_bundle?.decision_artifact?.content_hash
+        || "",
+    ).trim();
+    if (
+      enforcePreflight
+      && (!approvedDecisionArtifactHash || approvedDecisionArtifactHash.length !== 64)
+    ) {
+      toast({
+        title: "Re-run Validate",
+        message:
+          "Execute requires the Decision Artifact hash from Validate. "
+          + "Run Validate again before starting the transfer.",
+        tone: "warning",
+      });
+      return;
+    }
 
     setTransferring(true);
     setStep(STEP_RUN);
@@ -3853,6 +3776,12 @@ export function TransferPage({
           schemaDriftAcknowledged ? "Schema drift acknowledged on Validate" : "",
           fkRiskAcknowledged ? "FK risk acknowledged on Validate" : "",
         ].filter(Boolean).join("; ") || undefined,
+        approvedDecisionArtifactHash: approvedDecisionArtifactHash || undefined,
+        decisionArtifact:
+          preflight?.proof_bundle?.decision_artifact
+          && typeof preflight.proof_bundle.decision_artifact === "object"
+            ? (preflight.proof_bundle.decision_artifact as Record<string, unknown>)
+            : undefined,
       });
       setRunStartupProgress(36);
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);

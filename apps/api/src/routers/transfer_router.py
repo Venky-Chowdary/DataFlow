@@ -217,6 +217,9 @@ class ExecuteTransferRequest(BaseModel):
     fk_risk_acknowledged: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
+    # Phase C11 — pin Validate Decision Artifact (64-hex content_hash).
+    approved_decision_artifact_hash: str = ""
+    decision_artifact: dict = Field(default_factory=dict)
 
 
 class MapColumnsRequest(BaseModel):
@@ -690,6 +693,10 @@ async def execute_transfer_json(
         fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
         acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
         acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
+        approved_decision_artifact_hash=str(
+            body.approved_decision_artifact_hash or ""
+        ).strip(),
+        decision_artifact=dict(body.decision_artifact or {}),
     )
     from services.batch_progress import effective_backfill_new_fields
 
@@ -875,6 +882,8 @@ async def run_universal_transfer(
     fk_risk_acknowledged: str = Form("false"),
     acknowledgment_actor: str = Form(""),
     acknowledgment_reason: str = Form(""),
+    approved_decision_artifact_hash: str = Form(""),
+    decision_artifact_json: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -1009,7 +1018,19 @@ async def run_universal_transfer(
         fk_risk_acknowledged=fk_risk_acknowledged.lower() in ("true", "1", "yes"),
         acknowledgment_actor=(acknowledgment_actor or "").strip() or _actor_email(request),
         acknowledgment_reason=(acknowledgment_reason or "").strip(),
+        approved_decision_artifact_hash=(approved_decision_artifact_hash or "").strip(),
     )
+    if decision_artifact_json.strip():
+        try:
+            import json as _json
+
+            parsed_art = _json.loads(decision_artifact_json)
+            if isinstance(parsed_art, dict):
+                request_obj.decision_artifact = parsed_art
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "decision_artifact_json parse failed: %s", exc, exc_info=exc
+            )
     # Explicit form fields win over stored plan policies (plan used to force
     # validation_mode=strict and re-block encoding after Studio quarantine).
     form_validation_mode = (validation_mode or "").strip()

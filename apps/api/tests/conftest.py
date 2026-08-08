@@ -61,11 +61,100 @@ def _is_mongo_reachable() -> bool:
         return False
 
 
+def _is_postgresql_auth_ok(
+    *,
+    host: str = "localhost",
+    port: int = 5432,
+    database: str = "dataflow",
+    user: str = "dataflow",
+    password: str = "dataflow",
+) -> bool:
+    """Port open ≠ role/password valid (common on shared localhost:5432)."""
+    try:
+        socket.create_connection((host, port), timeout=1.0).close()
+    except Exception:
+        return False
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            dbname=database,
+            user=user,
+            password=password,
+            connect_timeout=3,
+        )
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
 def pytest_collection_modifyitems(config, items):
-    """Skip MongoDB-specific tests when no local MongoDB emulator is running."""
-    if _is_mongo_reachable():
-        return
-    skip_mongo = pytest.mark.skip(reason="MongoDB not reachable on this runner")
-    for item in items:
-        if "mongodb" in item.nodeid.lower():
-            item.add_marker(skip_mongo)
+    """Skip live-service tests when emulators are absent or unauthenticated."""
+    if not _is_mongo_reachable():
+        skip_mongo = pytest.mark.skip(reason="MongoDB not reachable on this runner")
+        for item in items:
+            if "mongodb" in item.nodeid.lower():
+                item.add_marker(skip_mongo)
+
+    # Live execute_tracked / CDC PG paths hard-code dataflow/dataflow.
+    # Port-open-only skips previously failed with auth errors mid-test.
+    if not _is_postgresql_auth_ok():
+        skip_pg = pytest.mark.skip(
+            reason=(
+                "PostgreSQL auth failed for dataflow/dataflow on localhost:5432 "
+                "(skip_honest — port open ≠ usable)"
+            )
+        )
+        for item in items:
+            nid = item.nodeid.lower()
+            path = str(getattr(item, "path", "") or getattr(item, "fspath", "")).lower()
+            live_pg = (
+                "execute_tracked" in nid
+                and (
+                    "postgres" in nid
+                    or "postgresql" in nid
+                    or "pgvector" in nid
+                )
+            ) or (
+                "execute_tracked" in path
+                and (
+                    "postgres" in path
+                    or "postgresql" in path
+                    or "pgvector" in path
+                )
+            ) or any(
+                token in nid
+                for token in (
+                    "cdc_postgres",
+                    "postgresql_cdc",
+                    "cross_schema_edge_types",
+                    "csv_to_postgres_upsert",
+                    "[pgvector]",
+                    "mongodb_to_postgresql",
+                    "pilot_aggregation_wave89",
+                    "pilot_transfer_wave92",
+                    "pilot_transfer_matrix_wave93",
+                    "postgresql_to_postgresql_incremental",
+                    "postgresql_writer_dedupe",
+                    "postgresql_writer_upsert_dedupes",
+                )
+            ) or (
+                "postgresql_to_postgresql_incremental" in path
+                or "postgresql_writer_dedupe" in path
+            ) or (
+                "live_emulator" in nid
+                and ("[postgresql]" in nid or "[pgvector]" in nid)
+            ) or (
+                "pilot_aggregation" in path
+                or "mongodb_to_postgresql" in path
+                or "pilot_transfer_wave92" in path
+                or (
+                    "pilot_transfer_matrix_wave93" in path
+                    and "live_cross_engine" in nid
+                )
+            )
+            if live_pg:
+                item.add_marker(skip_pg)

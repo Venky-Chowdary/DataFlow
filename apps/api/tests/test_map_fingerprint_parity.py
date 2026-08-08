@@ -32,7 +32,7 @@ def test_map_rows_for_fingerprint_surfaces_fail_job_rejects():
             {
                 "source": "amount",
                 "target": "amount",
-                "transform": "to_integer",
+                "transform": "integer",
                 "target_type": "integer",
                 "risk_contract": contract.to_dict(),
             },
