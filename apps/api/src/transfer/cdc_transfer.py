@@ -250,9 +250,15 @@ def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
         wal = str(meta.get("wal_status") or "").strip().lower()
         if wal in {"lost", "unreserved"} and out.get("cdc_freshness_severity") != "critical":
             out["cdc_freshness_severity"] = "critical"
+            plugin_label = str(plugin or meta.get("plugin") or "cdc").strip().lower()
+            reason_prefix = (
+                "mysql_binlog"
+                if "mysql" in plugin_label or "mariadb" in plugin_label or "binlog" in plugin_label
+                else "pg_replication_slots"
+            )
             out["cdc_lag_unknown_reason"] = (
                 out.get("cdc_lag_unknown_reason")
-                or f"pg_replication_slots.wal_status={wal}"
+                or f"{reason_prefix}.wal_status={wal}"
             )
     if meta.get("active") is False and out.get("cdc_freshness_severity") not in {
         "critical",

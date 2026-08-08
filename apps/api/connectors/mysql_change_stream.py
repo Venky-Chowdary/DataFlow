@@ -29,6 +29,7 @@ from services.cdc_schema_history import (
 from connectors.mysql_conn import get_connection
 from connectors.mysql_reader import read_table_batch
 from connectors.sql_identifiers import quote_table_ref
+from services.cdc_cursor_gap import CdcBinlogGapError
 
 _DDL_RE = re.compile(
     r"\b(ALTER|CREATE|DROP|RENAME)\s+TABLE\b",
@@ -136,6 +137,8 @@ class MySqlChangeStreamCdc:
                 "shared_reader": len(self.tables) > 1,
             },
         )
+        self._binlog_catalog_cache: dict[str, Any] | None = None
+        self._binlog_catalog_cache_at: float = 0.0
 
     @property
     def lease_holder_id(self) -> str:
@@ -514,6 +517,240 @@ class MySqlChangeStreamCdc:
 
     def heartbeat(self) -> None:
         self._last_heartbeat_at = datetime.now(timezone.utc)
+
+    def _binlog_catalog_status(self, *, max_age_sec: float = 2.0) -> dict[str, Any]:
+        """Live binlog catalog proof for Theater / Freshness (PG slot parity).
+
+        Returns ``slot_exists`` (log_bin), ``active`` (lease), ``restart_lsn``
+        (oldest retained file:pos), ``confirmed_flush_lsn`` (resume file:pos),
+        ``wal_status`` ∈ {reserved, unreserved, lost}, expire vars, gtid_purged.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if (
+            self._binlog_catalog_cache is not None
+            and (now - float(self._binlog_catalog_cache_at or 0.0)) < max(0.25, float(max_age_sec))
+        ):
+            return dict(self._binlog_catalog_cache)
+
+        out: dict[str, Any] = {
+            "plugin": "mysql-binlog",
+            "slot_exists": False,
+            "active": bool(getattr(self._lease, "acquired", False)),
+            "restart_lsn": None,
+            "confirmed_flush_lsn": None,
+            "wal_status": None,
+            "binary_logs": [],
+            "oldest_file": None,
+            "current_file": None,
+            "current_pos": None,
+            "gtid_purged": "",
+            "gtid_executed": "",
+            "binlog_expire_logs_seconds": None,
+            "expire_logs_days": None,
+            "server_id": self._mysql_server_id(),
+            "log_bin": False,
+            "binlog_format": None,
+            "binlog_row_image": None,
+        }
+        token = self.resume_token if isinstance(self.resume_token, dict) else {}
+        resume_file = str(token.get("file") or "").strip()
+        resume_pos = token.get("pos")
+        resume_gtid = str(token.get("gtid") or "").strip()
+        if resume_file:
+            out["confirmed_flush_lsn"] = (
+                f"{resume_file}:{resume_pos}" if resume_pos is not None else resume_file
+            )
+        elif resume_gtid:
+            out["confirmed_flush_lsn"] = resume_gtid[:120]
+
+        try:
+            conn = self._conn()
+            try:
+                with conn.cursor() as cur:
+                    def _var(name: str) -> str | None:
+                        try:
+                            cur.execute(f"SHOW VARIABLES LIKE '{name}'")
+                            row = cur.fetchone()
+                            if row and len(row) > 1 and row[1] is not None:
+                                return str(row[1])
+                        except Exception:
+                            return None
+                        return None
+
+                    log_bin = (_var("log_bin") or "").lower()
+                    out["log_bin"] = log_bin in {"on", "1", "true"}
+                    out["slot_exists"] = bool(out["log_bin"])
+                    out["binlog_format"] = _var("binlog_format")
+                    out["binlog_row_image"] = _var("binlog_row_image")
+                    expire_sec = _var("binlog_expire_logs_seconds")
+                    if expire_sec is not None:
+                        try:
+                            out["binlog_expire_logs_seconds"] = int(expire_sec)
+                        except (TypeError, ValueError):
+                            out["binlog_expire_logs_seconds"] = expire_sec
+                    expire_days = _var("expire_logs_days")
+                    if expire_days is not None:
+                        try:
+                            out["expire_logs_days"] = int(float(expire_days))
+                        except (TypeError, ValueError):
+                            out["expire_logs_days"] = expire_days
+
+                    logs: list[str] = []
+                    try:
+                        cur.execute("SHOW BINARY LOGS")
+                        for row in cur.fetchall() or []:
+                            if row and row[0]:
+                                logs.append(str(row[0]))
+                    except Exception as exc:
+                        out["probe_error"] = f"SHOW BINARY LOGS: {exc}"[:200]
+                    out["binary_logs"] = logs
+                    if logs:
+                        out["oldest_file"] = logs[0]
+                        out["restart_lsn"] = f"{logs[0]}:4"
+
+                    for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
+                        try:
+                            cur.execute(sql)
+                            row = cur.fetchone()
+                            if row:
+                                out["current_file"] = str(row[0]) if row[0] else None
+                                try:
+                                    out["current_pos"] = int(row[1])
+                                except (TypeError, ValueError, IndexError):
+                                    out["current_pos"] = row[1] if len(row) > 1 else None
+                                break
+                        except Exception:
+                            continue
+
+                    try:
+                        cur.execute("SELECT @@GLOBAL.gtid_purged")
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            out["gtid_purged"] = str(row[0])
+                    except Exception:
+                        pass
+                    try:
+                        cur.execute("SELECT @@GLOBAL.gtid_executed")
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            out["gtid_executed"] = str(row[0])
+                    except Exception:
+                        pass
+
+                    gtid_in_purged: bool | None = None
+                    if resume_gtid and out.get("gtid_purged"):
+                        try:
+                            cur.execute(
+                                "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_purged)",
+                                (resume_gtid,),
+                            )
+                            row = cur.fetchone()
+                            if row is not None and row[0] is not None:
+                                gtid_in_purged = bool(int(row[0]))
+                        except Exception:
+                            gtid_in_purged = None
+                    out["gtid_in_purged"] = gtid_in_purged
+
+                from services.cdc_retention_probe import classify_binlog_retention
+
+                retention = classify_binlog_retention(
+                    resume_file,
+                    resume_pos,
+                    logs,
+                    resume_gtid=resume_gtid,
+                    gtid_purged=str(out.get("gtid_purged") or ""),
+                    gtid_in_purged=gtid_in_purged,
+                    cursor_key=self.cursor_key,
+                )
+                out["retention_status"] = retention.status
+                if retention.status == "gap":
+                    out["wal_status"] = "lost"
+                elif retention.status == "at_risk":
+                    out["wal_status"] = "unreserved"
+                elif retention.status == "ok":
+                    out["wal_status"] = "reserved"
+                elif out["slot_exists"]:
+                    out["wal_status"] = "reserved"
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            _logger.debug("binlog catalog probe failed: %s", exc)
+            out["probe_error"] = str(exc)[:200]
+
+        out["active"] = bool(getattr(self._lease, "acquired", False))
+        self._binlog_catalog_cache = dict(out)
+        self._binlog_catalog_cache_at = now
+        return out
+
+    def cdc_metadata(self) -> dict[str, Any]:
+        """Operator-visible MySQL CDC status for Job Theater / Validate."""
+        lag_sec = self.replication_lag_seconds()
+        obs = dict(self._lag_observation or {})
+        catalog = self._binlog_catalog_status()
+        lease_fields: dict[str, Any] = {}
+        try:
+            lease_fields = dict(self._lease.theater_fields() or {})
+        except Exception:
+            lease_fields = {}
+        phase = "snapshot"
+        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
+            phase = "snapshot"
+        elif self.resume_token:
+            phase = "streaming"
+        return {
+            "plugin": "mysql-binlog",
+            "slot_name": f"server_id:{catalog.get('server_id') or self._mysql_server_id()}",
+            "phase": phase,
+            "replication_lag_bytes": obs.get(
+                "replication_lag_bytes", self.replication_lag_bytes()
+            ),
+            "replication_lag_seconds": lag_sec,
+            "cdc_lag_basis": obs.get("cdc_lag_basis"),
+            "cdc_heartbeat_age_sec": obs.get("cdc_heartbeat_age_sec"),
+            "freshness_severity": obs.get("freshness_severity"),
+            "active": catalog.get("active"),
+            "slot_exists": catalog.get("slot_exists"),
+            "restart_lsn": catalog.get("restart_lsn"),
+            "confirmed_flush_lsn": catalog.get("confirmed_flush_lsn"),
+            "wal_status": catalog.get("wal_status"),
+            "binlog_expire_logs_seconds": catalog.get("binlog_expire_logs_seconds"),
+            "gtid_purged": catalog.get("gtid_purged"),
+            "retention_status": catalog.get("retention_status"),
+            "delivery": "at-least-once",
+            **lease_fields,
+        }
+
+    def _assert_resume_within_retention(self) -> None:
+        """Fail-closed when resume file/GTID is before retained binary logs."""
+        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
+            return
+        token = self.resume_token if isinstance(self.resume_token, dict) else {}
+        resume_file = str(token.get("file") or "").strip()
+        resume_gtid = str(token.get("gtid") or "").strip()
+        if not resume_file and not resume_gtid:
+            return
+        catalog = self._binlog_catalog_status(max_age_sec=0)
+        if catalog.get("retention_status") != "gap" and catalog.get("wal_status") != "lost":
+            return
+        raise CdcBinlogGapError(
+            (
+                f"MySQL CDC resume is before retained binary logs "
+                f"(resume={catalog.get('confirmed_flush_lsn') or resume_file or resume_gtid}, "
+                f"oldest={catalog.get('oldest_file') or catalog.get('gtid_purged') or '?'}). "
+                "Reset watermark and re-snapshot — continuous CDC across the gap is not claimed."
+            ),
+            resume_file=resume_file,
+            resume_pos=token.get("pos") if resume_file else "",
+            oldest_file=str(catalog.get("oldest_file") or ""),
+            resume_gtid=resume_gtid,
+            gtid_purged=str(catalog.get("gtid_purged") or ""),
+            cursor_key=self.cursor_key,
+        )
 
     def _poll_signal_table(self) -> None:
         """Debezium-compatible signal table → incremental snapshot enqueue."""
@@ -985,6 +1222,8 @@ class MySqlChangeStreamCdc:
 
         self._acquire_cdc_lease()
         self._poll_signal_table()
+        # Fail-closed before opening the stream — purged binlog/GTID is silent loss.
+        self._assert_resume_within_retention()
 
         # Signal-driven incremental snapshot (DDD-3 window via shared runner).
         from services.cdc_incremental_runner import interleave_incremental_snapshot

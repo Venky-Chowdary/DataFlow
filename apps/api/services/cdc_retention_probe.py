@@ -178,6 +178,153 @@ def classify_scn_retention(
     )
 
 
+def classify_binlog_retention(
+    resume_file: str,
+    resume_pos: int | str | None,
+    binary_logs: list[str],
+    *,
+    resume_gtid: str = "",
+    gtid_purged: str = "",
+    gtid_in_purged: bool | None = None,
+    cursor_key: str = "",
+    dialect: str = "mysql",
+) -> RetentionProbeResult:
+    """Compare resume file:pos / GTID to retained binary logs.
+
+    - ``gap``: resume file missing from ``SHOW BINARY LOGS``, or GTID ⊆ gtid_purged
+    - ``at_risk``: resume sits on the oldest retained file (next purge may gap)
+    - ``ok``: resume file is still retained and not the oldest edge
+    """
+    logs = [str(f).strip() for f in (binary_logs or []) if str(f).strip()]
+    resume_f = str(resume_file or "").strip()
+    resume_g = str(resume_gtid or "").strip()
+    try:
+        pos_s = "" if resume_pos in (None, "") else str(int(resume_pos))
+    except (TypeError, ValueError):
+        pos_s = str(resume_pos or "")
+    resume_label = f"{resume_f}:{pos_s}" if resume_f and pos_s else (resume_f or resume_g)
+    oldest = logs[0] if logs else ""
+    retained_label = oldest or (str(gtid_purged)[:120] if gtid_purged else "")
+
+    if gtid_in_purged is True:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=resume_label or resume_g,
+            retained=retained_label,
+            cursor_key=cursor_key,
+            message=(
+                f"Resume GTID is contained in gtid_purged. "
+                "Reset watermark and re-snapshot — continuous CDC across the gap is not claimed."
+            ),
+            details={"gtid_purged": str(gtid_purged)[:200], "resume_gtid": resume_g[:200]},
+        )
+
+    if not resume_f and not resume_g:
+        return RetentionProbeResult(
+            status="no_watermark",
+            dialect=dialect,
+            retained=retained_label,
+            cursor_key=cursor_key,
+            message="No resume binlog file/GTID — next run will snapshot or start at current.",
+        )
+
+    if resume_f:
+        if not logs:
+            return RetentionProbeResult(
+                status="unknown",
+                dialect=dialect,
+                resume=resume_label,
+                cursor_key=cursor_key,
+                message="Could not list binary logs (privilege or log_bin off).",
+            )
+        if resume_f not in logs:
+            return RetentionProbeResult(
+                status="gap",
+                dialect=dialect,
+                resume=resume_label,
+                retained=retained_label,
+                cursor_key=cursor_key,
+                message=(
+                    f"Resume binlog {resume_label} is not in SHOW BINARY LOGS "
+                    f"(oldest retained={oldest or '?'}). "
+                    "Reset watermark and re-snapshot — continuous CDC across the gap is not claimed."
+                ),
+                details={"binary_logs": logs[:20], "oldest_file": oldest},
+            )
+        if oldest and resume_f == oldest:
+            return RetentionProbeResult(
+                status="at_risk",
+                dialect=dialect,
+                resume=resume_label,
+                retained=retained_label,
+                cursor_key=cursor_key,
+                message=(
+                    f"Resume sits on oldest retained binlog ({oldest}). "
+                    "Next expire_logs purge may force a gap — consider when_needed snapshot readiness."
+                ),
+                details={"oldest_file": oldest},
+            )
+        return RetentionProbeResult(
+            status="ok",
+            dialect=dialect,
+            resume=resume_label,
+            retained=retained_label,
+            cursor_key=cursor_key,
+            message=f"Resume binlog is within retention (resume={resume_label}, oldest={oldest}).",
+            details={"oldest_file": oldest},
+        )
+
+    # GTID-only resume without server-side purged subset proof.
+    if resume_g and gtid_purged and gtid_in_purged is None:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect=dialect,
+            resume=resume_g[:200],
+            retained=str(gtid_purged)[:120],
+            cursor_key=cursor_key,
+            message="GTID resume present but GTID_SUBSET(gtid_purged) was not evaluated.",
+        )
+    return RetentionProbeResult(
+        status="ok",
+        dialect=dialect,
+        resume=resume_g[:200] if resume_g else resume_label,
+        retained=retained_label,
+        cursor_key=cursor_key,
+        message="GTID resume retained (not reported in gtid_purged).",
+    )
+
+
+def _resume_binlog_from_watermark(watermark: str | None) -> dict[str, Any]:
+    """Extract file/pos/gtid from a MySQL CDC watermark JSON or bare file:pos."""
+    out: dict[str, Any] = {"file": "", "pos": None, "gtid": ""}
+    if not watermark:
+        return out
+    text = str(watermark).strip()
+    try:
+        import json
+
+        if text.startswith("{"):
+            data = json.loads(text)
+            out["file"] = str(data.get("file") or "").strip()
+            if data.get("pos") is not None:
+                try:
+                    out["pos"] = int(data["pos"])
+                except (TypeError, ValueError):
+                    out["pos"] = data.get("pos")
+            out["gtid"] = str(data.get("gtid") or "").strip()
+            return out
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    if ":" in text and not text.startswith("{"):
+        # bare mysql-bin.000003:1234
+        file_part, _, pos_part = text.rpartition(":")
+        if file_part and pos_part.isdigit():
+            out["file"] = file_part
+            out["pos"] = int(pos_part)
+    return out
+
+
 def _resume_lsn_from_watermark(watermark: str | None) -> str:
     if not watermark:
         return ""
@@ -323,6 +470,93 @@ def probe_oracle_retention(
         )
 
 
+def probe_mysql_retention(
+    cfg: dict[str, Any],
+    *,
+    cursor_key: str = "",
+    watermark: str | None = None,
+) -> RetentionProbeResult:
+    """Live probe: watermark file:pos / GTID vs ``SHOW BINARY LOGS`` + gtid_purged."""
+    from connectors.mysql_conn import get_connection
+
+    from services.sync_cursor import get_watermark
+
+    ck = (cursor_key or "").strip()
+    wm = watermark if watermark is not None else (get_watermark(ck) if ck else None)
+    resume = _resume_binlog_from_watermark(wm)
+    dialect = "mariadb" if "maria" in str(cfg.get("type") or "").lower() else "mysql"
+    database = cfg.get("database") or cfg.get("schema") or ""
+    try:
+        conn = get_connection(
+            host=cfg.get("host") or "localhost",
+            port=cfg.get("port") or 3306,
+            database=database,
+            username=cfg.get("username") or "",
+            password=cfg.get("password") or "",
+            connection_string=cfg.get("connection_string") or "",
+            ssl=bool(cfg.get("ssl")),
+        )
+        try:
+            with conn.cursor() as cur:
+                logs: list[str] = []
+                try:
+                    cur.execute("SHOW BINARY LOGS")
+                    for row in cur.fetchall() or []:
+                        if row and row[0]:
+                            logs.append(str(row[0]))
+                except Exception as exc:
+                    logger.debug("SHOW BINARY LOGS failed: %s", exc)
+                gtid_purged = ""
+                try:
+                    cur.execute("SELECT @@GLOBAL.gtid_purged")
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        gtid_purged = str(row[0])
+                except Exception as exc:
+                    logger.debug("gtid_purged read failed: %s", exc)
+                gtid_in_purged: bool | None = None
+                resume_gtid = str(resume.get("gtid") or "")
+                if resume_gtid and gtid_purged:
+                    try:
+                        cur.execute(
+                            "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_purged)",
+                            (resume_gtid,),
+                        )
+                        row = cur.fetchone()
+                        if row is not None:
+                            gtid_in_purged = bool(int(row[0])) if row[0] is not None else False
+                    except Exception as exc:
+                        logger.debug("GTID_SUBSET(gtid_purged) failed: %s", exc)
+            return classify_binlog_retention(
+                str(resume.get("file") or ""),
+                resume.get("pos"),
+                logs,
+                resume_gtid=resume_gtid,
+                gtid_purged=gtid_purged,
+                gtid_in_purged=gtid_in_purged,
+                cursor_key=ck,
+                dialect=dialect,
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect=dialect,
+            resume=(
+                f"{resume.get('file')}:{resume.get('pos')}"
+                if resume.get("file")
+                else str(resume.get("gtid") or "")
+            ),
+            cursor_key=ck,
+            message=f"Retention probe failed: {exc}",
+            details={"error": str(exc)[:300]},
+        )
+
+
 def probe_cdc_retention(
     cfg: dict[str, Any],
     *,
@@ -347,6 +581,10 @@ def probe_cdc_retention(
         return probe_oracle_retention(
             cfg, cursor_key=cursor_key, watermark=watermark
         )
+    if dialect in {"mysql", "mariadb", "amazon_rds_mysql", "azure_mysql", "mysql8"}:
+        return probe_mysql_retention(
+            cfg, cursor_key=cursor_key, watermark=watermark
+        )
     return RetentionProbeResult(
         status="n_a",
         dialect=dialect or "unknown",
@@ -364,6 +602,11 @@ def attach_cdc_retention(cdc: Any, src_cfg: dict[str, Any] | None, *, table: str
         "sqlserver",
         "mssql",
         "oracle",
+        "mysql",
+        "mariadb",
+        "amazon_rds_mysql",
+        "azure_mysql",
+        "mysql8",
         "sql_server",
         "microsoft_sql_server",
         "azure_sql_database",

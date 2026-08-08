@@ -986,8 +986,16 @@ export function JobTheaterView({
               <strong>{job.cdc_slot_active ? "Active" : "Inactive"}</strong>
               <span>
                 {job.cdc_wal_status
-                  ? `Slot · wal_status=${job.cdc_wal_status}`
-                  : "Replication slot"}
+                  ? `${
+                      String(job.cdc_plugin || "").toLowerCase().includes("mysql")
+                        || String(job.cdc_plugin || "").toLowerCase().includes("binlog")
+                        ? "Binlog"
+                        : "Slot"
+                    } · wal_status=${job.cdc_wal_status}`
+                  : (String(job.cdc_plugin || "").toLowerCase().includes("mysql")
+                      || String(job.cdc_plugin || "").toLowerCase().includes("binlog")
+                      ? "Binlog catalog"
+                      : "Replication slot")}
               </span>
             </div>
           </article>

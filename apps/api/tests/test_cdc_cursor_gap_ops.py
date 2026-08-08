@@ -44,6 +44,24 @@ def test_humanize_cdc_scn_gap():
     assert h["retained"] == "100"
 
 
+def test_humanize_cdc_binlog_gap():
+    from services.cdc_cursor_gap import CdcBinlogGapError
+    from services.error_handling import humanize_transfer_failure
+
+    exc = CdcBinlogGapError(
+        "resume binlog purged",
+        resume_file="mysql-bin.000001",
+        resume_pos=4,
+        oldest_file="mysql-bin.000009",
+        cursor_key="mysql:db:orders",
+    )
+    h = humanize_transfer_failure(exc)
+    assert h["code"] == "cdc_binlog_gap"
+    assert h["dialect"] == "mysql"
+    assert "000001" in h["resume"]
+    assert "watermark" in h["fix"].lower() or "snapshot" in h["fix"].lower()
+
+
 def test_job_failure_fields_stamp_cursor_gap():
     from services.cdc_cursor_gap import CdcLsnGapError
     from src.transfer.engine import _job_failure_fields

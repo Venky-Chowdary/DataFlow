@@ -1,10 +1,11 @@
-"""CDC cursor gap — fail-closed when resume is before retained redo/LSN.
+"""CDC cursor gap — fail-closed when resume is before retained redo/LSN/binlog.
 
 Honesty
 -------
-SQL Server ``min_lsn`` and Oracle oldest redo gaps mean continuous CDC across
-the gap is impossible. Operators must clear the watermark and re-snapshot
-(``when_needed`` / ``initial``). This is not exactly-once recovery.
+SQL Server ``min_lsn``, Oracle oldest redo, and MySQL purged binlog/GTID gaps
+mean continuous CDC across the gap is impossible. Operators must clear the
+watermark and re-snapshot (``when_needed`` / ``initial``). This is not
+exactly-once recovery.
 """
 
 from __future__ import annotations
@@ -87,3 +88,38 @@ class CdcScnGapError(CdcCursorGapError):
         )
         self.resume_scn = resume_scn
         self.oldest_scn = oldest_scn
+
+
+class CdcBinlogGapError(CdcCursorGapError):
+    """MySQL/MariaDB: resume file:pos or GTID before retained binary logs."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resume_file: str = "",
+        resume_pos: int | str = "",
+        oldest_file: str = "",
+        resume_gtid: str = "",
+        gtid_purged: str = "",
+        cursor_key: str = "",
+    ) -> None:
+        resume = ""
+        if resume_file:
+            resume = f"{resume_file}:{resume_pos}" if resume_pos not in ("", None) else str(resume_file)
+        elif resume_gtid:
+            resume = str(resume_gtid)
+        retained = oldest_file or (str(gtid_purged)[:120] if gtid_purged else "")
+        super().__init__(
+            message,
+            code="cdc_binlog_gap",
+            dialect="mysql",
+            resume=resume,
+            retained=retained,
+            cursor_key=cursor_key,
+        )
+        self.resume_file = resume_file
+        self.resume_pos = resume_pos
+        self.oldest_file = oldest_file
+        self.resume_gtid = resume_gtid
+        self.gtid_purged = gtid_purged
