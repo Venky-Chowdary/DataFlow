@@ -170,6 +170,7 @@ def stamp_additive_mapping_types(
     source_types: dict[str, str] | None = None,
     samples_by_source: dict[str, list[Any]] | None = None,
     backfill_new_fields: bool = False,
+    dest_table_exists: bool | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Stamp Map ``target_type`` for additive / create-new columns (Decision Kernel).
 
@@ -177,9 +178,12 @@ def stamp_additive_mapping_types(
     * ``pending_dest_schema`` — never invent (Studio must reload).
     * Live dest carrier present — bind that stamp; never invent from source.
     * Column absent from live types + (``create_new`` / create strategies /
-      ``backfill_new_fields``) — invent via :func:`invent_dest_type` ``CREATE_NEW``.
-    * Column absent + no create/backfill authority — leave empty (Validate/write
-      refuse Map VARCHAR ADD invent).
+      ``backfill_new_fields`` / ``dest_table_exists is False``) — invent via
+      :func:`invent_dest_type` ``CREATE_NEW``.
+    * Column absent + no create/backfill authority — leave empty (Execute
+      refuses Map VARCHAR ADD). Not reported as ``unstamped`` — that list is
+      invent-required-but-failed only (Property 2: legitimate create-new must
+      not be blocked by empty-stamp noise).
 
     Returns ``(stamped_mappings, unstamped_additive_targets)``.
     """
@@ -194,6 +198,8 @@ def stamp_additive_mapping_types(
     samples = samples_by_source or {}
     unstamped: list[str] = []
     db = (dest_db or "").strip()
+    # Missing destination object → CREATE TABLE invent (never-narrower stamps).
+    create_table_authority = dest_table_exists is False
 
     for row in rows:
         strategy = str(row.get("assignment_strategy") or "").strip()
@@ -233,6 +239,7 @@ def stamp_additive_mapping_types(
                 "identity_passthrough",
             }
             or backfill_new_fields
+            or create_table_authority
         )
         src = (
             str(row.get("source_type") or "").strip()
@@ -250,7 +257,7 @@ def stamp_additive_mapping_types(
                 row["create_new"] = True
             continue
         if not is_create:
-            unstamped.append(tgt)
+            # No invent authority — leave blank; do not report as stamp failure.
             continue
         src_key = str(row.get("source") or "")
         col_samples = list(samples.get(src_key) or [])[:32] or None

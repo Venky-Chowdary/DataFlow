@@ -1654,7 +1654,18 @@ def _auto_map(
     else:
         sync_mode = resolve_effective_sync_mode(request.sync_mode)
         if is_overwrite_sync(sync_mode):
+            # Property 2: auto-derived identity maps must satisfy create-new
+            # gates — stamp CREATE authority so Kernel invents target_type
+            # instead of blocking with "lack Map target_type under partial Studio".
             mappings = default_mappings(columns)
+            for m in mappings:
+                if not isinstance(m, dict):
+                    continue
+                m["create_new"] = True
+                m.setdefault("assignment_strategy", "create_compatible_new")
+                src_name = str(m.get("source") or "")
+                if src_name and not str(m.get("source_type") or "").strip():
+                    m["source_type"] = schema.get(src_name, "TEXT")
         else:
             target_schema, dest_exists = _destination_schema_probe(
                 request.destination,
@@ -2486,6 +2497,7 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
                 sample_rows=records[:100] if isinstance(records, list) else None,
+                dest_table_exists=dest_table_exists_flag,
             )
             # Resolve upsert mode for non-streaming database writes.
             contract = resolve_sync_contract(request.stream_contracts)
@@ -3598,6 +3610,7 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
                 sample_rows=sample_rows[:100] if sample_rows else None,
+                dest_table_exists=dest_table_exists_flag,
             )
             mongo.update_job_status(
                 job_id,
@@ -4366,6 +4379,7 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
                 sample_rows=sample_rows[:100] if sample_rows else None,
+                dest_table_exists=dest_table_exists_flag,
             )
             mongo.update_job_status(
                 job_id,

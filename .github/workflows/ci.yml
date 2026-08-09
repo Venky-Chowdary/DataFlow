@@ -70,6 +70,34 @@ jobs:
             apps/api/data/proofs/module_size_budgets.json
             apps/api/data/proofs/connector_capability_matrix.json
 
+  # Property 2 — no-config transfer must never be blocked by additive/DDL gates.
+  # SQLite↔SQLite is the always-on happy path (no Docker). Live PG/Mongo expand
+  # coverage when services are present on the runner.
+  no-config-transfer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Golden-path no-config transfer (Property 2)
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+        run: |
+          python -m pytest tests/test_property2_golden_path_never_blocked.py -q --tb=short
+
   # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
   gitops:
     runs-on: ubuntu-latest
