@@ -3988,12 +3988,32 @@ def _introspect_sqlite(
                         ("NUMERIC", "DECIMAL", "NUMBER")
                     ):
                         inferred = "DECIMAL"
-                    elif inferred in ("VARCHAR", "TEXT") and declared_base in {"INTEGER", "INT", "BIGINT"}:
-                        inferred = "INTEGER"
-                    elif inferred in ("VARCHAR", "TEXT") and declared_base in {
-                        "REAL", "FLOAT", "DOUBLE"
-                    }:
-                        inferred = "DECIMAL"
+                    elif declared_base in {"INTEGER", "INT", "BIGINT"}:
+                        # SQLite INTEGER affinity is a signed int64 storage class
+                        # (not PG/MySQL INT32). Stamping INTEGER invents INT32 on
+                        # those destinations and rejects/quarantines values >
+                        # 2147483647 (audit ITEM 1). Keep BOOLEAN/temporal when
+                        # samples prove them; otherwise never-narrower BIGINT.
+                        inf_u = str(inferred or "").strip().upper()
+                        if inf_u in {"BOOLEAN", "BOOL"}:
+                            inferred = "BOOLEAN"
+                        elif inf_u in {
+                            "DATE",
+                            "DATETIME",
+                            "TIMESTAMP",
+                            "TIME",
+                            "TIMESTAMPTZ",
+                        }:
+                            pass
+                        else:
+                            inferred = "BIGINT"
+                    elif declared_base in {"REAL", "FLOAT", "DOUBLE"}:
+                        # REAL affinity holds IEEE-754 float64 values in SQLite.
+                        inf_u = str(inferred or "").strip().upper()
+                        if inf_u in {"DECIMAL", "NUMERIC", "NUMBER"}:
+                            inferred = "DECIMAL"
+                        else:
+                            inferred = "DOUBLE PRECISION"
 
                 col_out: dict[str, Any] = {
                     "name": name,

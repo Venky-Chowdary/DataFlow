@@ -6,7 +6,7 @@ Status values: `NOT_STARTED` | `IN_PROGRESS` | `DONE_VERIFIED` | `BLOCKED` | `RE
 
 | item | status | files changed | tests added | verify output | notes |
 |------|--------|---------------|-------------|---------------|-------|
-| 1 | DONE_VERIFIED | `apps/api/services/decision_kernel/type_invent.py`, `apps/api/services/decision_kernel/invent.py`, `apps/api/connectors/generic_sql.py` | `apps/api/tests/test_item1_pg_writer_bare_integer_is_bigint.py`, `apps/api/tests/test_item1_sa_bare_integer_never_int32.py` | See ITEM 1 verify log (2026-08-09): stash 4 failed → 4 passed; VERIFY set **486 passed, 1 skipped** | Fixed CREATE string path: bare logical `integer` rematerializes via `ddl_type`→BIGINT (`pg_type`); stamp_additive no longer casefolds logical `integer` onto physical `INTEGER`. Live PG writer: `udt=int8`, bit-exact int64. |
+| 1 | DONE_VERIFIED | `apps/api/services/decision_kernel/type_invent.py`, `apps/api/services/decision_kernel/invent.py`, `apps/api/services/schema_introspect.py` | `apps/api/tests/test_item1_sqlite_integer_affinity_invents_bigint.py`, `apps/api/tests/test_item1_pg_writer_bare_integer_is_bigint.py` | VERIFY 491p/1s; stash 4f→5p; iso 5p; polluted slice 71p; full suite **109→105 failed** (11659→11663 passed) | Prior DONE_VERIFIED retracted (SQLite INTEGER affinity cliff). Fixed introspect BIGINT + bare float materialize. |
 | 2 | NOT_STARTED | | | | |
 | 3 | NOT_STARTED | | | | |
 | 4 | NOT_STARTED | | | | |

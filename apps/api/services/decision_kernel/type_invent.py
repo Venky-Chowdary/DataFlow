@@ -1440,9 +1440,12 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         if bare in {"INTEGER", "INT", "SIGNED"} and integer_bit_width(raw) is None:
             return False
         return True
-    # MySQL/Maria FLOAT is a real physical stamp (HALF create-new). On PG/etc.
-    # bare FLOAT is the logical alias that must still map via ddl_type → DOUBLE.
+    # MySQL/Maria/SQL Server FLOAT is a real physical stamp when width is known
+    # (FLOAT32 / FLOAT4). Bare logical ``float`` (mantissa unknown) must still
+    # rematerialize via ddl_type → DOUBLE — never pass through as FLOAT32.
     if bare == "FLOAT":
+        if float_mantissa_bits(raw) is None:
+            return False
         return db in {"mysql", "mariadb", "tidb", "sqlserver", "mssql"}
     if specialty_carrier_base(raw) is not None:
         return True
