@@ -111,6 +111,45 @@ def invent_context_from_sync_mode(
     return InventContext.BIND_EXISTING if table_exists else InventContext.CREATE_NEW
 
 
+def _is_source_as_dest_bootstrap(stamped: str, src: str) -> bool:
+    """True when Map copied source type onto target (FE bootstrap), not invent.
+
+    Exact string match always counts. Case-insensitive match counts only when
+    both sides have the same *known* integer/float width — never when either
+    side is bare logical ``integer`` / ``float`` (width unknown → invent 64-bit).
+    """
+    a = (stamped or "").strip()
+    b = (src or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a.upper().replace(" ", "") != b.upper().replace(" ", ""):
+        return False
+    from services.type_system import (
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        float_mantissa_bits,
+        integer_bit_width,
+        normalize_logical_type,
+    )
+
+    la = normalize_logical_type(a)
+    lb = normalize_logical_type(b)
+    if la == LOGICAL_INTEGER and lb == LOGICAL_INTEGER:
+        wa, wb = integer_bit_width(a), integer_bit_width(b)
+        if wa is None or wb is None:
+            return False
+        return wa == wb
+    if la == LOGICAL_FLOAT and lb == LOGICAL_FLOAT:
+        fa, fb = float_mantissa_bits(a), float_mantissa_bits(b)
+        if fa is None or fb is None:
+            return False
+        return fa == fb
+    # Non numeric: casefold identity still means FE copied the token.
+    return True
+
+
 def stamp_additive_mapping_types(
     mappings: list[dict[str, Any]] | None,
     *,
@@ -190,12 +229,10 @@ def stamp_additive_mapping_types(
         )
         # Source-as-dest FE bootstrap (target_type == source_type) is NOT Kernel
         # invent — must still run invent_dest_type (BQ UUID→STRING, etc.).
-        source_identity_stamp = bool(
-            stamped
-            and src
-            and stamped.strip().upper().replace(" ", "")
-            == src.strip().upper().replace(" ", "")
-        )
+        # Casefold alone is unsafe: bare logical ``integer`` uppercases to the
+        # same token as physical INT32 ``INTEGER``, which would re-invent a
+        # 32-bit column and undo never-narrower invent (audit ITEM 1).
+        source_identity_stamp = _is_source_as_dest_bootstrap(stamped, src)
         if stamped and not (is_create and source_identity_stamp):
             if is_create and not row.get("create_new"):
                 row["create_new"] = True

@@ -1433,6 +1433,12 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
             "redshift",
         }:
             return False
+        # Bare logical ``integer`` (width unknown) must NOT pass through as the
+        # dialect keyword INTEGER/INT — on PostgreSQL/MySQL that keyword is
+        # INT32, while ddl_type invents BIGINT. Explicit INT32 carriers
+        # (INTEGER/INT/INT32) keep integer_bit_width==32 and stay physical.
+        if bare in {"INTEGER", "INT", "SIGNED"} and integer_bit_width(raw) is None:
+            return False
         return True
     # MySQL/Maria FLOAT is a real physical stamp (HALF create-new). On PG/etc.
     # bare FLOAT is the logical alias that must still map via ddl_type → DOUBLE.
