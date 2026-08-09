@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 
 from connectors.base import ReadBatch
 from connectors.sqlite_common import sqlite_file_path
@@ -23,9 +24,12 @@ def read_table_batch(
     limit: int = 100_000,
     offset: int = 0,
     known_total_rows: int | None = None,
+    conn: Any | None = None,
 ) -> ReadBatch:
     """Read a batch of rows from a SQLite table."""
     del port, username, password, schema, ssl
+    from services.source_snapshot import get_source_snapshot_conn
+
     path = sqlite_file_path(database, connection_string, host)
     if not path:
         raise ValueError("SQLite path is required (database or connection_string).")
@@ -33,10 +37,13 @@ def read_table_batch(
         raise ValueError("SQLite source table name required.")
 
     table_quoted = quote_sql_identifier(table)
-    conn = sqlite3.connect(path, timeout=8)
-    conn.row_factory = sqlite3.Row
+    shared = conn if conn is not None else get_source_snapshot_conn()
+    close_conn = shared is None
+    if shared is None:
+        shared = sqlite3.connect(path, timeout=8)
+    shared.row_factory = sqlite3.Row
     try:
-        cur = conn.cursor()
+        cur = shared.cursor()
         if known_total_rows is not None:
             total = known_total_rows
         else:
@@ -61,4 +68,5 @@ def read_table_batch(
             total_rows=total,
         )
     finally:
-        conn.close()
+        if close_conn:
+            shared.close()

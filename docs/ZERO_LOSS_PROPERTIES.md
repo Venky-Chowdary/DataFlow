@@ -8,7 +8,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 |---|----------|--------|---------------|-----------------|---------------------|
 | 1 | Type identity is referentially transparent | **PROVEN** | `cd apps/api && python -m pytest tests/test_property1_type_identity_case_transparent.py -q` (424 passed) + live PG introspect when reachable | All `DDL_TYPES` destinations (case×logical matrix); live PostgreSQL introspect `integer`→`INT4` | Docker MySQL/ClickHouse/Iceberg not run on this host (no Docker); matrix covers their invent DDL |
 | 2 | The legitimate path is never blocked | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property2_golden_path_never_blocked.py -q` (19 passed, 4 skipped MySQL on this host) | SQLite↔SQLite + CSV→SQLite resume + SQLite checkpoint resume (always); live PG→PG / CSV→PG / PG→SQLite / PG→Parquet / Mongo→PG; CI `no-config-transfer` now boots PG+MySQL+Mongo and fails on any skip | MySQL 8 on this Windows host (no Docker); CI-wired but not yet green-proven in this run |
-| 3 | Source reads are snapshot-consistent | UNPROVEN | — | — | — |
+| 3 | Source reads are snapshot-consistent | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property3_source_snapshot_consistent.py -q` (3 passed) | PostgreSQL full-refresh REPEATABLE READ + LSN/export_snapshot; SQLite deferred txn; inline write-pass fingerprints (no second scan by default) | MySQL consistent snapshot; Mongo majority/clusterTime; Oracle flashback SCN; SQL Server SI; Snowflake/BQ time-travel; incremental sync (watermark by design) |
 | 4 | Writes are exactly-once observable | UNPROVEN | — | — | — |
 | 5 | Five-layer verification, not sampling | UNPROVEN | — | — | — |
 | 6 | Schema fidelity is more than column types | UNPROVEN | — | — | — |
@@ -121,3 +121,46 @@ pytest tests/test_property2_golden_path_never_blocked.py -q
   `no-config-transfer` is wired for that; this host cannot boot MySQL).
 * Resume-after-kill on every cross-engine golden route (SQLite/CSV proven
   here; PG/MySQL/Mongo resume still rely on adjacent checkpoint suites).
+
+---
+
+## Property 3 — PARTIAL (2026-08-09)
+
+### Defect
+DB→DB streaming opened a **new source connection per page** under default
+READ COMMITTED. Concurrent source writers could make page N describe a
+different table state than page 1. Optional `RECONCILE_SOURCE_REREAD` was a
+second independent scan (another snapshot). Inline write-pass fingerprints
+already avoided the second scan by default, but page-to-page MVCC consistency
+was missing.
+
+### Fix
+1. `services/source_snapshot.py` — transfer-scoped snapshot bind (ContextVar).
+2. PostgreSQL full-refresh: one connection, `SET TRANSACTION ISOLATION LEVEL
+   REPEATABLE READ`, capture `pg_current_wal_lsn` + `pg_export_snapshot`.
+3. SQLite full-refresh: one connection + deferred `BEGIN` for the whole read.
+4. `postgresql_reader` / `sqlite_reader` reuse the bound connection; COUNT runs
+   on the **same** connection as page reads.
+5. Stamp `source_snapshot` onto `destination_summary` and reconciliation
+   (certificate surface). Other engines/modes stamp `guarantee=not_guaranteed`
+   with an explicit note.
+6. Incremental sync intentionally does **not** freeze a snapshot (watermark).
+
+### Proof output (this host)
+
+```
+pytest tests/test_property3_source_snapshot_consistent.py -q
+3 passed in 8.79s
+
+LIVE PG: 10-row source, CHUNK_SIZE=2, concurrent INSERT id=100..109 after
+first page → records_transferred=10, dest ids=[1..10], no late rows;
+source_snapshot.isolation=repeatable_read, snapshot_lsn present.
+
+SQLite: deferred transaction snapshot stamped; recon passed.
+```
+
+### NOT claimed / remaining for PROVEN
+* MySQL `consistent snapshot` / locked handoff on the transfer path
+* MongoDB majority read concern + clusterTime
+* Oracle flashback SCN / SQL Server snapshot isolation / warehouse time-travel
+* Binding bulk COPY export to the same RR session when `BULK_EXPORT` is on

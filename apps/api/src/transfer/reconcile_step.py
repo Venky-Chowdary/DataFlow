@@ -24,9 +24,19 @@ from .adapters import records_to_matrix, resolve_connector_config
 from .models import EndpointConfig
 
 
-def _finalize_reconcile(payload: dict[str, Any]) -> dict[str, Any]:
+def _finalize_reconcile(
+    payload: dict[str, Any],
+    *,
+    dest_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Every post-write reconcile return path gets an explicit phase."""
-    return stamp_post_write_phase(payload)
+    out = stamp_post_write_phase(payload)
+    snap = None
+    if isinstance(dest_summary, dict):
+        snap = dest_summary.get("source_snapshot")
+    if isinstance(snap, dict) and snap:
+        out["source_snapshot"] = dict(snap)
+    return out
 
 def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
     return {
@@ -179,6 +189,12 @@ def run_reconciliation(
     validation_mode: str = "strict",
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
+
+    def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
+        # Property 3 — carry source snapshot id onto the reconcile report /
+        # migration certificate surface.
+        return _finalize_reconcile(payload, dest_summary=dest_summary)
+
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
     coerced_null_rows = int(dest_summary.get("coerced_null_rows", 0) or 0)
     rows_skipped = int(dest_summary.get("rows_skipped", 0) or 0)
@@ -199,7 +215,7 @@ def run_reconciliation(
         # proves bytes landed, not per-cell fidelity. Operational write may pass;
         # never stamp migration_proven / cell-fidelity Gate-8 green.
         checksum = str(writer_checksum or dest_summary.get("checksum") or "").strip()
-        return _finalize_reconcile({
+        return _finalize({
             "passed": True,
             "unproven": True,
             "skipped_readback": True,
@@ -320,7 +336,7 @@ def run_reconciliation(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
         )
-        return _finalize_reconcile(report.to_dict())
+        return _finalize(report.to_dict())
 
     # Request a real read-back; if the verifier is unavailable we will detect
     # the negative row count and surface a softer "writer only" result.
@@ -413,7 +429,7 @@ def run_reconciliation(
             # A failed read is not "no rows to compare". Skipping Gate-8 here
             # used to report a clean reconcile while the destination was
             # unreachable — the exact silent-pass the proof bar forbids.
-            return _finalize_reconcile({
+            return _finalize({
                 "passed": False,
                 "message": (
                     "Gate-8 sample compare unavailable: could not read destination "
@@ -460,7 +476,7 @@ def run_reconciliation(
                     key_values=delete_pks,
                 )
             except TargetSampleUnavailable as exc:
-                return _finalize_reconcile({
+                return _finalize({
                     "passed": False,
                     "message": (
                         "Gate-8 delete proof unavailable: could not read destination "
@@ -475,7 +491,7 @@ def run_reconciliation(
                     "coerced_null_rows": coerced_null_rows,
                 })
             if still_present:
-                return _finalize_reconcile({
+                return _finalize({
                     "passed": False,
                     "message": (
                         f"Gate-8 delete proof failed: {len(still_present)} deleted "
@@ -512,7 +528,7 @@ def run_reconciliation(
             and int(sample_compare.get("compared") or 0) > 0
             and rows_written == expected_written
         ):
-            return _finalize_reconcile({
+            return _finalize({
                 "passed": True,
                 "message": (
                     f"Gate-8 sample-verified {int(sample_compare.get('compared') or 0)} "
@@ -531,7 +547,7 @@ def run_reconciliation(
                 "sample_compare": sample_compare,
             })
         if strict_checksum and not dest_only:
-            return _finalize_reconcile({
+            return _finalize({
                 "passed": False,
                 "message": (
                     "Strict reconciliation requires an independent destination read-back; "
@@ -547,7 +563,7 @@ def run_reconciliation(
                 "sample_compare": sample_compare,
             })
         if rows_written == expected_written:
-            return _finalize_reconcile({
+            return _finalize({
                 "passed": True,
                 "message": (
                     f"Transfer verified by writer: {rows_written:,} rows written"
@@ -575,7 +591,7 @@ def run_reconciliation(
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
         )
-        return _finalize_reconcile(report.to_dict())
+        return _finalize(report.to_dict())
 
     # Data loss signal: the target table holds fewer rows than we just wrote.
     if target_rows < rows_written:
@@ -590,7 +606,7 @@ def run_reconciliation(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
         )
-        return _finalize_reconcile(report.to_dict())
+        return _finalize(report.to_dict())
 
     # We have a verified read-back. Extra dest rows are legitimate for append /
     # upsert into a non-empty sink; overwrite/mirror/replace must not soft-pass
@@ -676,4 +692,4 @@ def run_reconciliation(
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
     )
-    return _finalize_reconcile(report.to_dict())
+    return _finalize(report.to_dict())

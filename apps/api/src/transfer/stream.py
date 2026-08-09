@@ -1113,6 +1113,63 @@ def stream_database_transfer(
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
     Returns (rows_written, ddl_log, dest_summary, columns).
+
+    Property 3: full-refresh PostgreSQL/SQLite reads bind one snapshot session
+    for the whole pagination lifetime (see ``services.source_snapshot``).
+    """
+    ok = False
+    try:
+        result = _stream_database_transfer_impl(
+            source,
+            destination,
+            mappings,
+            schema,
+            on_checkpoint,
+            sync_mode=sync_mode,
+            stream_contracts=stream_contracts,
+            job_id=job_id,
+            checkpoint=checkpoint,
+            checkpoint_service=checkpoint_service,
+            retry_budget=retry_budget,
+            backfill_new_fields=backfill_new_fields,
+            validation_mode=validation_mode,
+            source_filter=source_filter,
+            limit=limit,
+            skip_preflight=skip_preflight,
+        )
+        ok = True
+        return result
+    finally:
+        try:
+            from services.source_snapshot import release_active_snapshot
+
+            release_active_snapshot(commit=ok)
+        except Exception as exc:
+            logger.warning("source snapshot release failed: %s", exc, exc_info=exc)
+
+
+def _stream_database_transfer_impl(
+    source: EndpointConfig,
+    destination: EndpointConfig,
+    mappings: list[dict],
+    schema: dict[str, str],
+    on_checkpoint: Callable[..., None] | None = None,
+    *,
+    sync_mode: str = "full_refresh_append",
+    stream_contracts: list[dict] | None = None,
+    job_id: str | None = None,
+    checkpoint: Checkpoint | None = None,
+    checkpoint_service: CheckpointService | None = None,
+    retry_budget: RetryBudget | None = None,
+    backfill_new_fields: bool = False,
+    validation_mode: str = "strict",
+    source_filter: dict[str, Any] | None = None,
+    limit: int = 0,
+    skip_preflight: bool = False,
+) -> tuple[int, list[str], dict[str, Any], list[str]]:
+    """
+    Extract source table in CHUNK_SIZE batches and load to destination.
+    Returns (rows_written, ddl_log, dest_summary, columns).
     """
     from .connector_capabilities import resolve_driver_type
     src_type = resolve_driver_type(source.format)
@@ -1248,6 +1305,64 @@ def stream_database_transfer(
             source_filter=source_filter,
             skip_preflight=skip_preflight,
         )
+
+    # Property 3 — one MVCC/transaction snapshot for the whole full-refresh read
+    # (sample probe + pages + optional checksum re-read). Incremental syncs
+    # intentionally follow watermarks and do not bind a frozen snapshot.
+    if not incremental and src_type in ("postgresql", "redshift"):
+        try:
+            from services.source_snapshot import (
+                activate_snapshot,
+                begin_postgresql_repeatable_read,
+                end_postgresql_snapshot,
+            )
+
+            _snap_conn, _snap_meta = begin_postgresql_repeatable_read(
+                host=str(src_cfg.get("host") or ""),
+                port=int(src_cfg.get("port") or (5439 if src_type == "redshift" else 5432)),
+                database=str(src_cfg.get("database") or ""),
+                username=str(src_cfg.get("username") or ""),
+                password=str(src_cfg.get("password") or ""),
+                connection_string=str(src_cfg.get("connection_string") or ""),
+                ssl=bool(src_cfg.get("ssl", False)),
+            )
+            activate_snapshot(_snap_conn, _snap_meta, end_postgresql_snapshot)
+            logger.info(
+                "Property 3 source snapshot bound — engine=postgresql "
+                "isolation=repeatable_read lsn=%s",
+                _snap_meta.get("snapshot_lsn"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Property 3 PostgreSQL REPEATABLE READ snapshot unavailable (%s) — "
+                "falling back to per-page READ COMMITTED (weaker guarantee)",
+                exc,
+                exc_info=exc,
+            )
+    elif not incremental and src_type == "sqlite":
+        try:
+            from services.source_snapshot import (
+                activate_snapshot,
+                begin_sqlite_snapshot,
+                end_sqlite_snapshot,
+            )
+
+            _snap_conn, _snap_meta = begin_sqlite_snapshot(
+                database=str(src_cfg.get("database") or ""),
+                connection_string=str(
+                    src_cfg.get("connection_string") or src_cfg.get("uri") or ""
+                ),
+                host=str(src_cfg.get("host") or ""),
+            )
+            activate_snapshot(_snap_conn, _snap_meta, end_sqlite_snapshot)
+            logger.info("Property 3 source snapshot bound — engine=sqlite")
+        except Exception as exc:
+            logger.warning(
+                "Property 3 SQLite transaction snapshot unavailable (%s) — "
+                "falling back to per-page connections",
+                exc,
+                exc_info=exc,
+            )
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
     # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
@@ -2393,6 +2508,18 @@ def stream_database_transfer(
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
         dest_summary["sync_mode"] = effective_sync
         dest_summary["watermark"] = watermark
+        try:
+            from services.source_snapshot import get_source_snapshot_meta
+
+            _snap = get_source_snapshot_meta()
+            if _snap:
+                dest_summary["source_snapshot"] = _snap
+                dest_summary.setdefault(
+                    "source_snapshot_guarantee",
+                    _snap.get("guarantee") or "unknown",
+                )
+        except Exception:
+            pass
         return 0, ddl_log, dest_summary, columns
 
     if written == 0:
@@ -2636,6 +2763,31 @@ def stream_database_transfer(
         else:
             dest_summary["load_method"] = load_methods_seen[-1]
     ddl_log.insert(1, f"CREATE TABLE IF NOT EXISTS {dest_table}")
+    try:
+        from services.source_snapshot import get_source_snapshot_meta
+
+        _snap = get_source_snapshot_meta()
+        if _snap:
+            dest_summary["source_snapshot"] = _snap
+            dest_summary.setdefault(
+                "source_snapshot_guarantee",
+                _snap.get("guarantee") or "unknown",
+            )
+        elif "source_snapshot" not in dest_summary:
+            # Honest weaker guarantee when no engine snapshot was bound.
+            dest_summary["source_snapshot"] = {
+                "engine": src_type,
+                "isolation": "none",
+                "guarantee": "not_guaranteed",
+                "note": (
+                    "No transfer-scoped source snapshot for this engine/mode. "
+                    "PostgreSQL/SQLite full-refresh bind REPEATABLE READ / "
+                    "transaction snapshots; other engines and incremental sync "
+                    "document weaker page-local visibility."
+                ),
+            }
+    except Exception as exc:
+        logger.debug("source_snapshot stamp skipped: %s", exc)
     return written, ddl_log, dest_summary, columns
 
 
