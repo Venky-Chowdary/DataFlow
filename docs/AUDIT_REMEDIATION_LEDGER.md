@@ -9,7 +9,7 @@ Status values: `NOT_STARTED` | `IN_PROGRESS` | `DONE_VERIFIED` | `BLOCKED` | `RE
 | 1 | DONE_VERIFIED | `apps/api/services/decision_kernel/type_invent.py`, `apps/api/services/decision_kernel/invent.py`, `apps/api/services/schema_introspect.py` | `apps/api/tests/test_item1_sqlite_integer_affinity_invents_bigint.py`, `apps/api/tests/test_item1_pg_writer_bare_integer_is_bigint.py` | VERIFY 491p/1s; stash 4f→5p; iso 5p; polluted slice 71p; full suite **109→105 failed** (11659→11663 passed) | Prior DONE_VERIFIED retracted (SQLite INTEGER affinity cliff). Fixed introspect BIGINT + bare float materialize. |
 | 2 | DONE_VERIFIED | `apps/api/src/transfer/engine.py` | `apps/api/tests/test_item2_skip_preflight_ddl_identity.py` | stash 1f→6p; iso 6p; polluted 18p+sync/gzip green; UTE skip_preflight sqlite→sqlite success=True records=2; drift refused | Hollow proof_bundle + skip_preflight now inline-stamps; UI path still requires Validate; approved-hash drift still refused. |
 | 3 | DONE_VERIFIED | `apps/api/src/services/auth_service.py`, `apps/api/src/routers/auth_router.py`, `apps/api/tests/test_auth_service.py` | `apps/api/tests/test_item3_auth_bootstrap_no_enumeration.py` | VERIFY 19p; stash 3f→3p; iso 3p; polluted 24p; full suite **106→106 failed** (11668→11671 passed, +3 item3) | Prove-or-retract 2026-08-09: failure count flat; +3 passes = new regression tests. Flaky swap unrelated to auth (see log). |
-| 4 | NOT_STARTED | | | | |
+| 4 | DONE_VERIFIED | `apps/api/services/mcp_rate_limit.py`, `apps/api/services/auth_rate_limit.py`, `apps/api/tests/test_auth_login_rate_limit.py` | `apps/api/tests/test_item4_login_rate_limit_http.py` | stash 3f→8p; VERIFY 8p; iso 2p; polluted auth 26p | Reuses MCP `TokenBucketStore`; independent per-IP + per-email; exponential lockout; HTTP 429. |
 | 5 | NOT_STARTED | | | | |
 | 6 | NOT_STARTED | | | | |
 | 7 | NOT_STARTED | | | | |
@@ -229,4 +229,40 @@ FAILED-list swap (order/flake, not ITEM3):
         (fails in isolation on HEAD — pre-existing; not auth)
   GONE: test_decision_kernel_artifact.py::test_golden_fixture_loads_and_hashes
         (passes in isolation on HEAD)
+```
+
+## ITEM 4 verify log (2026-08-09)
+
+### Root cause
+Login had a parallel token-bucket (not the MCP primitive), keyed as combined
+`ip|email` only — so one IP could spray accounts and one account could be
+hit from many IPs. Lockout used a fixed window, not exponential backoff.
+
+### Fix
+- Export `TokenBucketStore` from `mcp_rate_limit.py`; auth consumes it.
+- Independent `ip:` and `email:` buckets — either may 429.
+- Lockout streak → `base * 2^(streak-1)` capped by `DATAFLOW_AUTH_LOCKOUT_MAX_SEC`.
+- Router already emits HTTP 429 + Retry-After (kept).
+
+### Stash proof
+```
+===== WITHOUT FIX =====
+3 failed, 4 passed
+FAILED test_per_ip_throttle_independent_of_email
+FAILED test_per_email_throttle_independent_of_ip
+FAILED test_lockout_backoff_is_exponential
+
+===== WITH FIX =====
+8 passed (item4 HTTP + auth_login_rate_limit + mcp bucket)
+```
+
+### VERIFY
+```
+pytest tests/test_item4_login_rate_limit_http.py \
+  tests/test_auth_login_rate_limit.py \
+  tests/test_idor_and_assurance_wave.py::test_mcp_rate_limit_bucket -q
+→ 8 passed
+
+isolation item4 HTTP: 2 passed
+polluted auth slice: 26 passed
 ```
