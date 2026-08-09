@@ -72,6 +72,27 @@ class TestInferType:
         b = "[" + ",".join(["0.2"] * 9) + "]"
         assert infer_type([a, b]) == "ARRAY"
 
+    def test_epoch_shaped_digits_mixed_with_short_ints_stay_numeric(self) -> None:
+        # 10-digit values classify per-value as TIMESTAMP; mixed with ordinary
+        # integers that produced {INTEGER, TIMESTAMP} and fell through to
+        # VARCHAR, landing an integer key column as text on Mongo/CSV → SQL.
+        assert infer_type(["1234567890", "5"], field_name="order_id") == "INTEGER"
+        assert infer_type(["1705312200000", "5"], field_name="seq") == "INTEGER"
+        assert infer_type(["1234567890", "5"]) == "INTEGER"
+
+    def test_epoch_recovery_widens_rather_than_narrowing(self) -> None:
+        # Beyond int64 the carrier widens; it must never narrow or go to text.
+        assert infer_type(
+            ["1234567890", "9223372036854775807"], field_name="big_id"
+        ).startswith("DECIMAL")
+
+    def test_temporal_named_epoch_column_is_still_a_timestamp(self) -> None:
+        assert infer_type(["1705312200000"], field_name="updated_epoch_ms") == "TIMESTAMP"
+        assert infer_type(["1705312200000"], field_name="created_at") == "TIMESTAMP"
+
+    def test_non_digit_samples_are_not_recovered_as_numeric(self) -> None:
+        assert infer_type(["1234567890", "abc"], field_name="code") == "VARCHAR"
+
     def test_never_invents_vector_1536(self) -> None:
         # Sparse / short sample must not invent a warehouse default dim.
         assert "1536" not in infer_type(["[0.1,0.2]"], field_name="embedding")

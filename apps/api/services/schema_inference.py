@@ -27,6 +27,7 @@ from collections import Counter
 from datetime import datetime
 from typing import Any
 
+from services.decimal_observe import observe_numeric_samples
 from services.transform_engine import (
     NULL_SENTINELS,
     _active_date_locale,
@@ -728,8 +729,6 @@ def infer_column(
 
     if types <= {"INTEGER", "DECIMAL"}:
         # Sample-aware DECIMAL(p,s) / FLOAT invent — never bare DECIMAL → (38,15).
-        from services.decimal_observe import observe_numeric_samples
-
         obs = observe_numeric_samples(non_empty)
         inferred = str(obs.get("carrier") or ("DECIMAL" if "DECIMAL" in types else "INTEGER"))
         role = "numeric"
@@ -853,18 +852,30 @@ def infer_column(
             inferred = "BINARY"
             role = "binary"
 
+    # Bare epoch-shaped digits (10 or 13 chars) classify as TIMESTAMP per value.
+    # Two ways that misreads an ordinary integer column:
+    #   unanimous — every sample epoch-shaped, so the column reads as TIMESTAMP;
+    #   mixed     — ordinary short integers alongside 10-digit ones give
+    #               {INTEGER, TIMESTAMP}, which no widening rule covers, so the
+    #               column fell through to VARCHAR and an integer key landed as
+    #               text on Mongo/CSV → SQL routes.
+    # The unanimous case needs a name to judge (a nameless all-epoch column is
+    # more likely a real timestamp); the mixed case is already self-evidently
+    # not a timestamp column, so it recovers even unnamed.
+    epoch_mixed = inferred == "VARCHAR" and types == {"INTEGER", "TIMESTAMP"}
     if (
-        inferred == "TIMESTAMP"
-        and field_name
-        and not _is_timestamp_field_name(field_name)
-    ):
+        (inferred == "TIMESTAMP" and field_name) or epoch_mixed
+    ) and not _is_timestamp_field_name(field_name or ""):
         if all(re.match(r"^[+\-]?\d+$", v) for v in non_empty):
             try:
                 for v in non_empty:
                     int(v)
-                inferred = "INTEGER"
+                # Re-observe so a value beyond int64 still widens to DECIMAL
+                # rather than being forced into INTEGER.
+                obs = observe_numeric_samples(non_empty)
+                inferred = str(obs.get("carrier") or "INTEGER")
                 role = "numeric"
-                notes.append("long digits without temporal name — INTEGER not TIMESTAMP")
+                notes.append("long digits without temporal name — numeric not TIMESTAMP")
             except ValueError:
                 inferred = "VARCHAR"
                 role = "text"
