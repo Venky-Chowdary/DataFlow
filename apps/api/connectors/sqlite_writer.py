@@ -886,13 +886,44 @@ def write_mapped_rows(
                         )
                         use_ledger = False
                 if create_table:
-                    col_defs = ", ".join(
-                        f"{quote_sql_identifier(c)} {t}"
-                        for c, t in zip(target_cols, target_types)
+                    from services.schema_fidelity import (
+                        render_create_column_defs,
+                        resolve_create_fidelity_plan,
+                    )
+
+                    fidelity_plan = None
+                    try:
+                        fidelity_plan = resolve_create_fidelity_plan(
+                            source_schema_catalog=_kwargs.get("source_schema_catalog"),
+                            mappings=mappings,
+                            target_columns=target_cols,
+                            target_types=target_types,
+                            dest_dialect="sqlite",
+                            table_already_exists=bool(table_existed),
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "SQLite schema fidelity plan failed (types-only CREATE): %s",
+                            exc,
+                        )
+                        fidelity_plan = None
+                    if fidelity_plan and fidelity_plan.column_renames and fidelity_plan.dest_columns:
+                        target_cols = list(fidelity_plan.dest_columns)
+                    col_defs = render_create_column_defs(
+                        columns=target_cols,
+                        types=target_types,
+                        plan=(
+                            fidelity_plan
+                            if fidelity_plan is not None and not table_existed
+                            else None
+                        ),
+                        dialect="sqlite",
                     )
                     cur.execute(
                         f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})"
                     )
+                    if fidelity_plan is not None:
+                        _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
 
                 if backfill_new_fields:
                     existing = {
@@ -1050,6 +1081,15 @@ def write_mapped_rows(
                     warnings=transform_errors,
                 )
 
+            meta_out = gate8_writer_meta(
+                rows_for_checksum,
+                target_cols,
+                conflict_columns=conflict_cols or None,
+            )
+            fid_report = _kwargs.get("_schema_fidelity_report")
+            if isinstance(fid_report, dict):
+                meta_out = dict(meta_out or {})
+                meta_out["schema_fidelity"] = fid_report
             return WriteResult(
                 ok=True,
                 rows_written=written,
@@ -1070,11 +1110,7 @@ def write_mapped_rows(
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 warnings=transform_errors,
-                meta=gate8_writer_meta(
-                    rows_for_checksum,
-                    target_cols,
-                    conflict_columns=conflict_cols or None,
-                ),
+                meta=meta_out,
             )
         finally:
             conn.close()

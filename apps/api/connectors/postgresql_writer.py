@@ -1370,17 +1370,68 @@ def write_mapped_rows(
 
                 for stmt in collect_pg_enum_prerequisites(logical_types):
                     cursor.execute(stmt)
-            col_defs = sql.SQL(", ").join(
-                sql.SQL("{} {}").format(sql.Identifier(c), sql.SQL(t))
-                for c, t in zip(target_cols, target_types)
-            )
-            cursor.execute(
-                sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
-                    sql.Identifier(schema),
-                    sql.Identifier(table_name),
-                    col_defs,
+            fidelity_plan = None
+            try:
+                from services.schema_fidelity import (
+                    render_create_column_defs,
+                    resolve_create_fidelity_plan,
                 )
-            )
+
+                # Probe existence so we do not claim PK carry on IF NOT EXISTS no-op.
+                cursor.execute(
+                    """
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = %s AND table_name = %s
+                    LIMIT 1
+                    """,
+                    (schema, table_name),
+                )
+                pg_table_existed = cursor.fetchone() is not None
+                fidelity_plan = resolve_create_fidelity_plan(
+                    source_schema_catalog=_kwargs.get("source_schema_catalog"),
+                    mappings=mappings,
+                    target_columns=target_cols,
+                    target_types=target_types,
+                    dest_dialect="postgresql",
+                    table_already_exists=pg_table_existed,
+                )
+                if fidelity_plan and fidelity_plan.column_renames and fidelity_plan.dest_columns:
+                    target_cols[:] = list(fidelity_plan.dest_columns)
+                body = render_create_column_defs(
+                    columns=target_cols,
+                    types=target_types,
+                    plan=(
+                        fidelity_plan
+                        if fidelity_plan is not None and not pg_table_existed
+                        else None
+                    ),
+                    dialect="postgresql",
+                )
+                cursor.execute(
+                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
+                        sql.Identifier(schema),
+                        sql.Identifier(table_name),
+                        sql.SQL(body),
+                    )
+                )
+                if fidelity_plan is not None:
+                    _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
+            except Exception as exc:
+                logger.warning(
+                    "PostgreSQL schema fidelity plan failed; falling back to types-only CREATE: %s",
+                    exc,
+                )
+                col_defs = sql.SQL(", ").join(
+                    sql.SQL("{} {}").format(sql.Identifier(c), sql.SQL(t))
+                    for c, t in zip(target_cols, target_types)
+                )
+                cursor.execute(
+                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
+                        sql.Identifier(schema),
+                        sql.Identifier(table_name),
+                        col_defs,
+                    )
+                )
             # Track empty shell for orphan rollback if job fails before first ack.
             try:
                 from services.auto_create_lifecycle import register_auto_create
@@ -2067,6 +2118,15 @@ def write_mapped_rows(
         _checksum_rows = (
             rows_for_checksum if "rows_for_checksum" in locals() else mapped_rows
         )
+        meta_out = gate8_writer_meta(
+            _checksum_rows,
+            target_cols,
+            conflict_columns=conflict_columns or None,
+        )
+        fid_report = _kwargs.get("_schema_fidelity_report")
+        if isinstance(fid_report, dict):
+            meta_out = dict(meta_out or {})
+            meta_out["schema_fidelity"] = fid_report
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -2085,11 +2145,7 @@ def write_mapped_rows(
             rows_skipped=rows_skipped,
             warnings=transform_errors,
             load_method="copy" if use_copy else "insert",
-            meta=gate8_writer_meta(
-                _checksum_rows,
-                target_cols,
-                conflict_columns=conflict_columns or None,
-            ),
+            meta=meta_out,
         )
     except Exception as exc:
         if close_connection:

@@ -11,7 +11,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 3 | Source reads are snapshot-consistent | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property3_source_snapshot_consistent.py -q` (3 passed) | PostgreSQL full-refresh REPEATABLE READ + LSN/export_snapshot; SQLite deferred txn; inline write-pass fingerprints (no second scan by default) | MySQL consistent snapshot; Mongo majority/clusterTime; Oracle flashback SCN; SQL Server SI; Snowflake/BQ time-travel; incremental sync (watermark by design) |
 | 4 | Writes are exactly-once observable | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property4_observable_exactly_once.py -q` (3 passed) | SQLite+PostgreSQL insert ledger (same-txn; row_start/row_end/attempt); kill-mid-chunk resume = clean checksum | Mongo/Kafka/object-store/warehouse sinks (NOT_GUARANTEED); MySQL live kill proof (Docker down); quarantine salvage path still not same-txn |
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
-| 6 | Schema fidelity is more than column types | UNPROVEN | — | — | — |
+| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py -q` (5 passed) | SQLite create-new PK/NOT NULL/DEFAULT/UNIQUE + certificate; live PG PK/NOT NULL/DEFAULT/UNIQUE | MySQL/Oracle/SQL Server DDL carry; CHECK/FK/views/triggers (certified unsupported); identity RESTART; partitioning |
 | 7 | Referential integrity across multi-table migration | UNPROVEN | — | — | — |
 | 8 | Semantic value fidelity | UNPROVEN | — | — | — |
 | 9 | Every row is accounted for | UNPROVEN | — | — | — |
@@ -240,3 +240,41 @@ Inject amount drift on id=424 (SQLite) / id=77 (PG):
 * SQL pushdown aggregates/digests for MySQL and warehouses (no full load)
 * UI copy sweep so no card says “proof” for sample screening
 * Streaming path without source SQL still depends on buffered records
+
+---
+
+## Property 6 — PARTIAL (2026-08-09)
+
+### Defect
+Create-new DDL emitted `col type` only. PRIMARY KEY, NOT NULL, DEFAULT, and
+UNIQUE were silently dropped. CHECK / FK / views / triggers had no certificate
+line — operators could not tell carry from loss.
+
+### Fix
+1. `services/schema_fidelity.py` — plan + `SchemaFidelityReport` covering every
+   required aspect (`carried` / `unsupported` / `skipped` + reason).
+2. SQLite introspect now surfaces PRAGMA `notnull` + `dflt_value` (was always
+   nullable=True). PG introspect surfaces non-`nextval` defaults.
+3. Rich introspect keys include `defaults` / identity / generated / collation.
+4. Stream builds `source_schema_catalog` and passes it to SQLite/PG writers;
+   CREATE TABLE emits PK / NOT NULL / safe DEFAULT / UNIQUE; report stamped on
+   `destination_summary.schema_fidelity`.
+5. Unsafe defaults (arbitrary SQL) refuse silently — `unsupported`, not emitted.
+
+### Proof output (this host)
+
+```
+pytest tests/test_property6_schema_fidelity.py -q
+5 passed in 8.55s
+
+SQLite E2E: people → people_out carries PK/NOT NULL/DEFAULT/UNIQUE;
+  schema_fidelity.carried includes those aspects; CHECK/FK certified unsupported.
+Live PG: same carry + information_schema verifies NOT NULL / DEFAULT / PK / UNIQUE.
+```
+
+### NOT claimed / remaining for PROVEN
+* MySQL / Oracle / SQL Server create-new constraint carry
+* FOREIGN KEY ordering (Property 7) and CHECK expression rewrite
+* Views, triggers, generated expressions, identity RESTART, partitioning
+* Name-collision remaps under adversarial identifier fixtures (policy coded;
+  not yet matrix-proven)

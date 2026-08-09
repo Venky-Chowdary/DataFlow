@@ -2102,21 +2102,23 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
             default_expr and "nextval(" in str(default_expr).lower()
         ):
             generation = "by_default"
-        columns.append(
-            {
-                "name": name,
-                "inferred_type": logical,
-                "nullable": str(nullable).upper() == "YES",
-                "data_type": dtype,
-                "is_identity": bool(
-                    (attidentity or "").strip()
-                    or (default_expr and "nextval(" in str(default_expr).lower())
-                ),
-                "generation": generation,
-                "collation": collname,
-                "collation_deterministic": coll_det,
-            }
-        )
+        col_pg: dict[str, Any] = {
+            "name": name,
+            "inferred_type": logical,
+            "nullable": str(nullable).upper() == "YES",
+            "data_type": dtype,
+            "is_identity": bool(
+                (attidentity or "").strip()
+                or (default_expr and "nextval(" in str(default_expr).lower())
+            ),
+            "generation": generation,
+            "collation": collname,
+            "collation_deterministic": coll_det,
+        }
+        # Property 6 — surface defaults for create-new carry (exclude sequence nextval).
+        if default_expr and "nextval(" not in str(default_expr).lower():
+            col_pg["default"] = str(default_expr)
+        columns.append(col_pg)
     return columns
 
 
@@ -3967,6 +3969,9 @@ def _introspect_sqlite(
             except Exception:
                 logger.warning("SQLite sample read failed for %s", table, exc_info=True)
 
+            # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+            pragma_by_name = {str(row[1]): row for row in info_rows if row and row[1]}
+
             columns: list[dict[str, Any]] = []
             for name in col_names:
                 declared = declared_types.get(name, "")
@@ -4017,11 +4022,17 @@ def _introspect_sqlite(
                         else:
                             inferred = "DOUBLE PRECISION"
 
+                prow = pragma_by_name.get(name)
+                notnull = int(prow[3] or 0) if prow is not None else 0
+                dflt = prow[4] if prow is not None else None
                 col_out: dict[str, Any] = {
                     "name": name,
                     "inferred_type": inferred,
-                    "nullable": True,
+                    # Property 6 — never invent nullable=True when PRAGMA says NOT NULL.
+                    "nullable": notnull == 0,
                 }
+                if dflt is not None and str(dflt).strip() != "":
+                    col_out["default"] = str(dflt)
                 if semantic_role:
                     col_out["semantic_role"] = semantic_role
                 columns.append(col_out)
