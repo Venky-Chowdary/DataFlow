@@ -274,7 +274,7 @@ Each mergeable wave:
 5. **No catalog inflation** or marketing claims in the same PR.  
 6. **Do not mark complete** until Phase exit criteria for that ID are met.
 
-**Immediate next wave:** Excel→PG false Resume closed (`resolve_reclaim_resume` + zero-writes from-zero + checkpoint progress parity). Prior: claim-queue file staging, C2 Map/Validate kernel surface, F3/F4 Planned labels. Still open: B1 real_bug→0 (wave5 sample); C2 invent body extract; F4 streaming default + lag proof; redeploy Railway for Resume + staging fixes.
+**Immediate next wave:** C2 invent bodies extracted to `decision_kernel/type_invent.py` (F8 type_system 8850→7450). Still open: C2 `type_lossy` extract; B1 real_bug→0 (wave5 sample); F4 streaming default + lag proof; redeploy Railway for Resume + staging + Validate hydrate fixes.
 
 ---
 
@@ -340,7 +340,7 @@ Success metric for the company: a migration programme owner can move Oracle/SQL 
 ## 10. Checklist — Phase C (complete)
 
 - [x] C1 Decision Artifact models + golden fixture (`decision_artifact_v1`) + hash fail-closed tests
-- [~] C2 Type invent/classify/DDL facades on `services.decision_kernel`; writers + Map/Validate (`mapping_pipeline`/`semantic_mapper`/`coercion_probe`/`data_integrity`/`schema_drift`) import invent/lossy via kernel (`test_*_invent_imports_use_decision_kernel_surface`); invent **body** + specialty helpers still in `type_system` (exit criterion open)
+- [~] C2 Type invent/classify/DDL: invent **bodies** live in `decision_kernel/type_invent.py` (normalize/ddl_type/create_new/materialize/width); `type_system` shims + specialty/`*_would_*`; writers + Map/Validate import invent via kernel; lossy orchestrators still in `type_system` until `type_lossy` (exit criterion open)
 - [x] C3 Full ConversionClass set (identity/equivalent/widening/narrowing/… + Module 12 gates)
 - [x] C4 Structural Type Engine kernel facade (`StructuralStrategy`, never silent flatten)
 - [x] C5 Context-aware invent modes (`InventContext` + `invent_dest_type` refuse bind/CDC invent)

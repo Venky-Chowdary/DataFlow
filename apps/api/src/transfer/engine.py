@@ -1609,101 +1609,11 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
         raise FullRefreshDropFailed(table_name, str(exc)) from exc
 
 
-def _schema_for_endpoint(destination: EndpointConfig) -> str | None:
-    """Return the SQL schema name implied by a database endpoint config."""
-    try:
-        from connectors.generic_sql import get_sql_schema
-
-        from .adapters import resolve_connector_config
-
-        cfg = resolve_connector_config(destination)
-        return get_sql_schema(cfg)
-    except Exception as exc:
-        logger.warning("Destination schema resolution failed: %s", exc, exc_info=exc)
-        return None
-
-
-def _enrich_mappings_with_types(
-    mappings: list[dict],
-    dest_types: dict[str, str] | None = None,
-    column_types: dict[str, str] | None = None,
-) -> list[dict]:
-    if not mappings:
-        return mappings
-    try:
-        from services.transform_resolver import attach_transforms_to_mappings
-
-        return attach_transforms_to_mappings(
-            mappings,
-            column_types=column_types or {},
-            dest_types=dest_types or {},
-        )
-    except Exception as exc:
-        logger.warning("Transform enrichment failed: %s", exc, exc_info=exc)
-    out = []
-    for m in mappings:
-        enriched = dict(m)
-        tgt = m.get("target")
-        if tgt and dest_types and tgt in dest_types:
-            enriched["target_type"] = dest_types[tgt]
-        out.append(enriched)
-    return out
-
-
-def _stamp_additive_mappings_for_write(
-    request: TransferRequest,
-    mappings: list[dict],
-    *,
-    column_types: dict[str, str] | None = None,
-    dest_types: dict[str, str] | None = None,
-    sample_rows: list[dict] | None = None,
-) -> list[dict]:
-    """Decision Kernel stamp for ADD COLUMN under backfill / create-new.
-
-    Prevents Execute fail-closed after Validate when Map left ``target_type``
-    blank for additive columns (Excel→PG partial Studio cliff).
-    """
-    if not mappings:
-        return mappings
-    try:
-        from services.batch_progress import effective_backfill_new_fields
-        from services.decision_kernel import stamp_additive_mapping_types
-    except Exception as exc:
-        logger.debug("additive stamp import failed: %s", exc, exc_info=exc)
-        return mappings
-    try:
-        backfill = effective_backfill_new_fields(
-            backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
-            schema_policy=str(getattr(request, "schema_policy", "") or ""),
-            mappings=mappings,
-        )
-    except Exception:
-        backfill = bool(getattr(request, "backfill_new_fields", False))
-    samples_by_src: dict[str, list] = {}
-    for row in sample_rows or []:
-        if not isinstance(row, dict):
-            continue
-        for k, v in row.items():
-            if v is None:
-                continue
-            samples_by_src.setdefault(str(k), []).append(v)
-    for k in list(samples_by_src.keys()):
-        samples_by_src[k] = samples_by_src[k][:32]
-    dest_db = str(getattr(request.destination, "format", "") or "").lower()
-    stamped, unstamped = stamp_additive_mapping_types(
-        mappings,
-        dest_db=dest_db,
-        live_dest_types=dest_types or {},
-        source_types=column_types or {},
-        samples_by_source=samples_by_src,
-        backfill_new_fields=bool(backfill),
-    )
-    if unstamped and backfill:
-        raise ValueError(
-            f"Additive column(s) {', '.join(unstamped[:5])} lack Map target_type "
-            "under partial Studio — stamp on Map or disable backfill_new_fields."
-        )
-    return stamped
+from .mapping_write_stamp import (  # noqa: E402
+    enrich_mappings_with_types as _enrich_mappings_with_types,
+    schema_for_endpoint as _schema_for_endpoint,
+    stamp_additive_mappings_for_write as _stamp_additive_mappings_for_write,
+)
 
 
 def _auto_map(

@@ -161,11 +161,11 @@ def rank_suggested_target_type(
       4. Text fallback
       5. Quarantine / reject (not a type — returned empty)
     """
-    from services.type_system import (
+    from services.decision_kernel.type_invent import (
         create_new_mapping_target_type,
         normalize_logical_type,
-        suggest_remap_target,
     )
+    from services.type_system import suggest_remap_target
 
     fc = (
         failure_class

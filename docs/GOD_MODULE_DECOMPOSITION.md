@@ -13,7 +13,8 @@
 
 | Concern | Import |
 |---------|--------|
-| Type invent / width / lossy | `services.decision_kernel` / `services.decision_kernel.types` |
+| Type invent / width / materialize | `services.decision_kernel` / `services.decision_kernel.type_invent` |
+| Lossy / precision collapse (until type_lossy) | `services.decision_kernel.types` → still facades `type_system` orchestrators |
 | Execute Decision Artifact | `services.decision_kernel.execute_gate` |
 | Reconciliation checksums | `services.reconciliation_api` |
 | Writer quarantine / LSN | `connectors.writer_common_api` |
@@ -48,4 +49,12 @@ Artifact: `apps/api/data/proofs/module_size_budgets.json`
 |--------|--------|-----|
 | `src/transfer/engine.py` | 5212 → ≤5200 | Extracted `reconcile_phase_heartbeat` → `src/transfer/reconcile_heartbeat.py` |
 
-Next extraction must lower these ceilings after moving keyed-verify helpers into `reconciliation_api` / `writer_common_api`.
+## ADR — extract 2026-08-09 (C2 invent body)
+
+| Module | Change | Why |
+|--------|--------|-----|
+| `services/type_system.py` | 8850 → 7450 | Invent/normalize/materialize/width bodies → `decision_kernel/type_invent.py`; shims remain |
+| `src/transfer/engine.py` | 5286 → ≤5200 | Additive + transform mapping stamps → `mapping_write_stamp.py` |
+| `services/preflight_service.py` | 2573 → ≤2500 | Policy-gate merge → `preflight_policy_gates.py` |
+
+Next: `type_lossy.py` for `is_lossy_coercion` / `is_precision_collapse_coercion`; specialty helpers stay in `type_system` until C2c.
