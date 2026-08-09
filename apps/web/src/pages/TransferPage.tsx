@@ -2851,9 +2851,25 @@ export function TransferPage({
           if (!matches(m)) return m;
           hit = true;
           if (m.existsInDestination === false) {
+            // Widen create-new type must clear typed casts — cast_integer on
+            // LONGTEXT/DOUBLE keeps Invalid integer after Apply (Validate lie).
+            const widenClearsCast =
+              /varchar|text|string|char|longtext|double|float|decimal|numeric|number|real/i.test(
+                action.to_type || "",
+              );
+            const nextTransform =
+              widenClearsCast
+              && (m.transform === "cast_integer"
+                || m.transform === "cast_number"
+                || m.transform === "cast_boolean"
+                || m.transform === "date_iso"
+                || m.transform === "time_iso")
+                ? "none"
+                : m.transform;
             return sealRemediationApproval({
               ...m,
               destType: action.to_type,
+              transform: nextTransform,
               approved: true,
               requiresReview: false,
             });
@@ -2919,7 +2935,11 @@ export function TransferPage({
             createNew: true,
             assignmentStrategy: "create_compatible_new",
             transform:
-              m.transform === "cast_number" || m.transform === "cast_boolean"
+              m.transform === "cast_number"
+              || m.transform === "cast_boolean"
+              || m.transform === "cast_integer"
+              || m.transform === "date_iso"
+              || m.transform === "time_iso"
                 ? "none"
                 : m.transform,
             approved: true,

@@ -801,6 +801,77 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         col_label = ", ".join(cols[:5]) + (
             f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
         )
+        # Classify hazards via Decision Kernel so empty→typed ≠ fractional→int.
+        # Prefer coercion_report.failure_class (canonical) before parsing gate prose.
+        failure_classes: list[str] = []
+        try:
+            from services.decision_kernel import (
+                FailureClass,
+                classify_transform_failure,
+                recommended_action_for_failure,
+            )
+
+            coercion = preflight.get("coercion_report") or {}
+            for col in list(coercion.get("columns") or []):
+                if not isinstance(col, dict):
+                    continue
+                if str(col.get("severity") or "") != "block":
+                    continue
+                fc_raw = str(col.get("failure_class") or "").strip()
+                if fc_raw:
+                    failure_classes.append(fc_raw)
+            blob_parts: list[str] = []
+            for src in xf_gates + xf_blockers:
+                blob_parts.append(str(src.get("message") or ""))
+                details = src.get("details") or {}
+                for err in list(details.get("errors") or [])[:12]:
+                    blob_parts.append(str(err))
+                for it in list(details.get("issue_texts") or [])[:12]:
+                    blob_parts.append(str(it))
+            for part in blob_parts:
+                fc = classify_transform_failure(part)
+                if fc is not FailureClass.UNKNOWN:
+                    failure_classes.append(fc.value)
+            failure_classes = list(dict.fromkeys(failure_classes))
+            # Prefer precision-loss / empty-policy when present (action ranking).
+            priority = [
+                FailureClass.FRACTIONAL_PRECISION_LOSS.value,
+                FailureClass.EMPTY_VALUE_NOT_NULLABLE.value,
+                FailureClass.SEMANTIC_TRANSFORM_FAILURE.value,
+            ]
+            ordered = [c for c in priority if c in failure_classes] + [
+                c for c in failure_classes if c not in priority
+            ]
+            failure_classes = ordered
+            primary_fc = (
+                FailureClass(failure_classes[0])
+                if failure_classes
+                else FailureClass.TYPE_CAST_FAILURE
+            )
+            rec_fix = recommended_action_for_failure(primary_fc)
+            if len(failure_classes) > 1:
+                rec_fix = (
+                    rec_fix
+                    + " Distinct failure classes on this sample: "
+                    + ", ".join(failure_classes)
+                    + "."
+                )
+        except Exception:  # pragma: no cover — kernel always available in GA
+            failure_classes = []
+            rec_fix = (
+                "Open Map → fix types/transforms or Accept risk with "
+                "QUARANTINE_ROW / CAST_AND_CONTINUE → re-run Validate."
+            )
+        biz = (
+            "Sample cells cannot pass the same transforms writers use. "
+            "Execute stays locked until Map remediates each failure class "
+            "(fractional→numeric widen, empty→nullability/quarantine, semantic "
+            "transform off) or a continue-policy Risk Contract holds them out."
+        )
+        if failure_classes:
+            biz = (
+                f"Failure class(es): {', '.join(failure_classes)}. " + biz
+            )
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("sample_transform", cols, absorbed),
@@ -814,26 +885,23 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                         else "Write-path transforms failed on the Validate sample"
                     )
                     + f" — impacts {len(absorbed)} gate check(s)"
+                    + (
+                        f" · classes: {', '.join(failure_classes)}"
+                        if failure_classes
+                        else ""
+                    )
                 ),
-                business_impact=(
-                    "Sample cells cannot pass the same transforms writers use "
-                    "(e.g. empty value → url). Execute stays locked until Map remaps "
-                    "off the failing transform, cleans source cells, or a continue-policy "
-                    "Risk Contract (QUARANTINE_ROW / CAST_AND_CONTINUE) holds them out."
-                ),
+                business_impact=biz,
                 affected_columns=cols,
                 affected_rows_sample=sample_n,
                 estimated_total_rows=est_n,
                 risk_level="high",
-                recommended_fix=(
-                    "Open Map → set transform to none/identity for text image/url "
-                    "carriers, or Accept risk with QUARANTINE_ROW / CAST_AND_CONTINUE "
-                    "→ re-run Validate."
-                ),
+                recommended_fix=rec_fix,
                 alternative_fixes=[
+                    "Widen FLOAT/DECIMAL→INT to DOUBLE (preserve numeric meaning before text)",
+                    "Empty→typed: allow NULL / default or sign QUARANTINE_ROW",
                     "Remap image/url columns off the url semantic transform",
-                    "Sign QUARANTINE_ROW so empty/invalid cells hold out of primary write",
-                    "Clean empty URL cells in the source before transfer",
+                    "Sign CAST_AND_CONTINUE only for intentional lossy casts",
                 ],
                 recovery_strategy=(
                     "After remap or Risk Contract, re-Validate. Contracted holdouts "
@@ -940,12 +1008,33 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
     for r in roots:
         absorbed.update(r.absorbed_blocker_ids)
 
-    remaining = [
-        b
-        for b in (preflight.get("blockers") or [])
-        if b and str(b.get("id") or "") not in absorbed
-        and not (b.get("details") or {}).get("root_cause")
-    ]
+    root_msg_blobs = " ".join(
+        f"{r.title} {r.summary} {r.business_impact}".lower() for r in roots
+    )
+    remaining = []
+    for b in preflight.get("blockers") or []:
+        if not b:
+            continue
+        bid = str(b.get("id") or "")
+        if bid in absorbed:
+            continue
+        if (b.get("details") or {}).get("root_cause"):
+            continue
+        # proof_N echoes transfer_decision.blockers that often duplicate the
+        # collapsed sample_transform / fidelity root — drop the twin.
+        # Never substring-match short column names (e.g. "id") into unrelated
+        # proof prose — that falsely drops real proof blockers.
+        if bid.startswith("proof_"):
+            msg = str(b.get("message") or "").lower()
+            if (
+                "sample transform" in msg
+                or "fail write-path" in msg
+                or "dry-run failed" in msg
+                or "transform / cast" in msg
+                or (msg and msg[:80] in root_msg_blobs)
+            ):
+                continue
+        remaining.append(b)
     # Roots first — operator sees cause before residual issues.
     collapsed = [r.as_operator_blocker() for r in roots] + remaining
     preflight["blockers"] = collapsed

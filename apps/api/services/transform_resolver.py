@@ -152,6 +152,10 @@ def resolve_transform(
     # when create-new still carries a TEXT/VARCHAR stamp. Re-inferring away
     # ``integer`` / ``url`` undoes CAST_AND_CONTINUE / SKIP_ROW / QUARANTINE_ROW
     # (amt TEXT→integer contracted cast, image→url mutate).
+    #
+    # Exception: Widen-to-text (LONGTEXT/VARCHAR) without a continue-policy
+    # contract must drop incompatible typed casts — otherwise Validate keeps
+    # failing with Invalid integer after the operator already remapped to text.
     if raw and str(raw).strip().lower() not in {"", "none", "null", "identity"}:
         if (
             mapping.get("user_override")
@@ -161,6 +165,16 @@ def resolve_transform(
             or mapping.get("risk_acknowledged")
             or mapping.get("riskAcknowledged")
         ):
+            from services.decision_kernel import typed_cast_incompatible_with_text_sink
+            from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+            if typed_cast_incompatible_with_text_sink(str(raw), target_type):
+                if mapping_has_clearing_risk_contract(mapping):
+                    return str(raw)
+                # Widen-to-text: keep the raw payload. Do not re-infer decimal/
+                # integer from a float source (that re-blocks Validate after
+                # LONGTEXT remap with Invalid integer / numeric cast noise).
+                return "none"
             return str(raw)
 
     return infer_transform_for_mapping(

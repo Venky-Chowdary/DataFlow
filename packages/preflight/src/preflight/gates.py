@@ -1408,17 +1408,35 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
             start,
             details,
         )
-    # Contracted-only failures: gate passes; holdouts remain auditable.
+    # Contracted-only failures: gate does not hard-block Execute, but must not
+    # claim a clean "passed" — auditors reject "dry-run passed" beside holdouts.
     if contracted:
         details["note"] = (
-            "Continue-policy Risk Contract holdouts on sample — primary dry-run "
-            "cleared; cast failures quarantine/hold out at write (not silent invent)"
+            "Continue-policy Risk Contract holdouts on sample — hard transforms "
+            "cleared; cast failures quarantine/hold out at write (not silent invent). "
+            "This is not a clean transform pass."
         )
+        details["transform_status"] = "completed_with_contracted_holdouts"
     elif not passed and not errors:
         # run_dry_run returned False with empty errors (rare adapter failure).
         return _block(
             GateId.G5_DRY_RUN,
             "Dry-run failed — no sample transform proof",
+            start,
+            details,
+        )
+    if contracted and not hard_errors:
+        rows_bit = (
+            f" ({int(details.get('sample_rows_scanned', 0))} preview rows)"
+            if details.get("sample_rows_scanned")
+            else ""
+        )
+        return _pass(
+            GateId.G5_DRY_RUN,
+            (
+                f"Sample transform completed with {len(contracted)} contracted "
+                f"holdout(s){rows_bit} — not a clean pass; holdouts quarantine at write"
+            ),
             start,
             details,
         )
@@ -1429,11 +1447,6 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
             + (
                 f" ({int(details.get('sample_rows_scanned', 0))} preview rows)"
                 if details.get("sample_rows_scanned")
-                else ""
-            )
-            + (
-                f" · {len(contracted)} contracted holdout(s)"
-                if contracted
                 else ""
             )
         ),

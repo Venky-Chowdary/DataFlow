@@ -141,9 +141,9 @@ def _target_type_for(
 def _safe_target_type(dest_db_type: str, prefer_structural: bool) -> str | None:
     """A destination-native type that would accept the offending values.
 
-    For a mixed/dirty column the safe move on a typed warehouse is to widen the
-    column to text (or VARIANT when the values are structural) so no value is
-    rejected — the user can always cast downstream.
+    Text/VARIANT sinks are a last resort. Prefer
+    :func:`services.decision_kernel.rank_suggested_target_type` for numeric
+    fidelity (FLOAT→DOUBLE before LONGTEXT).
     """
     db = (dest_db_type or "").strip().lower()
     if not db:
@@ -196,10 +196,27 @@ def _build_suggestion(
     failure_examples: list[str],
     dest_db_type: str,
     structural: bool,
-) -> tuple[str, str | None, str | None]:
-    """Return (human_fix, suggested_target_type, suggested_transform)."""
+    failure_reasons: list[str] | None = None,
+) -> tuple[str, str | None, str | None, str | None]:
+    """Return (human_fix, suggested_target_type, suggested_transform, failure_class)."""
+    from services.decision_kernel import (
+        FailureClass,
+        classify_transform_failure,
+        rank_suggested_target_type,
+        recommended_action_for_failure,
+    )
+
     if failed:
         examples = ", ".join(repr(v) for v in failure_examples[:3]) or "some values"
+        reason0 = (failure_reasons or [""])[0] if failure_reasons else ""
+        if not reason0 and failure_examples:
+            reason0 = f"Invalid {target_logical}: {failure_examples[0]!r}"
+        fc = classify_transform_failure(
+            reason0,
+            source_type=source_type,
+            target_type=target_type,
+            source_value=(failure_examples[0] if failure_examples else ""),
+        )
         if target_logical in _STRUCTURAL_LOGICALS:
             # A VARIANT/JSON column only accepts valid JSON. Mixed Mongo fields
             # (array in one doc, bare scalar in another) fail on the scalar. The
@@ -211,18 +228,58 @@ def _build_suggestion(
                 f"{safe_type or 'VARCHAR'} to keep every raw value, or normalize the "
                 f"source so this field is always a JSON object/array before loading."
             )
-            return fix, safe_type, None
-        safe_type = _safe_target_type(dest_db_type, prefer_structural=structural)
-        fix = (
-            f"Column '{source}' → {target_type}: {failed} of {sampled} sampled "
-            f"value(s) cannot be cast to {target_logical} (e.g. {examples}). "
-            f"For a new table, create as {safe_type or 'VARCHAR'}. "
-            f"For an existing typed column, remap to a text column or ALTER the "
-            f"destination (mapping Widen alone does not change DDL). "
-            f"Quarantine only applies after Validate passes for write-time rejects "
-            f"— it never silently drops rows."
+            return fix, safe_type, None, fc.value
+        safe_type = rank_suggested_target_type(
+            source_type=source_type,
+            target_type=target_type,
+            dest_db=dest_db_type,
+            failure_class=fc,
+            failure_examples=failure_examples,
+        ) or None
+        # Structural / dirty mixed columns still fall back to text sink.
+        if not safe_type and structural and fc not in {
+            FailureClass.FRACTIONAL_PRECISION_LOSS,
+            FailureClass.EMPTY_VALUE_NOT_NULLABLE,
+        }:
+            safe_type = _safe_target_type(dest_db_type, prefer_structural=False)
+        action = recommended_action_for_failure(
+            fc, source=source, suggested_target_type=safe_type or ""
         )
-        return fix, safe_type, None
+        if fc is FailureClass.FRACTIONAL_PRECISION_LOSS:
+            fix = (
+                f"Column '{source}' → {target_type}: {failed} of {sampled} sampled "
+                f"value(s) are fractional and cannot cast to integer without fidelity "
+                f"collapse (e.g. {examples}). For a new table, create as "
+                f"{safe_type or 'DOUBLE'} to preserve numeric semantics. "
+                f"LONGTEXT is a last-resort value sink — prefer numeric widen. "
+                f"For an existing typed column, remap or ALTER the destination "
+                f"(mapping Widen alone does not change DDL). "
+                f"Quarantine never silently drops rows. {action}"
+            )
+        elif fc is FailureClass.EMPTY_VALUE_NOT_NULLABLE:
+            fix = (
+                f"Column '{source}' → {target_type}: {failed} of {sampled} sampled "
+                f"value(s) are empty and cannot coerce to {target_logical}. "
+                f"This is a nullability / empty-value policy problem — allow NULL, "
+                f"set a default, remap, or Accept risk with QUARANTINE_ROW / "
+                f"CAST_AND_CONTINUE. Widening to text is optional, not preferred. "
+                f"{action}"
+            )
+        else:
+            sink = safe_type or _safe_target_type(
+                dest_db_type, prefer_structural=structural
+            )
+            fix = (
+                f"Column '{source}' → {target_type}: {failed} of {sampled} sampled "
+                f"value(s) cannot be cast to {target_logical} (e.g. {examples}). "
+                f"For a new table, create as {sink or 'VARCHAR'}. "
+                f"For an existing typed column, remap to a compatible column or ALTER "
+                f"the destination (mapping Widen alone does not change DDL). "
+                f"Quarantine only applies after Validate passes for write-time rejects "
+                f"— it never silently drops rows. {action}"
+            )
+            safe_type = sink
+        return fix, safe_type, None, fc.value
     if sentinel_nulls:
         fix = (
             f"Column '{source}' → {target_type}: {sentinel_nulls} of {sampled} sampled "
@@ -230,8 +287,8 @@ def _build_suggestion(
             f"Remap to a text/compatible type, quarantine unfit cells, or acknowledge "
             f"coerce-to-NULL under a non-strict validation mode."
         )
-        return fix, None, None
-    return "", None, None
+        return fix, None, None, FailureClass.TYPE_CAST_FAILURE.value
+    return "", None, None, None
 
 
 def analyze_coercion(
@@ -693,7 +750,12 @@ def analyze_coercion(
             severity = "ok"
 
         structural = tgt_logical in _STRUCTURAL_LOGICALS or _looks_structural(observed_values)
-        fix, suggested_type, suggested_transform = _build_suggestion(
+        failure_reasons = [
+            str(sf.get("reason") or "")
+            for sf in sample_failures
+            if isinstance(sf, dict) and sf.get("reason")
+        ]
+        fix, suggested_type, suggested_transform, failure_class = _build_suggestion(
             source=src,
             source_type=src_type,
             target_type=tgt_type,
@@ -704,6 +766,7 @@ def analyze_coercion(
             failure_examples=raw_failure_values,
             dest_db_type=dest_db_type,
             structural=structural,
+            failure_reasons=failure_reasons,
         )
         if severity != "block" and fidelity_collapse:
             # Keep fidelity_collapse=true for honesty. Soften severity only with a
@@ -851,6 +914,7 @@ def analyze_coercion(
             "sample_wire_form": sample_wire_form,
             "severity": severity,
             "fidelity_collapse": fidelity_collapse,
+            "failure_class": failure_class,
             "suggested_fix": fix,
             "suggested_target_type": suggested_type,
             "suggested_transform": suggested_transform,

@@ -264,9 +264,16 @@ def _check_transform_dry_run(
     if hard_errors:
         result["kind"] = "transform_errors"
     elif contracted:
+        result["transform_status"] = "completed_with_contracted_holdouts"
         result["warnings"] = [
             f"Contracted holdout (continue-policy): {c}" for c in contracted[:5]
         ]
+        result["note"] = (
+            (result.get("note") + " ") if result.get("note") else ""
+        ) + (
+            f"Sample transform completed with {len(contracted)} contracted holdout(s) "
+            "— not a clean pass; holdouts quarantine at write."
+        )
     return result
 
 
