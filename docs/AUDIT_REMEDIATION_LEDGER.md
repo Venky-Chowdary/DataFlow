@@ -7,7 +7,7 @@ Status values: `NOT_STARTED` | `IN_PROGRESS` | `DONE_VERIFIED` | `BLOCKED` | `RE
 | item | status | files changed | tests added | verify output | notes |
 |------|--------|---------------|-------------|---------------|-------|
 | 1 | DONE_VERIFIED | `apps/api/services/decision_kernel/type_invent.py`, `apps/api/services/decision_kernel/invent.py`, `apps/api/services/schema_introspect.py` | `apps/api/tests/test_item1_sqlite_integer_affinity_invents_bigint.py`, `apps/api/tests/test_item1_pg_writer_bare_integer_is_bigint.py` | VERIFY 491p/1s; stash 4f→5p; iso 5p; polluted slice 71p; full suite **109→105 failed** (11659→11663 passed) | Prior DONE_VERIFIED retracted (SQLite INTEGER affinity cliff). Fixed introspect BIGINT + bare float materialize. |
-| 2 | NOT_STARTED | | | | |
+| 2 | DONE_VERIFIED | `apps/api/src/transfer/engine.py` | `apps/api/tests/test_item2_skip_preflight_ddl_identity.py` | stash 1f→6p; iso 6p; polluted 18p+sync/gzip green; UTE skip_preflight sqlite→sqlite success=True records=2; drift refused | Hollow proof_bundle + skip_preflight now inline-stamps; UI path still requires Validate; approved-hash drift still refused. |
 | 3 | NOT_STARTED | | | | |
 | 4 | NOT_STARTED | | | | |
 | 5 | NOT_STARTED | | | | |
@@ -121,3 +121,42 @@ Delta: -4 failures / +4 passes (no new failures introduced)
 SQLite SKU/SCD2 failures (9) exist identically before and after — ITEM 2 territory
 (skip_preflight / additive stamp refuse), not width invent.
 ```
+
+## ITEM 2 verify log (2026-08-09)
+
+### Root cause
+`_enforce_ddl_identity` inline-stamped only when `pf is None`. A hollow
+`proof_bundle` without `ddl_identity_hash` took the "missing after Validate"
+refuse path even with `skip_preflight=True`. Same class of hole in Decision
+Artifact gate.
+
+### Stash proof
+```
+===== WITHOUT FIX =====
+1 failed, 5 passed
+FAILED test_skip_preflight_inline_stamps_when_proof_bundle_hollow
+  DDL identity fingerprint missing after Validate — refuse Execute
+
+===== WITH FIX =====
+6 passed (item2 file)
+18 passed (item2 + ddl_identity_ga + decision_kernel_execute_gate)
+```
+
+### VERIFY
+```
+pytest tests/test_item2_skip_preflight_ddl_identity.py \
+  tests/test_ddl_identity_fail_closed_ga.py \
+  tests/test_decision_kernel_execute_gate.py \
+  tests/test_sync_mode_append_vs_overwrite.py \
+  tests/test_gzip_streaming.py -q
+→ 28 passed
+
+isolation: 6 passed
+UTE skip_preflight sqlite→sqlite: success=True, records_transferred=2
+UTE drifted approved hash: success=False, records_transferred=0
+```
+
+### Note (out of ITEM 2 scope)
+PRODUCTION_SKU failures remain on additive Map `target_type` refuse under
+partial Studio — not the DDL-identity Validate message. Tracked via existing
+SKU failures; do not conflate with ITEM 2.
