@@ -30,6 +30,7 @@ from services.decision_kernel.invent import (
     InventRefused,
     invent_context_from_sync_mode,
     invent_dest_type,
+    stamp_additive_mapping_types,
 )
 from services.decision_kernel.models import (
     DECISION_ARTIFACT_SCHEMA,
@@ -153,6 +154,7 @@ __all__ = [
     "integer_width_carrier",
     "invent_context_from_sync_mode",
     "invent_dest_type",
+    "stamp_additive_mapping_types",
     "is_lossy_coercion",
     "is_precision_collapse_coercion",
     "materialize_dest_ddl",

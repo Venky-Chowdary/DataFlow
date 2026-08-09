@@ -1647,6 +1647,62 @@ def _enrich_mappings_with_types(
     return out
 
 
+def _stamp_additive_mappings_for_write(
+    request: TransferRequest,
+    mappings: list[dict],
+    *,
+    column_types: dict[str, str] | None = None,
+    dest_types: dict[str, str] | None = None,
+    sample_rows: list[dict] | None = None,
+) -> list[dict]:
+    """Decision Kernel stamp for ADD COLUMN under backfill / create-new.
+
+    Prevents Execute fail-closed after Validate when Map left ``target_type``
+    blank for additive columns (Excel→PG partial Studio cliff).
+    """
+    if not mappings:
+        return mappings
+    try:
+        from services.batch_progress import effective_backfill_new_fields
+        from services.decision_kernel import stamp_additive_mapping_types
+    except Exception as exc:
+        logger.debug("additive stamp import failed: %s", exc, exc_info=exc)
+        return mappings
+    try:
+        backfill = effective_backfill_new_fields(
+            backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
+            schema_policy=str(getattr(request, "schema_policy", "") or ""),
+            mappings=mappings,
+        )
+    except Exception:
+        backfill = bool(getattr(request, "backfill_new_fields", False))
+    samples_by_src: dict[str, list] = {}
+    for row in sample_rows or []:
+        if not isinstance(row, dict):
+            continue
+        for k, v in row.items():
+            if v is None:
+                continue
+            samples_by_src.setdefault(str(k), []).append(v)
+    for k in list(samples_by_src.keys()):
+        samples_by_src[k] = samples_by_src[k][:32]
+    dest_db = str(getattr(request.destination, "format", "") or "").lower()
+    stamped, unstamped = stamp_additive_mapping_types(
+        mappings,
+        dest_db=dest_db,
+        live_dest_types=dest_types or {},
+        source_types=column_types or {},
+        samples_by_source=samples_by_src,
+        backfill_new_fields=bool(backfill),
+    )
+    if unstamped and backfill:
+        raise ValueError(
+            f"Additive column(s) {', '.join(unstamped[:5])} lack Map target_type "
+            "under partial Studio — stamp on Map or disable backfill_new_fields."
+        )
+    return stamped
+
+
 def _auto_map(
     request: TransferRequest,
     columns: list[str],
@@ -2495,6 +2551,13 @@ class UniversalTransferEngine:
                 schema=schema,
                 mappings=mappings,
                 dest_schema_types=dest_schema_types,
+            )
+            mappings = _stamp_additive_mappings_for_write(
+                request,
+                mappings,
+                column_types=schema,
+                dest_types=dest_schema_types,
+                sample_rows=records[:100] if isinstance(records, list) else None,
             )
             # Resolve upsert mode for non-streaming database writes.
             contract = resolve_sync_contract(request.stream_contracts)
@@ -3590,6 +3653,13 @@ class UniversalTransferEngine:
                 mappings=mappings,
                 dest_schema_types=dest_schema_types,
             )
+            mappings = _stamp_additive_mappings_for_write(
+                request,
+                mappings,
+                column_types=schema,
+                dest_types=dest_schema_types,
+                sample_rows=sample_rows[:100] if sample_rows else None,
+            )
             mongo.update_job_status(
                 job_id,
                 "running",
@@ -4339,6 +4409,13 @@ class UniversalTransferEngine:
                 schema=schema,
                 mappings=mappings,
                 dest_schema_types=dest_schema_types,
+            )
+            mappings = _stamp_additive_mappings_for_write(
+                request,
+                mappings,
+                column_types=schema,
+                dest_types=dest_schema_types,
+                sample_rows=sample_rows[:100] if sample_rows else None,
             )
             mongo.update_job_status(
                 job_id,

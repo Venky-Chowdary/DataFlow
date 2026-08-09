@@ -1,0 +1,151 @@
+"""Decision Kernel additive Map stamps — Excel→PG partial Studio cliff."""
+
+from __future__ import annotations
+
+from services.decision_kernel import stamp_additive_mapping_types
+
+
+def test_stamp_additive_invents_create_new_under_backfill():
+    mappings, unstamped = stamp_additive_mapping_types(
+        [
+            {
+                "source": "Change_from_Previous_Year",
+                "target": "Change_from_Previous_Year",
+                "source_type": "DOUBLE",
+                "confidence": 0.9,
+            }
+        ],
+        dest_db="postgresql",
+        live_dest_types={"Country": "TEXT", "Year": "INTEGER"},
+        source_types={"Change_from_Previous_Year": "DOUBLE"},
+        backfill_new_fields=True,
+    )
+    assert unstamped == []
+    row = mappings[0]
+    assert row.get("create_new") is True
+    stamp = str(row.get("target_type") or "").upper()
+    assert stamp
+    assert "VARCHAR" not in stamp or "DOUBLE" in stamp or "FLOAT" in stamp or "NUMERIC" in stamp or "DOUBLE PRECISION" in stamp
+    # Prefer numeric invent over bare text for DOUBLE source.
+    assert any(tok in stamp for tok in ("DOUBLE", "FLOAT", "NUMERIC", "REAL", "DECIMAL"))
+
+
+def test_stamp_additive_binds_live_carrier_without_invent():
+    mappings, unstamped = stamp_additive_mapping_types(
+        [
+            {
+                "source": "Year",
+                "target": "Year",
+                "source_type": "INTEGER",
+            }
+        ],
+        dest_db="postgresql",
+        live_dest_types={"Year": "BIGINT"},
+        backfill_new_fields=True,
+    )
+    assert unstamped == []
+    assert mappings[0]["target_type"] == "BIGINT"
+
+
+def test_stamp_additive_refuses_pending_dest_schema():
+    mappings, unstamped = stamp_additive_mapping_types(
+        [
+            {
+                "source": "orphan",
+                "target": "orphan",
+                "source_type": "DOUBLE",
+                "target_type": "DOUBLE PRECISION",  # invented residue must clear
+                "create_new": True,
+                "assignment_strategy": "pending_dest_schema",
+            }
+        ],
+        dest_db="postgresql",
+        live_dest_types={"id": "INTEGER"},
+        backfill_new_fields=True,
+    )
+    assert not str(mappings[0].get("target_type") or "").strip()
+    assert mappings[0].get("create_new") is False
+    assert unstamped == []  # pending is not "unstamped additive" — honesty leave empty
+
+
+def test_stamp_additive_live_carrier_overrides_map_invent():
+    mappings, unstamped = stamp_additive_mapping_types(
+        [
+            {
+                "source": "Year",
+                "target": "Year",
+                "source_type": "INTEGER",
+                "target_type": "TEXT",  # Map invent must not beat live BIGINT
+                "create_new": True,
+                "assignment_strategy": "create_compatible_new",
+            }
+        ],
+        dest_db="postgresql",
+        live_dest_types={"Year": "BIGINT"},
+        backfill_new_fields=True,
+    )
+    assert unstamped == []
+    assert mappings[0]["target_type"] == "BIGINT"
+    assert mappings[0].get("create_new") is False
+
+
+def test_stamp_additive_without_backfill_lists_unstamped():
+    mappings, unstamped = stamp_additive_mapping_types(
+        [
+            {
+                "source": "note",
+                "target": "note",
+                "source_type": "TEXT",
+            }
+        ],
+        dest_db="postgresql",
+        live_dest_types={"id": "INTEGER"},
+        backfill_new_fields=False,
+    )
+    assert "note" in unstamped
+    assert not str(mappings[0].get("target_type") or "").strip()
+
+
+def test_preflight_stamps_additive_before_execute_refuse():
+    from services.preflight_service import run_file_preflight
+
+    result = run_file_preflight(
+        columns=["id", "Change_from_Previous_Year"],
+        column_types={"id": "INTEGER", "Change_from_Previous_Year": "DOUBLE"},
+        row_count=2,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.95, "target_type": "INTEGER"},
+            {
+                "source": "Change_from_Previous_Year",
+                "target": "Change_from_Previous_Year",
+                "confidence": 0.9,
+                "create_new": True,
+                "assignment_strategy": "create_compatible_new",
+                # Intentionally blank — Kernel must stamp under backfill.
+            },
+        ],
+        destination_connected=True,
+        source_connected=True,
+        source_kind="file",
+        sync_mode="full_refresh_append",
+        sample_rows=[
+            {"id": 1, "Change_from_Previous_Year": 1.5},
+            {"id": 2, "Change_from_Previous_Year": -0.25},
+        ],
+        destination_db_type="postgresql",
+        destination_table_exists=True,
+        destination_column_types={"id": "INTEGER"},
+        destination_can_create=True,
+        destination_can_write=True,
+        validation_mode="strict",
+        backfill_new_fields=True,
+        schema_policy="propagate_columns",
+    )
+    stamped = {
+        r["target"]: r["target_type"]
+        for r in (result.get("stamped_mappings") or [])
+        if r.get("target")
+    }
+    assert "Change_from_Previous_Year" in stamped
+    assert str(stamped["Change_from_Previous_Year"]).strip()
+    assert not any(b.get("id") == "g6_additive_stamp" for b in (result.get("blockers") or []))

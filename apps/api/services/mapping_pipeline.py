@@ -565,12 +565,17 @@ def run_mapping_pipeline(
             elif destination_db_type and (
                 strategy in {"identity_passthrough", "create_compatible_new"}
                 or destination_table_exists is False
+                or bool(m.get("create_new"))
             ):
+                # Intentional create-new / ADD COLUMN — Decision Kernel invent.
+                # Distinct from pending_dest_schema (Studio names-only refuse).
                 tgt_type = create_new_mapping_target_type(
                     src_type, destination_db_type, samples=col_samples
                 )
             elif destination_db_type and destination_table_exists is True:
-                # Existing table, column missing from Studio — refuse invent.
+                # Existing table, column missing from Studio, not create-new —
+                # refuse invent (partial Studio honesty). Backfill + create_new
+                # paths stamp above / via stamp_additive_mapping_types.
                 tgt_type = ""
             elif destination_db_type:
                 tgt_type = create_new_mapping_target_type(
@@ -759,6 +764,30 @@ def run_mapping_pipeline(
         enriched_mappings,
         destination_db_type=destination_db_type or "",
     )
+    # Additive create-new gaps: Kernel stamp before pending honesty pass.
+    try:
+        from services.decision_kernel import stamp_additive_mapping_types
+
+        samples_by_src = {
+            str(s.get("name") or ""): list(s.get("samples") or [])[:32]
+            for s in (source_schemas or [])
+            if s.get("name")
+        }
+        live_types = {
+            str(s.get("name") or ""): str(s.get("inferred_type") or "")
+            for s in (target_schemas or [])
+            if s.get("name") and str(s.get("inferred_type") or "").strip()
+        }
+        enriched_mappings, _ = stamp_additive_mapping_types(
+            enriched_mappings,
+            dest_db=destination_db_type or "",
+            live_dest_types=live_types,
+            source_types=declared_source_types,
+            samples_by_source=samples_by_src,
+            backfill_new_fields=False,
+        )
+    except Exception:
+        pass
     # Reassert pending-Studio honesty after sample/quality boosts — never leave
     # invented preserve @ 0.99 when dest schema was never loaded.
     fixed_pending: list[dict] = []

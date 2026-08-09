@@ -1005,6 +1005,7 @@ def run_file_preflight(
                 row["risk_acknowledged"] = True
         hydrated_mappings.append(row)
     mappings = hydrated_mappings
+    _unstamped_additive: list[str] = []
 
     # If the operator did not specify a locale for ambiguous day/month dates,
     # scan the sample for an unambiguous majority before any date coercion.
@@ -1038,6 +1039,41 @@ def run_file_preflight(
                     }
             except Exception as exc:
                 logger.debug("preflight schema inference failed: %s", exc, exc_info=exc)
+
+    # Additive / create-new under backfill: Decision Kernel stamps target_type
+    # after source types are known — same invent path writers honor (never bare
+    # VARCHAR invent at Execute after Validate green). Use the same effective
+    # backfill authority as Execute (schema policy + create_new maps).
+    try:
+        from services.batch_progress import effective_backfill_new_fields
+        from services.decision_kernel import stamp_additive_mapping_types
+
+        samples_by_src: dict[str, list] = {}
+        for row in sample_rows or []:
+            if not isinstance(row, dict):
+                continue
+            for k, v in row.items():
+                if v is None:
+                    continue
+                samples_by_src.setdefault(str(k), []).append(v)
+        for k in list(samples_by_src.keys()):
+            samples_by_src[k] = samples_by_src[k][:32]
+        effective_backfill = effective_backfill_new_fields(
+            backfill_new_fields=bool(backfill_new_fields),
+            schema_policy=schema_policy,
+            mappings=mappings,
+        )
+        mappings, _unstamped_additive = stamp_additive_mapping_types(
+            mappings,
+            dest_db=destination_db_type or "",
+            live_dest_types=destination_column_types or {},
+            source_types=column_types or {},
+            samples_by_source=samples_by_src,
+            backfill_new_fields=bool(effective_backfill),
+        )
+    except Exception as stamp_exc:
+        logger.debug("additive Map stamp skipped: %s", stamp_exc, exc_info=stamp_exc)
+        _unstamped_additive = []
 
     # Source nullability defaults to True (unknown), which is the safe reading
     # for files. For an introspected database source it is knowable, and
@@ -1485,6 +1521,47 @@ def run_file_preflight(
                 "details": {"ddl_identity": ddl_id},
             }
         )
+    # Additive ADD without Kernel stamp must not leave Execute as the first refuse.
+    create_unstamped = [
+        str(m.get("target") or "")
+        for m in (mappings or [])
+        if isinstance(m, dict)
+        and str(m.get("target") or "").strip()
+        and str(m.get("assignment_strategy") or "") != "pending_dest_schema"
+        and (
+            m.get("create_new")
+            or str(m.get("assignment_strategy") or "")
+            in {"create_compatible_new", "identity_passthrough"}
+            or backfill_new_fields
+        )
+        and not str(m.get("target_type") or m.get("dest_type") or "").strip()
+        and str(m.get("target") or "") not in (destination_column_types or {})
+        and str(m.get("target") or "").lower()
+        not in {str(k).lower() for k in (destination_column_types or {})}
+    ]
+    create_unstamped = list(dict.fromkeys([c for c in create_unstamped if c]))
+    additive_stamp_blocked = False
+    if create_unstamped or _unstamped_additive:
+        cols = list(dict.fromkeys([*_unstamped_additive, *create_unstamped]))
+        sample = ", ".join(repr(c) for c in cols[:5])
+        more = f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
+        blockers.append(
+            {
+                "id": "g6_additive_stamp",
+                "message": (
+                    f"Additive column(s) {sample}{more} lack Map target_type under "
+                    "partial Studio — Decision Kernel refuse VARCHAR ADD invent. "
+                    "Re-run Map (create-new stamp) or disable backfill_new_fields."
+                ),
+                "details": {
+                    "columns": cols[:20],
+                    "backfill_new_fields": bool(backfill_new_fields),
+                    "kind": "additive_map_stamp_required",
+                },
+            }
+        )
+        additive_stamp_blocked = True
+
     enriched_blockers = enrich_blockers(
         blockers,
         dest_kind=dest_kind,
@@ -1512,7 +1589,7 @@ def run_file_preflight(
     )
 
     out = {
-        "passed": result.passed,
+        "passed": bool(result.passed) and not additive_stamp_blocked,
         "passed_count": result.passed_count,
         "total_gates": result.total_gates,
         "readiness_score": round(
@@ -1527,8 +1604,35 @@ def run_file_preflight(
                 "details": g.details,
             }
             for g in result.gates
-        ],
+        ]
+        + (
+            [
+                {
+                    "id": "g6_additive_stamp",
+                    "status": "block",
+                    "message": enriched_blockers[-1]["message"]
+                    if additive_stamp_blocked and enriched_blockers
+                    else "Additive Map stamp required",
+                    "duration_ms": 0,
+                    "details": {"kind": "additive_map_stamp_required"},
+                }
+            ]
+            if additive_stamp_blocked
+            else []
+        ),
         "blockers": enriched_blockers,
+        # Echo Kernel-stamped additive types so Map/Execute share Validate authority.
+        "stamped_mappings": [
+            {
+                "source": str(m.get("source") or ""),
+                "target": str(m.get("target") or ""),
+                "target_type": str(m.get("target_type") or ""),
+                "create_new": bool(m.get("create_new")),
+                "assignment_strategy": str(m.get("assignment_strategy") or ""),
+            }
+            for m in (mappings or [])
+            if isinstance(m, dict) and str(m.get("target_type") or "").strip()
+        ],
         "schema_drift": drift,
         "ddl_issues": ddl_issues,
         "sample_quality": sample_quality,

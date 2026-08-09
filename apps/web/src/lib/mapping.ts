@@ -1382,6 +1382,9 @@ export function mappingsFromAnalysis(
       structPolicy: structish || arrayish ? "store_as_json" : undefined,
       existsInDestination,
       createNew: createNew || undefined,
+      // Create-new / ADD must carry a destType stamp — Execute refuse Map VARCHAR
+      // invent under partial Studio when target_type is blank (Excel→PG cliff).
+      destType: createNew && !pendingDest ? inferred : undefined,
       assignmentStrategy: pendingDest
         ? "pending_dest_schema"
         : createNew
