@@ -120,11 +120,15 @@ def resolve_transform(
     if mapping.get("intentional_omit") or mapping.get("intentionalOmit"):
         return "omit"
 
-    # Hold LLM invents until operator accepts on Map (user_override / explicit transform).
+    # Hold LLM-invented transforms until operator accept — but never suppress
+    # deterministic type-driven transforms (ITEM 1: LLM must not change fidelity).
     if mapping.get("llm_invented_transform") and not mapping.get("user_override"):
         held = str(mapping.get("transform") or "").strip().lower()
-        if held in {"", "none", "null", "identity"}:
-            return "none"
+        suggested = str(mapping.get("suggested_transform") or "").strip().lower()
+        if held and held not in {"", "none", "null", "identity"} and held == suggested:
+            # Live transform still equals the unaccepted LLM invent — strip it;
+            # fall through so deterministic inference can apply.
+            pass
 
     source_type = normalize_logical_type(column_types.get(mapping["source"], "VARCHAR"))
     # Live destination types beat Map target_type stamps (same honesty as

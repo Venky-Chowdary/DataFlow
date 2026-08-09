@@ -70,6 +70,42 @@ jobs:
             apps/api/data/proofs/module_size_budgets.json
             apps/api/data/proofs/connector_capability_matrix.json
 
+  # AI ITEM 1 — full Map/LLM suite with no network and no API keys.
+  # Proves offline claim: LLM cannot change mapping decisions / checksums.
+  ai-offline-correctness:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Offline LLM-off correctness (ITEM 1)
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          # Empty keys + unreachable Ollama — no network LLM. Policy-off is
+          # asserted inside test_offline_env_forces_llm_policy_off; mock tests
+          # patch is_llm_enabled when they need the suggest path.
+          OPENAI_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          OLLAMA_HOST: "http://127.0.0.1:9"
+        run: |
+          python -m pytest \
+            tests/test_item1_llm_never_correctness_path.py \
+            tests/test_llm_mapping.py \
+            -q --tb=short
+
   # Property 2 — no-config transfer must never be blocked by additive/DDL gates.
   # SQLite↔SQLite is the always-on happy path (no Docker). Live PG/Mongo expand
   # coverage when services are present on the runner.
