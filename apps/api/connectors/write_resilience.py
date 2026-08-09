@@ -356,6 +356,9 @@ _RAW_LEDGER_SPECS: dict[str, _RawLedgerSpec] = {
             " batch_key TEXT NOT NULL,"
             " chunk_idx INTEGER NOT NULL,"
             " rows_written INTEGER NOT NULL DEFAULT 0,"
+            " row_start INTEGER NOT NULL DEFAULT 0,"
+            " row_end INTEGER NOT NULL DEFAULT 0,"
+            " attempt INTEGER NOT NULL DEFAULT 1,"
             " written_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),"
         ),
         create_suffix="",
@@ -370,6 +373,9 @@ _RAW_LEDGER_SPECS: dict[str, _RawLedgerSpec] = {
             " batch_key VARCHAR(255) NOT NULL,"
             " chunk_idx INT NOT NULL,"
             " rows_written INT NOT NULL DEFAULT 0,"
+            " row_start INT NOT NULL DEFAULT 0,"
+            " row_end INT NOT NULL DEFAULT 0,"
+            " attempt INT NOT NULL DEFAULT 1,"
             " written_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         ),
         create_suffix=" ENGINE=InnoDB",
@@ -384,6 +390,9 @@ _RAW_LEDGER_SPECS: dict[str, _RawLedgerSpec] = {
             " batch_key TEXT NOT NULL,"
             " chunk_idx INTEGER NOT NULL,"
             " rows_written INTEGER NOT NULL DEFAULT 0,"
+            " row_start INTEGER NOT NULL DEFAULT 0,"
+            " row_end INTEGER NOT NULL DEFAULT 0,"
+            " attempt INTEGER NOT NULL DEFAULT 1,"
             " written_at TEXT NOT NULL DEFAULT (datetime('now')),"
         ),
         create_suffix="",
@@ -422,6 +431,43 @@ def ensure_raw_write_ledger(
         " PRIMARY KEY (job_id, batch_key, chunk_idx)"
         f"){spec.create_suffix}"
     )
+    # Property 4 — migrate pre-existing ledgers that lack row_range / attempt.
+    _ensure_raw_ledger_p4_columns(cur, dialect=dialect, ref=ref)
+
+
+def _ensure_raw_ledger_p4_columns(cur: Any, *, dialect: str, ref: str) -> None:
+    """Add row_start/row_end/attempt when an older ledger table already exists."""
+    dialect_n = (dialect or "").strip().lower()
+    adds = (
+        ("row_start", "INTEGER NOT NULL DEFAULT 0", "INT NOT NULL DEFAULT 0"),
+        ("row_end", "INTEGER NOT NULL DEFAULT 0", "INT NOT NULL DEFAULT 0"),
+        ("attempt", "INTEGER NOT NULL DEFAULT 1", "INT NOT NULL DEFAULT 1"),
+    )
+    for name, pg_sqlite_typ, mysql_typ in adds:
+        typ = mysql_typ if dialect_n == "mysql" else pg_sqlite_typ
+        try:
+            if dialect_n == "postgresql":
+                cur.execute(
+                    f"ALTER TABLE {ref} ADD COLUMN IF NOT EXISTS {name} {typ}"  # nosec B608
+                )
+            elif dialect_n == "mysql":
+                # MySQL lacks IF NOT EXISTS for ADD COLUMN on older versions.
+                cur.execute(f"ALTER TABLE {ref} ADD COLUMN {name} {typ}")  # nosec B608
+            else:
+                cur.execute(f"ALTER TABLE {ref} ADD COLUMN {name} {typ}")  # nosec B608
+        except Exception as exc:
+            msg = str(exc).lower()
+            if any(
+                tok in msg
+                for tok in (
+                    "duplicate column",
+                    "already exists",
+                    "exist",
+                )
+            ):
+                continue
+            # Non-fatal — mark path can still degrade to legacy columns.
+            logger.debug("ledger P4 column %s migrate skipped: %s", name, exc)
 
 
 def raw_chunk_rows_written(
@@ -467,17 +513,63 @@ def mark_raw_chunk_committed(
     chunk_idx: int,
     rows_written: int,
     schema: str | None = None,
+    row_start: int | None = None,
+    row_end: int | None = None,
+    attempt: int = 1,
 ) -> None:
-    """Record a committed chunk inside the same transaction as its data write."""
+    """Record a committed chunk inside the same transaction as its data write.
+
+    Property 4 — ``chunk_id`` is ``{batch_key}:{chunk_idx}``; ``row_start``/
+    ``row_end`` bound the inclusive source-row range covered by this chunk;
+    ``attempt`` records which try committed (resume skips already-committed).
+    """
     spec = _raw_ledger_spec(dialect)
     ref = _raw_ledger_ref(spec, schema)
     ph = spec.placeholder
-    cur.execute(
-        f"{spec.insert_prefix} {ref} "  # nosec: B608 — identifiers are quoted, dialect SQL is a constant
-        f"(job_id, batch_key, chunk_idx, rows_written) "
-        f"VALUES ({ph}, {ph}, {ph}, {ph}){spec.insert_conflict}",
-        (job_id, batch_key, chunk_idx, int(rows_written)),
-    )
+    n = int(rows_written)
+    start = int(row_start) if row_start is not None else 0
+    end = int(row_end) if row_end is not None else max(0, start + n - 1) if n else start
+    # SAVEPOINT so a missing-column failure on PG does not abort the data txn.
+    use_sp = (dialect or "").strip().lower() == "postgresql"
+    if use_sp:
+        cur.execute("SAVEPOINT df_ledger_mark")
+    try:
+        cur.execute(
+            f"{spec.insert_prefix} {ref} "  # nosec: B608 — identifiers are quoted
+            f"(job_id, batch_key, chunk_idx, rows_written, row_start, row_end, attempt) "
+            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph}){spec.insert_conflict}",
+            (job_id, batch_key, chunk_idx, n, start, end, int(attempt)),
+        )
+        if use_sp:
+            cur.execute("RELEASE SAVEPOINT df_ledger_mark")
+    except Exception as exc:
+        # Pre-Property-4 ledgers lack row_start/row_end/attempt — degrade once.
+        msg = str(exc).lower()
+        if not any(
+            tok in msg
+            for tok in (
+                "row_start",
+                "row_end",
+                "attempt",
+                "no such column",
+                "unknown column",
+                "does not exist",
+            )
+        ):
+            if use_sp:
+                try:
+                    cur.execute("ROLLBACK TO SAVEPOINT df_ledger_mark")
+                except Exception:
+                    pass
+            raise
+        if use_sp:
+            cur.execute("ROLLBACK TO SAVEPOINT df_ledger_mark")
+        cur.execute(
+            f"{spec.insert_prefix} {ref} "  # nosec: B608
+            f"(job_id, batch_key, chunk_idx, rows_written) "
+            f"VALUES ({ph}, {ph}, {ph}, {ph}){spec.insert_conflict}",
+            (job_id, batch_key, chunk_idx, n),
+        )
 
 
 def sqlalchemy_ledger_table(metadata: Any, schema: str | None = None) -> Any:
@@ -502,6 +594,9 @@ def sqlalchemy_ledger_table(metadata: Any, schema: str | None = None) -> Any:
         sa.Column("batch_key", sa.String(255), primary_key=True, nullable=False),
         sa.Column("chunk_idx", sa.Integer, primary_key=True, nullable=False),
         sa.Column("rows_written", sa.Integer, nullable=False, default=0),
+        sa.Column("row_start", sa.Integer, nullable=False, default=0),
+        sa.Column("row_end", sa.Integer, nullable=False, default=0),
+        sa.Column("attempt", sa.Integer, nullable=False, default=1),
         sa.Column(
             "written_at",
             sa.DateTime(timezone=True),
@@ -584,6 +679,9 @@ def mark_sqlalchemy_chunk_committed(
     batch_key: str,
     chunk_idx: int,
     rows_written: int,
+    row_start: int | None = None,
+    row_end: int | None = None,
+    attempt: int = 1,
 ) -> None:
     """Record a committed chunk.
 
@@ -599,16 +697,24 @@ def mark_sqlalchemy_chunk_committed(
     from datetime import datetime as _dt
     from datetime import timezone as _tz
 
+    n = int(rows_written)
+    start = int(row_start) if row_start is not None else 0
+    end = int(row_end) if row_end is not None else max(0, start + n - 1) if n else start
+    values = {
+        "job_id": job_id,
+        "batch_key": batch_key,
+        "chunk_idx": chunk_idx,
+        "rows_written": n,
+        "written_at": _dt.now(_tz.utc),
+    }
+    # Optional Property-4 columns — omit when the live table predates them.
+    cols = getattr(table, "c", None)
+    if cols is not None and hasattr(cols, "row_start"):
+        values["row_start"] = start
+        values["row_end"] = end
+        values["attempt"] = int(attempt)
     try:
-        conn.execute(
-            table.insert().values(
-                job_id=job_id,
-                batch_key=batch_key,
-                chunk_idx=chunk_idx,
-                rows_written=int(rows_written),
-                written_at=_dt.now(_tz.utc),
-            )
-        )
+        conn.execute(table.insert().values(**values))
     except Exception as exc:
         if _is_duplicate_key_error(exc):
             return

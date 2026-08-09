@@ -5314,6 +5314,9 @@ def write_mapped_rows(
                             batch_key=ledger_batch_key,
                             chunk_idx=chunk_idx,
                             rows_written=chunk_written,
+                            row_start=start,
+                            row_end=start + max(chunk_written - 1, 0),
+                            attempt=1,
                         )
                     conn.commit()
                     written += chunk_written
@@ -5402,6 +5405,9 @@ def write_mapped_rows(
                                     batch_key=ledger_batch_key,
                                     chunk_idx=chunk_idx,
                                     rows_written=chunk_written,
+                                    row_start=start,
+                                    row_end=start + max(chunk_written - 1, 0),
+                                    attempt=1,
                                 )
                                 conn.commit()
                             except Exception as ledger_exc:

@@ -1017,6 +1017,9 @@ def write_mapped_rows(
                                 batch_key=ledger_batch_key,
                                 chunk_idx=chunk_idx,
                                 rows_written=len(batch),
+                                row_start=start,
+                                row_end=start + len(batch) - 1,
+                                attempt=1,
                             )
 
                 if on_checkpoint:

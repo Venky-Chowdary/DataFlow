@@ -1271,7 +1271,11 @@ def write_mapped_rows(
         table_name=table_name,
         file_batch_idx=_kwargs.get("file_batch_idx"),
     )
-    use_ledger = bool(job_id)
+    # Ledger dedupes insert retries. Upserts already converge on conflict keys —
+    # skipping a ledgered upsert would suppress a legitimate value update.
+    use_ledger = bool(job_id) and not (
+        write_mode == "upsert" and conflict_columns
+    )
     conn = None
 
     def _build_insert():
@@ -1876,6 +1880,9 @@ def write_mapped_rows(
                                 batch_key=write_batch_key,
                                 chunk_idx=chunk_idx,
                                 rows_written=landed,
+                                row_start=start,
+                                row_end=start + max(landed - 1, 0),
+                                attempt=1,
                             )
                         conn.commit()
                         chunk_written = landed
@@ -1958,6 +1965,9 @@ def write_mapped_rows(
                                         batch_key=write_batch_key,
                                         chunk_idx=chunk_idx,
                                         rows_written=chunk_written,
+                                        row_start=start,
+                                        row_end=start + max(chunk_written - 1, 0),
+                                        attempt=1,
                                     )
                                 conn.commit()
                             except Exception as exc:

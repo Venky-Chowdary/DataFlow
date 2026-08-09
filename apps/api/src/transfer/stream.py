@@ -782,7 +782,10 @@ def _write_batch(
 
     if dest_type == "sqlite":
         from connectors.sqlite_writer import write_mapped_rows
+        from connectors.write_resilience import build_write_batch_key
 
+        # Property 4 — arm the same-txn write ledger (parity with PG/MySQL).
+        # Without job_id + write_batch_key, insert retries silently duplicate.
         result = write_mapped_rows(
             host=cfg["host"],
             port=0,
@@ -803,6 +806,11 @@ def _write_batch(
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
             error_policy=error_policy,
+            job_id=job_id,
+            write_batch_key=build_write_batch_key(
+                table_name=table_name, file_batch_idx=chunk_idx
+            ),
+            file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
