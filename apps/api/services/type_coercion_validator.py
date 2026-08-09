@@ -119,10 +119,13 @@ def validate_mapping_coercions(
             and tgt_logical in {"string", "text"}
             and not uuid_capacity_string_carrier(tgt_type)
         )
+        locked_block = False
         if type_locked and (src_logical != tgt_logical or wire_ok):
             severity = "block"
+            locked_block = True
         elif type_locked and precision_collapse:
             severity = "block"
+            locked_block = True
         elif uuid_string_create_new:
             from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
@@ -153,7 +156,16 @@ def validate_mapping_coercions(
             "lossy": lossy,
             "severity": severity,
             "validation_mode": mode,
-            "message": f"{src} ({src_type}) → {tgt} ({tgt_type})",
+            "schema_policy": "type_locked" if type_locked else (schema_policy or ""),
+            "message": (
+                f"{src} ({src_type}) → {tgt} ({tgt_type})"
+                + (
+                    " — schema_policy=type_locked forbids changing the "
+                    "destination type"
+                    if locked_block
+                    else ""
+                )
+            ),
             "suggested_fix": (
                 f"Remap '{src}' to a compatible {tgt_logical} column, or change the "
                 f"target type — '{src}' ({src_logical}) does not safely become {tgt_logical}."

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import pickle  # nosec B403
 import re
 import sys
 from collections import Counter
@@ -14,10 +13,20 @@ from pathlib import Path
 _model_cache = None
 
 
+def ml_baseline_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "packages"
+        / "ml"
+        / "models"
+        / "baseline.json"
+    )
+
+
 def ml_baseline_status() -> dict:
     """Operator-facing status for Map UI / Pilot — never silent about ML availability."""
     model = _load_ml_baseline()
-    path = Path(__file__).resolve().parents[3] / "packages" / "ml" / "models" / "baseline.pkl"
+    path = ml_baseline_path()
     return {
         "available": model is not None,
         "path": str(path),
@@ -32,28 +41,27 @@ def ml_baseline_status() -> dict:
 
 
 def _load_ml_baseline():
+    """Load the optional automap boost from a JSON vocabulary artifact.
+
+    Never a pickle: the boost is optional, so it must not be able to execute
+    code inside the transfer engine. A missing or malformed artifact degrades
+    to lexical + semantic + Hungarian mapping, it never fails a transfer.
+    """
     global _model_cache
     if _model_cache is not None:
         return _model_cache if _model_cache is not False else None
 
-    # Try to load the ML baseline model if it exists
     try:
-        model_path = Path(__file__).resolve().parents[3] / "packages" / "ml" / "models" / "baseline.pkl"
-        if model_path.exists():
-            # Adjust path so that baseline class can be loaded
-            pkg_path = str(Path(__file__).resolve().parents[3] / "packages")
-            if pkg_path not in sys.path:
-                sys.path.append(pkg_path)
-            # Ensure the picklable class is importable under a stable module path.
-            try:
-                import ml.baseline  # noqa: F401
-            except Exception:
-                pass
-            with model_path.open("rb") as f:
-                _model_cache = pickle.load(f)  # nosec B301
-                return _model_cache
+        from services.ml_baseline import load_baseline
+
+        model = load_baseline(ml_baseline_path())
+        if model is None:
+            _model_cache = False
+            return None
+        _model_cache = model
+        return _model_cache
     except Exception as exc:
-        # Cache negative result so a broken pickle does not spam every map_columns call.
+        # Cache negative result so a broken artifact does not spam every map_columns call.
         _model_cache = False
         logging.getLogger(__name__).warning(
             "ML baseline unavailable (%s); using lexical/semantic mapper only",

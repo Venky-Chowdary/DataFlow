@@ -168,6 +168,7 @@ def _sf_materialize_mapped_batch(
         rejected_details,
         policy,
         dialect_label="Snowflake INTEGER",
+        dest_db="snowflake",
     )
     mapped_rows = quarantine_unfit_bitstrings(
         mapped_rows, target_cols, target_types, rejected_details, policy

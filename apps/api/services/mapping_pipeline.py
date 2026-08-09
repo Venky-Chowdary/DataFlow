@@ -17,6 +17,10 @@ from services.type_system import ddl_carrier_type
 logger = logging.getLogger("datawrap.mapping")
 
 CONFIDENCE_FLOOR = 0.72
+# Carriers a schemaless/text source declares for *every* column (CSV header,
+# Parquet string, SaaS thin describe). A profiled upgrade off these is evidence,
+# not a cast the operator chose.
+_UNTYPED_TEXT_LOGICALS = frozenset({"string", "text", "varchar", "unknown"})
 # Untyped VARCHAR with no samples — refuse inflated confidence (thin SaaS / failed introspect).
 _UNTYPED_VARCHAR_CONF_CAP = 0.78
 
@@ -421,6 +425,11 @@ def run_mapping_pipeline(
     if target_schemas is None and target_columns:
         target_schemas = [{"name": c, "inferred_type": "VARCHAR", "samples": []} for c in target_columns]
 
+    # Carriers that actually exist in the destination. Identity targets derived
+    # below for a create-new table are proposals, not live columns, and must
+    # never grant bind-existing authority to the Decision Kernel.
+    introspected_target_schemas: list[dict] | None = target_schemas
+
     if source_samples and source_columns:
         from services.data_profiler import merge_profiler_schema, profile_dataset
 
@@ -443,6 +452,20 @@ def run_mapping_pipeline(
             # profile_dataset returns columns as name→profile dict — attach for
             # Map strip (null%/min/max/observed DECIMAL scale), not type invent only.
             col_profiles = profiled.get("columns") or {}
+            # One source-type SSOT: when profiling upgrades an untyped text
+            # carrier (CSV/Parquet strings) to a proven numeric/temporal type,
+            # the fidelity verdict must judge that same type. Otherwise Map
+            # invents NUMBER from the profile and then calls its own invent a
+            # lossy VARCHAR→NUMBER cast, blocking every file→warehouse route.
+            for name, upgraded in merged_schema.items():
+                declared = declared_source_types.get(name, "")
+                if not upgraded or not declared:
+                    continue
+                if normalize_logical_type(declared) in _UNTYPED_TEXT_LOGICALS and (
+                    normalize_logical_type(upgraded)
+                    != normalize_logical_type(declared)
+                ):
+                    declared_source_types[name] = str(upgraded)
             source_schemas = [
                 {
                     **s,
@@ -480,6 +503,7 @@ def run_mapping_pipeline(
         and destination_table_exists is False
     ):
         target_columns = [m["target"] for m in base_mappings]
+        introspected_target_schemas = None
         target_schemas = [
             {
                 "name": m["target"],
@@ -780,7 +804,7 @@ def run_mapping_pipeline(
         }
         live_types = {
             str(s.get("name") or ""): str(s.get("inferred_type") or "")
-            for s in (target_schemas or [])
+            for s in (introspected_target_schemas or [])
             if s.get("name") and str(s.get("inferred_type") or "").strip()
         }
         enriched_mappings, _ = stamp_additive_mapping_types(
@@ -790,6 +814,7 @@ def run_mapping_pipeline(
             source_types=declared_source_types,
             samples_by_source=samples_by_src,
             backfill_new_fields=False,
+            dest_table_exists=destination_table_exists,
         )
     except Exception as stamp_exc:
         # Fail-closed honesty: leave create-new target_type blank so Map/Validate

@@ -1031,6 +1031,7 @@ def write_mapped_rows(
             rejected_details,
             policy,
             dialect_label="BigQuery INTEGER",
+            dest_db="bigquery",
         )
         mapped_rows = quarantine_unfit_bitstrings(
             mapped_rows,

@@ -147,5 +147,8 @@ KEYSET_CAPABLE_SOURCES = frozenset(
         "generic_sql",
         "sqlserver",
         "oracle",
+        # Salesforce SOQL caps OFFSET at 2000 rows — Id seek is the only way to
+        # page a large SObject, so keyset is mandatory rather than an optimization.
+        "salesforce",
     }
 )

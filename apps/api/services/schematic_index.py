@@ -8,7 +8,7 @@ Used by the semantic mapper for O(1) abbreviation / alias resolution.
 from __future__ import annotations
 
 import logging
-import pickle  # nosec B403
+import pickle  # nosec B403 - dump only; reads go through safe_pickle
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -54,8 +54,10 @@ def _build_index() -> dict[str, str]:
     """Build inverted index variant → canonical. Target ~1M entries."""
     if _CACHE_PATH.exists():
         try:
-            with open(_CACHE_PATH, "rb") as f:
-                cached = pickle.load(f)  # nosec B301
+            from services.safe_pickle import load_restricted
+
+            # Pure str→str dict cache — no class may be resolved out of it.
+            cached = load_restricted(_CACHE_PATH, allowed_modules=frozenset())
             if isinstance(cached, dict) and len(cached) > 10_000:
                 return cached
         except Exception as exc:

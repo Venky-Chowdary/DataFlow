@@ -158,7 +158,7 @@ def _safe_path_conversion_class(
 ) -> ConversionClass:
     """Refine a non-lossy path into Identity / Widening / Equivalent / …"""
     from services.decision_kernel.types import normalize_logical_type
-    from services.type_system import integer_bit_width
+    from services.type_system import integer_bit_width, integer_storage_bounds
 
     src_u = (source_type or "").strip().upper().replace(" ", "")
     tgt_u = (target_type or "").strip().upper().replace(" ", "")
@@ -170,6 +170,15 @@ def _safe_path_conversion_class(
     if src_l == tgt_l:
         sw = integer_bit_width(source_type)
         tw = integer_bit_width(target_type)
+        if sw is None or tw is None:
+            # Ambiguous ``INT``/``INTEGER`` keyword: invent refuses a width, but
+            # the *storage* SSOT resolves it per engine so INTEGER → BIGINT
+            # still reads as widening instead of a vague "equivalent".
+            src_b = integer_storage_bounds(source_type, dest_db=dest_db)
+            tgt_b = integer_storage_bounds(target_type, dest_db=dest_db)
+            if src_b and tgt_b:
+                sw = src_b[1].bit_length()
+                tw = tgt_b[1].bit_length()
         if sw is not None and tw is not None:
             if tw > sw:
                 return ConversionClass.WIDENING

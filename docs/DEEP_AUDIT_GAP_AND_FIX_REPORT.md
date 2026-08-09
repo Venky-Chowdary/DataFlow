@@ -9,7 +9,9 @@
 
 ## 1. Executive Summary
 
-This audit was a line-by-line review of the Datawrap universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping). After this fix cycle the local full test suite is green: 9,065 passed, 1,085 skipped, 0 failed. The remaining 1,085 skipped are mostly cloud-warehouse/Oracle/Redis routes that require live credentials or services not running in the local CI container.
+This audit was a line-by-line review of the Datawrap universal transfer engine, with the goal of moving the product toward Airbyte/Fivetran-class robustness and zero silent data loss. The engine has a strong architecture (`UniversalTransferEngine`, preflight gates, reconciliation, quarantine, and schema mapping).
+
+> **Status of the suite counts below.** Sections 1–21 record per-session numbers measured at the time of each session, several of which were run with `DATAFLOW_PII_HASH_KEY` / `DATAFLOW_FAKESNOW_KEEP_PATCH` / `DATAFLOW_ALLOW_STUB_WRITES` set and with MongoDB reachable. They are **not** the current state and must not be quoted as "the suite is green". The authoritative, measured numbers for this branch — including the failures that remain and why — are in **§22**.
 
 ### What was fixed in this cycle
 
@@ -1157,3 +1159,141 @@ pytest apps/api/tests/test_data_rule_scenario_matrix.py
 pytest apps/api/tests
 9065 passed, 1085 skipped, 0 failed
 ```
+
+---
+
+## 22. Deep Audit Session — measured state of this branch (2026-08-09)
+
+Base commit `9894b40a` (branch point of `devin/deep-audit-1784855991`), compared against a
+clean worktree of the same commit at `/home/ubuntu/baseline`. Same interpreter
+(`.venv`, CPython 3.12.10), same command, same machine, same missing services — so the
+delta below is attributable to the diff, not to the environment.
+
+### 22.1 Full suite: branch vs baseline
+
+```text
+branch    python -m pytest tests -q -p no:randomly   (apps/api)
+          55 failed, 11844 passed, 2061 skipped, 10 warnings in 1156.56s
+baseline  python -m pytest tests -q -p no:randomly   (apps/api, commit 9894b40a)
+          111 failed, 11700 passed, 2061 skipped, 10 warnings in 988.76s
+```
+
+Set difference of the two `FAILED` node-id lists:
+
+```text
+baseline-only (fixed by this branch) : 56
+current-only  (regressions)          : 0
+```
+
+**No test that passes on the base commit fails on this branch.** 56 pre-existing failures
+are gone; 144 more tests pass. This is the only suite claim in this document that
+describes the current tree — the counts in §1–§21 are historical, were taken with
+`DATAFLOW_PII_HASH_KEY` / `DATAFLOW_FAKESNOW_KEEP_PATCH` / `DATAFLOW_ALLOW_STUB_WRITES`
+set and MongoDB reachable, and must not be quoted as "the suite is green".
+
+### 22.2 The 55 remaining failures, categorised
+
+Every one of them also fails on the base commit. Categorised by the actual exception, not
+by guesswork:
+
+| Category | Count | What it really is |
+|---|---:|---|
+| Mock/patch shape no longer matches the writer (`MagicMock` leaks into the assertion, or the writer reaches destination *Describe* before the patched call) | 12 | Test scaffolding debt. In several cases the engine is behaving **more** correctly than the test: `test_salesforce_short_ack_fails_closed` now fails on `Salesforce Describe unavailable … refuse Map VARCHAR bind (empty→NULL invent risk)` — a fail-closed refusal the test predates. |
+| Naive→UTC timestamp expectation (`test_file_to_duckdb_preserves_types[csv/tsv/json/jsonl/parquet]`) | 5 | Source rows carry **naive** `2024-01-15T00:00:00`; the test asserts `tzinfo=timezone.utc` at the destination. Stamping UTC on a naive input is timezone *invention*, which the type system deliberately refuses. The engine is right and the fixture encodes the old lossy behaviour — this needs a test-contract change, which is out of scope here (tests are not edited to go green). |
+| Destination introspection unavailable (fakesnow/Snowflake) | 4 | `Snowflake physical DDL introspection returned empty for an existing table — refuse silent Map VARCHAR bind`. Fail-closed by design; needs `DATAFLOW_FAKESNOW_KEEP_PATCH` / a live warehouse. |
+| SQLite `database is locked` (`test_stream_scd2_sqlite_to_sqlite`, `test_stream_mirror_sqlite_to_sqlite`) | 2 | Real concurrency debt in the SQLite write-ledger path, tracked below as an open item. |
+| Missing proof fixture (`data/proofs/decision_artifact_v1_golden.json` not in tree) | 1 | Artifact never committed. |
+| Stale test signature (`fake_mark() got an unexpected keyword argument 'row_start'`) | 1 | Ledger API grew `row_start`; the double in `test_write_resilience_proxy.py` did not. |
+| Other (no network egress to SaaS/object-store APIs, DuckDB/Trino struct forms, kernel width facade) | 30 | Mix of sandbox-egress limits and genuine pre-existing type-facade debt, e.g. `is_lossy_coercion("BIGINT","INTEGER", dest_db="postgresql")` returning `False` — a narrowing that should be lossy. |
+
+Nothing in this table is a regression introduced here, and none of it was made to pass by
+editing a test or loosening a gate.
+
+### 22.3 Gates re-run on this branch
+
+```text
+apps/api/scripts/check_module_size_budgets.py   {"ok": true, "violations": []}
+pytest tests/test_evidence_pack.py              4 passed in 101.55s
+ruff check --config ruff.toml <CI allowlist>    All checks passed!   (was 1 × F401)
+bandit -r connectors services src -lll -q       0 high-severity findings
+pip-audit --local (clean venv, apps/api/requirements.txt)
+                                                No known vulnerabilities found
+scripts/transfer_ready_matrix_report.py         77 PRODUCTION_SKU routes, 44 unique drivers
+```
+
+The earlier "122 vulnerabilities in 16 packages" figure in this session came from the
+*development* venv (streamlit, pillow, pyarrow dev extras). The environment CI actually
+audits — a clean install of `apps/api/requirements.txt`, which is what `pip-audit --local`
+gates — is clean.
+
+Focused suites for the code changed here:
+
+```text
+tests/test_salesforce_keyset_pagination.py tests/test_safe_pickle.py
+tests/test_ml_baseline_artifact.py tests/test_objectid_text_domain_polarity.py
+tests/test_decimal_text_carrier_fidelity.py tests/test_retry_after_backoff.py
+tests/test_sqlserver_native_cdc.py              68 passed in 1.27s
+
+tests/test_pilot_upload_staging_isolation.py tests/test_pilot_quality_wave32.py
+                                                10 passed in 3.18s
+```
+
+### 22.4 Cross-tenant leak: transfer spills were served as Pilot datasets
+
+The highest-severity defect found this session, and it is a **privacy** bug rather than a
+throughput bug.
+
+`services/transfer_file_staging.persist_file_source` spills each job's source payload into
+the shared upload directory. `src/ai/training/universal_data_feeder` scans that same
+directory to build the Data Pilot dataset catalog. It filtered on extension only — so a
+spilled `xfer_<token>_products.csv` from *someone else's* transfer appeared in
+`list_datasets`, was queryable through the Pilot, and, worse, satisfied a name lookup:
+`compare orders and products` resolved `products` against another job's staged source
+instead of failing closed.
+
+Fix: staging naming became an explicit contract (`TRANSFER_STAGING_PREFIX`,
+`is_transfer_staging_file`) owned by `transfer_file_staging`, and the feeder gained
+`_is_dataset_file`, used by both `list_dataset_names` and `scan_uploads`. Regression test
+`tests/test_pilot_upload_staging_isolation.py` pins all three invariants: the spill is not
+listed, a real upload still is, and `resolve_dataset("products")` returns `None` when only
+a spill matches.
+
+This also explains the one current-only failure seen mid-session
+(`test_pilot_quality_wave32.py::test_compare_miss_recovers_with_lists`): the test asserts
+the miss-then-recover path, and stale spills in the shared directory were satisfying the
+lookup. It passes with the permanent filter, with no test edit.
+
+### 22.5 God-module split (behaviour-preserving)
+
+Four modules were over budget. Each was split by *responsibility*, with the original module
+re-exporting the moved names so no import site changes:
+
+| New module | Extracted from | Owns |
+|---|---|---|
+| `connectors/lsn_guards.py` | `connectors/writer_common.py` | CDC LSN families, comparison, dedupe, per-dialect monotonic-apply predicates |
+| `src/transfer/batch_readers.py` | `src/transfer/stream.py` | per-source read dispatch (keyset/cursor/scan/search_after) |
+| `src/transfer/job_quarantine.py` | `src/transfer/engine.py` | quarantine durability + rollback-plan attachment |
+| `services/identity_fit.py`, `numeric_fit.py`, `specialty_fit.py` | `services/type_system.py` | identity/GENERATED, width/unsigned fit, domain-specialty fidelity |
+
+`check_module_size_budgets.py` is now clean (largest: `type_system.py` 7435/7450).
+
+### 22.6 Honest position, unchanged by this cycle
+
+- **Connectors:** 741 catalog tiles, **44** transfer-live drivers over **77** PRODUCTION_SKU
+  routes. Airbyte/Fivetran remain ahead on breadth. The tile count is a catalog, not a claim.
+- **CDC:** at-least-once upsert with monotonic LSN guards. Not exactly-once. Not
+  Debezium/GoldenGate maturity.
+- **Wedge:** "move + prove" — semantic mapping, fail-closed preflight, decision artifacts,
+  quarantine/replay, full-population checksum reconciliation. That is where this branch
+  invested, and it is the only axis on which DataFlow is currently ahead of the field.
+
+### 22.7 Open, not fixed here
+
+1. SQLite write-ledger `database is locked` under concurrent streams (2 failing tests, pre-existing).
+2. `is_lossy_coercion("BIGINT","INTEGER")` narrowing not flagged lossy in the kernel facade.
+3. `data/proofs/decision_artifact_v1_golden.json` missing from the tree.
+4. `test_write_resilience_proxy` double is behind the ledger's `row_start` signature.
+5. The five naive→UTC DuckDB fixtures encode timezone invention and need a contract decision.
+6. `services/transfer_scheduler.py` logs to a closed stream during interpreter shutdown.
+7. Live-route matrices for Salesforce/SFTP/Snowflake still need credentials; the keyset,
+   host-key, and LSN work here is proven by unit matrices, not by a live org.

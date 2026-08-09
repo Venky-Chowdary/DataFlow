@@ -517,6 +517,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         )
         if not lossy and nested_collapse:
             lossy = True
+        # ObjectId → unbounded TEXT keeps the hex value but the destination no
+        # longer enforces the ObjectId domain — Accept risk, never silent green.
+        objectid_text_domain = False
+        try:
+            from services.specialty_fit import objectid_text_domain_polarity
+
+            objectid_text_domain = objectid_text_domain_polarity(
+                source_col.inferred_type, target.inferred_type
+            )
+        except ImportError:
+            objectid_text_domain = False
+        if objectid_text_domain:
+            lossy = True
         # Coercion probe may block wire values even when declared types look
         # safe (naive DATETIME→TIMESTAMPTZ). Never skip those columns.
         probe_early = by_source.get(m.source) if value_aware else None
@@ -711,18 +724,24 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         # ObjectId→bare TEXT/VARCHAR: hex wire is value-lossless; domain polarity
         # still needs Accept risk (not a silent hard-block on existing PG TEXT).
         objectid_text_polarity = False
-        if fidelity_collapse and not field_shape_loss:
+        if not field_shape_loss:
             try:
                 from services.type_system import (
                     specialty_carrier_base,
                     specialty_carrier_would_collapse,
                 )
 
-                objectid_text_polarity = bool(
-                    specialty_carrier_would_collapse(
-                        source_col.inferred_type, target.inferred_type
+                objectid_source = (
+                    specialty_carrier_base(source_col.inferred_type) == "OBJECTID"
+                )
+                objectid_text_polarity = objectid_source and (
+                    (
+                        fidelity_collapse
+                        and specialty_carrier_would_collapse(
+                            source_col.inferred_type, target.inferred_type
+                        )
                     )
-                    and specialty_carrier_base(source_col.inferred_type) == "OBJECTID"
+                    or objectid_text_domain
                 )
             except ImportError:
                 objectid_text_polarity = False

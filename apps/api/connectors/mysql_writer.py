@@ -314,6 +314,7 @@ def _mysql_materialize_mapped_batch(
         rejected_details,
         policy,
         dialect_label="MySQL INTEGER",
+        dest_db="mysql",
     )
     mapped_rows = quarantine_unfit_bitstrings(
         mapped_rows, target_cols, target_types, rejected_details, policy

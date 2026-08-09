@@ -794,6 +794,54 @@ class RetryBudget:
         return self.attempts_made < self.max_attempts
 
 
+# Server-directed backoff cap. Salesforce/HubSpot/Graph can ask for minutes;
+# honour that, but never let one header park a worker indefinitely.
+_RETRY_AFTER_CAP_SECONDS = float(getenv_brand("RETRY_AFTER_MAX_SECONDS", "300.0"))
+
+
+def retry_after_seconds(error: Exception) -> float | None:
+    """Server-directed wait from a throttled HTTP response, in seconds.
+
+    Salesforce (REQUEST_LIMIT_EXCEEDED), HubSpot, and Microsoft Graph all answer
+    429/503 with ``Retry-After``. Ignoring it and using our own exponential
+    backoff re-sends inside the penalty window, which is what turns a throttle
+    into a multi-hour stall on large SaaS migrations. Supports both the
+    delta-seconds and HTTP-date forms of RFC 9110 ``Retry-After``.
+    """
+    headers = getattr(getattr(error, "response", None), "headers", None)
+    if not headers:
+        return None
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except Exception:  # noqa: BLE001 - header mapping may be exotic
+        return None
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return max(0.0, min(float(text), _RETRY_AFTER_CAP_SECONDS))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(text)
+    except Exception:  # noqa: BLE001 - malformed header is not fatal
+        return None
+    if when is None:
+        return None
+    from datetime import datetime, timezone
+
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = (when - datetime.now(timezone.utc)).total_seconds()
+    if delta <= 0:
+        return 0.0
+    return min(delta, _RETRY_AFTER_CAP_SECONDS)
+
+
 @dataclass
 class QuarantineRecord:
     row_index: int = 0
@@ -943,6 +991,9 @@ def with_retry(
                         )
                 raise AmbiguousWriteOutcome(exc, replay_safety) from exc
             delay = budget.next_delay()
+            server_hint = retry_after_seconds(exc)
+            if server_hint is not None:
+                delay = max(delay, server_hint)
             if on_transient:
                 on_transient(exc, delay)
             time.sleep(delay)

@@ -9,7 +9,7 @@ dialect helper tables remain in ``type_system`` until later C2 splits.
 from __future__ import annotations
 
 import re
-from typing import Any, Final
+from typing import Final
 
 # Helpers / tables still owned by type_system (shared core). Import the module
 # object so circular init stays safe: type_system shims lazy-import this module.
