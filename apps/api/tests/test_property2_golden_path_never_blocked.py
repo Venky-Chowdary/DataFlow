@@ -1,24 +1,28 @@
 """PROPERTY 2 — the legitimate path is never blocked.
 
-Golden-path transfers must complete with success=True, correct row counts, and
-no g6 additive-stamp / DDL-identity refuse on create-new overwrite.
+Golden-path transfers must complete with success=True, correct row counts,
+reconciliation.passed, and no g6 additive-stamp / DDL-identity refuse on
+create-new overwrite.
 
-Routes covered here (real services when reachable; sqlite always):
+Routes covered here (real services when reachable; sqlite/csv always):
   * SQLite→SQLite (always — CI no-config)
-  * PG→PG (live when 5432 up)
-  * CSV→PG (live when 5432 up)
-  * PG→SQLite (live PG source when 5432 up)
+  * CSV→SQLite resume-after-kill (always)
+  * PG→PG / CSV→PG / PG→SQLite / PG→Parquet (when 5432 up)
+  * PG→MySQL (when 3306 up — CI services)
   * Mongo→PG (when both up)
 
-Each route: (a) no mappings (b) explicit mappings (c) skip_preflight=True.
+Each route: (a) no mappings (b) explicit mappings (c) skip_preflight=True
+where parametrized; (d) resume-after-kill on CSV→SQLite + SQLite checkpoint.
 Gate pair: BLOCK unsafe additive invent-fail; ALLOW create-new invent.
 """
 
 from __future__ import annotations
 
 import csv
+import io
 import os
 import socket
+import sqlite3
 import uuid
 from pathlib import Path
 
@@ -28,8 +32,11 @@ from sqlalchemy import create_engine, text
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
+from services.checkpoint_service import Checkpoint
 from services.decision_kernel import stamp_additive_mapping_types
 from services.preflight_service import run_file_preflight
+import src.transfer.engine as engine_mod
+from src.transfer import file_stream
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
 
@@ -68,8 +75,56 @@ def _pg_creds() -> dict:
     }
 
 
-def _run(req: TransferRequest):
-    return UniversalTransferEngine().execute_tracked(req, uuid.uuid4().hex[:24])
+def _mysql_creds() -> dict:
+    return {
+        "host": os.environ.get("P2_MYSQL_HOST", "127.0.0.1"),
+        "port": int(os.environ.get("P2_MYSQL_PORT", "3306")),
+        "database": os.environ.get("P2_MYSQL_DB", "dataflow"),
+        "username": os.environ.get("P2_MYSQL_USER", "dataflow"),
+        "password": os.environ.get("P2_MYSQL_PASSWORD", "dataflow"),
+    }
+
+
+def _run(req: TransferRequest, job_id: str | None = None, *, resume: bool = False):
+    jid = job_id or uuid.uuid4().hex[:24]
+    return UniversalTransferEngine().execute_tracked(req, jid, resume=resume)
+
+
+def _assert_transfer_ok(result, expected_rows: int) -> None:
+    assert result.success, result.error
+    assert result.records_transferred == expected_rows
+    assert "lack Map target_type" not in (result.error or "")
+    assert "DDL identity requires Validate" not in (result.error or "")
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is True, recon
+    if recon.get("target_rows") is not None:
+        assert int(recon["target_rows"]) == expected_rows, recon
+    if recon.get("source_checksum") and recon.get("target_checksum"):
+        assert recon["source_checksum"] == recon["target_checksum"], recon
+
+
+class _FakeMongo:
+    """Minimal job store so resume tests can seed a durable checkpoint."""
+
+    def __init__(self) -> None:
+        self.jobs: dict[str, dict] = {}
+
+    def get_job(self, job_id: str) -> dict | None:
+        return self.jobs.get(job_id)
+
+    def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
+        self.jobs.setdefault(job_id, {})
+        self.jobs[job_id].update(kwargs)
+        self.jobs[job_id]["status"] = status
+        return True
+
+    def list_jobs(self, limit: int = 50) -> list[dict]:
+        return list(self.jobs.values())
+
+    def create_transfer_job(self, job_data: dict) -> str:
+        job_id = job_data.get("job_id") or uuid.uuid4().hex[:24]
+        self.jobs[job_id] = dict(job_data)
+        return job_id
 
 
 # ---------------------------------------------------------------------------
@@ -224,10 +279,7 @@ def test_golden_sqlite_to_sqlite_no_config(tmp_path: Path, with_maps: bool, skip
         mappings=maps,
     )
     result = _run(req)
-    assert result.success, result.error
-    assert result.records_transferred == 3
-    assert "lack Map target_type" not in (result.error or "")
-    assert "DDL identity requires Validate" not in (result.error or "")
+    _assert_transfer_ok(result, 3)
 
     deng = create_engine(f"sqlite:///{dst}")
     try:
@@ -236,6 +288,165 @@ def test_golden_sqlite_to_sqlite_no_config(tmp_path: Path, with_maps: bool, skip
         assert list(rows) == [(1, 10, "a"), (2, 20, "b"), (3, 30, "c")]
     finally:
         deng.dispose()
+
+
+def test_golden_csv_to_sqlite_resume_after_kill(tmp_path: Path, monkeypatch):
+    """(d) resume-after-kill: partial CSV write, then resume — no dupes, recon passes."""
+    monkeypatch.setenv("DATAFLOW_JOB_STORE", "memory")
+    monkeypatch.setenv("DATAWRAP_JOB_STORE", "memory")
+    import services.mongodb_service as mongo_mod
+
+    monkeypatch.setattr(mongo_mod, "_mongodb_service", None)
+    old = file_stream.CHUNK_SIZE
+    monkeypatch.setattr(file_stream, "CHUNK_SIZE", 2)
+
+    def _csv_bytes(rows: list[dict]) -> bytes:
+        buf = io.StringIO()
+        w = csv.DictWriter(buf, fieldnames=["id", "v", "nm"])
+        w.writeheader()
+        w.writerows(rows)
+        return buf.getvalue().encode("utf-8")
+
+    db_path = tmp_path / "p2_resume.sqlite"
+    dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        connection_string=str(db_path),
+        table="t",
+    )
+
+    def _req(rows: list[dict]) -> TransferRequest:
+        return TransferRequest(
+            source=EndpointConfig(kind="file", format="csv"),
+            source_filename="p2.csv",
+            source_content=_csv_bytes(rows),
+            destination=dest,
+            sync_mode="upsert",
+            stream_contracts=[
+                {
+                    "name": "t",
+                    "sync_mode": "upsert",
+                    "primary_key": "id",
+                    "selected": True,
+                }
+            ],
+            skip_preflight=True,
+            validation_mode="warn",
+            mappings=None,
+        )
+
+    engine = UniversalTransferEngine()
+    job_id = uuid.uuid4().hex[:24]
+    first = engine.execute_tracked(
+        _req(
+            [
+                {"id": "1", "v": "10", "nm": "a"},
+                {"id": "2", "v": "20", "nm": "b"},
+            ]
+        ),
+        job_id,
+    )
+    assert first.success, first.error
+    assert first.records_transferred == 2
+
+    full = _req(
+        [
+            {"id": "1", "v": "10", "nm": "a"},
+            {"id": "2", "v": "20", "nm": "b"},
+            {"id": "3", "v": "30", "nm": "c"},
+            {"id": "4", "v": "40", "nm": "d"},
+            {"id": "5", "v": "50", "nm": "e"},
+        ]
+    )
+    result = engine.execute_tracked(full, job_id, resume=True)
+    _assert_transfer_ok(result, 5)
+
+    conn = sqlite3.connect(str(db_path))
+    try:
+        rows = conn.execute("SELECT id FROM t ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    assert [r[0] for r in rows] == [1, 2, 3, 4, 5]
+    monkeypatch.setattr(file_stream, "CHUNK_SIZE", old)
+    monkeypatch.setattr(mongo_mod, "_mongodb_service", None)
+
+
+def test_golden_sqlite_to_sqlite_resume_from_checkpoint(tmp_path: Path, monkeypatch):
+    """(d) DB→DB: seed checkpoint mid-table, resume overwrite — full row set, no dupes."""
+    fake = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
+
+    src = tmp_path / "p2_resume_src.sqlite"
+    dst = tmp_path / "p2_resume_dst.sqlite"
+    eng = create_engine(f"sqlite:///{src}")
+    try:
+        with eng.begin() as c:
+            c.execute(text("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)"))
+            c.execute(
+                text(
+                    "INSERT INTO t VALUES (1,10),(2,20),(3,30),(4,40),(5,50),(6,60)"
+                )
+            )
+    finally:
+        eng.dispose()
+
+    # Simulate kill after first 3 rows committed.
+    deng = create_engine(f"sqlite:///{dst}")
+    try:
+        with deng.begin() as c:
+            c.execute(text("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)"))
+            c.execute(text("INSERT INTO t VALUES (1,10),(2,20),(3,30)"))
+    finally:
+        deng.dispose()
+
+    job_id = "p2resume" + uuid.uuid4().hex[:16]
+    checkpoint = Checkpoint(
+        job_id=job_id,
+        chunk_index=1,
+        offset=3,
+        rows_processed=3,
+        cursor_column="id",
+        cursor_value=3,
+    )
+    fake.update_job_status(
+        job_id,
+        "running",
+        checkpoint=checkpoint.to_dict(),
+        transfer_request={},
+    )
+
+    req = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="t"
+        ),
+        destination=EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="t"
+        ),
+        sync_mode="full_refresh_overwrite",
+        stream_contracts=[
+            {
+                "name": "t",
+                "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+                "selected": True,
+            }
+        ],
+        skip_preflight=True,
+        validation_mode="warn",
+        mappings=None,
+    )
+    result = UniversalTransferEngine().execute_tracked(req, job_id, resume=True)
+    _assert_transfer_ok(result, 6)
+
+    conn = sqlite3.connect(str(dst))
+    try:
+        rows = conn.execute("SELECT id, v FROM t ORDER BY id").fetchall()
+        distinct = conn.execute("SELECT count(DISTINCT id) FROM t").fetchone()[0]
+    finally:
+        conn.close()
+    assert len(rows) == 6
+    assert distinct == 6
+    assert rows == [(1, 10), (2, 20), (3, 30), (4, 40), (5, 50), (6, 60)]
 
 
 @pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
@@ -316,9 +527,7 @@ def test_golden_pg_to_pg_no_config(with_maps: bool, skip_preflight: bool):
             mappings=maps,
         )
         result = _run(req)
-        assert result.success, result.error
-        assert result.records_transferred == 2
-        assert "lack Map target_type" not in (result.error or "")
+        _assert_transfer_ok(result, 2)
     finally:
         conn = psycopg2.connect(
             host=creds["host"],
@@ -337,7 +546,9 @@ def test_golden_pg_to_pg_no_config(with_maps: bool, skip_preflight: bool):
 
 
 @pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
-def test_golden_csv_to_pg_no_config(tmp_path: Path):
+@pytest.mark.parametrize("with_maps", [False, True])
+@pytest.mark.parametrize("skip_preflight", [False, True])
+def test_golden_csv_to_pg_no_config(tmp_path: Path, with_maps: bool, skip_preflight: bool):
     import psycopg2
 
     creds = _pg_creds()
@@ -348,6 +559,24 @@ def test_golden_csv_to_pg_no_config(tmp_path: Path):
         w.writerow(["1", "alpha"])
         w.writerow(["2", "beta"])
     dst_table = f"p2_csv_{uuid.uuid4().hex[:8]}"
+    maps = None
+    if with_maps:
+        maps = [
+            {
+                "source": "id",
+                "target": "id",
+                "target_type": "BIGINT",
+                "approved": True,
+                "confidence": 0.99,
+            },
+            {
+                "source": "nm",
+                "target": "nm",
+                "target_type": "TEXT",
+                "approved": True,
+                "confidence": 0.99,
+            },
+        ]
     req = TransferRequest(
         source=EndpointConfig(kind="file", format="csv"),
         destination=EndpointConfig(
@@ -365,13 +594,12 @@ def test_golden_csv_to_pg_no_config(tmp_path: Path):
         source_filename="p2.csv",
         sync_mode="full_refresh_overwrite",
         validation_mode="warn",
-        skip_preflight=True,
-        mappings=None,
+        skip_preflight=skip_preflight,
+        mappings=maps,
     )
     try:
         result = _run(req)
-        assert result.success, result.error
-        assert result.records_transferred == 2
+        _assert_transfer_ok(result, 2)
     finally:
         conn = psycopg2.connect(
             host=creds["host"],
@@ -434,8 +662,7 @@ def test_golden_pg_to_sqlite_no_config(tmp_path: Path):
             mappings=None,
         )
         result = _run(req)
-        assert result.success, result.error
-        assert result.records_transferred == 2
+        _assert_transfer_ok(result, 2)
     finally:
         conn = psycopg2.connect(
             host=creds["host"],
@@ -494,6 +721,8 @@ def test_golden_mongo_to_pg_no_config():
         result = _run(req)
         assert result.success, result.error
         assert result.records_transferred >= 2
+        recon = result.reconciliation or {}
+        assert recon.get("passed") is True, recon
     finally:
         client.drop_database(db_name)
         client.close()
@@ -570,6 +799,9 @@ def test_golden_pg_to_parquet_export():
         assert result.success, result.error
         assert result.records_transferred == 2
         assert Path(out_path).exists() and Path(out_path).stat().st_size > 0
+        # File export may skip checksum readback; still must not fail recon.
+        recon = result.reconciliation or {}
+        assert recon.get("passed") is True or recon.get("skipped_readback") is True, recon
     finally:
         Path(out_path).unlink(missing_ok=True)
         conn = psycopg2.connect(
@@ -587,7 +819,112 @@ def test_golden_pg_to_parquet_export():
             conn.close()
 
 
-@pytest.mark.skipif(not _mysql_up(), reason="MySQL not reachable (Docker unavailable on host)")
-def test_golden_pg_to_mysql_placeholder():
-    """Reserved — requires MySQL 8. Documented NOT covered until Docker is available."""
-    pytest.fail("unreachable: skipif should have skipped")
+@pytest.mark.skipif(
+    not (_pg_up() and _mysql_up()),
+    reason="PostgreSQL or MySQL not reachable (CI provides both via services)",
+)
+@pytest.mark.parametrize("with_maps", [False, True])
+@pytest.mark.parametrize("skip_preflight", [False, True])
+def test_golden_pg_to_mysql_no_config(with_maps: bool, skip_preflight: bool):
+    import psycopg2
+    import pymysql
+
+    pg = _pg_creds()
+    my = _mysql_creds()
+    src_table = f"p2_src_{uuid.uuid4().hex[:8]}"
+    dst_table = f"p2_dst_{uuid.uuid4().hex[:8]}"
+    conn = psycopg2.connect(
+        host=pg["host"],
+        port=pg["port"],
+        dbname=pg["database"],
+        user=pg["username"],
+        password=pg["password"],
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f'CREATE TABLE public."{src_table}" '
+                "(id bigint PRIMARY KEY, big_val bigint, nm text)"
+            )
+            cur.execute(
+                f'INSERT INTO public."{src_table}" VALUES '
+                "(1, 9223372036854775807, 'a'), (2, -1, 'b')"
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    maps = None
+    if with_maps:
+        maps = [
+            {
+                "source": c,
+                "target": c,
+                "target_type": t,
+                "approved": True,
+                "confidence": 0.99,
+            }
+            for c, t in (
+                ("id", "BIGINT"),
+                ("big_val", "BIGINT"),
+                ("nm", "TEXT"),
+            )
+        ]
+
+    try:
+        req = TransferRequest(
+            source=EndpointConfig(
+                kind="database",
+                format="postgresql",
+                host=pg["host"],
+                port=pg["port"],
+                database=pg["database"],
+                username=pg["username"],
+                password=pg["password"],
+                schema="public",
+                table=src_table,
+            ),
+            destination=EndpointConfig(
+                kind="database",
+                format="mysql",
+                host=my["host"],
+                port=my["port"],
+                database=my["database"],
+                username=my["username"],
+                password=my["password"],
+                table=dst_table,
+            ),
+            sync_mode="full_refresh_overwrite",
+            validation_mode="warn",
+            skip_preflight=skip_preflight,
+            mappings=maps,
+        )
+        result = _run(req)
+        _assert_transfer_ok(result, 2)
+    finally:
+        conn = psycopg2.connect(
+            host=pg["host"],
+            port=pg["port"],
+            dbname=pg["database"],
+            user=pg["username"],
+            password=pg["password"],
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'DROP TABLE IF EXISTS public."{src_table}"')
+            conn.commit()
+        finally:
+            conn.close()
+        mconn = pymysql.connect(
+            host=my["host"],
+            port=my["port"],
+            database=my["database"],
+            user=my["username"],
+            password=my["password"],
+            autocommit=True,
+        )
+        try:
+            with mconn.cursor() as cur:
+                cur.execute(f"DROP TABLE IF EXISTS `{dst_table}`")
+        finally:
+            mconn.close()

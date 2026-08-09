@@ -7,7 +7,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | # | Property | Status | Proof command | Engines covered | Engines NOT covered |
 |---|----------|--------|---------------|-----------------|---------------------|
 | 1 | Type identity is referentially transparent | **PROVEN** | `cd apps/api && python -m pytest tests/test_property1_type_identity_case_transparent.py -q` (424 passed) + live PG introspect when reachable | All `DDL_TYPES` destinations (case×logical matrix); live PostgreSQL introspect `integer`→`INT4` | Docker MySQL/ClickHouse/Iceberg not run on this host (no Docker); matrix covers their invent DDL |
-| 2 | The legitimate path is never blocked | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property2_golden_path_never_blocked.py -q` | SQLite↔SQLite (always); live PG→PG, CSV→PG, PG→SQLite, PG→Parquet, Mongo→PG when services up; CI job `no-config-transfer` | MySQL (no Docker on proof host); kill-9 resume-after-kill matrix not in this suite (see existing checkpoint resume tests) |
+| 2 | The legitimate path is never blocked | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property2_golden_path_never_blocked.py -q` (19 passed, 4 skipped MySQL on this host) | SQLite↔SQLite + CSV→SQLite resume + SQLite checkpoint resume (always); live PG→PG / CSV→PG / PG→SQLite / PG→Parquet / Mongo→PG; CI `no-config-transfer` now boots PG+MySQL+Mongo and fails on any skip | MySQL 8 on this Windows host (no Docker); CI-wired but not yet green-proven in this run |
 | 3 | Source reads are snapshot-consistent | UNPROVEN | — | — | — |
 | 4 | Writes are exactly-once observable | UNPROVEN | — | — | — |
 | 5 | Five-layer verification, not sampling | UNPROVEN | — | — | — |
@@ -80,7 +80,7 @@ by the case matrix against `ddl_type` / `DDL_TYPES` authority.
 
 ---
 
-## Property 2 — PARTIAL (2026-08-09)
+## Property 2 — PARTIAL (2026-08-09, tightened)
 
 ### Defect
 Plain create-new / overwrite transfers with auto-derived identity mappings
@@ -94,19 +94,30 @@ did not request CREATE invent.
 1. Overwrite auto-maps stamp `create_new` + `source_type` so Kernel invent runs.
 2. `stamp_additive_mapping_types(..., dest_table_exists=False)` invents CREATE
    TABLE stamps; `unstamped` is invent-required-but-failed only.
-3. Golden-path suite + gate ALLOW/BLOCK pair + CI job `no-config-transfer`.
+3. Golden-path suite + gate ALLOW/BLOCK pair + CI job `no-config-transfer`
+   (PG + MySQL + Mongo services; fails if any test skips).
+4. Golden asserts now require `reconciliation.passed` (+ checksum match when
+   both sides present).
+5. Resume-after-kill: CSV→SQLite partial+resume; SQLite→SQLite seeded
+   checkpoint resume (no duplicates, full row set).
+6. Real PG→MySQL golden path (parametrized maps × skip_preflight) when 3306 up.
 
-### Proof output (this host)
+### Proof output (this host, 2026-08-09)
 
 ```
+pytest tests/test_property1_type_identity_case_transparent.py -q
+424 passed in 2.27s   # re-verify before trusting P1
+
 pytest tests/test_property2_golden_path_never_blocked.py -q
-… passed (SQLite↔SQLite × maps × skip_preflight; PG→PG; CSV→PG; PG→SQLite;
-          PG→Parquet; Mongo→PG when up; MySQL skipped — no Docker)
-g6 BLOCK (invent refused) + g6 ALLOW (create-table invent) green
+19 passed, 4 skipped in 52.12s
+  skipped = PG→MySQL × maps × skip_preflight (MySQL DOWN — no Docker)
+  passed  = g6 BLOCK/ALLOW; SQLite↔SQLite ×4; CSV→SQLite resume;
+            SQLite checkpoint resume; PG→PG ×4; CSV→PG ×4;
+            PG→SQLite; Mongo→PG; PG→Parquet
 ```
 
 ### NOT claimed / remaining for PROVEN
-* MySQL 8 Docker route
-* kill-9 mid-chunk resume on every golden route (checkpoint resume tests exist
-  separately; not yet in this always-green suite)
-* Reconciliation checksum assert on every golden route (row-count + success only)
+* Paste a **zero-skip** Property 2 run with MySQL reachable (CI
+  `no-config-transfer` is wired for that; this host cannot boot MySQL).
+* Resume-after-kill on every cross-engine golden route (SQLite/CSV proven
+  here; PG/MySQL/Mongo resume still rely on adjacent checkpoint suites).
