@@ -2631,6 +2631,40 @@ export interface QueryResult {
   column_schema: Record<string, string>;
   row_count: number;
   truncated: boolean;
+  /** Server-measured execution time. Absent on older API builds. */
+  duration_ms?: number;
+  /**
+   * Provenance of `column_schema`. Result-set types are inferred from the
+   * returned values, never read from source DDL — the console must not
+   * present the first as the second.
+   */
+  column_type_source?: string;
+}
+
+export interface QuerySchemaColumnInfo {
+  name: string;
+  type: string;
+  /** null/undefined = the catalog did not say; never assume nullable. */
+  nullable?: boolean | null;
+  primary_key?: boolean;
+}
+
+export interface QuerySchemaObjectInfo {
+  name: string;
+  type: string;
+  schema_name?: string;
+  columns: QuerySchemaColumnInfo[];
+  row_estimate?: number;
+}
+
+export interface QuerySchemaResult {
+  connected: boolean;
+  connector_type?: string;
+  database?: string;
+  objects: QuerySchemaObjectInfo[];
+  message?: string;
+  warnings?: string[];
+  type_source?: string;
 }
 
 export interface QueryExportResult {
@@ -2649,6 +2683,11 @@ export async function executeQuery(payload: {
   database?: string;
   collection?: string;
   limit?: number;
+  /**
+   * Named bind parameters for `:name` placeholders. These stay bound values
+   * on the server — they are never interpolated into the SQL text.
+   */
+  params?: Record<string, unknown>;
 }): Promise<QueryResult> {
   const res = await apiFetch(`${API_BASE}/query/execute`, {
     method: "POST",
@@ -2685,6 +2724,29 @@ export async function exportQuery(payload: {
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Export failed"));
+  return res.json();
+}
+
+/**
+ * List queryable objects for a connector, and columns for one named object.
+ *
+ * Two-phase by design: omit `object_name` to list objects, then pass it to
+ * expand that object's columns. Fetching every table's columns up front is
+ * what makes schema browsers unusable on large estates.
+ */
+export async function fetchQuerySchema(payload: {
+  connector_id: string;
+  database?: string;
+  schema_name?: string;
+  object_name?: string;
+}): Promise<QuerySchemaResult> {
+  const res = await apiFetch(`${API_BASE}/query/schema`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Schema introspection failed"));
   return res.json();
 }
 
