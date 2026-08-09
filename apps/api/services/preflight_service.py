@@ -903,8 +903,20 @@ def run_file_preflight(
     # after source types are known — same invent path writers honor (never bare
     # VARCHAR invent at Execute after Validate green). Use the same effective
     # backfill authority as Execute (schema policy + create_new maps).
+    effective_backfill = bool(backfill_new_fields)
     try:
         from services.batch_progress import effective_backfill_new_fields
+
+        effective_backfill = bool(
+            effective_backfill_new_fields(
+                backfill_new_fields=bool(backfill_new_fields),
+                schema_policy=schema_policy,
+                mappings=mappings,
+            )
+        )
+    except Exception:
+        effective_backfill = bool(backfill_new_fields)
+    try:
         from services.decision_kernel import stamp_additive_mapping_types
 
         samples_by_src: dict[str, list] = {}
@@ -917,11 +929,6 @@ def run_file_preflight(
                 samples_by_src.setdefault(str(k), []).append(v)
         for k in list(samples_by_src.keys()):
             samples_by_src[k] = samples_by_src[k][:32]
-        effective_backfill = effective_backfill_new_fields(
-            backfill_new_fields=bool(backfill_new_fields),
-            schema_policy=schema_policy,
-            mappings=mappings,
-        )
         mappings, _unstamped_additive = stamp_additive_mapping_types(
             mappings,
             dest_db=destination_db_type or "",
@@ -931,8 +938,23 @@ def run_file_preflight(
             backfill_new_fields=bool(effective_backfill),
         )
     except Exception as stamp_exc:
-        logger.debug("additive Map stamp skipped: %s", stamp_exc, exc_info=stamp_exc)
-        _unstamped_additive = []
+        # Fail-closed: stamp failure must surface as unstamped additives, not
+        # clear the list and let Validate green-wash Map VARCHAR invent.
+        logger.warning(
+            "additive Map stamp failed (fail-closed): %s", stamp_exc, exc_info=stamp_exc
+        )
+        _unstamped_additive = [
+            str(m.get("target") or m.get("source") or "?")
+            for m in (mappings or [])
+            if isinstance(m, dict)
+            and (
+                bool(m.get("create_new"))
+                or str(m.get("assignment_strategy") or "")
+                in {"create_compatible_new", "identity_passthrough"}
+                or effective_backfill
+            )
+            and not str(m.get("target_type") or m.get("dest_type") or "").strip()
+        ]
 
     # Source nullability defaults to True (unknown), which is the safe reading
     # for files. For an introspected database source it is knowable, and

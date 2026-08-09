@@ -78,28 +78,10 @@ def invent_dest_type(
         # Refreshing into an existing object: bind authority wins.
         return str(materialize_dest_ddl(db, existing) or existing)
 
-    from services.decision_kernel.types import normalize_logical_type
-    from services.type_system import integer_bit_width
-
+    # CREATE_NEW invent authority is create_new_mapping_target_type alone
+    # (width-preserving + bare-logical 64-bit floor). Never re-widen here —
+    # a second BIGINT floor made Map INT/SMALLINT disagree with Validate stamp.
     stamped = create_new_mapping_target_type(src, db, samples=samples)
-    logical = normalize_logical_type(src)
-    # Bare INTEGER/INT32 invent must never undercut the 64-bit create-new floor
-    # (audit §2.1 / Phase A). Prefer ddl_type(logical) when stamp is narrower.
-    if logical == "integer":
-        safe = str(ddl_type(db, "integer") or "BIGINT")
-        if not stamped:
-            return safe
-        sw = integer_bit_width(stamped)
-        ww = integer_bit_width(safe)
-        if sw is not None and ww is not None and sw < ww:
-            return safe
-        if str(stamped).upper().replace(" ", "") in {
-            "INTEGER",
-            "INT",
-            "INT32",
-            "SIGNED",
-        }:
-            return safe
     if stamped:
         return str(stamped)
     return str(ddl_type(db, src) or src or "TEXT")
@@ -201,18 +183,26 @@ def stamp_additive_mapping_types(
             }
             or backfill_new_fields
         )
-        if stamped:
+        src = (
+            str(row.get("source_type") or "").strip()
+            or str(src_types.get(str(row.get("source") or "")) or "").strip()
+            or "TEXT"
+        )
+        # Source-as-dest FE bootstrap (target_type == source_type) is NOT Kernel
+        # invent — must still run invent_dest_type (BQ UUID→STRING, etc.).
+        source_identity_stamp = bool(
+            stamped
+            and src
+            and stamped.strip().upper().replace(" ", "")
+            == src.strip().upper().replace(" ", "")
+        )
+        if stamped and not (is_create and source_identity_stamp):
             if is_create and not row.get("create_new"):
                 row["create_new"] = True
             continue
         if not is_create:
             unstamped.append(tgt)
             continue
-        src = (
-            str(row.get("source_type") or "").strip()
-            or str(src_types.get(str(row.get("source") or "")) or "").strip()
-            or "TEXT"
-        )
         src_key = str(row.get("source") or "")
         col_samples = list(samples.get(src_key) or [])[:32] or None
         try:

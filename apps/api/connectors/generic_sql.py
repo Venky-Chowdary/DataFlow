@@ -4358,13 +4358,21 @@ def write_mapped_rows(
             column_types.get(str(mapping.get("source") or ""))
             or (logical_types[i] if i < len(logical_types) else "string")
         )
-        # Map stamps / logicals through materialize_dest_ddl so CREATE cannot
-        # invent REAL→DOUBLE or BQ TIMESTAMP→DATETIME after Map stamped.
+        # Map stamps through materialize_dest_ddl so CREATE cannot invent
+        # REAL→DOUBLE or BQ TIMESTAMP→DATETIME after Map stamped. Missing stamp
+        # uses Decision Kernel invent_dest_type (same CREATE_NEW as Validate) —
+        # never a second materialize(source) invent authority.
         if explicit:
             derived = materialize_dest_ddl(dest_db, explicit) if dest_db else str(explicit)
             explicit_stamps.add(col)
         elif dest_db:
-            derived = materialize_dest_ddl(dest_db, source_type)
+            from services.decision_kernel import InventContext, invent_dest_type
+
+            derived = invent_dest_type(
+                str(source_type),
+                dest_db=dest_db,
+                context=InventContext.CREATE_NEW,
+            )
         else:
             derived = source_type
         # Bare DECIMAL/NUMERIC keep DECIMAL(38,15) via materialize_dest_ddl —

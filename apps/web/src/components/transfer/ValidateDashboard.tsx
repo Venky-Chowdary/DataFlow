@@ -1752,11 +1752,27 @@ export function ValidateDashboard({
                     const cBase = c.replace(/\s+.*$/, "");
                     return unbound.test(sBase) && unbound.test(cBase);
                   };
+                  // Prefer Decision Kernel validation_findings (SSOT) over raw
+                  // coercion_report when both exist — Map/Validate/Proof share rank.
+                  const kernelFindings = (preflight?.validation_findings ?? [])
+                    .filter((f) => f && (f.blocking === true || f.severity === "high")
+                      && String(f.suggested_target_type || "").trim())
+                    .filter((f) => !isNoopTextRemap(
+                      String(f.suggested_target_type),
+                      String(f.target_type || ""),
+                    ))
+                    .slice(0, 2);
                   const coercionBlocks = (preflight?.coercion_report?.columns ?? [])
                     .filter((c) => c.severity === "block" && c.suggested_target_type)
                     .filter((c) => !isNoopTextRemap(String(c.suggested_target_type), String(c.target_type || "")))
                     .slice(0, 2);
-                  const remapCols = coercionBlocks.length > 0
+                  const remapCols = kernelFindings.length > 0
+                    ? kernelFindings.map((f) => ({
+                      source: String(f.source_column || ""),
+                      target: String(f.target_column || f.source_column || ""),
+                      toType: String(f.suggested_target_type || "VARCHAR"),
+                    }))
+                    : coercionBlocks.length > 0
                     ? coercionBlocks.map((c) => ({
                       source: c.source,
                       target: c.target,

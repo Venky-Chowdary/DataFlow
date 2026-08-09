@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from services.semantic_mapper import map_columns
@@ -12,6 +13,8 @@ from services.decision_kernel import (
     normalize_logical_type,
 )
 from services.type_system import ddl_carrier_type
+
+logger = logging.getLogger("datawrap.mapping")
 
 CONFIDENCE_FLOOR = 0.72
 # Untyped VARCHAR with no samples — refuse inflated confidence (thin SaaS / failed introspect).
@@ -786,8 +789,24 @@ def run_mapping_pipeline(
             samples_by_source=samples_by_src,
             backfill_new_fields=False,
         )
-    except Exception:
-        pass
+    except Exception as stamp_exc:
+        # Fail-closed honesty: leave create-new target_type blank so Map/Validate
+        # cannot invent preserve@0.99 after Kernel stamp failed.
+        logger.warning(
+            "additive Kernel stamp failed on Map: %s", stamp_exc, exc_info=stamp_exc
+        )
+        fixed: list[dict] = []
+        for m in enriched_mappings:
+            row = dict(m)
+            strat = str(row.get("assignment_strategy") or "")
+            if (
+                bool(row.get("create_new"))
+                or strat in {"create_compatible_new", "identity_passthrough"}
+            ) and not str(row.get("target_type") or "").strip():
+                row["requires_review"] = True
+                row["confidence"] = min(float(row.get("confidence") or 0), 0.55)
+            fixed.append(row)
+        enriched_mappings = fixed
     # Reassert pending-Studio honesty after sample/quality boosts — never leave
     # invented preserve @ 0.99 when dest schema was never loaded.
     fixed_pending: list[dict] = []

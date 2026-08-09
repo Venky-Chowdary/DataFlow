@@ -5085,8 +5085,11 @@ def resolve_mapping_target_type(
         if live:
             return live
         # Empty stamp must not fall back to source identity (BQ UUID→UUID lie).
+        # CREATE_NEW invent SSOT = invent_dest_type ≡ create_new_mapping_target_type.
         if db:
-            return create_new_mapping_target_type(src, db)
+            from services.decision_kernel import InventContext, invent_dest_type
+
+            return invent_dest_type(src, dest_db=db, context=InventContext.CREATE_NEW)
         return src
     # Match-existing: live → stamped. Empty = pending Studio/Map (callers must
     # not soft-green via source invent).

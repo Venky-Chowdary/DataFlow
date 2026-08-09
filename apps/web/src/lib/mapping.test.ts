@@ -261,6 +261,21 @@ describe("fail-closed Map approve", () => {
     assert.equal(merged[0].existsInDestination, false);
   });
 
+  it("mergeStampedTargetTypes refuses ambiguous source-only hydrate", () => {
+    const merged = mergeStampedTargetTypes(
+      [
+        { source: "a", target: "a1", confidence: 0.9, approved: true, destType: "TEXT" },
+        { source: "a", target: "a2", confidence: 0.9, approved: true, destType: "TEXT" },
+      ],
+      [
+        { source: "a", target: "a1", target_type: "INTEGER" },
+        { source: "a", target: "a2", target_type: "BIGINT" },
+      ],
+    );
+    assert.equal(merged[0].destType, "INTEGER");
+    assert.equal(merged[1].destType, "BIGINT");
+  });
+
   it("mergeStampedTargetTypes clears stale createNew on bind_existing", () => {
     const merged = mergeStampedTargetTypes(
       [{

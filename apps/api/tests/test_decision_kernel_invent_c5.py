@@ -12,13 +12,31 @@ from services.decision_kernel import (
 )
 
 
-def test_create_new_widens_integer_to_64bit():
+def test_create_new_bare_logical_integer_uses_64bit_floor():
+    """Bare logical ``integer`` (not INT32) invents 64-bit — Phase A floor."""
     out = invent_dest_type(
-        "INTEGER",
+        "integer",
         dest_db="postgresql",
         context=InventContext.CREATE_NEW,
     )
     assert out.upper() == "BIGINT"
+
+
+def test_create_new_invent_matches_create_new_mapping_target_type():
+    """Map stamp and Validate invent_dest_type must be one CREATE_NEW authority."""
+    from services.decision_kernel import create_new_mapping_target_type
+
+    for src, db in (
+        ("INTEGER", "postgresql"),
+        ("INT32", "mysql"),
+        ("SMALLINT", "postgresql"),
+        ("TINYINT", "mysql"),
+        ("integer", "postgresql"),
+        ("BIGINT", "mysql"),
+    ):
+        invent = invent_dest_type(src, dest_db=db, context=InventContext.CREATE_NEW)
+        create = create_new_mapping_target_type(src, db)
+        assert invent == create, (src, db, invent, create)
 
 
 def test_bind_existing_refuses_without_stamp():
@@ -74,8 +92,10 @@ def test_same_conversion_different_ddl_by_context():
         context=InventContext.BIND_EXISTING,
         existing_dest_type="INT",
     )
-    # Create-new invents 64-bit; bind keeps the live INT stamp.
-    assert create.upper() in {"BIGINT", "INT64", "LONG"}
+    # Create-new follows width-preserving create_new stamp; bind keeps live INT.
+    from services.decision_kernel import create_new_mapping_target_type
+
+    assert create == create_new_mapping_target_type("INTEGER", "mysql")
     assert bound.upper() in {"INT", "INTEGER"}
 
 

@@ -71,8 +71,11 @@ def stamp_additive_mappings_for_write(
         from services.batch_progress import effective_backfill_new_fields
         from services.decision_kernel import stamp_additive_mapping_types
     except Exception as exc:
-        logger.debug("additive stamp import failed: %s", exc, exc_info=exc)
-        return mappings
+        # Fail-closed: never Execute create/backfill without Kernel invent surface.
+        raise ValueError(
+            "Decision Kernel additive stamp unavailable — refuse Execute rather "
+            f"than invent destination types without SSOT ({exc})"
+        ) from exc
     try:
         backfill = effective_backfill_new_fields(
             backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
@@ -92,15 +95,27 @@ def stamp_additive_mappings_for_write(
     for k in list(samples_by_src.keys()):
         samples_by_src[k] = samples_by_src[k][:32]
     dest_db = str(getattr(request.destination, "format", "") or "").lower()
-    stamped, unstamped = stamp_additive_mapping_types(
-        mappings,
-        dest_db=dest_db,
-        live_dest_types=dest_types or {},
-        source_types=column_types or {},
-        samples_by_source=samples_by_src,
-        backfill_new_fields=bool(backfill),
+    try:
+        stamped, unstamped = stamp_additive_mapping_types(
+            mappings,
+            dest_db=dest_db,
+            live_dest_types=dest_types or {},
+            source_types=column_types or {},
+            samples_by_source=samples_by_src,
+            backfill_new_fields=bool(backfill),
+        )
+    except Exception as exc:
+        raise ValueError(
+            f"Decision Kernel additive stamp failed — refuse Execute ({exc})"
+        ) from exc
+    needs_stamp = bool(backfill) or any(
+        bool(m.get("create_new"))
+        or str(m.get("assignment_strategy") or "")
+        in {"create_compatible_new", "identity_passthrough"}
+        for m in mappings
+        if isinstance(m, dict)
     )
-    if unstamped and backfill:
+    if unstamped and needs_stamp:
         raise ValueError(
             f"Additive column(s) {', '.join(unstamped[:5])} lack Map target_type "
             "under partial Studio — stamp on Map or disable backfill_new_fields."

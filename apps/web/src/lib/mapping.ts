@@ -782,19 +782,24 @@ export function mergeStampedTargetTypes(
 ): EditableMapping[] {
   if (!stamped?.length) return mappings;
   const bySourceTarget = new Map<string, (typeof stamped)[number]>();
-  const bySource = new Map<string, (typeof stamped)[number]>();
+  // Source-only fallback only when that source maps to exactly one stamp —
+  // never first-wins across fan-out (source→many targets).
+  const bySource = new Map<string, (typeof stamped)[number] | "ambiguous">();
   for (const row of stamped) {
     const src = String(row.source || "").trim();
     const tgt = String(row.target || "").trim();
     const tt = String(row.target_type || "").trim();
     if (!src || !tt) continue;
     bySourceTarget.set(`${src}\0${tgt}`, row);
-    if (!bySource.has(src)) bySource.set(src, row);
+    const prev = bySource.get(src);
+    if (prev === undefined) bySource.set(src, row);
+    else if (prev !== "ambiguous" && prev !== row) bySource.set(src, "ambiguous");
   }
   return mappings.map((m) => {
+    const srcHit = bySource.get(m.source);
     const hit =
       bySourceTarget.get(`${m.source}\0${m.target || m.source}`)
-      || bySource.get(m.source);
+      || (srcHit && srcHit !== "ambiguous" ? srcHit : undefined);
     if (!hit?.target_type) return m;
     const stampedType = String(hit.target_type).trim();
     if (!stampedType) return m;

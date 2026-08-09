@@ -30,6 +30,32 @@ def test_stamp_additive_invents_create_new_under_backfill():
     assert any(tok in stamp for tok in ("DOUBLE", "FLOAT", "NUMERIC", "REAL", "DECIMAL"))
 
 
+def test_stamp_additive_replaces_source_identity_bootstrap():
+    """FE source-as-destType must not skip Kernel CREATE_NEW invent."""
+    mappings, unstamped = stamp_additive_mapping_types(
+        [
+            {
+                "source": "uid",
+                "target": "uid",
+                "source_type": "UUID",
+                "target_type": "UUID",  # Map bootstrap echo — not Kernel invent
+                "create_new": True,
+                "assignment_strategy": "create_compatible_new",
+            }
+        ],
+        dest_db="bigquery",
+        live_dest_types={},
+        source_types={"uid": "UUID"},
+        backfill_new_fields=True,
+    )
+    assert unstamped == []
+    stamp = str(mappings[0].get("target_type") or "").upper()
+    assert stamp
+    # BigQuery create-new UUID invent is STRING (not native UUID).
+    assert "UUID" not in stamp or stamp == "STRING"
+    assert stamp in {"STRING", "TEXT", "VARCHAR"} or "STRING" in stamp
+
+
 def test_stamp_additive_binds_live_carrier_without_invent():
     mappings, unstamped = stamp_additive_mapping_types(
         [
