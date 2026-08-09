@@ -1522,12 +1522,15 @@ def _fail_runtime_job(
         **lease_extras,
     }
     if stamped_details:
+        from services.job_document_budget import slim_rejected_details
+
+        preview, total, truncated = slim_rejected_details(stamped_details)
         status_kwargs["rejected_rows"] = int(
-            getattr(exc, "rejected_rows", 0) or len(stamped_details)
+            getattr(exc, "rejected_rows", 0) or total
         )
-        status_kwargs["rejected_details"] = stamped_details[:2000]
-        status_kwargs["rejected_details_total"] = len(stamped_details)
-        status_kwargs["rejected_details_truncated"] = len(stamped_details) > 2000
+        status_kwargs["rejected_details"] = preview
+        status_kwargs["rejected_details_total"] = total
+        status_kwargs["rejected_details_truncated"] = truncated
         status_kwargs["records_processed"] = int(getattr(exc, "rows_written", 0) or 0)
     mongo.update_job_status(
         job_id,
@@ -2918,13 +2921,24 @@ class UniversalTransferEngine:
                         request=request,
                         last_persisted=_quarantine_persisted,
                     )
+                    from services.job_document_budget import (
+                        slim_checkpoint_for_job_store,
+                        slim_rejected_details,
+                    )
+
                     details = list(checkpoint.get("rejected_details") or [])
-                    update["checkpoint"] = checkpoint
+                    preview, total, truncated = slim_rejected_details(details)
+                    # Never embed the full writer checkpoint (unbounded quarantine)
+                    # into transfer_jobs — that is the DocumentTooLarge failure mode.
+                    update["checkpoint"] = slim_checkpoint_for_job_store(checkpoint)
                     update["destination_summary"] = {
                         "checksum": checkpoint.get("checksum", ""),
-                        "rejected_rows": checkpoint.get("rejected_rows", 0),
-                        "rejected_details": details[:50],
-                        "rejected_details_total": len(details),
+                        "rejected_rows": int(
+                            checkpoint.get("rejected_rows") or total or 0
+                        ),
+                        "rejected_details": preview,
+                        "rejected_details_total": total,
+                        "rejected_details_truncated": truncated,
                         "quarantine_checkpoint_durable": True,
                     }
                     _promote_cdc_job_fields(checkpoint, update)
@@ -3934,13 +3948,24 @@ class UniversalTransferEngine:
                         request=request,
                         last_persisted=_quarantine_persisted,
                     )
+                    from services.job_document_budget import (
+                        slim_checkpoint_for_job_store,
+                        slim_rejected_details,
+                    )
+
                     details = list(checkpoint.get("rejected_details") or [])
-                    update["checkpoint"] = checkpoint
+                    preview, total, truncated = slim_rejected_details(details)
+                    # Never embed the full writer checkpoint (unbounded quarantine)
+                    # into transfer_jobs — that is the DocumentTooLarge failure mode.
+                    update["checkpoint"] = slim_checkpoint_for_job_store(checkpoint)
                     update["destination_summary"] = {
                         "checksum": checkpoint.get("checksum", ""),
-                        "rejected_rows": checkpoint.get("rejected_rows", 0),
-                        "rejected_details": details[:50],
-                        "rejected_details_total": len(details),
+                        "rejected_rows": int(
+                            checkpoint.get("rejected_rows") or total or 0
+                        ),
+                        "rejected_details": preview,
+                        "rejected_details_total": total,
+                        "rejected_details_truncated": truncated,
                         "quarantine_checkpoint_durable": True,
                     }
                     _promote_cdc_job_fields(checkpoint, update)
@@ -4677,13 +4702,24 @@ class UniversalTransferEngine:
                         request=request,
                         last_persisted=_quarantine_persisted,
                     )
+                    from services.job_document_budget import (
+                        slim_checkpoint_for_job_store,
+                        slim_rejected_details,
+                    )
+
                     details = list(checkpoint.get("rejected_details") or [])
-                    update["checkpoint"] = checkpoint
+                    preview, total, truncated = slim_rejected_details(details)
+                    # Never embed the full writer checkpoint (unbounded quarantine)
+                    # into transfer_jobs — that is the DocumentTooLarge failure mode.
+                    update["checkpoint"] = slim_checkpoint_for_job_store(checkpoint)
                     update["destination_summary"] = {
                         "checksum": checkpoint.get("checksum", ""),
-                        "rejected_rows": checkpoint.get("rejected_rows", 0),
-                        "rejected_details": details[:50],
-                        "rejected_details_total": len(details),
+                        "rejected_rows": int(
+                            checkpoint.get("rejected_rows") or total or 0
+                        ),
+                        "rejected_details": preview,
+                        "rejected_details_total": total,
+                        "rejected_details_truncated": truncated,
                         "quarantine_checkpoint_durable": True,
                     }
                     _promote_cdc_job_fields(checkpoint, update)

@@ -29,9 +29,9 @@ logger = logging.getLogger(__name__)
 #: Hard cap on quarantine evidence carried inside a checkpoint document.
 #: The checkpoint is rewritten on every chunk and lives inside the job record,
 #: so this list is the one field that can push the document past MongoDB's
-#: 16 MB limit and break resume entirely. 500 rows is far more than an operator
-#: reads, and the exact count still lives in ``rejected_rows``.
-MAX_REJECTED_DETAILS = int(getenv_brand("MAX_REJECTED_DETAILS", "500") or 500)
+#: 16 MB limit and break resume entirely. Preview rows are slimmed; the exact
+#: count still lives in ``rejected_rows`` and the DLQ ledger.
+MAX_REJECTED_DETAILS = int(getenv_brand("MAX_REJECTED_DETAILS", "80") or 80)
 
 #: Operator-facing message when checkpoint persistence fails (fail-closed).
 CHECKPOINT_PERSISTENCE_FAILED = (
@@ -101,12 +101,18 @@ class Checkpoint:
         """
         if not details:
             return
+        try:
+            from services.job_document_budget import slim_rejected_detail
+
+            slimmed = [slim_rejected_detail(d) for d in details]
+        except Exception:
+            slimmed = list(details)
         room = MAX_REJECTED_DETAILS - len(self.rejected_details)
         if room > 0:
-            self.rejected_details.extend(details[:room])
-            overflow = len(details) - room
+            self.rejected_details.extend(slimmed[:room])
+            overflow = len(slimmed) - room
         else:
-            overflow = len(details)
+            overflow = len(slimmed)
         if overflow > 0:
             self.rejected_details_truncated += overflow
 

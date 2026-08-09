@@ -562,7 +562,28 @@ class MongoDBService:
                 ],
             }
 
-        result = collection.update_one(filt, {"$set": updates})
+        # Control-plane BSON budget — never let quarantine/checkpoint previews
+        # blow MongoDB's 16 MiB update command (Excel→SQL high-reject cliff).
+        try:
+            from services.job_document_budget import apply_job_update_with_budget
+
+            result = apply_job_update_with_budget(collection, filt, updates)
+        except Exception as budget_exc:
+            logging.getLogger(__name__).error(
+                "transfer_jobs update failed for %s: %s",
+                job_id,
+                budget_exc,
+                exc_info=budget_exc,
+            )
+            # Last ditch: status/error only so Theater still shows failure.
+            try:
+                from services.job_document_budget import emergency_strip_job_update
+
+                result = collection.update_one(
+                    filt, {"$set": emergency_strip_job_update(updates)}
+                )
+            except Exception:
+                return False
         ok = result.modified_count > 0 or result.matched_count > 0
         if ok:
             try:
