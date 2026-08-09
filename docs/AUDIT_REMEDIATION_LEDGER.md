@@ -8,7 +8,7 @@ Status values: `NOT_STARTED` | `IN_PROGRESS` | `DONE_VERIFIED` | `BLOCKED` | `RE
 |------|--------|---------------|-------------|---------------|-------|
 | 1 | DONE_VERIFIED | `apps/api/services/decision_kernel/type_invent.py`, `apps/api/services/decision_kernel/invent.py`, `apps/api/services/schema_introspect.py` | `apps/api/tests/test_item1_sqlite_integer_affinity_invents_bigint.py`, `apps/api/tests/test_item1_pg_writer_bare_integer_is_bigint.py` | VERIFY 491p/1s; stash 4f→5p; iso 5p; polluted slice 71p; full suite **109→105 failed** (11659→11663 passed) | Prior DONE_VERIFIED retracted (SQLite INTEGER affinity cliff). Fixed introspect BIGINT + bare float materialize. |
 | 2 | DONE_VERIFIED | `apps/api/src/transfer/engine.py` | `apps/api/tests/test_item2_skip_preflight_ddl_identity.py` | stash 1f→6p; iso 6p; polluted 18p+sync/gzip green; UTE skip_preflight sqlite→sqlite success=True records=2; drift refused | Hollow proof_bundle + skip_preflight now inline-stamps; UI path still requires Validate; approved-hash drift still refused. |
-| 3 | DONE_VERIFIED | `apps/api/src/services/auth_service.py`, `apps/api/src/routers/auth_router.py`, `apps/api/tests/test_auth_service.py` | `apps/api/tests/test_item3_auth_bootstrap_no_enumeration.py` | stash 3f→3p; auth slice 19p; public keys exactly `{auth_required, has_users}` | Public bootstrap no longer returns emails/password length/config; sensitive omits emails too. |
+| 3 | DONE_VERIFIED | `apps/api/src/services/auth_service.py`, `apps/api/src/routers/auth_router.py`, `apps/api/tests/test_auth_service.py` | `apps/api/tests/test_item3_auth_bootstrap_no_enumeration.py` | VERIFY 19p; stash 3f→3p; iso 3p; polluted 24p; full suite **106→106 failed** (11668→11671 passed, +3 item3) | Prove-or-retract 2026-08-09: failure count flat; +3 passes = new regression tests. Flaky swap unrelated to auth (see log). |
 | 4 | NOT_STARTED | | | | |
 | 5 | NOT_STARTED | | | | |
 | 6 | NOT_STARTED | | | | |
@@ -193,5 +193,40 @@ FAILED test_authenticated_bootstrap_still_omits_emails
 ```
 pytest tests/test_item3_auth_bootstrap_no_enumeration.py \
   tests/test_auth_service.py tests/test_auth_middleware.py -q
-→ 19 passed
+→ 19 passed, 1 warning in 6.90s
+```
+
+## ITEM 3 prove-or-retract (2026-08-09)
+
+### Stash (`git reset --soft HEAD~1` + `git stash push` prod files; keep regression test)
+```
+===== WITHOUT FIX =====
+3 failed (user_count on public; emails on authenticated sensitive)
+
+===== WITH FIX =====
+3 passed
+```
+
+### Isolation vs full suite
+```
+isolation: pytest tests/test_item3_auth_bootstrap_no_enumeration.py -q
+→ 3 passed, 1 warning in 4.35s
+
+polluted neighbors: item3 + auth_service + auth_middleware + workspace_* 
+→ 24 passed
+
+full suite AFTER (includes item3 file): 106 failed, 11671 passed, 1569 skipped
+```
+
+### Full-suite before vs after
+```
+BEFORE (HEAD~1 / 7943794 worktree): 106 failed, 11668 passed, 1569 skipped
+AFTER  (HEAD / 16e2318):             106 failed, 11671 passed, 1569 skipped
+Delta: failure count unchanged; +3 passed (= new item3 tests)
+
+FAILED-list swap (order/flake, not ITEM3):
+  NEW:  test_pilot_quality_wave32.py::test_compare_miss_recovers_with_lists
+        (fails in isolation on HEAD — pre-existing; not auth)
+  GONE: test_decision_kernel_artifact.py::test_golden_fixture_loads_and_hashes
+        (passes in isolation on HEAD)
 ```
