@@ -1640,6 +1640,8 @@ def run_file_preflight(
         "payload_shape": payload_shape,
         "validation_plan": validation_plan.to_dict(),
         "coercion_report": ctx.coercion_report(),
+        # Canonical Kernel findings — Map / Proof / root-cause must not re-classify.
+        "validation_findings": [],
         "date_locale": date_locale,
         "privilege_probe": privilege_probe or {},
         "recommended_batch_size": min(
@@ -1659,6 +1661,24 @@ def run_file_preflight(
             if isinstance(m, dict) and isinstance(m.get("risk_contract"), dict)
         ],
     }
+
+    # Stamp Decision Kernel ValidationFindings onto Validate SSOT (coercion → findings).
+    try:
+        from services.decision_kernel import findings_from_coercion_report
+
+        _vf = findings_from_coercion_report(
+            out.get("coercion_report"),
+            dest_db=str(destination_db_type or ""),
+        )
+        out["validation_findings"] = _vf
+        if isinstance(out.get("proof_bundle"), dict) and _vf:
+            out["proof_bundle"] = {
+                **out["proof_bundle"],
+                "validation_findings": _vf,
+                "validation_finding_schema": "validation_finding_v1",
+            }
+    except Exception as vf_exc:
+        logger.warning("validation_findings stamp failed: %s", vf_exc, exc_info=vf_exc)
 
     # FK / relational constraint findings + sample orphan probe.
     # Schema unmapped-FK + sample orphans fail closed in strict/maximum unless

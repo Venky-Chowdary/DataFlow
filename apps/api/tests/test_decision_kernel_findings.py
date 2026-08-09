@@ -6,6 +6,7 @@ from services.coercion_probe import analyze_coercion
 from services.decision_kernel import (
     FailureClass,
     classify_transform_failure,
+    findings_from_coercion_report,
     rank_suggested_target_type,
 )
 from services.transform_resolver import resolve_transform
@@ -129,3 +130,33 @@ def test_cast_and_continue_keeps_integer_on_text_stamp():
         column_types={"amt": "TEXT"},
     )
     assert transform == "integer"
+
+
+def test_findings_from_coercion_report_stamps_canonical_ssot():
+    report = analyze_coercion(
+        sample_rows=[
+            {"metadata_atsScore": "90"},
+            {"metadata_atsScore": "94.5"},
+        ],
+        mappings=[
+            {
+                "source": "metadata_atsScore",
+                "target": "metadata_ats_score",
+                "create_new": True,
+                "target_type": "INT",
+            }
+        ],
+        source_types={"metadata_atsScore": "FLOAT"},
+        dest_types={},
+        dest_db_type="mysql",
+        table_exists=False,
+    )
+    findings = findings_from_coercion_report(report, dest_db="mysql")
+    assert findings, "blocking coercion must emit canonical findings"
+    top = findings[0]
+    assert top["failure_class"] == FailureClass.FRACTIONAL_PRECISION_LOSS.value
+    assert top["schema_version"] == "validation_finding_v1"
+    assert top["blocking"] is True
+    suggested = (top.get("suggested_target_type") or "").upper()
+    assert "DOUBLE" in suggested or "FLOAT" in suggested or "DECIMAL" in suggested
+    assert "LONGTEXT" not in suggested

@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from services.type_system import ddl_type, is_lossy_coercion, normalize_logical_type
+from services.decision_kernel import ddl_type, is_lossy_coercion, normalize_logical_type
 
 # Transforms that mutate string content (fidelity risk even when intentional).
 _MUTATING_TRANSFORMS = frozenset({
@@ -149,7 +149,7 @@ def mapping_fidelity(
                 "requires_risk_contract": True,
             }
         try:
-            from services.type_system import create_new_mapping_target_type
+            from services.decision_kernel import create_new_mapping_target_type
 
             proof_samples = None
             for key in ("samples", "sample_values", "preview_values"):
@@ -411,10 +411,10 @@ def _mapping_risks(
 
     # Align Map proof severity with G3 fidelity helpers (never bury as info).
     try:
+        from services.decision_kernel import is_precision_collapse_coercion
         from services.type_system import (
             is_nested_document_collapse,
             is_nested_shape_collapse,
-            is_precision_collapse_coercion,
             is_timezone_polarity_loss,
         )
     except ImportError:  # pragma: no cover

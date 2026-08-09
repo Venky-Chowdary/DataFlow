@@ -235,7 +235,7 @@ def recommended_action_for_failure(
         return "Open Fix bad data → Strip controls / Quarantine unfit cells → re-Validate."
     if suggested_target_type:
         return (
-            f"Open Map → widen {col}to {suggested_target_type} (or remap / ALTER) → re-Validate."
+            f"Open Map → widen {col} to {suggested_target_type} (or remap / ALTER) → re-Validate."
         )
     return (
         "Open Map → fix type/transform or Accept risk with a continue-policy Risk Contract "
@@ -304,15 +304,17 @@ def build_finding(
     dest_db: str = "",
     blocking: bool = True,
     gate_ids: tuple[str, ...] | list[str] | None = None,
+    failure_class: FailureClass | None = None,
+    suggested_target_type: str = "",
 ) -> ValidationFinding:
     """Construct a canonical finding from a transform/coercion failure."""
-    fc = classify_transform_failure(
+    fc = failure_class or classify_transform_failure(
         failure_message,
         source_type=source_type,
         target_type=target_type,
         source_value=source_value,
     )
-    suggested = rank_suggested_target_type(
+    suggested = (suggested_target_type or "").strip() or rank_suggested_target_type(
         source_type=source_type,
         target_type=target_type,
         dest_db=dest_db,
@@ -345,3 +347,72 @@ def build_finding(
         suggested_target_type=suggested,
         gate_ids=tuple(gate_ids or ()),
     )
+
+
+def findings_from_coercion_report(
+    report: Mapping[str, Any] | None,
+    *,
+    dest_db: str = "",
+    max_findings: int = 64,
+) -> list[dict[str, Any]]:
+    """Promote coercion_probe columns into canonical ValidationFinding dicts.
+
+    One finding per blocking/warning column (not per sample cell) so Map /
+    Proof / root-cause share a single ranked remediation surface.
+    """
+    if not isinstance(report, Mapping):
+        return []
+    columns = report.get("columns")
+    if not isinstance(columns, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for col in columns:
+        if not isinstance(col, Mapping):
+            continue
+        severity = str(col.get("severity") or "").lower()
+        failed = int(col.get("failed") or 0)
+        fidelity = bool(col.get("fidelity_collapse"))
+        if severity not in {"block", "warn"} and failed <= 0 and not fidelity:
+            continue
+        samples = col.get("sample_failures") if isinstance(col.get("sample_failures"), list) else []
+        first = samples[0] if samples and isinstance(samples[0], Mapping) else {}
+        reason = str(
+            (first or {}).get("reason")
+            or col.get("suggested_fix")
+            or ("fidelity collapse" if fidelity else "coercion failure")
+        )
+        source_value = str((first or {}).get("value") or "")
+        row_number = (first or {}).get("row")
+        if row_number is not None:
+            try:
+                row_number = int(row_number)
+            except (TypeError, ValueError):
+                row_number = None
+        fc_raw = str(col.get("failure_class") or "").strip()
+        fc: FailureClass | None = None
+        if fc_raw:
+            try:
+                fc = FailureClass(fc_raw)
+            except ValueError:
+                fc = None
+        if fidelity and fc is None:
+            fc = FailureClass.FIDELITY_COLLAPSE
+        finding = build_finding(
+            source_column=str(col.get("source") or ""),
+            target_column=str(col.get("target") or ""),
+            failure_message=reason,
+            source_type=str(col.get("source_type") or ""),
+            target_type=str(col.get("target_type") or col.get("target_logical") or ""),
+            source_value=source_value,
+            row_number=row_number,
+            operation=str(col.get("transform") or ""),
+            dest_db=dest_db,
+            blocking=severity == "block" or fidelity,
+            gate_ids=("g3_coercion",),
+            failure_class=fc,
+            suggested_target_type=str(col.get("suggested_target_type") or ""),
+        )
+        out.append(finding.to_dict())
+        if len(out) >= max_findings:
+            break
+    return out

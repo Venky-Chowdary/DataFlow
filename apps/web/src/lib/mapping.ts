@@ -766,6 +766,71 @@ export function acknowledgeMappingRisk(
   };
 }
 
+/**
+ * Merge Validate-echoed Kernel target_type stamps onto Map rows.
+ * Additive / create-new columns must show the same stamp Execute will refuse without.
+ */
+export function mergeStampedTargetTypes(
+  mappings: EditableMapping[],
+  stamped: Array<{
+    source?: string;
+    target?: string;
+    target_type?: string;
+    create_new?: boolean;
+    assignment_strategy?: string;
+  }> | null | undefined,
+): EditableMapping[] {
+  if (!stamped?.length) return mappings;
+  const bySourceTarget = new Map<string, (typeof stamped)[number]>();
+  const bySource = new Map<string, (typeof stamped)[number]>();
+  for (const row of stamped) {
+    const src = String(row.source || "").trim();
+    const tgt = String(row.target || "").trim();
+    const tt = String(row.target_type || "").trim();
+    if (!src || !tt) continue;
+    bySourceTarget.set(`${src}\0${tgt}`, row);
+    if (!bySource.has(src)) bySource.set(src, row);
+  }
+  return mappings.map((m) => {
+    const hit =
+      bySourceTarget.get(`${m.source}\0${m.target || m.source}`)
+      || bySource.get(m.source);
+    if (!hit?.target_type) return m;
+    const stampedType = String(hit.target_type).trim();
+    if (!stampedType) return m;
+    const nextStrategy = String(hit.assignment_strategy || "").trim();
+    const stampedCreateNew =
+      typeof hit.create_new === "boolean" ? hit.create_new : undefined;
+    // Bind-existing must clear stale createNew + mark dest present — otherwise
+    // buildPreflightMappings re-emits create_new via existsInDestination===false.
+    let createNew = m.createNew;
+    let existsInDestination = m.existsInDestination;
+    if (stampedCreateNew === true || nextStrategy === "create_compatible_new") {
+      createNew = true;
+      existsInDestination = false;
+    } else if (
+      stampedCreateNew === false
+      || nextStrategy === "bind_existing"
+    ) {
+      createNew = false;
+      existsInDestination = true;
+    }
+    return {
+      ...m,
+      destType: stampedType,
+      createNew,
+      existsInDestination,
+      assignmentStrategy: nextStrategy || m.assignmentStrategy,
+      reason: [
+        m.reason,
+        m.destType && m.destType !== stampedType
+          ? `Validate stamped ${stampedType}`
+          : "",
+      ].filter(Boolean).join(" · "),
+    };
+  });
+}
+
 /** Merge Validate-echoed signed risk contracts onto Map rows (risk_id + signature). */
 export function mergeSignedRiskContracts(
   mappings: EditableMapping[],

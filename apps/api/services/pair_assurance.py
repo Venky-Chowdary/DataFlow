@@ -135,12 +135,12 @@ def evaluate_type_cell(
 ) -> TypeCellResult:
     """Evaluate one source carrier → dest create-new stamp using real engines."""
     from services.type_coercion_validator import validate_mapping_coercions
-    from services.type_system import (
-        assess_create_new_type_risk,
+    from services.decision_kernel import (
         create_new_mapping_target_type,
         ddl_type,
         is_lossy_coercion,
     )
+    from services.type_system import assess_create_new_type_risk
 
     try:
         stamped = create_new_mapping_target_type(source_type, dest_db)

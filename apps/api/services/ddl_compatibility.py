@@ -11,13 +11,15 @@ from services.db_type_utils import (
     ci_get,
     normalize_dest_kind,
 )
-from services.type_system import (
+from services.decision_kernel import (
     ddl_type,
-    decimal_precision_would_truncate,
-    decimal_scale_would_truncate,
     is_lossy_coercion,
     is_precision_collapse_coercion,
     normalize_logical_type,
+)
+from services.type_system import (
+    decimal_precision_would_truncate,
+    decimal_scale_would_truncate,
     specialty_carrier_would_collapse,
     string_width_would_narrow,
     vector_dim_mismatch,

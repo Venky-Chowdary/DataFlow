@@ -895,6 +895,19 @@ export interface PreflightResult {
     risk_contract?: Record<string, unknown>;
     risk_acknowledged?: boolean;
   }>;
+  /**
+   * Decision Kernel target_type stamps from Validate (additive / create-new).
+   * Merge onto Map so Studio destType matches what Execute will refuse without.
+   */
+  stamped_mappings?: Array<{
+    source?: string;
+    target?: string;
+    target_type?: string;
+    create_new?: boolean;
+    assignment_strategy?: string;
+  }>;
+  /** Canonical Kernel ValidationFinding dicts (coercion → findings SSOT). */
+  validation_findings?: Array<Record<string, unknown>>;
 }
 
 /** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */

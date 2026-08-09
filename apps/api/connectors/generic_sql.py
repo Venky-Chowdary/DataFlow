@@ -42,12 +42,12 @@ from connectors.write_resilience import (
 )
 from services import reflection_cache
 from services.engine_pool import release_engine
-from services.type_system import (
+from services.decision_kernel import (
     ddl_type,
     materialize_dest_ddl,
     normalize_logical_type,
-    parse_numeric_precision_scale,
 )
+from services.type_system import parse_numeric_precision_scale
 from services.value_serializer import cell_to_string, json_default
 
 logger = logging.getLogger(__name__)
@@ -952,6 +952,7 @@ def _sa_type_for_logical(
     ``t == "decimal"`` matching used to fall through to TEXT and strip scale
     (SQL Server / Oracle / DuckDB greenfield fidelity bug).
     """
+    from services.decision_kernel import ddl_type, normalize_logical_type
     from services.type_system import (
         LOGICAL_ARRAY,
         LOGICAL_BINARY,
@@ -968,8 +969,6 @@ def _sa_type_for_logical(
         LOGICAL_TEXT,
         LOGICAL_TIME,
         LOGICAL_UUID,
-        ddl_type,
-        normalize_logical_type,
         parse_numeric_precision_scale,
     )
 

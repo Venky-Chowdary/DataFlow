@@ -95,6 +95,7 @@ import {
   isEnumToBooleanConflict,
   mappingRequiresRiskAck,
   mergeSignedRiskContracts,
+  mergeStampedTargetTypes,
   uiTransformToEngine,
   widenMappingToVarchar,
   mappingsFromAnalysis,
@@ -3435,11 +3436,21 @@ export function TransferPage({
         }
       }
       setPreflight(pf);
-      // Echo signed Risk Contracts from Validate onto Map — Execute verifies signatures.
-      if (Array.isArray(pf.signed_mappings) && pf.signed_mappings.length) {
-        setColumnMappings((prev) => mergeSignedRiskContracts(prev, pf.signed_mappings));
+      // Echo Kernel stamps + signed Risk Contracts from Validate onto Map.
+      // Contract key MUST use post-hydrate mappings or Execute stays locked /
+      // invalidation clears a green preflight when destType stamps change.
+      let hydrateMaps = activeMappings;
+      if (
+        (Array.isArray(pf.stamped_mappings) && pf.stamped_mappings.length)
+        || (Array.isArray(pf.signed_mappings) && pf.signed_mappings.length)
+      ) {
+        hydrateMaps = mergeSignedRiskContracts(
+          mergeStampedTargetTypes(activeMappings, pf.stamped_mappings),
+          pf.signed_mappings,
+        );
+        setColumnMappings(hydrateMaps);
       }
-      setValidatedContractKey(buildValidateContractKey(activeMappings));
+      setValidatedContractKey(buildValidateContractKey(hydrateMaps));
       if (!pf.passed) {
         toast({
           title: "Validation incomplete",
@@ -3658,9 +3669,9 @@ export function TransferPage({
     setTransferLaunch(null);
     setRunStartupProgress(12);
     setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
-    // Prefer Validate-echoed signed contracts over Map drafts (setState race).
+    // Prefer Validate-echoed Kernel stamps + signed contracts over Map drafts.
     const mappingsForExecute = mergeSignedRiskContracts(
-      columnMappings,
+      mergeStampedTargetTypes(columnMappings, preflight?.stamped_mappings),
       preflight?.signed_mappings,
     );
     const transferMappings = mappingsForExecute.length

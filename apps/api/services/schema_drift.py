@@ -23,7 +23,7 @@ from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.schema_fingerprint import fingerprint_schema, schemas_match
-from services.type_system import is_lossy_coercion, normalize_logical_type
+from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 
 # Policies that auto-apply additive field evolution (Airbyte propagate_*).
 PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
@@ -586,10 +586,8 @@ def detect_schema_drift(
                 or "VARCHAR"
             )
             # Prefer mapping stamp over invented VARCHAR when live schema lacks column.
-            from services.type_system import (
-                is_precision_collapse_coercion,
-                resolve_mapping_target_type,
-            )
+            from services.decision_kernel import is_precision_collapse_coercion
+            from services.type_system import resolve_mapping_target_type
 
             dest_db = str(destination_db_type or dest_kind or "")
             tgt_type = resolve_mapping_target_type(

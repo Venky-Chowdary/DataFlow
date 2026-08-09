@@ -26,6 +26,7 @@ import {
   mappingRequiresRiskAck,
   mappingsFromAnalysis,
   mergeSignedRiskContracts,
+  mergeStampedTargetTypes,
   uiTransformToEngine,
   widenMappingToVarchar,
   type EditableMapping,
@@ -234,6 +235,58 @@ describe("fail-closed Map approve", () => {
     assert.equal(next.riskAcknowledged, true);
     assert.equal(next.approved, false);
     assert.equal(next.requiresReview, true);
+  });
+
+  it("mergeStampedTargetTypes hydrates Kernel destType from Validate", () => {
+    const merged = mergeStampedTargetTypes(
+      [{
+        source: "Change_from_Previous_Year",
+        target: "Change_from_Previous_Year",
+        confidence: 0.9,
+        approved: true,
+        createNew: true,
+        destType: "",
+        assignmentStrategy: "create_compatible_new",
+      }],
+      [{
+        source: "Change_from_Previous_Year",
+        target: "Change_from_Previous_Year",
+        target_type: "DOUBLE PRECISION",
+        create_new: true,
+        assignment_strategy: "create_compatible_new",
+      }],
+    );
+    assert.equal(merged[0].destType, "DOUBLE PRECISION");
+    assert.equal(merged[0].createNew, true);
+    assert.equal(merged[0].existsInDestination, false);
+  });
+
+  it("mergeStampedTargetTypes clears stale createNew on bind_existing", () => {
+    const merged = mergeStampedTargetTypes(
+      [{
+        source: "id",
+        target: "id",
+        confidence: 0.99,
+        approved: true,
+        createNew: true,
+        existsInDestination: false,
+        destType: "VARCHAR",
+        assignmentStrategy: "create_compatible_new",
+      }],
+      [{
+        source: "id",
+        target: "id",
+        target_type: "INTEGER",
+        create_new: false,
+        assignment_strategy: "bind_existing",
+      }],
+    );
+    assert.equal(merged[0].destType, "INTEGER");
+    assert.equal(merged[0].createNew, false);
+    assert.equal(merged[0].existsInDestination, true);
+    assert.equal(merged[0].assignmentStrategy, "bind_existing");
+    const wire = buildPreflightMappings([], merged);
+    assert.equal(wire[0].create_new, false);
   });
 
   it("mergeSignedRiskContracts echoes risk_id and signature", () => {
