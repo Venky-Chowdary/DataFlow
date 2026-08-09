@@ -10,7 +10,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 2 | The legitimate path is never blocked | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property2_golden_path_never_blocked.py -q` (19 passed, 4 skipped MySQL on this host) | SQLite↔SQLite + CSV→SQLite resume + SQLite checkpoint resume (always); live PG→PG / CSV→PG / PG→SQLite / PG→Parquet / Mongo→PG; CI `no-config-transfer` now boots PG+MySQL+Mongo and fails on any skip | MySQL 8 on this Windows host (no Docker); CI-wired but not yet green-proven in this run |
 | 3 | Source reads are snapshot-consistent | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property3_source_snapshot_consistent.py -q` (3 passed) | PostgreSQL full-refresh REPEATABLE READ + LSN/export_snapshot; SQLite deferred txn; inline write-pass fingerprints (no second scan by default) | MySQL consistent snapshot; Mongo majority/clusterTime; Oracle flashback SCN; SQL Server SI; Snowflake/BQ time-travel; incremental sync (watermark by design) |
 | 4 | Writes are exactly-once observable | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property4_observable_exactly_once.py -q` (3 passed) | SQLite+PostgreSQL insert ledger (same-txn; row_start/row_end/attempt); kill-mid-chunk resume = clean checksum | Mongo/Kafka/object-store/warehouse sinks (NOT_GUARANTEED); MySQL live kill proof (Docker down); quarantine salvage path still not same-txn |
-| 5 | Five-layer verification, not sampling | UNPROVEN | — | — | — |
+| 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
 | 6 | Schema fidelity is more than column types | UNPROVEN | — | — | — |
 | 7 | Referential integrity across multi-table migration | UNPROVEN | — | — | — |
 | 8 | Semantic value fidelity | UNPROVEN | — | — | — |
@@ -202,3 +202,41 @@ PostgreSQL (live): same kill/resume/checksum proof green.
   same-txn ledger skip (insert) or conflict-key upsert.
 * Mongo / Kafka / object stores / warehouses: **NOT_GUARANTEED** (no ledger).
 * Quarantine salvage (per-row commit then ledger) is still not same-txn.
+
+---
+
+## Property 5 — PARTIAL (2026-08-09)
+
+### Defect
+Gate-8 had strong L1 (row balance) + L3 (full checksum) but no column-level
+or row-level localization. Preflight 500-row probes were easy to misread as
+population proof. A checksum failure told operators “something’s wrong” —
+not which column or which row.
+
+### Fix
+1. `services/verification_ladder.py` — enterprise L1–L5 (aggregates, typed
+   per-column digests, binary-search PK localization).
+2. Wired into `run_reconciliation` for SQLite/PostgreSQL when both populations
+   are loadable; engine passes `source_endpoint`.
+3. On L3 fail (or `validation_mode=maximum`), L4/L5 run and enrich the Gate-8
+   message with `column` + `pk` + source/target values.
+4. `DEFAULT_SCREENING_LIMIT` alias; sample-success copy says “screening only”.
+5. Memory cap `VERIFICATION_LADDER_MAX_ROWS` (default 250k) — refuse to fake
+   population localization above the cap.
+
+### Proof output (this host)
+
+```
+pytest tests/test_property5_five_layer_verification.py -q
+6 passed in 6.47s
+
+Inject amount drift on id=424 (SQLite) / id=77 (PG):
+  L1 pass, L2 fail on amount, L3 fail,
+  L4 mismatched_columns=['amount'],
+  L5 pk + source_value + target_value exact.
+```
+
+### NOT claimed / remaining for PROVEN
+* SQL pushdown aggregates/digests for MySQL and warehouses (no full load)
+* UI copy sweep so no card says “proof” for sample screening
+* Streaming path without source SQL still depends on buffered records

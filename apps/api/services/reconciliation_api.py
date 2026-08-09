@@ -17,14 +17,22 @@ from services.reconciliation import (
     reconcile,
     stamp_post_write_phase,
 )
+from services.verification_ladder import (
+    DEFAULT_SCREENING_LIMIT,
+    attach_ladder_to_reconcile_report,
+    run_five_layer_verification,
+)
 
 __all__ = [
+    "DEFAULT_SCREENING_LIMIT",
     "FingerprintAccumulator",
     "aggregate_checksum",
+    "attach_ladder_to_reconcile_report",
     "canonical_checksum",
     "canonical_checksum_from_iter",
     "checksum_rows",
     "fingerprint_checksum",
     "reconcile",
+    "run_five_layer_verification",
     "stamp_post_write_phase",
 ]

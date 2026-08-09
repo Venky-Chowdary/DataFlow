@@ -60,8 +60,11 @@ _TEXTUAL_LOGICALS = {"string", "text"}
 _STRUCTURAL_LOGICALS = {"json", "array", "struct", "map"}
 SAMPLE_FAILURE_LIMIT = 5
 # Must match preflight_service sample cap so G3/G5/G6 see the same rows.
-DEFAULT_SAMPLE_LIMIT = 500
-PREFLIGHT_SAMPLE_LIMIT = DEFAULT_SAMPLE_LIMIT
+# Screening only — never population proof (Property 5). Prefer the screening name
+# in new call sites; DEFAULT_SAMPLE_LIMIT remains as a compatibility alias.
+DEFAULT_SCREENING_LIMIT = 500
+DEFAULT_SAMPLE_LIMIT = DEFAULT_SCREENING_LIMIT
+PREFLIGHT_SAMPLE_LIMIT = DEFAULT_SCREENING_LIMIT
 
 
 def samples_coerce_mapping(

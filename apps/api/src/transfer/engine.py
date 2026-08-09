@@ -3304,6 +3304,7 @@ class UniversalTransferEngine:
                     mappings=mappings,
                     source_schema=schema,
                     validation_mode=request.validation_mode,
+                    source_endpoint=request.source,
                 )
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
@@ -4098,6 +4099,7 @@ class UniversalTransferEngine:
                     mappings=mappings,
                     source_schema=schema,
                     validation_mode=request.validation_mode,
+                    source_endpoint=request.source,
                 )
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
@@ -4768,6 +4770,7 @@ class UniversalTransferEngine:
                     mappings=mappings,
                     source_schema=schema,
                     validation_mode=request.validation_mode,
+                    source_endpoint=request.source,
                 )
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
