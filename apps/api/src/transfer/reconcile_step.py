@@ -24,9 +24,19 @@ from .adapters import records_to_matrix, resolve_connector_config
 from .models import EndpointConfig
 
 
-def _finalize_reconcile(payload: dict[str, Any]) -> dict[str, Any]:
+def _finalize_reconcile(
+    payload: dict[str, Any],
+    *,
+    dest_summary: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Every post-write reconcile return path gets an explicit phase."""
-    return stamp_post_write_phase(payload)
+    out = stamp_post_write_phase(payload)
+    snap = None
+    if isinstance(dest_summary, dict):
+        snap = dest_summary.get("source_snapshot")
+    if isinstance(snap, dict) and snap:
+        out["source_snapshot"] = dict(snap)
+    return out
 
 def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
     return {
@@ -166,6 +176,133 @@ def _source_key_values(
     return values
 
 
+def _maybe_attach_verification_ladder(
+    report: dict[str, Any],
+    *,
+    endpoint: EndpointConfig,
+    source_endpoint: EndpointConfig | None,
+    records: list[dict],
+    columns: list[str],
+    dest_summary: dict[str, Any],
+    mappings: list[dict],
+    validation_mode: str,
+) -> dict[str, Any]:
+    """Property 5 — run L1–L5 when source+dest populations can be loaded."""
+    from services.verification_ladder import (
+        attach_ladder_to_reconcile_report,
+        read_postgres_rows,
+        read_sqlite_rows,
+        run_five_layer_verification,
+    )
+
+    from .connector_capabilities import resolve_driver_type
+
+    dest_type = resolve_driver_type(endpoint.format)
+    if dest_type not in {"sqlite", "postgresql", "redshift"}:
+        return report
+    target_cols = _mapped_targets(mappings, columns) if mappings else list(columns or [])
+    if not target_cols:
+        return report
+
+    pk_cols: list[str] = []
+    for key in ("primary_key_columns", "conflict_columns"):
+        raw = dest_summary.get(key) or []
+        if isinstance(raw, (list, tuple)):
+            pk_cols = [str(x) for x in raw if x]
+            if pk_cols:
+                break
+    pk_column = pk_cols[0] if pk_cols else ""
+    # Identity maps often use `id` — accept when present on both sides.
+    if not pk_column and "id" in {c.lower() for c in target_cols}:
+        pk_column = next(c for c in target_cols if c.lower() == "id")
+
+    dest_cfg = resolve_connector_config(endpoint)
+    source_rows: list[dict] = [r for r in (records or []) if isinstance(r, dict)]
+    target_rows: list[dict] = []
+
+    # Prefer full SQL population over buffered records (streaming passes []).
+    try:
+        if dest_type == "sqlite":
+            target_rows = read_sqlite_rows(
+                database=str(dest_cfg.get("database") or ""),
+                table=str(endpoint.table or dest_cfg.get("table") or ""),
+                columns=target_cols,
+                connection_string=str(dest_cfg.get("connection_string") or ""),
+                host=str(dest_cfg.get("host") or ""),
+            )
+        else:
+            target_rows = read_postgres_rows(
+                host=str(dest_cfg.get("host") or ""),
+                port=int(dest_cfg.get("port") or 5432),
+                database=str(dest_cfg.get("database") or ""),
+                username=str(dest_cfg.get("username") or ""),
+                password=str(dest_cfg.get("password") or ""),
+                schema=str(dest_cfg.get("schema") or "public"),
+                table=str(endpoint.table or dest_cfg.get("table") or ""),
+                columns=target_cols,
+                connection_string=str(dest_cfg.get("connection_string") or ""),
+                ssl=bool(dest_cfg.get("ssl", False)),
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).debug("ladder dest load failed: %s", exc)
+        return report
+
+    if source_endpoint is not None and not source_rows:
+        src_type = resolve_driver_type(source_endpoint.format)
+        src_cfg = resolve_connector_config(source_endpoint)
+        try:
+            if src_type == "sqlite":
+                source_rows = read_sqlite_rows(
+                    database=str(src_cfg.get("database") or ""),
+                    table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                    columns=target_cols,
+                    connection_string=str(src_cfg.get("connection_string") or ""),
+                    host=str(src_cfg.get("host") or ""),
+                )
+            elif src_type in {"postgresql", "redshift"}:
+                source_rows = read_postgres_rows(
+                    host=str(src_cfg.get("host") or ""),
+                    port=int(src_cfg.get("port") or 5432),
+                    database=str(src_cfg.get("database") or ""),
+                    username=str(src_cfg.get("username") or ""),
+                    password=str(src_cfg.get("password") or ""),
+                    schema=str(src_cfg.get("schema") or "public"),
+                    table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                    columns=target_cols,
+                    connection_string=str(src_cfg.get("connection_string") or ""),
+                    ssl=bool(src_cfg.get("ssl", False)),
+                )
+        except Exception as exc:
+            logging.getLogger(__name__).debug("ladder source load failed: %s", exc)
+
+    if not source_rows or not target_rows:
+        return report
+
+    dest_types = {
+        str(m.get("target") or ""): str(m.get("target_type") or m.get("inferredType") or "")
+        for m in mappings
+        if m.get("target") and (m.get("target_type") or m.get("inferredType"))
+    }
+    ladder = run_five_layer_verification(
+        source_rows=source_rows,
+        target_rows=target_rows,
+        columns=target_cols,
+        pk_column=pk_column,
+        source_row_count=int(report.get("source_rows") or len(source_rows)),
+        target_row_count=int(report.get("target_rows") or len(target_rows)),
+        rejected_rows=int(report.get("rejected_rows") or 0),
+        coerced_null_rows=int(report.get("coerced_null_rows") or 0),
+        rows_skipped=int(report.get("rows_skipped") or 0),
+        source_checksum=str(report.get("source_checksum") or ""),
+        target_checksum=str(report.get("target_checksum") or ""),
+        dest_db_type=dest_type,
+        dest_types=dest_types,
+        # maximum: always run L4/L5. strict/balanced: localize only on L3 fail.
+        always_localize=str(validation_mode or "").lower() == "maximum",
+    )
+    return attach_ladder_to_reconcile_report(report, ladder)
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -177,8 +314,32 @@ def run_reconciliation(
     mappings: list[dict] | None = None,
     source_schema: dict[str, str] | None = None,
     validation_mode: str = "strict",
+    source_endpoint: EndpointConfig | None = None,
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
+
+    def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
+        # Property 3 — carry source snapshot id onto the reconcile report /
+        # migration certificate surface.
+        stamped = _finalize_reconcile(payload, dest_summary=dest_summary)
+        # Property 5 — attach L1–L5 ladder when both populations are available.
+        try:
+            stamped = _maybe_attach_verification_ladder(
+                stamped,
+                endpoint=endpoint,
+                source_endpoint=source_endpoint,
+                records=records,
+                columns=columns,
+                dest_summary=dest_summary,
+                mappings=mappings or [],
+                validation_mode=validation_mode,
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "verification ladder skipped: %s", exc, exc_info=exc
+            )
+        return stamped
+
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
     coerced_null_rows = int(dest_summary.get("coerced_null_rows", 0) or 0)
     rows_skipped = int(dest_summary.get("rows_skipped", 0) or 0)
@@ -199,7 +360,7 @@ def run_reconciliation(
         # proves bytes landed, not per-cell fidelity. Operational write may pass;
         # never stamp migration_proven / cell-fidelity Gate-8 green.
         checksum = str(writer_checksum or dest_summary.get("checksum") or "").strip()
-        return _finalize_reconcile({
+        return _finalize({
             "passed": True,
             "unproven": True,
             "skipped_readback": True,
@@ -320,7 +481,7 @@ def run_reconciliation(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
         )
-        return _finalize_reconcile(report.to_dict())
+        return _finalize(report.to_dict())
 
     # Request a real read-back; if the verifier is unavailable we will detect
     # the negative row count and surface a softer "writer only" result.
@@ -413,7 +574,7 @@ def run_reconciliation(
             # A failed read is not "no rows to compare". Skipping Gate-8 here
             # used to report a clean reconcile while the destination was
             # unreachable — the exact silent-pass the proof bar forbids.
-            return _finalize_reconcile({
+            return _finalize({
                 "passed": False,
                 "message": (
                     "Gate-8 sample compare unavailable: could not read destination "
@@ -460,7 +621,7 @@ def run_reconciliation(
                     key_values=delete_pks,
                 )
             except TargetSampleUnavailable as exc:
-                return _finalize_reconcile({
+                return _finalize({
                     "passed": False,
                     "message": (
                         "Gate-8 delete proof unavailable: could not read destination "
@@ -475,7 +636,7 @@ def run_reconciliation(
                     "coerced_null_rows": coerced_null_rows,
                 })
             if still_present:
-                return _finalize_reconcile({
+                return _finalize({
                     "passed": False,
                     "message": (
                         f"Gate-8 delete proof failed: {len(still_present)} deleted "
@@ -512,14 +673,15 @@ def run_reconciliation(
             and int(sample_compare.get("compared") or 0) > 0
             and rows_written == expected_written
         ):
-            return _finalize_reconcile({
+            return _finalize({
                 "passed": True,
                 "message": (
-                    f"Gate-8 sample-verified {int(sample_compare.get('compared') or 0)} "
+                    f"Gate-8 sample screening compared "
+                    f"{int(sample_compare.get('compared') or 0)} "
                     f"key-aligned field(s) for '{db_type}' "
                     f"({rows_written:,} rows written"
                     + (f", {rejected_rows:,} rejected" if rejected_rows else "")
-                    + ")"
+                    + ") — screening only, not population proof"
                 ),
                 "source_rows": source_rows,
                 "target_rows": rows_written,
@@ -529,9 +691,10 @@ def run_reconciliation(
                 "coerced_null_rows": coerced_null_rows,
                 "rows_skipped": rows_skipped,
                 "sample_compare": sample_compare,
+                "assurance_level": "sample_screening",
             })
         if strict_checksum and not dest_only:
-            return _finalize_reconcile({
+            return _finalize({
                 "passed": False,
                 "message": (
                     "Strict reconciliation requires an independent destination read-back; "
@@ -547,7 +710,7 @@ def run_reconciliation(
                 "sample_compare": sample_compare,
             })
         if rows_written == expected_written:
-            return _finalize_reconcile({
+            return _finalize({
                 "passed": True,
                 "message": (
                     f"Transfer verified by writer: {rows_written:,} rows written"
@@ -575,7 +738,7 @@ def run_reconciliation(
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
         )
-        return _finalize_reconcile(report.to_dict())
+        return _finalize(report.to_dict())
 
     # Data loss signal: the target table holds fewer rows than we just wrote.
     if target_rows < rows_written:
@@ -590,7 +753,7 @@ def run_reconciliation(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
         )
-        return _finalize_reconcile(report.to_dict())
+        return _finalize(report.to_dict())
 
     # We have a verified read-back. Extra dest rows are legitimate for append /
     # upsert into a non-empty sink; overwrite/mirror/replace must not soft-pass
@@ -676,4 +839,4 @@ def run_reconciliation(
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
     )
-    return _finalize_reconcile(report.to_dict())
+    return _finalize(report.to_dict())

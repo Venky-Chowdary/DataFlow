@@ -59,6 +59,7 @@ def stamp_additive_mappings_for_write(
     column_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
     sample_rows: list[dict] | None = None,
+    dest_table_exists: bool | None = None,
 ) -> list[dict]:
     """Decision Kernel stamp for ADD COLUMN under backfill / create-new.
 
@@ -70,6 +71,7 @@ def stamp_additive_mappings_for_write(
     try:
         from services.batch_progress import effective_backfill_new_fields
         from services.decision_kernel import stamp_additive_mapping_types
+        from services.sync_cursor import is_overwrite_sync, resolve_effective_sync_mode
     except Exception as exc:
         # Fail-closed: never Execute create/backfill without Kernel invent surface.
         raise ValueError(
@@ -95,6 +97,17 @@ def stamp_additive_mappings_for_write(
     for k in list(samples_by_src.keys()):
         samples_by_src[k] = samples_by_src[k][:32]
     dest_db = str(getattr(request.destination, "format", "") or "").lower()
+    # Overwrite into a missing object → CREATE TABLE invent authority.
+    table_exists = dest_table_exists
+    if table_exists is None:
+        try:
+            sync = resolve_effective_sync_mode(
+                str(getattr(request, "sync_mode", "") or "")
+            )
+            if is_overwrite_sync(sync) and not (dest_types or {}):
+                table_exists = False
+        except Exception:
+            table_exists = dest_table_exists
     try:
         stamped, unstamped = stamp_additive_mapping_types(
             mappings,
@@ -103,12 +116,13 @@ def stamp_additive_mappings_for_write(
             source_types=column_types or {},
             samples_by_source=samples_by_src,
             backfill_new_fields=bool(backfill),
+            dest_table_exists=table_exists,
         )
     except Exception as exc:
         raise ValueError(
             f"Decision Kernel additive stamp failed — refuse Execute ({exc})"
         ) from exc
-    needs_stamp = bool(backfill) or any(
+    needs_stamp = bool(backfill) or table_exists is False or any(
         bool(m.get("create_new"))
         or str(m.get("assignment_strategy") or "")
         in {"create_compatible_new", "identity_passthrough"}

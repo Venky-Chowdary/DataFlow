@@ -229,8 +229,10 @@ def test_array_to_json_is_document_collapse_not_preserve():
     assert is_lossy_coercion("ARRAY<INTEGER>", "JSONB") is True
     assert normalize_logical_type("INTEGER[]") == "array"
     assert parse_array_element("INTEGER[]") == "INTEGER"
-    assert ddl_type("postgresql", "ARRAY<INTEGER>") == "INTEGER[]"
-    assert ddl_type("postgresql", "INTEGER[]") == "INTEGER[]"
+    # Ambiguous INTEGER leaf invents 64-bit; INT4 keeps 32-bit arrays.
+    assert ddl_type("postgresql", "ARRAY<INTEGER>") == "BIGINT[]"
+    assert ddl_type("postgresql", "INTEGER[]") == "BIGINT[]"
+    assert ddl_type("postgresql", "ARRAY<INT4>") == "INTEGER[]"
 
 
 def test_ntz_to_tz_is_polarity_loss_and_bind_refuses_naive():
@@ -391,11 +393,11 @@ def test_float_int_udt_invent_width_wave20():
     assert is_lossy_coercion("REAL", "DOUBLE") is False
 
     assert create_new_mapping_target_type("TINYINT", "postgresql") == "SMALLINT"
-    assert create_new_mapping_target_type("INTEGER", "postgresql") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "postgresql") == "BIGINT"
     assert create_new_mapping_target_type("TINYINT", "mysql") == "TINYINT"
     assert create_new_mapping_target_type("TINYINT UNSIGNED", "mysql") == "TINYINT UNSIGNED"
     assert create_new_mapping_target_type("MEDIUMINT", "mysql") == "MEDIUMINT"
-    assert create_new_mapping_target_type("INTEGER", "oracle") == "NUMBER(10,0)"
+    assert create_new_mapping_target_type("INTEGER", "oracle") == "NUMBER(38,0)"
     assert create_new_mapping_target_type("BIGINT", "oracle") == "NUMBER(38,0)"
     assert is_lossy_coercion("INTEGER", "BIGINT") is False
 
@@ -422,7 +424,7 @@ def test_dest_alias_tz_longraw_uuid_wave21():
     assert create_new_mapping_target_type("NUMBER", "postgres") == "NUMERIC"
     assert create_new_mapping_target_type("DATE", "cockroachdb") == "DATE"
     assert create_new_mapping_target_type("BOOLEAN", "supabase") == "BOOLEAN"
-    assert create_new_mapping_target_type("INTEGER", "alloydb") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "alloydb") == "BIGINT"
 
     assert timezone_aware_would_collapse_to_string("TIMESTAMPTZ", "TEXT") is True
     assert is_lossy_coercion("TIMESTAMPTZ", "TEXT") is True
@@ -464,9 +466,9 @@ def test_decfloat_alias_sdo_array_wave22():
 
     assert create_new_mapping_target_type("INTEGER", "mongo") == "long"
     assert create_new_mapping_target_type("INTEGER", "documentdb") == "long"
-    assert create_new_mapping_target_type("INTEGER", "neon") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "neon") == "BIGINT"
     assert create_new_mapping_target_type("INTEGER", "db2") == "BIGINT"
-    assert create_new_mapping_target_type("INTEGER", "fabric") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "fabric") == "BIGINT"
 
     assert spatial_polarity("SDO_GEOMETRY") == "sdo"
     assert is_lossy_coercion("GEOGRAPHY", "SDO_GEOMETRY") is True
@@ -474,7 +476,8 @@ def test_decfloat_alias_sdo_array_wave22():
 
     assert float_mantissa_bits("REAL UNSIGNED") == 24
     assert create_new_mapping_target_type("REAL UNSIGNED", "postgresql") == "REAL"
-    assert create_new_mapping_target_type("ARRAY<INT>", "postgresql") == "INTEGER[]"
+    assert create_new_mapping_target_type("ARRAY<INT>", "postgresql") == "BIGINT[]"
+    assert create_new_mapping_target_type("ARRAY<INT4>", "postgresql") == "INTEGER[]"
 
     assert is_lossy_coercion("NUMBER", "BIGNUMERIC") is True
     assert is_lossy_coercion("SMALLDATETIME", "TIMESTAMP(0)") is True
@@ -515,7 +518,7 @@ def test_long_int8_varbyte_national_wave23():
     assert create_new_mapping_target_type("SYSNAME", "sqlserver") == "NVARCHAR(128)"
     assert normalize_logical_type("Nullable(Int32)") == "integer"
     assert create_new_mapping_target_type("Nullable(Int32)", "postgresql") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "azure-sql") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "azure-sql") == "BIGINT"
 
 
 def test_aurora_clickhouse_unsigned_wave24():
@@ -527,10 +530,10 @@ def test_aurora_clickhouse_unsigned_wave24():
         unsigned_signed_polarity_invent,
     )
 
-    assert create_new_mapping_target_type("INTEGER", "aurora_postgres") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "aurora_postgres") == "BIGINT"
     assert create_new_mapping_target_type("DATE", "pgbouncer") == "DATE"
-    assert create_new_mapping_target_type("INTEGER", "aurora_mysql") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "singlestore") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "aurora_mysql") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "singlestore") == "BIGINT"
     assert create_new_mapping_target_type("BOOLEAN", "memsql") == "BOOLEAN"
 
     assert specialty_carrier_base("Enum8('a'=1)") == "ENUM8"
@@ -554,14 +557,14 @@ def test_cloud_aliases_uuid_agg_wave25():
         specialty_carrier_base,
     )
 
-    assert create_new_mapping_target_type("INTEGER", "athena") == "integer"
-    assert create_new_mapping_target_type("INTEGER", "hive") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "redshift_serverless") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "snowflake_aws") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "cloudsql_postgres") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "cloudsql_mysql") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "rds_mysql") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "percona") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "athena") == "bigint"
+    assert create_new_mapping_target_type("INTEGER", "hive") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "redshift_serverless") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "snowflake_aws") == "NUMBER(38,0)"
+    assert create_new_mapping_target_type("INTEGER", "cloudsql_postgres") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "cloudsql_mysql") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "rds_mysql") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "percona") == "BIGINT"
     assert create_new_mapping_target_type("INTEGER", "spanner") == "INT64"
     assert create_new_mapping_target_type("INTEGER", "cassandra") == "BIGINT"
 
@@ -589,28 +592,28 @@ def test_connector_aliases_identity_ring_decimal_wave26():
         specialty_carrier_base,
     )
 
-    assert create_new_mapping_target_type("INTEGER", "doris") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "starrocks") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "tidb_cloud") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "oceanbase") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "polardb") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "gaussdb") == "INT"
-    assert create_new_mapping_target_type("INTEGER", "openGauss") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "kingbase") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "hologres") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "greenplum_cloud") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "supabase_db") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "neon_serverless") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "motherduck") == "INTEGER"
+    assert create_new_mapping_target_type("INTEGER", "doris") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "starrocks") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "tidb_cloud") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "oceanbase") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "polardb") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "gaussdb") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "openGauss") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "kingbase") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "hologres") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "greenplum_cloud") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "supabase_db") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "neon_serverless") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "motherduck") == "BIGINT"
     assert create_new_mapping_target_type("INTEGER", "libsql") == "INTEGER"
     assert create_new_mapping_target_type("INTEGER", "turso") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "bytehouse") == "Int32"
+    assert create_new_mapping_target_type("INTEGER", "bytehouse") == "Int64"
     assert create_new_mapping_target_type("INTEGER", "teradata") == "BIGINT"
     assert create_new_mapping_target_type("INTEGER", "vertica") == "BIGINT"
-    assert create_new_mapping_target_type("INTEGER", "materialize") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "risingwave") == "INTEGER"
-    assert create_new_mapping_target_type("INTEGER", "dremio") == "integer"
-    assert create_new_mapping_target_type("INTEGER", "maxcompute") == "INT"
+    assert create_new_mapping_target_type("INTEGER", "materialize") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "risingwave") == "BIGINT"
+    assert create_new_mapping_target_type("INTEGER", "dremio") == "bigint"
+    assert create_new_mapping_target_type("INTEGER", "maxcompute") == "BIGINT"
 
     assert is_identity_column("IDENTITY(1,1)") is True
     assert normalize_logical_type("IDENTITY(1,1)") == "integer"
@@ -656,9 +659,10 @@ def test_struct_int64_interval_identity_document_wave17():
 
     assert integer_bit_width("INT64") == 64
     assert integer_bit_width("LONG") == 64
-    assert integer_width_would_narrow("INT64", "INT") is True
-    assert is_lossy_coercion("INT64", "INTEGER") is True
-    assert is_lossy_coercion("LONG", "INT") is True
+    # Ambiguous INT/INTEGER have unknown width; INT4 is the 32-bit carrier.
+    assert integer_width_would_narrow("INT64", "INT4") is True
+    assert is_lossy_coercion("INT64", "INT4") is True
+    assert is_lossy_coercion("LONG", "INT4") is True
 
     assert normalize_logical_type("INTERVAL DAY") == "interval"
     assert interval_family_would_collapse("INTERVAL DAY", "INTERVAL YEAR") is True
@@ -934,13 +938,13 @@ def test_integer_float_specialty_vector_honesty_wave11():
         vector_dim_mismatch,
     )
 
-    assert integer_width_would_narrow("BIGINT", "INTEGER") is True
-    assert is_lossy_coercion("BIGINT", "INTEGER") is True
-    assert is_lossy_coercion("INTEGER", "SMALLINT") is True
+    assert integer_width_would_narrow("BIGINT", "INT4") is True
+    assert is_lossy_coercion("BIGINT", "INT4") is True
+    assert is_lossy_coercion("INT4", "SMALLINT") is True
     assert is_lossy_coercion("INTEGER", "BIGINT") is False
 
     assert float_mantissa_would_narrow("DOUBLE", "REAL") is True
-    assert is_lossy_coercion("DOUBLE PRECISION", "FLOAT") is True
+    assert is_lossy_coercion("DOUBLE PRECISION", "FLOAT32") is True
     assert is_lossy_coercion("REAL", "DOUBLE") is False
 
     assert specialty_polarity_mismatch("INET", "CIDR") is True

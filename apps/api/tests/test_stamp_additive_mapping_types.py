@@ -115,7 +115,8 @@ def test_stamp_additive_live_carrier_overrides_map_invent():
     assert mappings[0].get("create_new") is False
 
 
-def test_stamp_additive_without_backfill_lists_unstamped():
+def test_stamp_additive_without_backfill_leaves_blank_not_unstamped():
+    """No invent authority → blank stamp, not a g6 invent-failure (Property 2)."""
     mappings, unstamped = stamp_additive_mapping_types(
         [
             {
@@ -127,8 +128,55 @@ def test_stamp_additive_without_backfill_lists_unstamped():
         dest_db="postgresql",
         live_dest_types={"id": "INTEGER"},
         backfill_new_fields=False,
+        dest_table_exists=True,
     )
-    assert "note" in unstamped
+    assert unstamped == []
+    assert not str(mappings[0].get("target_type") or "").strip()
+
+
+def test_stamp_additive_create_table_invents_without_backfill():
+    """Missing dest object invents CREATE TABLE stamps (legitimate happy path)."""
+    mappings, unstamped = stamp_additive_mapping_types(
+        [
+            {"source": "id", "target": "id", "source_type": "BIGINT"},
+            {"source": "nm", "target": "nm", "source_type": "TEXT"},
+        ],
+        dest_db="postgresql",
+        live_dest_types={},
+        backfill_new_fields=False,
+        dest_table_exists=False,
+    )
+    assert unstamped == []
+    assert mappings[0]["target_type"]
+    assert mappings[1]["target_type"]
+    assert mappings[0].get("create_new") is True
+
+
+def test_stamp_additive_invent_refused_lists_unstamped(monkeypatch):
+    """Invent-required but refused → unstamped (gate BLOCK path)."""
+    from services.decision_kernel import invent as invent_mod
+    from services.decision_kernel.invent import InventRefused, InventContext
+
+    def _boom(*_a, **_k):
+        raise InventRefused("forced", context=InventContext.CREATE_NEW)
+
+    monkeypatch.setattr(invent_mod, "invent_dest_type", _boom)
+    mappings, unstamped = stamp_additive_mapping_types(
+        [
+            {
+                "source": "x",
+                "target": "x",
+                "source_type": "TEXT",
+                "create_new": True,
+                "assignment_strategy": "create_compatible_new",
+            }
+        ],
+        dest_db="postgresql",
+        live_dest_types={"id": "INTEGER"},
+        backfill_new_fields=True,
+        dest_table_exists=True,
+    )
+    assert "x" in unstamped
     assert not str(mappings[0].get("target_type") or "").strip()
 
 

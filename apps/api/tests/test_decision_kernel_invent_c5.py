@@ -92,10 +92,11 @@ def test_same_conversion_different_ddl_by_context():
         context=InventContext.BIND_EXISTING,
         existing_dest_type="INT",
     )
-    # Create-new follows width-preserving create_new stamp; bind keeps live INT.
+    # Ambiguous INTEGER invents 64-bit; bind keeps live INT. INT4 stays 32-bit.
     from services.decision_kernel import create_new_mapping_target_type
 
-    assert create == create_new_mapping_target_type("INTEGER", "mysql")
+    assert create == create_new_mapping_target_type("INTEGER", "mysql") == "BIGINT"
+    assert create_new_mapping_target_type("INT4", "mysql") == "INT"
     assert bound.upper() in {"INT", "INTEGER"}
 
 

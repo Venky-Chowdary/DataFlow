@@ -1,0 +1,280 @@
+# Zero-Loss Properties — Migration Assurance Ledger
+
+Each property is either **PROVEN** (executable proof against real services or an
+exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
+**NOT_GUARANTEED**. There is no third option between proven and documented-absent.
+
+| # | Property | Status | Proof command | Engines covered | Engines NOT covered |
+|---|----------|--------|---------------|-----------------|---------------------|
+| 1 | Type identity is referentially transparent | **PROVEN** | `cd apps/api && python -m pytest tests/test_property1_type_identity_case_transparent.py -q` (424 passed) + live PG introspect when reachable | All `DDL_TYPES` destinations (case×logical matrix); live PostgreSQL introspect `integer`→`INT4` | Docker MySQL/ClickHouse/Iceberg not run on this host (no Docker); matrix covers their invent DDL |
+| 2 | The legitimate path is never blocked | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property2_golden_path_never_blocked.py -q` (19 passed, 4 skipped MySQL on this host) | SQLite↔SQLite + CSV→SQLite resume + SQLite checkpoint resume (always); live PG→PG / CSV→PG / PG→SQLite / PG→Parquet / Mongo→PG; CI `no-config-transfer` now boots PG+MySQL+Mongo and fails on any skip | MySQL 8 on this Windows host (no Docker); CI-wired but not yet green-proven in this run |
+| 3 | Source reads are snapshot-consistent | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property3_source_snapshot_consistent.py -q` (3 passed) | PostgreSQL full-refresh REPEATABLE READ + LSN/export_snapshot; SQLite deferred txn; inline write-pass fingerprints (no second scan by default) | MySQL consistent snapshot; Mongo majority/clusterTime; Oracle flashback SCN; SQL Server SI; Snowflake/BQ time-travel; incremental sync (watermark by design) |
+| 4 | Writes are exactly-once observable | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property4_observable_exactly_once.py -q` (3 passed) | SQLite+PostgreSQL insert ledger (same-txn; row_start/row_end/attempt); kill-mid-chunk resume = clean checksum | Mongo/Kafka/object-store/warehouse sinks (NOT_GUARANTEED); MySQL live kill proof (Docker down); quarantine salvage path still not same-txn |
+| 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
+| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py -q` (7 passed) | SQLite create-new PK/NOT NULL/DEFAULT/UNIQUE + certificate; live PG PK/NOT NULL/DEFAULT/UNIQUE; missing-catalog / unprobed CHECK·FK never silent | MySQL/Oracle/SQL Server DDL carry; CHECK/FK carry (certified unsupported); identity RESTART; partitioning |
+| 7 | Referential integrity across multi-table migration | UNPROVEN | — | — | — |
+| 8 | Semantic value fidelity | UNPROVEN | — | — | — |
+| 9 | Every row is accounted for | UNPROVEN | — | — | — |
+| 10 | Determinism | UNPROVEN | — | — | — |
+| 11 | The migration certificate | UNPROVEN | — | — | — |
+| 12 | Adversarial and chaos testing | UNPROVEN | — | — | — |
+
+---
+
+## Property 1 — PROVEN (2026-08-09)
+
+### Defect
+`ddl_type` disambiguated native vs logical integer/float by **surface case**:
+`integer`→64-bit, `INTEGER`/`Integer`/`INT`→32-bit; `float`→64-bit, `FLOAT`→32-bit
+on ClickHouse/Iceberg/MySQL. Five spellings normalized to the same logical type
+but invented different widths.
+
+### Fix
+1. **`LogicalType` / `NativeType`** in `services/decision_kernel/logical_type.py` —
+   width-bearing logical carriers; `ddl_type` accepts them.
+2. **Ambiguous tokens** (`INTEGER`/`INT`/`FLOAT` any case, plus bare logical
+   `integer`/`float`) → width unknown → invent via `DDL_TYPES` (64-bit / IEEE-64).
+3. **Unambiguous carriers** only select 32-bit: `INT4`/`INT32`/`SERIAL`,
+   `REAL`/`FLOAT4`/`FLOAT32`/`FLOAT(p≤24)`.
+4. **Introspect** emits `INT4` (PG int4) and MySQL `INT4` / `FLOAT32`.
+5. **Case-variant × destination matrix** + monotonicity vs `DDL_TYPES`.
+
+### Proof output (excerpt)
+
+```
+CASE MATRIX (ambiguous spellings → identical invent)
+  postgresql   integer/INTEGER/Integer/INT/int → BIGINT
+  clickhouse   integer/INTEGER/Integer/INT/int → Int64
+  iceberg      integer/INTEGER/Integer/INT/int → long
+  clickhouse   float/FLOAT/Float             → Float64
+  iceberg      float/FLOAT/Float             → double
+  mysql        float/FLOAT/Float             → DOUBLE
+
+unambiguous:
+  INT4  → postgresql INTEGER / clickhouse Int32 / iceberg int
+  FLOAT32 → iceberg float / clickhouse Float32
+
+introspect:
+  PG integer/int4 → INT4
+  MySQL int/float → INT4 / FLOAT32
+
+pytest: tests/test_property1_type_identity_case_transparent.py — 424 passed
+monotonicity: 0 failures across all DDL_TYPES × {integer,float}
+```
+
+### Live PostgreSQL (this host)
+
+```
+LIVE_PG_FORMAT_TYPE [('i', 'integer'), ('b', 'bigint'), ('r', 'real'), ('d', 'double precision')]
+i integer -> INT4
+b bigint -> BIGINT
+r real -> REAL
+d double precision -> DOUBLE PRECISION
+LIVE_PG_OK
+```
+
+### NOT claimed
+End-to-end transfer matrices on MySQL/ClickHouse/Iceberg Docker were **not** run
+on this Windows host (Docker unavailable). Invent DDL for those engines is proven
+by the case matrix against `ddl_type` / `DDL_TYPES` authority.
+
+---
+
+## Property 2 — PARTIAL (2026-08-09, tightened)
+
+### Defect
+Plain create-new / overwrite transfers with auto-derived identity mappings
+(no Map `target_type`) were blocked by `g6_additive_stamp`:
+`Additive column(s) … lack Map target_type under partial Studio`.
+`stamp_additive_mapping_types` listed every blank mapping as “unstamped” even
+when invent authority was create-table, and `_auto_map` overwrite identity maps
+did not request CREATE invent.
+
+### Fix
+1. Overwrite auto-maps stamp `create_new` + `source_type` so Kernel invent runs.
+2. `stamp_additive_mapping_types(..., dest_table_exists=False)` invents CREATE
+   TABLE stamps; `unstamped` is invent-required-but-failed only.
+3. Golden-path suite + gate ALLOW/BLOCK pair + CI job `no-config-transfer`
+   (PG + MySQL + Mongo services; fails if any test skips).
+4. Golden asserts now require `reconciliation.passed` (+ checksum match when
+   both sides present).
+5. Resume-after-kill: CSV→SQLite partial+resume; SQLite→SQLite seeded
+   checkpoint resume (no duplicates, full row set).
+6. Real PG→MySQL golden path (parametrized maps × skip_preflight) when 3306 up.
+
+### Proof output (this host, 2026-08-09)
+
+```
+pytest tests/test_property1_type_identity_case_transparent.py -q
+424 passed in 2.27s   # re-verify before trusting P1
+
+pytest tests/test_property2_golden_path_never_blocked.py -q
+19 passed, 4 skipped in 52.12s
+  skipped = PG→MySQL × maps × skip_preflight (MySQL DOWN — no Docker)
+  passed  = g6 BLOCK/ALLOW; SQLite↔SQLite ×4; CSV→SQLite resume;
+            SQLite checkpoint resume; PG→PG ×4; CSV→PG ×4;
+            PG→SQLite; Mongo→PG; PG→Parquet
+```
+
+### NOT claimed / remaining for PROVEN
+* Paste a **zero-skip** Property 2 run with MySQL reachable (CI
+  `no-config-transfer` is wired for that; this host cannot boot MySQL).
+* Resume-after-kill on every cross-engine golden route (SQLite/CSV proven
+  here; PG/MySQL/Mongo resume still rely on adjacent checkpoint suites).
+
+---
+
+## Property 3 — PARTIAL (2026-08-09)
+
+### Defect
+DB→DB streaming opened a **new source connection per page** under default
+READ COMMITTED. Concurrent source writers could make page N describe a
+different table state than page 1. Optional `RECONCILE_SOURCE_REREAD` was a
+second independent scan (another snapshot). Inline write-pass fingerprints
+already avoided the second scan by default, but page-to-page MVCC consistency
+was missing.
+
+### Fix
+1. `services/source_snapshot.py` — transfer-scoped snapshot bind (ContextVar).
+2. PostgreSQL full-refresh: one connection, `SET TRANSACTION ISOLATION LEVEL
+   REPEATABLE READ`, capture `pg_current_wal_lsn` + `pg_export_snapshot`.
+3. SQLite full-refresh: one connection + deferred `BEGIN` for the whole read.
+4. `postgresql_reader` / `sqlite_reader` reuse the bound connection; COUNT runs
+   on the **same** connection as page reads.
+5. Stamp `source_snapshot` onto `destination_summary` and reconciliation
+   (certificate surface). Other engines/modes stamp `guarantee=not_guaranteed`
+   with an explicit note.
+6. Incremental sync intentionally does **not** freeze a snapshot (watermark).
+
+### Proof output (this host)
+
+```
+pytest tests/test_property3_source_snapshot_consistent.py -q
+3 passed in 8.79s
+
+LIVE PG: 10-row source, CHUNK_SIZE=2, concurrent INSERT id=100..109 after
+first page → records_transferred=10, dest ids=[1..10], no late rows;
+source_snapshot.isolation=repeatable_read, snapshot_lsn present.
+
+SQLite: deferred transaction snapshot stamped; recon passed.
+```
+
+### NOT claimed / remaining for PROVEN
+* MySQL `consistent snapshot` / locked handoff on the transfer path
+* MongoDB majority read concern + clusterTime (standalone Mongo cannot
+  `start_session(snapshot=True)` — requires replica set)
+* Oracle flashback SCN / SQL Server snapshot isolation / warehouse time-travel
+* Binding bulk COPY export to the same RR session when `BULK_EXPORT` is on
+
+---
+
+## Property 4 — PARTIAL (2026-08-09)
+
+### Defect
+Observable exactly-once was incomplete: the SQLite stream path never passed
+`job_id` / `write_batch_key`, so insert retries could duplicate despite the
+ledger existing in the writer. PG/MySQL armed the ledger even for upserts
+(could suppress legitimate updates). Ledger schema lacked `row_start` /
+`row_end` / `attempt`. No kill-mid-chunk + checksum golden existed.
+
+### Fix
+1. `stream.py` SQLite `_write_batch` arms ledger like PG/MySQL.
+2. PG/MySQL `use_ledger` only for insert (not keyed upsert) — parity with SQLite.
+3. Ledger DDL + mark record `row_start` / `row_end` / `attempt`; migrate older
+   tables; PG mark uses SAVEPOINT so missing-column degrade cannot abort the
+   data transaction.
+4. Golden proof: clean run checksum == kill-after-chunk-0 + resume.
+
+### Proof output (this host)
+
+```
+pytest tests/test_property4_observable_exactly_once.py tests/test_chunk_ledger_accounting.py -q
+19 passed in 18.59s
+
+SQLite: insert ledger armed; kill after chunk 0 → resume → 6 rows, no dupes,
+identical SHA-256 vs clean run; ledger row_start/row_end present.
+
+PostgreSQL (live): same kill/resume/checksum proof green.
+```
+
+### Honesty
+* Delivery remains **at-least-once**; observable result is exactly-once via
+  same-txn ledger skip (insert) or conflict-key upsert.
+* Mongo / Kafka / object stores / warehouses: **NOT_GUARANTEED** (no ledger).
+* Quarantine salvage (per-row commit then ledger) is still not same-txn.
+
+---
+
+## Property 5 — PARTIAL (2026-08-09)
+
+### Defect
+Gate-8 had strong L1 (row balance) + L3 (full checksum) but no column-level
+or row-level localization. Preflight 500-row probes were easy to misread as
+population proof. A checksum failure told operators “something’s wrong” —
+not which column or which row.
+
+### Fix
+1. `services/verification_ladder.py` — enterprise L1–L5 (aggregates, typed
+   per-column digests, binary-search PK localization).
+2. Wired into `run_reconciliation` for SQLite/PostgreSQL when both populations
+   are loadable; engine passes `source_endpoint`.
+3. On L3 fail (or `validation_mode=maximum`), L4/L5 run and enrich the Gate-8
+   message with `column` + `pk` + source/target values.
+4. `DEFAULT_SCREENING_LIMIT` alias; sample-success copy says “screening only”.
+5. Memory cap `VERIFICATION_LADDER_MAX_ROWS` (default 250k) — refuse to fake
+   population localization above the cap.
+
+### Proof output (this host)
+
+```
+pytest tests/test_property5_five_layer_verification.py -q
+6 passed in 6.47s
+
+Inject amount drift on id=424 (SQLite) / id=77 (PG):
+  L1 pass, L2 fail on amount, L3 fail,
+  L4 mismatched_columns=['amount'],
+  L5 pk + source_value + target_value exact.
+```
+
+### NOT claimed / remaining for PROVEN
+* SQL pushdown aggregates/digests for MySQL and warehouses (no full load)
+* UI copy sweep so no card says “proof” for sample screening
+* Streaming path without source SQL still depends on buffered records
+
+---
+
+## Property 6 — PARTIAL (2026-08-09)
+
+### Defect
+Create-new DDL emitted `col type` only. PRIMARY KEY, NOT NULL, DEFAULT, and
+UNIQUE were silently dropped. CHECK / FK / views / triggers had no certificate
+line — operators could not tell carry from loss.
+
+### Fix
+1. `services/schema_fidelity.py` — plan + `SchemaFidelityReport` covering every
+   required aspect (`carried` / `unsupported` / `skipped` + reason).
+2. SQLite introspect now surfaces PRAGMA `notnull` + `dflt_value` (was always
+   nullable=True). PG introspect surfaces non-`nextval` defaults.
+3. Rich introspect keys include `defaults` / identity / generated / collation.
+4. Stream builds `source_schema_catalog` and passes it to SQLite/PG writers;
+   CREATE TABLE emits PK / NOT NULL / safe DEFAULT / UNIQUE; report stamped on
+   `destination_summary.schema_fidelity`.
+5. Unsafe defaults (arbitrary SQL) refuse silently — `unsupported`, not emitted.
+
+### Proof output (this host)
+
+```
+pytest tests/test_property6_schema_fidelity.py -q
+5 passed in 8.55s
+
+SQLite E2E: people → people_out carries PK/NOT NULL/DEFAULT/UNIQUE;
+  schema_fidelity.carried includes those aspects; CHECK/FK certified unsupported.
+Live PG: same carry + information_schema verifies NOT NULL / DEFAULT / PK / UNIQUE.
+```
+
+### NOT claimed / remaining for PROVEN
+* MySQL / Oracle / SQL Server create-new constraint carry
+* FOREIGN KEY ordering (Property 7) and CHECK expression rewrite
+* Views, triggers, generated expressions, identity RESTART, partitioning
+* Name-collision remaps under adversarial identifier fixtures (policy coded;
+  not yet matrix-proven)

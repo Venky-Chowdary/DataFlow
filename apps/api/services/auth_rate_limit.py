@@ -1,8 +1,9 @@
-"""Login rate limit + progressive lockout (audit §6.2).
+"""Login rate limit + exponential lockout (audit ITEM 4).
 
-Per-IP and per-email token buckets with failed-attempt lockout. Fail-closed on
-excess attempts (HTTP 429). Disable only via ``DATAFLOW_AUTH_RATE_LIMIT=0``
-(never the default in production).
+Reuses ``TokenBucketStore`` from ``mcp_rate_limit`` (do not invent a second
+bucket). Applies **independent** per-IP and per-account throttles — either
+exhausted bucket denies the attempt. Failed logins escalate lockout with
+exponential backoff on both dimensions.
 """
 
 from __future__ import annotations
@@ -10,7 +11,9 @@ from __future__ import annotations
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+
+from services.mcp_rate_limit import TokenBucketStore
 
 
 def _env_float(name: str, default: float) -> float:
@@ -34,15 +37,16 @@ def _env_int(name: str, default: int) -> int:
 
 
 @dataclass
-class _Bucket:
-    tokens: float
-    updated_at: float = field(default_factory=time.monotonic)
+class _LockoutState:
     failures: int = 0
     locked_until: float = 0.0
+    # How many lockout cycles have fired; drives exponential backoff.
+    lockout_streak: int = 0
 
 
+_RATE_STORE = TokenBucketStore()
 _LOCK = threading.Lock()
-_BUCKETS: dict[str, _Bucket] = {}
+_LOCKOUTS: dict[str, _LockoutState] = {}
 
 
 def auth_rate_limit_enabled() -> bool:
@@ -51,87 +55,165 @@ def auth_rate_limit_enabled() -> bool:
 
 
 def reset_auth_rate_limits() -> None:
-    """Test helper — clear all buckets."""
+    """Test helper — clear rate buckets and lockout state."""
+    _RATE_STORE.clear()
     with _LOCK:
-        _BUCKETS.clear()
+        _LOCKOUTS.clear()
 
 
-def _client_key(ip: str, email: str) -> str:
-    ip_k = (ip or "unknown").strip().lower() or "unknown"
-    email_k = (email or "").strip().lower() or "anonymous"
-    return f"{ip_k}|{email_k}"
+def _norm_ip(ip: str) -> str:
+    return (ip or "unknown").strip().lower() or "unknown"
+
+
+def _norm_email(email: str) -> str:
+    return (email or "").strip().lower() or "anonymous"
+
+
+def _lockout_key(kind: str, value: str) -> str:
+    return f"{kind}:{value}"
+
+
+def _check_lockout(key: str, *, now: float) -> dict[str, float | bool | str] | None:
+    with _LOCK:
+        state = _LOCKOUTS.get(key)
+        if state is None:
+            return None
+        if state.locked_until > now:
+            return {
+                "allowed": False,
+                "locked": True,
+                "retry_after_sec": max(0.1, round(state.locked_until - now, 2)),
+                "principal": key,
+            }
+    return None
+
+
+def _maybe_engage_lockout(key: str, *, now: float) -> dict[str, float | bool | str] | None:
+    """If failure threshold reached, engage exponential lockout and deny."""
+    lockout_after = max(1, _env_int("DATAFLOW_AUTH_LOCKOUT_FAILURES", 8))
+    base_sec = max(1.0, _env_float("DATAFLOW_AUTH_LOCKOUT_SEC", 300.0))
+    max_sec = max(base_sec, _env_float("DATAFLOW_AUTH_LOCKOUT_MAX_SEC", 3600.0))
+
+    with _LOCK:
+        state = _LOCKOUTS.get(key)
+        if state is None:
+            return None
+        if state.locked_until > now:
+            return {
+                "allowed": False,
+                "locked": True,
+                "retry_after_sec": max(0.1, round(state.locked_until - now, 2)),
+                "principal": key,
+            }
+        if state.failures < lockout_after:
+            return None
+        state.lockout_streak = max(1, state.lockout_streak + 1)
+        # Exponential: base * 2^(streak-1), capped.
+        lock_sec = min(max_sec, base_sec * (2 ** (state.lockout_streak - 1)))
+        state.locked_until = now + lock_sec
+        state.failures = 0
+        return {
+            "allowed": False,
+            "locked": True,
+            "retry_after_sec": float(lock_sec),
+            "principal": key,
+        }
 
 
 def check_login_rate_limit(*, ip: str, email: str) -> dict[str, float | bool | str]:
-    """Consume one attempt token. Returns allowed / retry_after_sec / locked."""
+    """Deny when per-IP or per-account throttle/lockout is exhausted."""
     if not auth_rate_limit_enabled():
         return {"allowed": True, "disabled": True}
 
-    key = _client_key(ip, email)
-    capacity = max(1.0, _env_float("DATAFLOW_AUTH_RATE_BURST", 10.0))
-    refill_per_sec = max(0.05, _env_float("DATAFLOW_AUTH_RATE_QPS", 0.2))
-    lockout_after = max(3, _env_int("DATAFLOW_AUTH_LOCKOUT_FAILURES", 8))
-    lockout_sec = max(30.0, _env_float("DATAFLOW_AUTH_LOCKOUT_SEC", 300.0))
+    ip_k = _norm_ip(ip)
+    email_k = _norm_email(email)
+    ip_lock_key = _lockout_key("ip", ip_k)
+    email_lock_key = _lockout_key("email", email_k)
     now = time.monotonic()
 
-    with _LOCK:
-        bucket = _BUCKETS.get(key)
-        if bucket is None:
-            bucket = _Bucket(tokens=capacity, updated_at=now)
-            _BUCKETS[key] = bucket
+    for key in (ip_lock_key, email_lock_key):
+        denied = _check_lockout(key, now=now)
+        if denied is not None:
+            return denied
 
-        if bucket.locked_until > now:
-            return {
-                "allowed": False,
-                "locked": True,
-                "retry_after_sec": max(0.1, round(bucket.locked_until - now, 2)),
-                "principal": key,
-            }
-        # Progressive lockout after consecutive auth failures.
-        if bucket.failures >= lockout_after:
-            bucket.locked_until = now + lockout_sec
-            bucket.failures = 0
-            return {
-                "allowed": False,
-                "locked": True,
-                "retry_after_sec": lockout_sec,
-                "principal": key,
-            }
+    # Engage every over-threshold principal in one pass so sibling failure
+    # counters cannot immediately re-lock after the first dimension unlocks.
+    engaged: dict[str, float | bool | str] | None = None
+    for key in (ip_lock_key, email_lock_key):
+        denied = _maybe_engage_lockout(key, now=now)
+        if denied is not None and engaged is None:
+            engaged = denied
+    if engaged is not None:
+        return engaged
 
-        elapsed = max(0.0, now - bucket.updated_at)
-        bucket.tokens = min(capacity, bucket.tokens + elapsed * refill_per_sec)
-        bucket.updated_at = now
-        if bucket.tokens < 1.0:
-            need = 1.0 - bucket.tokens
-            retry = need / refill_per_sec
-            return {
-                "allowed": False,
-                "locked": False,
-                "retry_after_sec": max(0.1, round(retry, 2)),
-                "principal": key,
-            }
-        bucket.tokens -= 1.0
-        return {"allowed": True, "principal": key}
+    capacity = max(1.0, _env_float("DATAFLOW_AUTH_RATE_BURST", 10.0))
+    refill = max(0.05, _env_float("DATAFLOW_AUTH_RATE_QPS", 0.2))
+    max_keys = _env_int("DATAFLOW_AUTH_RATE_MAX_KEYS", 5000)
+
+    # Independent buckets — either may refuse.
+    ip_result = _RATE_STORE.consume(
+        f"ip:{ip_k}",
+        capacity=capacity,
+        refill_per_sec=refill,
+        max_keys=max_keys,
+    )
+    if not ip_result.get("allowed"):
+        return {
+            "allowed": False,
+            "locked": False,
+            "retry_after_sec": ip_result.get("retry_after_sec", 60),
+            "principal": f"ip:{ip_k}",
+        }
+
+    email_result = _RATE_STORE.consume(
+        f"email:{email_k}",
+        capacity=capacity,
+        refill_per_sec=refill,
+        max_keys=max_keys,
+    )
+    if not email_result.get("allowed"):
+        return {
+            "allowed": False,
+            "locked": False,
+            "retry_after_sec": email_result.get("retry_after_sec", 60),
+            "principal": f"email:{email_k}",
+        }
+
+    return {"allowed": True, "principal": f"ip:{ip_k}|email:{email_k}"}
 
 
 def record_login_failure(*, ip: str, email: str) -> None:
     if not auth_rate_limit_enabled():
         return
-    key = _client_key(ip, email)
+    ip_k = _norm_ip(ip)
+    email_k = _norm_email(email)
     with _LOCK:
-        bucket = _BUCKETS.get(key)
-        if bucket is None:
-            bucket = _Bucket(tokens=0.0)
-            _BUCKETS[key] = bucket
-        bucket.failures += 1
+        for key in (_lockout_key("ip", ip_k), _lockout_key("email", email_k)):
+            state = _LOCKOUTS.get(key)
+            if state is None:
+                state = _LockoutState()
+                _LOCKOUTS[key] = state
+            state.failures += 1
 
 
 def record_login_success(*, ip: str, email: str) -> None:
     if not auth_rate_limit_enabled():
         return
-    key = _client_key(ip, email)
+    ip_k = _norm_ip(ip)
+    email_k = _norm_email(email)
     with _LOCK:
-        bucket = _BUCKETS.get(key)
-        if bucket is not None:
-            bucket.failures = 0
-            bucket.locked_until = 0.0
+        for key in (_lockout_key("ip", ip_k), _lockout_key("email", email_k)):
+            state = _LOCKOUTS.get(key)
+            if state is not None:
+                state.failures = 0
+                state.locked_until = 0.0
+                state.lockout_streak = 0
+
+
+__all__ = [
+    "auth_rate_limit_enabled",
+    "check_login_rate_limit",
+    "record_login_failure",
+    "record_login_success",
+    "reset_auth_rate_limits",
+]

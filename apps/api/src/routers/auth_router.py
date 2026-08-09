@@ -556,7 +556,7 @@ async def sso_post_callback(sso_type: str, request: Request):
 
 @router.get("/bootstrap")
 async def auth_bootstrap(request: Request):
-    """Public auth diagnostics — no account enumeration (audit §6.1)."""
+    """Public auth diagnostics — no account enumeration (audit ITEM 3)."""
     # Authenticated operators get richer deploy diagnostics (still no secrets).
     sensitive = False
     try:
@@ -566,7 +566,11 @@ async def auth_bootstrap(request: Request):
         if auth.lower().startswith("bearer "):
             email = verify_token(auth.split(" ", 1)[1].strip())
             sensitive = bool(email and lookup_user(email))
-    except Exception:
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "auth bootstrap token inspection failed; returning public payload only",
+            exc_info=exc,
+        )
         sensitive = False
     return auth_bootstrap_status(include_sensitive=sensitive)
 
@@ -622,7 +626,7 @@ async def login(body: LoginRequest, request: Request):
         )
 
     status = auth_bootstrap_status()
-    if not status.get("has_users") and int(status.get("user_count") or 0) == 0:
+    if not status.get("has_users"):
         raise HTTPException(
             status_code=503,
             detail=(

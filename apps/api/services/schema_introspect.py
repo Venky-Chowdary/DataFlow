@@ -1344,10 +1344,10 @@ def _pg_fetch_enum_labels(cur: Any, type_oids: list[int]) -> dict[int, list[str]
 
 
 def _pg_apply_identity_carrier(logical: str, attidentity: str, default_expr: str | None) -> str:
-    """Annotate INTEGER carriers with GENERATED / SERIAL when catalog says so."""
+    """Annotate integer carriers with GENERATED / SERIAL when catalog says so."""
     ident = (attidentity or "").strip().lower()
     default = (default_expr or "").lower()
-    base = (logical or "INTEGER").upper()
+    base = (logical or "INT4").upper()
     if ident == "a":
         # GENERATED ALWAYS AS IDENTITY — client INSERT must omit the column.
         return f"{base} GENERATED ALWAYS"
@@ -2102,21 +2102,23 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
             default_expr and "nextval(" in str(default_expr).lower()
         ):
             generation = "by_default"
-        columns.append(
-            {
-                "name": name,
-                "inferred_type": logical,
-                "nullable": str(nullable).upper() == "YES",
-                "data_type": dtype,
-                "is_identity": bool(
-                    (attidentity or "").strip()
-                    or (default_expr and "nextval(" in str(default_expr).lower())
-                ),
-                "generation": generation,
-                "collation": collname,
-                "collation_deterministic": coll_det,
-            }
-        )
+        col_pg: dict[str, Any] = {
+            "name": name,
+            "inferred_type": logical,
+            "nullable": str(nullable).upper() == "YES",
+            "data_type": dtype,
+            "is_identity": bool(
+                (attidentity or "").strip()
+                or (default_expr and "nextval(" in str(default_expr).lower())
+            ),
+            "generation": generation,
+            "collation": collname,
+            "collation_deterministic": coll_det,
+        }
+        # Property 6 — surface defaults for create-new carry (exclude sequence nextval).
+        if default_expr and "nextval(" not in str(default_expr).lower():
+            col_pg["default"] = str(default_expr)
+        columns.append(col_pg)
     return columns
 
 
@@ -2241,14 +2243,15 @@ def _pg_to_logical(dtype: str) -> str:
         return "TID"
     if d == "pg_lsn":
         return "PG_LSN"
-    # Width-preserving uppercase carriers (audit P0: never bigint→INTEGER).
+    # Width-preserving unambiguous carriers (Property 1: never emit ambiguous
+    # INTEGER/INT — those invent 64-bit. PG int4 → INT4 so width is explicit).
     # Must not emit lowercase ``integer`` — that token is LOGICAL_INTEGER.
     if d in ("bigint", "int8"):
         return "BIGINT"
     if d in ("smallint", "int2"):
         return "SMALLINT"
     if d in ("integer", "int", "int4"):
-        return "INTEGER"
+        return "INT4"
     # IEEE floats keep REAL vs DOUBLE polarity — never silently rewrite to DECIMAL.
     if d in ("real", "float4"):
         return "REAL"
@@ -2439,7 +2442,7 @@ def _mysql_to_logical(dtype: str) -> str:
         if "tinyint" in d and "tinyint(1)" not in d:
             return "TINYINT UNSIGNED"
         if "int" in d:
-            return "INT UNSIGNED"
+            return "INT4 UNSIGNED"
     if d == "year" or d.startswith("year("):
         # MySQL YEAR — keep carrier so write quarantine enforces 1901–2155 / 0000
         # (non-strict MySQL silently stores invalid years as 0000).
@@ -2456,14 +2459,15 @@ def _mysql_to_logical(dtype: str) -> str:
         # tinyint(1) boolean handled earlier in this mapper when present.
         return "TINYINT"
     if re.search(r"\bint\b", d) or d == "int":
-        return "INTEGER"
+        return "INT4"
     # IEEE float/double/real — preserve DOUBLE vs FLOAT polarity.
+    # MySQL FLOAT is IEEE-32 — emit FLOAT32 (bare FLOAT invents IEEE-64).
     if "double" in d:
         return "DOUBLE"
     if "real" in d:
         return "REAL"
     if "float" in d:
-        return "FLOAT"
+        return "FLOAT32"
     if "bool" in d:
         return "BOOLEAN"
     if d == "date":
@@ -3965,6 +3969,9 @@ def _introspect_sqlite(
             except Exception:
                 logger.warning("SQLite sample read failed for %s", table, exc_info=True)
 
+            # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
+            pragma_by_name = {str(row[1]): row for row in info_rows if row and row[1]}
+
             columns: list[dict[str, Any]] = []
             for name in col_names:
                 declared = declared_types.get(name, "")
@@ -3988,18 +3995,44 @@ def _introspect_sqlite(
                         ("NUMERIC", "DECIMAL", "NUMBER")
                     ):
                         inferred = "DECIMAL"
-                    elif inferred in ("VARCHAR", "TEXT") and declared_base in {"INTEGER", "INT", "BIGINT"}:
-                        inferred = "INTEGER"
-                    elif inferred in ("VARCHAR", "TEXT") and declared_base in {
-                        "REAL", "FLOAT", "DOUBLE"
-                    }:
-                        inferred = "DECIMAL"
+                    elif declared_base in {"INTEGER", "INT", "BIGINT"}:
+                        # SQLite INTEGER affinity is a signed int64 storage class
+                        # (not PG/MySQL INT32). Stamping INTEGER invents INT32 on
+                        # those destinations and rejects/quarantines values >
+                        # 2147483647 (audit ITEM 1). Keep BOOLEAN/temporal when
+                        # samples prove them; otherwise never-narrower BIGINT.
+                        inf_u = str(inferred or "").strip().upper()
+                        if inf_u in {"BOOLEAN", "BOOL"}:
+                            inferred = "BOOLEAN"
+                        elif inf_u in {
+                            "DATE",
+                            "DATETIME",
+                            "TIMESTAMP",
+                            "TIME",
+                            "TIMESTAMPTZ",
+                        }:
+                            pass
+                        else:
+                            inferred = "BIGINT"
+                    elif declared_base in {"REAL", "FLOAT", "DOUBLE"}:
+                        # REAL affinity holds IEEE-754 float64 values in SQLite.
+                        inf_u = str(inferred or "").strip().upper()
+                        if inf_u in {"DECIMAL", "NUMERIC", "NUMBER"}:
+                            inferred = "DECIMAL"
+                        else:
+                            inferred = "DOUBLE PRECISION"
 
+                prow = pragma_by_name.get(name)
+                notnull = int(prow[3] or 0) if prow is not None else 0
+                dflt = prow[4] if prow is not None else None
                 col_out: dict[str, Any] = {
                     "name": name,
                     "inferred_type": inferred,
-                    "nullable": True,
+                    # Property 6 — never invent nullable=True when PRAGMA says NOT NULL.
+                    "nullable": notnull == 0,
                 }
+                if dflt is not None and str(dflt).strip() != "":
+                    col_out["default"] = str(dflt)
                 if semantic_role:
                     col_out["semantic_role"] = semantic_role
                 columns.append(col_out)

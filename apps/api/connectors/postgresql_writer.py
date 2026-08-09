@@ -1271,7 +1271,11 @@ def write_mapped_rows(
         table_name=table_name,
         file_batch_idx=_kwargs.get("file_batch_idx"),
     )
-    use_ledger = bool(job_id)
+    # Ledger dedupes insert retries. Upserts already converge on conflict keys —
+    # skipping a ledgered upsert would suppress a legitimate value update.
+    use_ledger = bool(job_id) and not (
+        write_mode == "upsert" and conflict_columns
+    )
     conn = None
 
     def _build_insert():
@@ -1366,17 +1370,73 @@ def write_mapped_rows(
 
                 for stmt in collect_pg_enum_prerequisites(logical_types):
                     cursor.execute(stmt)
-            col_defs = sql.SQL(", ").join(
-                sql.SQL("{} {}").format(sql.Identifier(c), sql.SQL(t))
-                for c, t in zip(target_cols, target_types)
+            fidelity_plan = None
+            from services.schema_fidelity import (
+                empty_unsupported_report,
+                render_create_column_defs,
+                resolve_create_fidelity_plan,
             )
-            cursor.execute(
-                sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
-                    sql.Identifier(schema),
-                    sql.Identifier(table_name),
-                    col_defs,
+
+            try:
+                # Probe existence so we do not claim PK carry on IF NOT EXISTS no-op.
+                cursor.execute(
+                    """
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = %s AND table_name = %s
+                    LIMIT 1
+                    """,
+                    (schema, table_name),
                 )
-            )
+                pg_table_existed = cursor.fetchone() is not None
+                fidelity_plan = resolve_create_fidelity_plan(
+                    source_schema_catalog=_kwargs.get("source_schema_catalog"),
+                    mappings=mappings,
+                    target_columns=target_cols,
+                    target_types=target_types,
+                    dest_dialect="postgresql",
+                    table_already_exists=pg_table_existed,
+                )
+                if fidelity_plan.column_renames and fidelity_plan.dest_columns:
+                    target_cols[:] = list(fidelity_plan.dest_columns)
+                body = render_create_column_defs(
+                    columns=target_cols,
+                    types=target_types,
+                    plan=(None if pg_table_existed else fidelity_plan),
+                    dialect="postgresql",
+                )
+                cursor.execute(
+                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
+                        sql.Identifier(schema),
+                        sql.Identifier(table_name),
+                        sql.SQL(body),
+                    )
+                )
+                _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
+            except Exception as exc:
+                logger.warning(
+                    "PostgreSQL schema fidelity plan failed; falling back to types-only CREATE: %s",
+                    exc,
+                )
+                col_defs = sql.SQL(", ").join(
+                    sql.SQL("{} {}").format(sql.Identifier(c), sql.SQL(t))
+                    for c, t in zip(target_cols, target_types)
+                )
+                cursor.execute(
+                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
+                        sql.Identifier(schema),
+                        sql.Identifier(table_name),
+                        col_defs,
+                    )
+                )
+                # Never silence a types-only fallback — Property 6 certificate required.
+                _kwargs["_schema_fidelity_report"] = empty_unsupported_report(
+                    source_dialect="",
+                    dest_dialect="postgresql",
+                    reason=(
+                        f"Schema fidelity CREATE failed ({type(exc).__name__}); "
+                        "fell back to types-only CREATE TABLE — constraints not carried."
+                    ),
+                ).to_dict()
             # Track empty shell for orphan rollback if job fails before first ack.
             try:
                 from services.auto_create_lifecycle import register_auto_create
@@ -1876,6 +1936,9 @@ def write_mapped_rows(
                                 batch_key=write_batch_key,
                                 chunk_idx=chunk_idx,
                                 rows_written=landed,
+                                row_start=start,
+                                row_end=start + max(landed - 1, 0),
+                                attempt=1,
                             )
                         conn.commit()
                         chunk_written = landed
@@ -1958,6 +2021,9 @@ def write_mapped_rows(
                                         batch_key=write_batch_key,
                                         chunk_idx=chunk_idx,
                                         rows_written=chunk_written,
+                                        row_start=start,
+                                        row_end=start + max(chunk_written - 1, 0),
+                                        attempt=1,
                                     )
                                 conn.commit()
                             except Exception as exc:
@@ -2057,6 +2123,15 @@ def write_mapped_rows(
         _checksum_rows = (
             rows_for_checksum if "rows_for_checksum" in locals() else mapped_rows
         )
+        meta_out = gate8_writer_meta(
+            _checksum_rows,
+            target_cols,
+            conflict_columns=conflict_columns or None,
+        )
+        fid_report = _kwargs.get("_schema_fidelity_report")
+        if isinstance(fid_report, dict):
+            meta_out = dict(meta_out or {})
+            meta_out["schema_fidelity"] = fid_report
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -2075,11 +2150,7 @@ def write_mapped_rows(
             rows_skipped=rows_skipped,
             warnings=transform_errors,
             load_method="copy" if use_copy else "insert",
-            meta=gate8_writer_meta(
-                _checksum_rows,
-                target_cols,
-                conflict_columns=conflict_columns or None,
-            ),
+            meta=meta_out,
         )
     except Exception as exc:
         if close_connection:

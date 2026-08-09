@@ -325,7 +325,9 @@ def test_materialize_dest_ddl_honors_map_stamps():
     assert materialize_dest_ddl("bigquery", "TIMESTAMP") == "TIMESTAMP"
     # Blind ddl_type still treats bare TIMESTAMP as NTZ → DATETIME on BQ.
     assert ddl_type("bigquery", "TIMESTAMP") == "DATETIME"
-    assert materialize_dest_ddl("mysql", "FLOAT") == "FLOAT"
+    # Bare FLOAT is ambiguous (Property 1) — rematerialize IEEE-64; FLOAT32 stays.
+    assert materialize_dest_ddl("mysql", "FLOAT") == ddl_type("mysql", "FLOAT")
+    assert materialize_dest_ddl("mysql", "FLOAT32") == "FLOAT"
     assert materialize_dest_ddl("postgresql", "FLOAT") == ddl_type("postgresql", "FLOAT")
     assert materialize_dest_ddl("postgresql", "JSONB") == "JSONB"
     assert materialize_dest_ddl("oracle", "NVARCHAR2(50)").upper().startswith("NVARCHAR2")
@@ -377,10 +379,18 @@ def test_iceberg_and_generic_materialize_honor_stamps():
     from services.type_system import materialize_dest_ddl, ddl_type
     from connectors.iceberg_writer import _logical_to_iceberg_type
 
-    assert _logical_to_iceberg_type("ARRAY<FLOAT>") in {"ARRAY<FLOAT>", "list<float>"}
-    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
+    # Unambiguous FLOAT32 leaf stays single; bare FLOAT invents double (P1).
+    assert _logical_to_iceberg_type("ARRAY<FLOAT32>") in {
+        "ARRAY<FLOAT>",
+        "ARRAY<FLOAT32>",
+        "list<float>",
+    }
+    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT32>").lower()
     assert materialize_dest_ddl("duckdb", "REAL") == "REAL"
-    assert materialize_dest_ddl("databricks", "ARRAY<FLOAT>") == "ARRAY<FLOAT>"
+    assert materialize_dest_ddl("databricks", "ARRAY<FLOAT32>").upper() in {
+        "ARRAY<FLOAT>",
+        "ARRAY<FLOAT32>",
+    }
 
 
 def test_sa_float_stamp_not_always_double():
@@ -395,11 +405,16 @@ def test_sa_float_stamp_not_always_double():
 def test_iceberg_array_float_create_new_keeps_float_leaf():
     from services.type_system import create_new_mapping_target_type, ddl_type
 
-    stamped = create_new_mapping_target_type("ARRAY<FLOAT>", "iceberg")
+    # Property 1: bare FLOAT leaf invents double; FLOAT32 keeps single.
+    stamped = create_new_mapping_target_type("ARRAY<FLOAT32>", "iceberg")
     assert "double" not in stamped.lower(), stamped
     assert "float" in stamped.lower(), stamped
-    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
-    assert create_new_mapping_target_type("ARRAY<FLOAT>", "databricks").upper() == "ARRAY<FLOAT>"
+    assert "double" not in ddl_type("iceberg", "ARRAY<FLOAT32>").lower()
+    assert "double" in ddl_type("iceberg", "ARRAY<FLOAT>").lower()
+    assert create_new_mapping_target_type("ARRAY<FLOAT32>", "databricks").upper() in {
+        "ARRAY<FLOAT>",
+        "ARRAY<FLOAT32>",
+    }
 
 def test_create_new_stamps_not_self_lossy():
     from services.type_system import (
@@ -472,8 +487,9 @@ def test_create_new_false_self_blocks_cleared():
         ("VECTOR(768)", "duckdb"),
         ("VECTOR(768)", "clickhouse"),
         ("VECTOR(768)", "iceberg"),
-        ("STRUCT<a:INT>", "clickhouse"),
-        ("STRUCT<a:INT>", "duckdb"),
+        # INT4 — unambiguous 32-bit; bare INT invents 64 (Property 1).
+        ("STRUCT<a:INT4>", "clickhouse"),
+        ("STRUCT<a:INT4>", "duckdb"),
     ]
     for src, dest in cases:
         stamp = create_new_mapping_target_type(src, dest)
@@ -510,8 +526,10 @@ def test_mapping_proof_uses_dest_db_for_timestamptz_instant_sinks():
 def test_iceberg_materialize_array_vector_spelling():
     from services.type_system import materialize_dest_ddl
 
-    assert materialize_dest_ddl("iceberg", "ARRAY<FLOAT>").lower() == "list<float>"
-    assert materialize_dest_ddl("iceberg", "FLOAT[]").lower() == "list<float>"
+    # Property 1: bare FLOAT invents double; FLOAT32 / vector leaf stay float.
+    assert materialize_dest_ddl("iceberg", "ARRAY<FLOAT>").lower() == "list<double>"
+    assert materialize_dest_ddl("iceberg", "FLOAT[]").lower() == "list<double>"
+    assert materialize_dest_ddl("iceberg", "ARRAY<FLOAT32>").lower() == "list<float>"
     assert materialize_dest_ddl("iceberg", "VECTOR(768)").lower() == "list<float>"
     assert materialize_dest_ddl("iceberg", "list<float>").lower() == "list<float>"
 

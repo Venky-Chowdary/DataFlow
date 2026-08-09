@@ -70,6 +70,18 @@ def invent_dest_type(
                 "live schema / Map stamp (never invent capacity from source alone).",
                 context=ctx,
             )
+        # Live schema is physical authority. Ambiguous SQL keywords (INT/INTEGER/
+        # FLOAT) on an existing column mean the engine's native wire already
+        # present — never rewrite to the create-new 64-bit invent floor.
+        from services.type_system import strip_identity_qualifier
+
+        live = strip_identity_qualifier(existing).strip()
+        live_u = live.upper()
+        if live_u in {"INT", "INTEGER", "SIGNED", "FLOAT"} or live.lower() in {
+            "integer",
+            "float",
+        }:
+            return str(existing)
         # Materialize for dialect wire; do not widen beyond the proven stamp.
         return str(materialize_dest_ddl(db, existing) or existing)
 
@@ -111,6 +123,45 @@ def invent_context_from_sync_mode(
     return InventContext.BIND_EXISTING if table_exists else InventContext.CREATE_NEW
 
 
+def _is_source_as_dest_bootstrap(stamped: str, src: str) -> bool:
+    """True when Map copied source type onto target (FE bootstrap), not invent.
+
+    Exact string match always counts. Case-insensitive match counts only when
+    both sides have the same *known* integer/float width — never when either
+    side is bare logical ``integer`` / ``float`` (width unknown → invent 64-bit).
+    """
+    a = (stamped or "").strip()
+    b = (src or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a.upper().replace(" ", "") != b.upper().replace(" ", ""):
+        return False
+    from services.type_system import (
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        float_mantissa_bits,
+        integer_bit_width,
+        normalize_logical_type,
+    )
+
+    la = normalize_logical_type(a)
+    lb = normalize_logical_type(b)
+    if la == LOGICAL_INTEGER and lb == LOGICAL_INTEGER:
+        wa, wb = integer_bit_width(a), integer_bit_width(b)
+        if wa is None or wb is None:
+            return False
+        return wa == wb
+    if la == LOGICAL_FLOAT and lb == LOGICAL_FLOAT:
+        fa, fb = float_mantissa_bits(a), float_mantissa_bits(b)
+        if fa is None or fb is None:
+            return False
+        return fa == fb
+    # Non numeric: casefold identity still means FE copied the token.
+    return True
+
+
 def stamp_additive_mapping_types(
     mappings: list[dict[str, Any]] | None,
     *,
@@ -119,6 +170,7 @@ def stamp_additive_mapping_types(
     source_types: dict[str, str] | None = None,
     samples_by_source: dict[str, list[Any]] | None = None,
     backfill_new_fields: bool = False,
+    dest_table_exists: bool | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Stamp Map ``target_type`` for additive / create-new columns (Decision Kernel).
 
@@ -126,9 +178,12 @@ def stamp_additive_mapping_types(
     * ``pending_dest_schema`` — never invent (Studio must reload).
     * Live dest carrier present — bind that stamp; never invent from source.
     * Column absent from live types + (``create_new`` / create strategies /
-      ``backfill_new_fields``) — invent via :func:`invent_dest_type` ``CREATE_NEW``.
-    * Column absent + no create/backfill authority — leave empty (Validate/write
-      refuse Map VARCHAR ADD invent).
+      ``backfill_new_fields`` / ``dest_table_exists is False``) — invent via
+      :func:`invent_dest_type` ``CREATE_NEW``.
+    * Column absent + no create/backfill authority — leave empty (Execute
+      refuses Map VARCHAR ADD). Not reported as ``unstamped`` — that list is
+      invent-required-but-failed only (Property 2: legitimate create-new must
+      not be blocked by empty-stamp noise).
 
     Returns ``(stamped_mappings, unstamped_additive_targets)``.
     """
@@ -143,6 +198,8 @@ def stamp_additive_mapping_types(
     samples = samples_by_source or {}
     unstamped: list[str] = []
     db = (dest_db or "").strip()
+    # Missing destination object → CREATE TABLE invent (never-narrower stamps).
+    create_table_authority = dest_table_exists is False
 
     for row in rows:
         strategy = str(row.get("assignment_strategy") or "").strip()
@@ -182,6 +239,7 @@ def stamp_additive_mapping_types(
                 "identity_passthrough",
             }
             or backfill_new_fields
+            or create_table_authority
         )
         src = (
             str(row.get("source_type") or "").strip()
@@ -190,18 +248,16 @@ def stamp_additive_mapping_types(
         )
         # Source-as-dest FE bootstrap (target_type == source_type) is NOT Kernel
         # invent — must still run invent_dest_type (BQ UUID→STRING, etc.).
-        source_identity_stamp = bool(
-            stamped
-            and src
-            and stamped.strip().upper().replace(" ", "")
-            == src.strip().upper().replace(" ", "")
-        )
+        # Casefold alone is unsafe: bare logical ``integer`` uppercases to the
+        # same token as physical INT32 ``INTEGER``, which would re-invent a
+        # 32-bit column and undo never-narrower invent (audit ITEM 1).
+        source_identity_stamp = _is_source_as_dest_bootstrap(stamped, src)
         if stamped and not (is_create and source_identity_stamp):
             if is_create and not row.get("create_new"):
                 row["create_new"] = True
             continue
         if not is_create:
-            unstamped.append(tgt)
+            # No invent authority — leave blank; do not report as stamp failure.
             continue
         src_key = str(row.get("source") or "")
         col_samples = list(samples.get(src_key) or [])[:32] or None

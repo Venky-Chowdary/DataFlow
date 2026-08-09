@@ -138,35 +138,40 @@ def read_table_batch(
     offset: int = 0,
     limit: int = 500,
     known_total_rows: int | None = None,
+    conn: Any | None = None,
 ) -> ReadBatch:
     from psycopg2 import sql
 
+    from services.source_snapshot import get_source_snapshot_conn
+
     schema = schema or "public"
-    conn = get_connection(
-        host=host,
-        port=port,
-        database=database,
-        username=username,
-        password=password,
-        connection_string=connection_string,
-        ssl=ssl,
-    )
+    # Prefer an explicit conn, then a transfer-bound RR snapshot (Property 3).
+    shared = conn if conn is not None else get_source_snapshot_conn()
+    close_conn = shared is None
+    if shared is None:
+        shared = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
     try:
-        with conn.cursor() as cur:
+        with shared.cursor() as cur:
             if known_total_rows is not None:
                 total = known_total_rows
             else:
-                total = count_table_rows(
-                    host=host,
-                    port=port,
-                    database=database,
-                    username=username,
-                    password=password,
-                    schema=schema,
-                    connection_string=connection_string,
-                    ssl=ssl,
-                    table=table,
+                # COUNT on the SAME connection so cardinality matches the
+                # MVCC snapshot used for page reads (never a second conn).
+                cur.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                        sql.Identifier(schema),
+                        sql.Identifier(table),
+                    )
                 )
+                total = int(cur.fetchone()[0])
             order_by = _order_by_clause(
                 cur,
                 schema,
@@ -202,7 +207,8 @@ def read_table_batch(
             rows = [[_cell(v) for v in row] for row in fetched]
             return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
-        conn.close()
+        if close_conn:
+            shared.close()
 
 
 def read_table_sample(
@@ -250,6 +256,7 @@ def read_table_cursor_batch(
     columns: list[str] | None = None,
     limit: int = 500,
     cursor_primary_key: str | None = None,
+    conn: Any | None = None,
 ) -> ReadBatch:
     """Read rows with cursor_column > watermark — for incremental sync.
 
@@ -258,18 +265,23 @@ def read_table_cursor_batch(
     """
     from psycopg2 import sql
 
+    from services.source_snapshot import get_source_snapshot_conn
+
     schema = schema or "public"
-    conn = get_connection(
-        host=host,
-        port=port,
-        database=database,
-        username=username,
-        password=password,
-        connection_string=connection_string,
-        ssl=ssl,
-    )
+    shared = conn if conn is not None else get_source_snapshot_conn()
+    close_conn = shared is None
+    if shared is None:
+        shared = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
     try:
-        with conn.cursor() as cur:
+        with shared.cursor() as cur:
             if columns:
                 col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
                 base = sql.SQL("SELECT {} FROM {}.{}").format(
@@ -330,4 +342,5 @@ def read_table_cursor_batch(
             # trip stream early-stop (fetch_offset >= total_rows).
             return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:
-        conn.close()
+        if close_conn:
+            shared.close()

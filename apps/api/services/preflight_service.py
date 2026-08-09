@@ -936,6 +936,7 @@ def run_file_preflight(
             source_types=column_types or {},
             samples_by_source=samples_by_src,
             backfill_new_fields=bool(effective_backfill),
+            dest_table_exists=destination_table_exists,
         )
     except Exception as stamp_exc:
         # Fail-closed: stamp failure must surface as unstamped additives, not

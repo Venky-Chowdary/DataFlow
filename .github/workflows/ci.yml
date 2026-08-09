@@ -70,6 +70,123 @@ jobs:
             apps/api/data/proofs/module_size_budgets.json
             apps/api/data/proofs/connector_capability_matrix.json
 
+  # AI ITEM 1 — full Map/LLM suite with no network and no API keys.
+  # Proves offline claim: LLM cannot change mapping decisions / checksums.
+  ai-offline-correctness:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Offline LLM-off correctness (ITEM 1)
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          # Empty keys + unreachable Ollama — no network LLM. Policy-off is
+          # asserted inside test_offline_env_forces_llm_policy_off; mock tests
+          # patch is_llm_enabled when they need the suggest path.
+          OPENAI_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          OLLAMA_HOST: "http://127.0.0.1:9"
+        run: |
+          python -m pytest \
+            tests/test_item1_llm_never_correctness_path.py \
+            tests/test_llm_mapping.py \
+            -q --tb=short
+
+  # Property 2 — no-config transfer must never be blocked by additive/DDL gates.
+  # Services make the full golden matrix (PG/MySQL/Mongo) runnable with zero skips.
+  no-config-transfer:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_USER: dataflow
+          POSTGRES_PASSWORD: dataflow
+          POSTGRES_DB: dataflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U dataflow -d dataflow"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      mysql:
+        image: public.ecr.aws/docker/library/mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: dataflow
+          MYSQL_DATABASE: dataflow
+          MYSQL_USER: dataflow
+          MYSQL_PASSWORD: dataflow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pdataflow"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      mongo:
+        image: public.ecr.aws/docker/library/mongo:7
+        ports:
+          - 27017:27017
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Golden-path no-config transfer (Property 2)
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          P2_PG_HOST: 127.0.0.1
+          P2_PG_PORT: "5432"
+          P2_PG_DB: dataflow
+          P2_PG_USER: dataflow
+          P2_PG_PASSWORD: dataflow
+          P2_MYSQL_HOST: 127.0.0.1
+          P2_MYSQL_PORT: "3306"
+          P2_MYSQL_DB: dataflow
+          P2_MYSQL_USER: dataflow
+          P2_MYSQL_PASSWORD: dataflow
+          P2_MONGO_URI: mongodb://127.0.0.1:27017
+        run: |
+          # Fail the job if any golden-path test is skipped (services must be up).
+          out="$(mktemp)"
+          set +e
+          python -m pytest tests/test_property2_golden_path_never_blocked.py -q --tb=short | tee "$out"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if grep -Eq '[1-9][0-9]* skipped' "$out"; then
+            echo "Property 2 golden path must not skip when CI services are present" >&2
+            cat "$out" >&2
+            exit 1
+          fi
+          exit "$rc"
+
   # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
   gitops:
     runs-on: ubuntu-latest

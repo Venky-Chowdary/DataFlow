@@ -295,6 +295,27 @@ def _validation_plan_for_result(pf: dict | None) -> dict:
     return plan
 
 
+def _inline_stamp_ddl_identity(mappings: list, dest_db: str) -> str | None:
+    """Stamp Map→DDL fingerprint for programmatic skip_preflight callers.
+
+    Returns None on success, or an error message when the stamp cannot be built.
+    """
+    try:
+        from services.decision_kernel import approved_mapping_ddl_fingerprint
+
+        stamped = approved_mapping_ddl_fingerprint(mappings, dest_db=dest_db or "")
+        if not str(stamped or "").strip():
+            return (
+                "DDL identity inline stamp produced an empty fingerprint — "
+                "refuse write (check Map target_type stamps)."
+            )
+    except Exception as exc:
+        # Fail closed with the exception attached — never soft-pass invent.
+        logger.error("DDL identity inline stamp failed: %s", exc, exc_info=exc)
+        return f"DDL identity inline stamp failed closed: {exc}"
+    return None
+
+
 def _enforce_ddl_identity(
     pf: dict | None,
     mappings: list,
@@ -305,14 +326,17 @@ def _enforce_ddl_identity(
 ) -> str | None:
     """Module 12 / GA — fail closed when Map→DDL fingerprint drifts after Validate.
 
-    Returns an error message when identity fails. When Validate preflight is
-    present, a missing ``ddl_identity_hash`` also fails closed (no soft-skip).
+    Returns an error message when identity fails.
 
     Programmatic callers (``skip_preflight=True``: API/CLI/scheduler/tests) may
-    omit Validate when no operator-approved hash is present: the engine stamps
-    the Map→DDL fingerprint **inline** from the current mappings and verifies
-    materialize is deterministic. UI Validate→Execute still requires a stamped
-    hash (preflight proof or ``approved_ddl_identity_hash``).
+    omit a Validate fingerprint: the engine stamps Map→DDL **inline** from the
+    current mappings. That applies when preflight is absent **or** when a stub
+    proof_bundle lacks ``ddl_identity_hash`` (incomplete Validate must not block
+    skip_preflight callers — audit ITEM 2).
+
+    UI Validate→Execute (``skip_preflight=False``) still requires a stamped hash
+    from preflight proof or ``approved_ddl_identity_hash``. When a hash is
+    present, drift vs current mappings is always refused.
     """
     has_maps = bool(mappings)
     approved = ""
@@ -322,34 +346,23 @@ def _enforce_ddl_identity(
         ) or ""
     if not approved:
         approved = (approved_ddl_identity_hash or "").strip()
-    if not pf and not approved:
-        if has_maps and skip_preflight:
-            # Inline stamp — refuse only when fingerprint cannot be computed.
-            try:
-                from services.decision_kernel import approved_mapping_ddl_fingerprint
 
-                stamped = approved_mapping_ddl_fingerprint(
-                    mappings, dest_db=dest_db or ""
-                )
-                if not str(stamped or "").strip():
-                    return (
-                        "DDL identity inline stamp produced an empty fingerprint — "
-                        "refuse write (check Map target_type stamps)."
-                    )
-            except Exception as exc:  # pragma: no cover
-                return f"DDL identity inline stamp failed closed: {exc}"
-            return None
+    if not approved:
+        if has_maps and skip_preflight:
+            # Programmatic path — inline stamp whether or not a hollow pf exists.
+            return _inline_stamp_ddl_identity(mappings, dest_db)
+        if pf and has_maps:
+            return (
+                "DDL identity fingerprint missing after Validate — refuse Execute "
+                "(Map→DDL identity not stamped; re-run Validate)."
+            )
         if has_maps:
             return (
                 "DDL identity requires Validate preflight before Execute — "
                 "refuse write without Map→DDL fingerprint (re-run Validate)."
             )
         return None
-    if not approved:
-        return (
-            "DDL identity fingerprint missing after Validate — refuse Execute "
-            "(Map→DDL identity not stamped; re-run Validate)."
-        )
+
     try:
         from services.decision_kernel import DdlIdentityError, assert_ddl_identity
 
@@ -357,6 +370,7 @@ def _enforce_ddl_identity(
     except DdlIdentityError as exc:
         return str(exc)
     except Exception as exc:  # pragma: no cover — never invent soft-pass on check crash
+        logger.error("DDL identity check crashed: %s", exc, exc_info=exc)
         return f"DDL identity check failed closed: {exc}"
     return None
 
@@ -401,9 +415,10 @@ def _enforce_decision_artifact(
             or (pf.get("proof_bundle") or {}).get("decision_artifact_hash")
             or ""
         ).strip()
-    # C11 tightened: Validate preflight must carry Decision Artifact (or hash).
-    # Only programmatic skip_preflight may inline-stamp. No transitional soft-skip.
-    if pf and not approved and not payload:
+    # C11: UI Validate→Execute requires a Decision Artifact (or hash).
+    # Programmatic skip_preflight may inline-stamp even when proof_bundle is a
+    # hollow stub — same honesty as DDL identity (audit ITEM 2).
+    if pf and not approved and not payload and not skip_preflight:
         return (
             "Decision Artifact missing from Validate proof_bundle — refuse Execute "
             "(re-run Validate to stamp decision_artifact.content_hash).",
@@ -1639,7 +1654,18 @@ def _auto_map(
     else:
         sync_mode = resolve_effective_sync_mode(request.sync_mode)
         if is_overwrite_sync(sync_mode):
+            # Property 2: auto-derived identity maps must satisfy create-new
+            # gates — stamp CREATE authority so Kernel invents target_type
+            # instead of blocking with "lack Map target_type under partial Studio".
             mappings = default_mappings(columns)
+            for m in mappings:
+                if not isinstance(m, dict):
+                    continue
+                m["create_new"] = True
+                m.setdefault("assignment_strategy", "create_compatible_new")
+                src_name = str(m.get("source") or "")
+                if src_name and not str(m.get("source_type") or "").strip():
+                    m["source_type"] = schema.get(src_name, "TEXT")
         else:
             target_schema, dest_exists = _destination_schema_probe(
                 request.destination,
@@ -2471,6 +2497,7 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
                 sample_rows=records[:100] if isinstance(records, list) else None,
+                dest_table_exists=dest_table_exists_flag,
             )
             # Resolve upsert mode for non-streaming database writes.
             contract = resolve_sync_contract(request.stream_contracts)
@@ -3277,6 +3304,7 @@ class UniversalTransferEngine:
                     mappings=mappings,
                     source_schema=schema,
                     validation_mode=request.validation_mode,
+                    source_endpoint=request.source,
                 )
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
@@ -3583,6 +3611,7 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
                 sample_rows=sample_rows[:100] if sample_rows else None,
+                dest_table_exists=dest_table_exists_flag,
             )
             mongo.update_job_status(
                 job_id,
@@ -4070,6 +4099,7 @@ class UniversalTransferEngine:
                     mappings=mappings,
                     source_schema=schema,
                     validation_mode=request.validation_mode,
+                    source_endpoint=request.source,
                 )
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
@@ -4351,6 +4381,7 @@ class UniversalTransferEngine:
                 column_types=schema,
                 dest_types=dest_schema_types,
                 sample_rows=sample_rows[:100] if sample_rows else None,
+                dest_table_exists=dest_table_exists_flag,
             )
             mongo.update_job_status(
                 job_id,
@@ -4739,6 +4770,7 @@ class UniversalTransferEngine:
                     mappings=mappings,
                     source_schema=schema,
                     validation_mode=request.validation_mode,
+                    source_endpoint=request.source,
                 )
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)

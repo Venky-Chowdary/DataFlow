@@ -87,7 +87,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     skipped = int(getattr(result, "rows_skipped", 0) or 0)
     # GA: never truncate rejected_details before merge/DLQ — rows cannot disappear.
     details = list(getattr(result, "rejected_details", []) or [])
-    return {
+    out: dict[str, Any] = {
         "rejected_rows": rejected,
         "coerced_null_rows": coerced,
         "rows_skipped": skipped,
@@ -97,6 +97,10 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
         "error_policy": "quarantine" if (rejected or coerced) else "none",
         "load_method": getattr(result, "load_method", None),
     }
+    meta = getattr(result, "meta", None) or {}
+    if isinstance(meta, dict) and meta.get("schema_fidelity"):
+        out["schema_fidelity"] = meta["schema_fidelity"]
+    return out
 
 
 _STREAMING_TYPES = frozenset({
@@ -631,6 +635,7 @@ def _write_batch(
     skip_session_setup: bool = False,
     job_id: str | None = None,
     skip_preflight: bool = False,
+    source_schema_catalog: dict[str, Any] | None = None,
 ) -> tuple[int, str, dict]:
     # Live dest nullability for write-time NOT NULL escalate (G3 / adapters parity).
     dest_nullability = dict(
@@ -684,6 +689,7 @@ def _write_batch(
             connection_holder=connection_holder,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            source_schema_catalog=source_schema_catalog,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -782,7 +788,10 @@ def _write_batch(
 
     if dest_type == "sqlite":
         from connectors.sqlite_writer import write_mapped_rows
+        from connectors.write_resilience import build_write_batch_key
 
+        # Property 4 — arm the same-txn write ledger (parity with PG/MySQL).
+        # Without job_id + write_batch_key, insert retries silently duplicate.
         result = write_mapped_rows(
             host=cfg["host"],
             port=0,
@@ -803,9 +812,15 @@ def _write_batch(
             backfill_new_fields=backfill_new_fields,
             auth_source=cfg.get("auth_source", ""),
             error_policy=error_policy,
+            job_id=job_id,
+            write_batch_key=build_write_batch_key(
+                table_name=table_name, file_batch_idx=chunk_idx
+            ),
+            file_batch_idx=chunk_idx,
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            source_schema_catalog=source_schema_catalog,
         )
         if not result.ok:
             _raise_write_failure(result, "SQLite batch write failed")
@@ -1113,6 +1128,63 @@ def stream_database_transfer(
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
     Returns (rows_written, ddl_log, dest_summary, columns).
+
+    Property 3: full-refresh PostgreSQL/SQLite reads bind one snapshot session
+    for the whole pagination lifetime (see ``services.source_snapshot``).
+    """
+    ok = False
+    try:
+        result = _stream_database_transfer_impl(
+            source,
+            destination,
+            mappings,
+            schema,
+            on_checkpoint,
+            sync_mode=sync_mode,
+            stream_contracts=stream_contracts,
+            job_id=job_id,
+            checkpoint=checkpoint,
+            checkpoint_service=checkpoint_service,
+            retry_budget=retry_budget,
+            backfill_new_fields=backfill_new_fields,
+            validation_mode=validation_mode,
+            source_filter=source_filter,
+            limit=limit,
+            skip_preflight=skip_preflight,
+        )
+        ok = True
+        return result
+    finally:
+        try:
+            from services.source_snapshot import release_active_snapshot
+
+            release_active_snapshot(commit=ok)
+        except Exception as exc:
+            logger.warning("source snapshot release failed: %s", exc, exc_info=exc)
+
+
+def _stream_database_transfer_impl(
+    source: EndpointConfig,
+    destination: EndpointConfig,
+    mappings: list[dict],
+    schema: dict[str, str],
+    on_checkpoint: Callable[..., None] | None = None,
+    *,
+    sync_mode: str = "full_refresh_append",
+    stream_contracts: list[dict] | None = None,
+    job_id: str | None = None,
+    checkpoint: Checkpoint | None = None,
+    checkpoint_service: CheckpointService | None = None,
+    retry_budget: RetryBudget | None = None,
+    backfill_new_fields: bool = False,
+    validation_mode: str = "strict",
+    source_filter: dict[str, Any] | None = None,
+    limit: int = 0,
+    skip_preflight: bool = False,
+) -> tuple[int, list[str], dict[str, Any], list[str]]:
+    """
+    Extract source table in CHUNK_SIZE batches and load to destination.
+    Returns (rows_written, ddl_log, dest_summary, columns).
     """
     from .connector_capabilities import resolve_driver_type
     src_type = resolve_driver_type(source.format)
@@ -1248,6 +1320,64 @@ def stream_database_transfer(
             source_filter=source_filter,
             skip_preflight=skip_preflight,
         )
+
+    # Property 3 — one MVCC/transaction snapshot for the whole full-refresh read
+    # (sample probe + pages + optional checksum re-read). Incremental syncs
+    # intentionally follow watermarks and do not bind a frozen snapshot.
+    if not incremental and src_type in ("postgresql", "redshift"):
+        try:
+            from services.source_snapshot import (
+                activate_snapshot,
+                begin_postgresql_repeatable_read,
+                end_postgresql_snapshot,
+            )
+
+            _snap_conn, _snap_meta = begin_postgresql_repeatable_read(
+                host=str(src_cfg.get("host") or ""),
+                port=int(src_cfg.get("port") or (5439 if src_type == "redshift" else 5432)),
+                database=str(src_cfg.get("database") or ""),
+                username=str(src_cfg.get("username") or ""),
+                password=str(src_cfg.get("password") or ""),
+                connection_string=str(src_cfg.get("connection_string") or ""),
+                ssl=bool(src_cfg.get("ssl", False)),
+            )
+            activate_snapshot(_snap_conn, _snap_meta, end_postgresql_snapshot)
+            logger.info(
+                "Property 3 source snapshot bound — engine=postgresql "
+                "isolation=repeatable_read lsn=%s",
+                _snap_meta.get("snapshot_lsn"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Property 3 PostgreSQL REPEATABLE READ snapshot unavailable (%s) — "
+                "falling back to per-page READ COMMITTED (weaker guarantee)",
+                exc,
+                exc_info=exc,
+            )
+    elif not incremental and src_type == "sqlite":
+        try:
+            from services.source_snapshot import (
+                activate_snapshot,
+                begin_sqlite_snapshot,
+                end_sqlite_snapshot,
+            )
+
+            _snap_conn, _snap_meta = begin_sqlite_snapshot(
+                database=str(src_cfg.get("database") or ""),
+                connection_string=str(
+                    src_cfg.get("connection_string") or src_cfg.get("uri") or ""
+                ),
+                host=str(src_cfg.get("host") or ""),
+            )
+            activate_snapshot(_snap_conn, _snap_meta, end_sqlite_snapshot)
+            logger.info("Property 3 source snapshot bound — engine=sqlite")
+        except Exception as exc:
+            logger.warning(
+                "Property 3 SQLite transaction snapshot unavailable (%s) — "
+                "falling back to per-page connections",
+                exc,
+                exc_info=exc,
+            )
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
     # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
@@ -1569,13 +1699,18 @@ def stream_database_transfer(
         "sqlite",
         "generic_sql",
     )
+    # Property 6 — source catalog for create-new fidelity certificate (PG/SQLite sinks).
+    source_schema_catalog: dict[str, Any] | None = None
+    _src_schema_types: dict[str, str] = {}
+    _src_schema_nulls: dict[str, bool] = {}
+    _src_keys: dict[str, Any] = {}
     if not keyset_pk_cols and src_type in _pk_introspect_types:
         # Most transfers never declare a stream contract, so requiring a
         # contract PK would drop every one of them onto OFFSET. The source
         # catalog already knows the real key — ask it, so the common case keeps
         # seek reads and gets uniqueness from the database rather than a guess.
         try:
-            _, _, _src_keys = _introspect_table_schema_rich(
+            _src_schema_types, _src_schema_nulls, _src_keys = _introspect_table_schema_rich(
                 src_type, src_cfg, table, columns
             )
             keyset_pk_cols = [
@@ -1583,6 +1718,36 @@ def stream_database_transfer(
             ]
         except Exception as exc:
             logger.debug("source primary-key introspection failed: %s", exc, exc_info=exc)
+    elif src_type in _pk_introspect_types and dest_type in (
+        "sqlite",
+        "postgresql",
+        "redshift",
+    ):
+        # Contract already supplied a PK — still need nullability/defaults for fidelity.
+        try:
+            _src_schema_types, _src_schema_nulls, _src_keys = _introspect_table_schema_rich(
+                src_type, src_cfg, table, columns
+            )
+        except Exception as exc:
+            logger.debug("source schema fidelity introspection failed: %s", exc, exc_info=exc)
+    if _src_keys or _src_schema_nulls or _src_schema_types:
+        try:
+            from services.schema_fidelity import (
+                build_catalog_from_introspect,
+                catalog_to_payload,
+            )
+
+            source_schema_catalog = catalog_to_payload(
+                build_catalog_from_introspect(
+                    dialect=src_type,
+                    columns=list(columns or []),
+                    column_types=_src_schema_types or dict(schema or {}),
+                    nullable=_src_schema_nulls,
+                    keys=_src_keys,
+                )
+            )
+        except Exception as exc:
+            logger.debug("source schema catalog build failed: %s", exc, exc_info=exc)
     # Ordered composite key for seek (all PK parts). Legacy single + tie-break
     # still work when only one/two columns are available.
     keyset_order_cols = list(keyset_pk_cols)
@@ -2128,6 +2293,7 @@ def stream_database_transfer(
             error_policy=stream_error_policy,
             job_id=job_id,
             skip_preflight=skip_preflight,
+            source_schema_catalog=source_schema_catalog,
             **write_kwargs,
         )
         # Phase F1 — fingerprint the mapped rows from this chunk (same policy as
@@ -2248,6 +2414,10 @@ def stream_database_transfer(
                 "rejected_rows": rejected_total,
                 "coerced_null_rows": coerced_null_total,
             }
+            # Property 6 — keep first-batch fidelity certificate across chunks.
+            fid = incoming.get("schema_fidelity") or prev.get("schema_fidelity")
+            if fid:
+                dest_summary["schema_fidelity"] = fid
             batches_completed += 1
             # Persist rejected rows before continuing — crash must not lose quarantine.
             if new_details and job_id:
@@ -2393,6 +2563,18 @@ def stream_database_transfer(
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
         dest_summary["sync_mode"] = effective_sync
         dest_summary["watermark"] = watermark
+        try:
+            from services.source_snapshot import get_source_snapshot_meta
+
+            _snap = get_source_snapshot_meta()
+            if _snap:
+                dest_summary["source_snapshot"] = _snap
+                dest_summary.setdefault(
+                    "source_snapshot_guarantee",
+                    _snap.get("guarantee") or "unknown",
+                )
+        except Exception:
+            pass
         return 0, ddl_log, dest_summary, columns
 
     if written == 0:
@@ -2636,6 +2818,31 @@ def stream_database_transfer(
         else:
             dest_summary["load_method"] = load_methods_seen[-1]
     ddl_log.insert(1, f"CREATE TABLE IF NOT EXISTS {dest_table}")
+    try:
+        from services.source_snapshot import get_source_snapshot_meta
+
+        _snap = get_source_snapshot_meta()
+        if _snap:
+            dest_summary["source_snapshot"] = _snap
+            dest_summary.setdefault(
+                "source_snapshot_guarantee",
+                _snap.get("guarantee") or "unknown",
+            )
+        elif "source_snapshot" not in dest_summary:
+            # Honest weaker guarantee when no engine snapshot was bound.
+            dest_summary["source_snapshot"] = {
+                "engine": src_type,
+                "isolation": "none",
+                "guarantee": "not_guaranteed",
+                "note": (
+                    "No transfer-scoped source snapshot for this engine/mode. "
+                    "PostgreSQL/SQLite full-refresh bind REPEATABLE READ / "
+                    "transaction snapshots; other engines and incremental sync "
+                    "document weaker page-local visibility."
+                ),
+            }
+    except Exception as exc:
+        logger.debug("source_snapshot stamp skipped: %s", exc)
     return written, ddl_log, dest_summary, columns
 
 
