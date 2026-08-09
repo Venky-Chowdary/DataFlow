@@ -1001,6 +1001,7 @@ def stream_file_to_database(
             preserve_case=True,
             dest_kind=dest_type,
             destination_pk_columns=list(pk_target_cols or []) or None,
+            empty_cells_as_null=True,
         )
         fingerprints = row_fingerprints(mapped_rows, target_cols) if mapped_rows else []
 
@@ -1025,6 +1026,9 @@ def stream_file_to_database(
             error_policy=stream_error_policy,
             job_id=job_id,
             skip_preflight=skip_preflight,
+            # Spreadsheet/CSV blank cells → SQL NULL on nullable typed columns
+            # (ITEM 25). DB→DB empty strings still require a Risk Contract.
+            empty_cells_as_null=True,
             # Object-store purge vs append-run isolation keys off this. Omitting
             # it left overwrite jobs on the append path so stale part-* objects
             # survived and Gate-8 aggregated mixed generations.

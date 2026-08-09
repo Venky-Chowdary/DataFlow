@@ -30,7 +30,7 @@ Status values: `NOT_STARTED` | `IN_PROGRESS` | `DONE_VERIFIED` | `BLOCKED` | `RE
 | 22 | NOT_STARTED | | | | |
 | 23 | NOT_STARTED | | | | |
 | 24 | NOT_STARTED | | | | |
-| 25 | NOT_STARTED | | | | **NEW:** Excel→PG empty→decimal/datetime FAIL_JOB quarantine (job `6a77e32d…`); minio ImportError suppressed. |
+| 25 | IN_PROGRESS | `apps/api/connectors/writer_common.py`, `file_stream.py`, `postgresql_writer.py`, `sqlite_writer.py`, `mysql_writer.py`, `stream.py`, `transform_engine.py` | `apps/api/tests/test_item25_excel_empty_cells_as_null.py` | pending VERIFY | Excel/CSV `empty_cells_as_null=True`: blank→NULL on nullable typed cols; Year≠datetime; abort msg counts cells≠rows. DB→DB empty still needs Risk Contract. |
 
 ## Flow track
 

@@ -655,6 +655,7 @@ def _pg_materialize_mapped_batch(
     destination_pk_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
     allow_logical_fallback: bool = True,
+    empty_cells_as_null: bool = False,
 ) -> _PgMaterializedBatch:
     """Build mapped rows against ``dest_types`` then quarantine/bind.
 
@@ -679,6 +680,7 @@ def _pg_materialize_mapped_batch(
         dest_kind="postgresql",
         destination_pk_columns=list(destination_pk_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
+        empty_cells_as_null=bool(empty_cells_as_null),
     )
     mapped_rows = quarantine_currency_markers_into_numeric(
         mapped_rows, target_cols, target_types, rejected_details, policy
@@ -1220,6 +1222,7 @@ def write_mapped_rows(
             destination_pk_columns=list(conflict_columns or []) or None,
             destination_column_nullability=_kwargs.get("destination_column_nullability"),
             allow_logical_fallback=True,
+            empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
         )
         mapped_rows = _batch.mapped_rows
         sparse_rows = _batch.sparse_rows
@@ -1711,6 +1714,7 @@ def write_mapped_rows(
                         destination_column_nullability=_kwargs.get(
                             "destination_column_nullability"
                         ),
+                        empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
                     )
                     mapped_rows = _batch.mapped_rows
                     sparse_rows = _batch.sparse_rows

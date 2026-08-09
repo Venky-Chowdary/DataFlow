@@ -944,12 +944,20 @@ def infer_transform_for_mapping(
         if tgt == "binary":
             return "binary"
         if tgt == "datetime":
+            # Calendar year number columns must stay integer (FSI "Year"), not
+            # invent datetime coerce that then FAIL_JOBs on blank Excel cells.
+            _year_name = re.sub(r"[^a-z0-9]", "", (source_col or "").lower())
+            if _year_name in {"year", "fiscalyear", "calendaryear", "yr"}:
+                return "integer"
             # Never force a date cast on non-temporal VARCHAR (status → posted_date).
             # Let G3/G5 declare the type mismatch instead of lucky-parse corruption.
             if src_temporal or samples_temporal:
                 return "datetime"
             return "none"
         if tgt == "date":
+            _year_name = re.sub(r"[^a-z0-9]", "", (source_col or "").lower())
+            if _year_name in {"year", "fiscalyear", "calendaryear", "yr"}:
+                return "integer"
             # Narrowing a datetime into a date-only column drops the time of day.
             # Only do it when the destination genuinely cannot hold a time;
             # document stores map both logical types onto one instant carrier.
@@ -1035,6 +1043,23 @@ def infer_transform_for_mapping(
         return "datetime"
 
     src_col = source_col.upper()
+    # Calendar year number (FSI "Year", fiscal_year) is INTEGER — never invent
+    # datetime coerce for a 4-digit year field (empty cells then FAIL_JOB).
+    src_name_compact = re.sub(r"[^a-z0-9]", "", (source_col or "").lower())
+    if src_name_compact in {"year", "fiscalyear", "calendaryear", "yr"} and src in {
+        "integer",
+        "bigint",
+        "decimal",
+        "float",
+        "string",
+        "text",
+        "unknown",
+        "",
+    }:
+        if tgt in {"datetime", "timestamp", "timestamptz", "date"}:
+            return "integer"
+        if not tgt or tgt in {"string", "text", "unknown", "integer", "bigint"}:
+            return "integer"
     # Name-heuristic decimal only when the destination is numeric — never invent
     # a cast that strips currency markers into a VARCHAR/TEXT sink.
     if tgt not in {"string", "text", "unknown", None} and (

@@ -582,6 +582,7 @@ def write_mapped_rows(
                     destination_column_nullability=_kwargs.get(
                         "destination_column_nullability"
                     ),
+                    empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
                 )
             )
             # Shared quarantine matrix — SQLite is PRODUCTION_SKU; never skip fit
@@ -775,6 +776,7 @@ def write_mapped_rows(
                         destination_column_nullability=_kwargs.get(
                             "destination_column_nullability"
                         ),
+                        empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
                     )
                 )
                 mapped_rows = apply_write_quarantine_matrix(
