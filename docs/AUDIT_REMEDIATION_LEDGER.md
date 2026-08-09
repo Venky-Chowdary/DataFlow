@@ -8,7 +8,7 @@ Status values: `NOT_STARTED` | `IN_PROGRESS` | `DONE_VERIFIED` | `BLOCKED` | `RE
 |------|--------|---------------|-------------|---------------|-------|
 | 1 | DONE_VERIFIED | `apps/api/services/decision_kernel/type_invent.py`, `apps/api/services/decision_kernel/invent.py`, `apps/api/services/schema_introspect.py` | `apps/api/tests/test_item1_sqlite_integer_affinity_invents_bigint.py`, `apps/api/tests/test_item1_pg_writer_bare_integer_is_bigint.py` | VERIFY 491p/1s; stash 4f→5p; iso 5p; polluted slice 71p; full suite **109→105 failed** (11659→11663 passed) | Prior DONE_VERIFIED retracted (SQLite INTEGER affinity cliff). Fixed introspect BIGINT + bare float materialize. |
 | 2 | DONE_VERIFIED | `apps/api/src/transfer/engine.py` | `apps/api/tests/test_item2_skip_preflight_ddl_identity.py` | stash 1f→6p; iso 6p; polluted 18p+sync/gzip green; UTE skip_preflight sqlite→sqlite success=True records=2; drift refused | Hollow proof_bundle + skip_preflight now inline-stamps; UI path still requires Validate; approved-hash drift still refused. |
-| 3 | NOT_STARTED | | | | |
+| 3 | DONE_VERIFIED | `apps/api/src/services/auth_service.py`, `apps/api/src/routers/auth_router.py`, `apps/api/tests/test_auth_service.py` | `apps/api/tests/test_item3_auth_bootstrap_no_enumeration.py` | stash 3f→3p; auth slice 19p; public keys exactly `{auth_required, has_users}` | Public bootstrap no longer returns emails/password length/config; sensitive omits emails too. |
 | 4 | NOT_STARTED | | | | |
 | 5 | NOT_STARTED | | | | |
 | 6 | NOT_STARTED | | | | |
@@ -160,3 +160,38 @@ UTE drifted approved hash: success=False, records_transferred=0
 PRODUCTION_SKU failures remain on additive Map `target_type` refuse under
 partial Studio — not the DDL-identity Validate message. Tracked via existing
 SKU failures; do not conflate with ITEM 2.
+
+## ITEM 3 verify log (2026-08-09)
+
+### Root cause
+`/api/v1/auth/bootstrap` is public. Historical `auth_bootstrap_status()` returned
+every account email plus `admin_password_length` to unauthenticated callers.
+A prior partial scrub still exposed `user_count` and, for any Bearer, a full
+`emails` list.
+
+### Fix
+- Public payload is **exactly** `{auth_required, has_users}` (`has_users` ≡ user_count > 0).
+- Authenticated sensitive diagnostics keep boolean config flags + count — **no emails**,
+  no password length.
+- Bootstrap token inspection failures log at ERROR and fall back to public payload.
+
+### Stash proof (`test_item3_auth_bootstrap_no_enumeration.py`)
+```
+===== WITHOUT FIX =====
+FFF
+FAILED test_unauthenticated_bootstrap_payload_is_exactly_public_contract
+  AssertionError: keys include emails / admin_password_length / user_count
+FAILED test_auth_bootstrap_status_public_never_lists_emails
+FAILED test_authenticated_bootstrap_still_omits_emails
+3 failed
+
+===== WITH FIX =====
+...  3 passed
+```
+
+### VERIFY
+```
+pytest tests/test_item3_auth_bootstrap_no_enumeration.py \
+  tests/test_auth_service.py tests/test_auth_middleware.py -q
+→ 19 passed
+```

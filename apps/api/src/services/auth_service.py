@@ -204,12 +204,15 @@ def _load_users() -> list[dict[str, Any]]:
     return []
 
 def auth_bootstrap_status(*, include_sensitive: bool = False) -> dict[str, Any]:
-    """Public-safe auth diagnostics (audit §6.1).
+    """Public-safe auth diagnostics (audit ITEM 3 / §6.1).
 
-    Unauthenticated callers receive only whether auth is required and whether
-    any users exist — never account emails or admin password length.
+    Unauthenticated callers receive **only** ``auth_required`` and ``has_users``
+    (whether ``user_count > 0``). Never account emails, password lengths, or
+    configuration detail that aids enumeration / brute-force.
+
     Authenticated operators may pass ``include_sensitive=True`` for deploy
-    diagnostics (still no secret values).
+    diagnostics: boolean config flags and a count — still no emails and no
+    password length.
     """
     admin_email = _normalize_secret(getenv_brand("ADMIN_EMAIL", ""))
     admin_password = _normalize_secret(getenv_brand("ADMIN_PASSWORD", ""))
@@ -222,7 +225,7 @@ def auth_bootstrap_status(*, include_sensitive: bool = False) -> dict[str, Any]:
         except json.JSONDecodeError:
             auth_users_json_valid = False
     users = _load_users()
-    # Public payload — audit §6.1: no emails, no password length, no enum aids.
+    # Public payload — exact audit contract: nothing else.
     public: dict[str, Any] = {
         "auth_required": auth_required(),
         "has_users": len(users) > 0,
@@ -235,13 +238,9 @@ def auth_bootstrap_status(*, include_sensitive: bool = False) -> dict[str, Any]:
                 "admin_password_configured": bool(admin_password),
                 "auth_users_configured": bool(raw_users) and auth_users_json_valid is True,
                 "auth_users_json_valid": auth_users_json_valid,
-                "emails": [u.get("email") for u in users],
-                # Never expose password length — that narrows brute-force search space.
+                # Never expose emails or password length — both aid attackers.
             }
         )
-    else:
-        # Login UX still needs to know whether to show "configure admin" vs form.
-        public["user_count"] = 1 if users else 0
     return public
 
 

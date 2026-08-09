@@ -108,16 +108,20 @@ def test_normalize_secret_handles_dollar_escape(auth_env, monkeypatch):
 def test_auth_bootstrap_status_reports_admin(auth_env):
     from src.services.auth_service import auth_bootstrap_status
 
-    # Public payload — no email enumeration / password length (audit §6.1).
+    # Public payload — exact ITEM 3 contract; no enumeration aids.
     public = auth_bootstrap_status()
-    assert public["has_users"] is True
-    assert public["user_count"] >= 1
+    assert public == {
+        "auth_required": public["auth_required"],
+        "has_users": True,
+    }
+    assert set(public.keys()) == {"auth_required", "has_users"}
     assert "emails" not in public
+    assert "user_count" not in public
     assert "admin_password_length" not in public
 
     sensitive = auth_bootstrap_status(include_sensitive=True)
     assert sensitive["admin_email_configured"] is True
     assert sensitive["admin_password_configured"] is True
     assert sensitive["user_count"] >= 1
-    assert "admin@example.com" in sensitive["emails"]
+    assert "emails" not in sensitive
     assert "admin_password_length" not in sensitive
