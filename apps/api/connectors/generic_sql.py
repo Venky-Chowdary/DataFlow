@@ -1010,8 +1010,15 @@ def _sa_type_for_logical(
         return _maybe_nullable(sa.DateTime())
 
     if t == LOGICAL_INTEGER:
-        # Honor Map integer width — never invent BIGINT from INTEGER/INT.
+        # Width SSOT = decision_kernel integer_width_carrier / ddl_type.
+        # Bare logical ``integer`` must invent 64-bit (never sa.Integer INT32).
+        # Explicit INTEGER/INT/INT32 stay 32-bit; BIGINT stays 64-bit.
+        from services.decision_kernel import integer_width_carrier
+        from services.type_system import integer_bit_width
+
         int_u = raw.upper().split("(", 1)[0].strip().replace(" ", "")
+        carrier = integer_width_carrier(raw) or ""
+        width = integer_bit_width(carrier) if carrier else None
         if int_u in {
             "BIGINT",
             "INT64",
@@ -1019,7 +1026,7 @@ def _sa_type_for_logical(
             "UBIGINT",
             "UINT64",
             "BIGSERIAL",
-        }:
+        } or width == 64 or (carrier.upper() in {"BIGINT", "INT64", "LONG"}):
             return _maybe_nullable(sa.BigInteger())
         # Oracle NUMBER(p,0) normalized as integer — width from precision.
         if int_u == "NUMBER":
@@ -1031,12 +1038,14 @@ def _sa_type_for_logical(
             if np is not None and int(np) <= 4:
                 return _maybe_nullable(sa.SmallInteger())
             return _maybe_nullable(sa.Integer())
-        if int_u in {"SMALLINT", "INT2", "SMALLSERIAL", "SHORT", "INT16"}:
+        if int_u in {"SMALLINT", "INT2", "SMALLSERIAL", "SHORT", "INT16"} or width == 16:
             return _maybe_nullable(sa.SmallInteger())
-        if int_u in {"TINYINT", "INT1", "UINT8", "BYTE"}:
+        if int_u in {"TINYINT", "INT1", "UINT8", "BYTE"} or (width is not None and width <= 8):
             return _maybe_nullable(sa.SmallInteger())
-        # INTEGER / INT / MEDIUMINT / INT32 / SERIAL / NUMBER(p,0) mid-range
-        return _maybe_nullable(sa.Integer())
+        if int_u in {"INTEGER", "INT", "INT32", "MEDIUMINT", "SERIAL", "SIGNED"} or width == 32:
+            return _maybe_nullable(sa.Integer())
+        # Bare / unknown integer invent — never-narrower 64-bit (audit ITEM 1).
+        return _maybe_nullable(sa.BigInteger())
     if t == LOGICAL_DECIMAL:
         precision, scale = parse_numeric_precision_scale(raw)
         if db_type == "risingwave":
