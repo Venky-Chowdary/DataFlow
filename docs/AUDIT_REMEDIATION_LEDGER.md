@@ -76,3 +76,48 @@ pytest tests/test_item1_pg_writer_bare_integer_is_bigint.py \
 ```
 pytest tests/test_stamp_additive_mapping_types.py -q → 7 passed
 ```
+
+## ITEM 1 prove-or-retract (2026-08-09) — SQLite INTEGER affinity
+
+### Retraction
+Prior DONE_VERIFIED after `4aec4f3` was wrong: Map stamp `integer`→BIGINT was fixed, but
+SQLite `INTEGER` affinity still introspected as `INTEGER` → PG invent INT32 → value
+`2147483648` quarantined. Claim retracted; status was `REGRESSED`.
+
+### Fix
+- `_introspect_sqlite`: INTEGER/INT/BIGINT affinity → `BIGINT` (REAL → `DOUBLE PRECISION`)
+- `materialize_dest_ddl`: bare logical `float` rematerializes on MySQL (not FLOAT32 keyword)
+
+### Stash proof (`test_item1_sqlite_integer_affinity_invents_bigint.py`)
+```
+===== WITHOUT FIX =====
+4 failed, 1 passed
+FAILED test_sqlite_integer_affinity_introspects_as_bigint — assert 'INTEGER' == 'BIGINT'
+FAILED test_invent_from_sqlite_introspect_carrier_is_never_int32
+FAILED test_live_pg_create_from_sqlite_affinity_carrier_holds_int64
+  integer does not fit PostgreSQL INTEGER — quarantined
+FAILED test_materialize_bare_logical_float_is_double_on_mysql — assert 'float' == 'DOUBLE'
+
+===== WITH FIX =====
+5 passed
+```
+
+### VERIFY
+```
+491 passed, 1 skipped in 4.59s
+```
+
+### Isolation vs polluted neighbors
+```
+isolation: 5 passed
+with stamp/workspace/canonical/item1: 71 passed
+```
+
+### Full suite failure count
+```
+BEFORE (HEAD without this fix): 109 failed, 11659 passed, 1569 skipped
+AFTER  (with this fix):         105 failed, 11663 passed, 1569 skipped
+Delta: -4 failures / +4 passes (no new failures introduced)
+SQLite SKU/SCD2 failures (9) exist identically before and after — ITEM 2 territory
+(skip_preflight / additive stamp refuse), not width invent.
+```
