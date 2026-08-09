@@ -161,6 +161,44 @@ SQLite: deferred transaction snapshot stamped; recon passed.
 
 ### NOT claimed / remaining for PROVEN
 * MySQL `consistent snapshot` / locked handoff on the transfer path
-* MongoDB majority read concern + clusterTime
+* MongoDB majority read concern + clusterTime (standalone Mongo cannot
+  `start_session(snapshot=True)` — requires replica set)
 * Oracle flashback SCN / SQL Server snapshot isolation / warehouse time-travel
 * Binding bulk COPY export to the same RR session when `BULK_EXPORT` is on
+
+---
+
+## Property 4 — PARTIAL (2026-08-09)
+
+### Defect
+Observable exactly-once was incomplete: the SQLite stream path never passed
+`job_id` / `write_batch_key`, so insert retries could duplicate despite the
+ledger existing in the writer. PG/MySQL armed the ledger even for upserts
+(could suppress legitimate updates). Ledger schema lacked `row_start` /
+`row_end` / `attempt`. No kill-mid-chunk + checksum golden existed.
+
+### Fix
+1. `stream.py` SQLite `_write_batch` arms ledger like PG/MySQL.
+2. PG/MySQL `use_ledger` only for insert (not keyed upsert) — parity with SQLite.
+3. Ledger DDL + mark record `row_start` / `row_end` / `attempt`; migrate older
+   tables; PG mark uses SAVEPOINT so missing-column degrade cannot abort the
+   data transaction.
+4. Golden proof: clean run checksum == kill-after-chunk-0 + resume.
+
+### Proof output (this host)
+
+```
+pytest tests/test_property4_observable_exactly_once.py tests/test_chunk_ledger_accounting.py -q
+19 passed in 18.59s
+
+SQLite: insert ledger armed; kill after chunk 0 → resume → 6 rows, no dupes,
+identical SHA-256 vs clean run; ledger row_start/row_end present.
+
+PostgreSQL (live): same kill/resume/checksum proof green.
+```
+
+### Honesty
+* Delivery remains **at-least-once**; observable result is exactly-once via
+  same-txn ledger skip (insert) or conflict-key upsert.
+* Mongo / Kafka / object stores / warehouses: **NOT_GUARANTEED** (no ledger).
+* Quarantine salvage (per-row commit then ledger) is still not same-txn.
