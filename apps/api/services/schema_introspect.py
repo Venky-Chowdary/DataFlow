@@ -1344,10 +1344,10 @@ def _pg_fetch_enum_labels(cur: Any, type_oids: list[int]) -> dict[int, list[str]
 
 
 def _pg_apply_identity_carrier(logical: str, attidentity: str, default_expr: str | None) -> str:
-    """Annotate INTEGER carriers with GENERATED / SERIAL when catalog says so."""
+    """Annotate integer carriers with GENERATED / SERIAL when catalog says so."""
     ident = (attidentity or "").strip().lower()
     default = (default_expr or "").lower()
-    base = (logical or "INTEGER").upper()
+    base = (logical or "INT4").upper()
     if ident == "a":
         # GENERATED ALWAYS AS IDENTITY — client INSERT must omit the column.
         return f"{base} GENERATED ALWAYS"
@@ -2241,14 +2241,15 @@ def _pg_to_logical(dtype: str) -> str:
         return "TID"
     if d == "pg_lsn":
         return "PG_LSN"
-    # Width-preserving uppercase carriers (audit P0: never bigint→INTEGER).
+    # Width-preserving unambiguous carriers (Property 1: never emit ambiguous
+    # INTEGER/INT — those invent 64-bit. PG int4 → INT4 so width is explicit).
     # Must not emit lowercase ``integer`` — that token is LOGICAL_INTEGER.
     if d in ("bigint", "int8"):
         return "BIGINT"
     if d in ("smallint", "int2"):
         return "SMALLINT"
     if d in ("integer", "int", "int4"):
-        return "INTEGER"
+        return "INT4"
     # IEEE floats keep REAL vs DOUBLE polarity — never silently rewrite to DECIMAL.
     if d in ("real", "float4"):
         return "REAL"
@@ -2439,7 +2440,7 @@ def _mysql_to_logical(dtype: str) -> str:
         if "tinyint" in d and "tinyint(1)" not in d:
             return "TINYINT UNSIGNED"
         if "int" in d:
-            return "INT UNSIGNED"
+            return "INT4 UNSIGNED"
     if d == "year" or d.startswith("year("):
         # MySQL YEAR — keep carrier so write quarantine enforces 1901–2155 / 0000
         # (non-strict MySQL silently stores invalid years as 0000).
@@ -2456,14 +2457,15 @@ def _mysql_to_logical(dtype: str) -> str:
         # tinyint(1) boolean handled earlier in this mapper when present.
         return "TINYINT"
     if re.search(r"\bint\b", d) or d == "int":
-        return "INTEGER"
+        return "INT4"
     # IEEE float/double/real — preserve DOUBLE vs FLOAT polarity.
+    # MySQL FLOAT is IEEE-32 — emit FLOAT32 (bare FLOAT invents IEEE-64).
     if "double" in d:
         return "DOUBLE"
     if "real" in d:
         return "REAL"
     if "float" in d:
-        return "FLOAT"
+        return "FLOAT32"
     if "bool" in d:
         return "BOOLEAN"
     if d == "date":

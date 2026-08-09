@@ -48,4 +48,4 @@ def test_pg_specialty_introspect_carriers():
 
     # Integers keep width — specialty split must not invent OID for bigint.
     assert _pg_to_logical("bigint") == "BIGINT"
-    assert _pg_to_logical("integer") == "INTEGER"
+    assert _pg_to_logical("integer") == "INT4"

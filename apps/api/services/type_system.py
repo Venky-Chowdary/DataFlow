@@ -698,7 +698,8 @@ _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
     "databricks": {
         LOGICAL_INTERVAL: "STRING",
         LOGICAL_GEOGRAPHY: "STRING",
-        LOGICAL_VECTOR: "ARRAY<FLOAT>",
+        # FLOAT32 leaf — bare FLOAT invents DOUBLE (Property 1).
+        LOGICAL_VECTOR: "ARRAY<FLOAT32>",
     },
     "iceberg": {
         LOGICAL_INTERVAL: "string",
@@ -713,7 +714,8 @@ _NATIVE_SPECIALTY_DDL: Final[dict[str, dict[str, str]]] = {
     "duckdb": {
         LOGICAL_INTERVAL: "INTERVAL",
         LOGICAL_GEOGRAPHY: "VARCHAR",
-        LOGICAL_VECTOR: "FLOAT[]",
+        # FLOAT32[] — bare FLOAT[] rematerializes to DOUBLE[] (Property 1).
+        LOGICAL_VECTOR: "FLOAT32[]",
     },
     "trino": {
         LOGICAL_INTERVAL: "interval day to second",
@@ -1166,7 +1168,16 @@ def _leaf_ddl_for_nested(db: str, leaf: str) -> str:
     leaf = (leaf or "STRING").strip()
     if db == "iceberg":
         low = leaf.lower()
-        if low in _ICEBERG_PHYSICAL_LEAVES:
+        # Property 1: ambiguous SQL/logical tokens must not hit the physical-leaf
+        # shortcut (``FLOAT``→``float`` IEEE-32 / ``INTEGER``→``int``). Only
+        # Iceberg-native spellings that are not also ambiguous SQL keywords
+        # (``long``/``double``/``boolean``/…) pass through; INT4/FLOAT32 fall
+        # through to width-aware invent below.
+        _ambiguous = leaf.upper() in {"INTEGER", "INT", "FLOAT", "SIGNED"} or leaf in {
+            LOGICAL_INTEGER,
+            LOGICAL_FLOAT,
+        }
+        if not _ambiguous and low in _ICEBERG_PHYSICAL_LEAVES:
             return low
         if low.startswith("decimal"):
             return low
@@ -6141,20 +6152,17 @@ def bfile_locator_would_collapse(source_type: str, target_type: str) -> bool:
 def integer_bit_width(inferred: str | None) -> int | None:
     """Signed bit width; UNSIGNED adds +1 so INT UNSIGNED is wider than INT.
 
-    Bare logical family token ``integer`` (exact, any case-folded match to
-    ``LOGICAL_INTEGER`` with no INT4/BIGINT/… carrier spelling) returns
-    ``None`` — width unknown. Create-new then invents via ``DDL_TYPES``
-    (64-bit default). Explicit ``INTEGER`` / ``INT`` / ``INT4`` carriers
-    remain 32-bit so true INT32 sources are not invent-widened silently.
+    Property 1 — referential transparency: ambiguous SQL keywords
+    ``INTEGER`` / ``INT`` (any case, with or without UNSIGNED) return
+    ``None`` — width unknown. Create-new invents via ``DDL_TYPES`` (64-bit).
+    Only unambiguous carriers select 32-bit: ``INT4`` / ``INT32`` / ``SERIAL``.
+    Introspect must emit those carriers for true INT32 sources.
     """
     raw = strip_identity_qualifier(inferred)
     if not raw:
         return None
-    # Bare logical family token only (exact lowercase ``integer`` from
-    # ``LOGICAL_INTEGER`` / harness). Uppercase ``INTEGER`` remains INT32.
-    # Introspect must emit uppercase carriers so PG ``integer`` (int4) is not
-    # confused with the logical family token.
-    if raw.strip() == LOGICAL_INTEGER:
+    # Bare logical family token (any case of ``integer``) — width unknown.
+    if raw.strip().lower() == LOGICAL_INTEGER:
         return None
     # ClickHouse Int8/UInt8/… — case-sensitive; must not collide with PG INT8≡BIGINT.
     m_ch = re.match(r"^(U?Int)(8|16|32|64)\b", raw)
@@ -6165,6 +6173,12 @@ def integer_bit_width(inferred: str | None) -> int | None:
     unsigned = "UNSIGNED" in upper or bool(
         re.search(r"\bUINT\d*\b", upper)
     )
+    # Strip UNSIGNED for ambiguous-keyword detection.
+    compact = re.sub(r"\bUNSIGNED\b", "", upper).strip()
+    compact = re.sub(r"\s+", " ", compact)
+    # Ambiguous SQL keywords — never select 32-bit by surface spelling/case.
+    if compact in {"INTEGER", "INT", "SIGNED"}:
+        return None
     base: int | None = None
     # Explicit widths before bare INT — INT64/LONG must not miss \\bINT\\b.
     if (
@@ -6196,19 +6210,17 @@ def integer_bit_width(inferred: str | None) -> int | None:
         base = 8
     elif (
         "SERIAL" in upper
-        or "INTEGER" in upper
         or re.search(r"\bINT32\b", upper)
         or re.search(r"\bINT4\b", upper)
         or re.search(r"\bUINT32\b", upper)
     ):
-        base = 32
-    elif re.search(r"\bINT\b", upper):
+        # SERIAL ≡ INT4 on PostgreSQL; INT4/INT32 are unambiguous 32-bit.
         base = 32
     if base is None:
         return None
     if unsigned:
         # Unsigned same nominal width holds larger max → needs signed width+1
-        # (e.g. INT UNSIGNED → 33 so BIGINT is a valid widen).
+        # (e.g. INT4 UNSIGNED → 33 so BIGINT is a valid widen).
         return base + 1
     return base
 
@@ -6264,20 +6276,21 @@ def integer_width_would_narrow(source_type: str, target_type: str) -> bool:
 def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | None:
     """IEEE significand bits for float carriers (53=double, 24=single, 11=half).
 
-    Bare logical family token ``float`` returns ``None`` (width unknown) so
-    create-new invents via ``DDL_TYPES`` / ``_FLOAT_DDL`` (IEEE-64 default).
+    Property 1 — referential transparency: bare ``FLOAT`` / logical ``float``
+    (any case) returns ``None`` (width unknown) so create-new invents via
+    ``DDL_TYPES`` / ``_FLOAT_DDL`` (IEEE-64 default). Unambiguous single-
+    precision carriers are ``REAL`` / ``FLOAT4`` / ``FLOAT32`` / ``FLOAT(p≤24)``.
+    Introspect must emit those for true IEEE-32 sources (e.g. MySQL FLOAT).
 
-    Bare carrier ``FLOAT`` is dialect-dependent: SQL Server / Snowflake FLOAT is
-    IEEE-64; MySQL FLOAT is IEEE-32. When ``dest_db`` is known, use the dialect
-    default so DOUBLE→FLOAT create-new on those engines is not a false mantissa
-    collapse.
+    ``dest_db`` is retained for call-site compatibility; bare FLOAT no longer
+    case- or dialect-selects IEEE-32.
     """
+    del dest_db  # unused — width is carrier-explicit, never dialect-guessed
     if normalize_logical_type(inferred) != LOGICAL_FLOAT:
         return None
     raw = strip_identity_qualifier(inferred)
-    # Bare logical family token only (exact lowercase ``float``).
-    # Uppercase ``FLOAT`` keeps dialect-default mantissa rules.
-    if raw.strip() == LOGICAL_FLOAT:
+    # Bare logical family token (any case of ``float``) — width unknown.
+    if raw.strip().lower() == LOGICAL_FLOAT:
         return None
     # Strip UNSIGNED so REAL UNSIGNED / FLOAT UNSIGNED keep single-width tokens.
     upper = re.sub(
@@ -6288,7 +6301,7 @@ def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | Non
     # IEEE half / float16 (~10 explicit + 1 implicit significand bits).
     if upper in {"HALF", "HALFFLOAT", "FLOAT16"} or upper.startswith("HALFFLOAT"):
         return 11
-    # Single-precision tokens.
+    # Single-precision tokens (unambiguous).
     if upper in {
         "REAL",
         "FLOAT4",
@@ -6308,15 +6321,9 @@ def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | Non
         "BINARY_DOUBLE",
     } or upper.startswith("DOUBLE"):
         return 53
-    # Bare FLOAT carrier is dialect-dependent.
+    # Bare FLOAT (any case) — ambiguous; invent IEEE-64 via DDL_TYPES.
     if upper == "FLOAT" or upper.startswith("FLOAT"):
-        db = (dest_db or "").strip().lower()
-        if db in {"sqlserver", "mssql", "snowflake", "postgresql", "postgres",
-                  "redshift", "duckdb", "bigquery", "spanner"}:
-            return 53
-        # Fail-closed single so DOUBLE→FLOAT never silent-greens without dest
-        # on engines where FLOAT ≡ IEEE-32 (MySQL, Iceberg, ClickHouse, …).
-        return 24
+        return None
     return 53
 
 

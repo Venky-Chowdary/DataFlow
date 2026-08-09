@@ -28,11 +28,14 @@ def test_sa_bare_integer_is_bigint_matching_ddl_types():
 
 
 def test_sa_explicit_int32_carrier_stays_32():
-    """Width-preserving: explicit INTEGER/INT must not be force-widened."""
-    for raw in ("INTEGER", "INT", "INT32"):
+    """Width-preserving: unambiguous INT4/INT32 stay 32; INTEGER/INT invent 64."""
+    for raw in ("INT4", "INT32"):
         sa_t = _sa_type_for_logical(raw, "postgresql", nullable=True)
         assert isinstance(sa_t, sa.Integer), (raw, type(sa_t))
         assert not isinstance(sa_t, sa.BigInteger), raw
+    for raw in ("INTEGER", "INT"):
+        sa_t = _sa_type_for_logical(raw, "postgresql", nullable=True)
+        assert isinstance(sa_t, sa.BigInteger), (raw, type(sa_t))
 
 
 def test_sa_bigint_carrier_stays_64():

@@ -14,6 +14,7 @@ from typing import Any, Final
 # Helpers / tables still owned by type_system (shared core). Import the module
 # object so circular init stays safe: type_system shims lazy-import this module.
 from services import type_system as _ts
+from services.decision_kernel.logical_type import LogicalType, NativeType
 
 # Bind shared helpers/tables from type_system into this module namespace.
 # Invent bodies below expect unqualified names (historical type_system style).
@@ -74,6 +75,7 @@ def _bind_from_type_system() -> None:
         'is_national_string_carrier',
         'is_unlimited_string_carrier',
         'observe_numeric_samples',
+        'parse_array_element',
         'parse_numeric_precision_scale',
         'parse_temporal_fractional_precision',
         'specialty_carrier_base',
@@ -229,8 +231,14 @@ def normalize_logical_type(inferred: str | None) -> str:
 
 
 
-def ddl_type(db_type: str, inferred: str | None) -> str:
+def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> str:
     """Map a logical source type to a destination-native DDL type.
+
+    Property 1: prefer ``LogicalType`` / ``NativeType`` over bare strings.
+    String inputs remain accepted for compatibility, but ambiguous keywords
+    (``INTEGER`` / ``INT`` / ``FLOAT`` any case) invent 64-bit — never
+    case-select Int32/Float32. True INT32/IEEE-32 sources must use unambiguous
+    carriers (``INT4`` / ``FLOAT32`` / ``REAL``).
 
     For DECIMAL sources with ``NUMBER(p,s)`` / ``DECIMAL(p,s)``, precision and
     scale are propagated within destination caps. Scale that exceeds the
@@ -249,6 +257,14 @@ def ddl_type(db_type: str, inferred: str | None) -> str:
     Nested ARRAY/STRUCT/MAP carriers are preserved on lakehouse engines
     (Databricks, DuckDB, ClickHouse, Iceberg, BigQuery, Trino, Snowflake).
     """
+    if isinstance(inferred, NativeType):
+        # Same-family physical passthrough; cross-family rematerialize.
+        if (inferred.db or "").strip().lower() == (db_type or "").strip().lower():
+            return inferred.text
+        inferred = inferred.text
+    elif isinstance(inferred, LogicalType):
+        # Width-bearing logical → unambiguous carrier, then invent.
+        inferred = inferred.to_carrier()
     raw_db = (db_type or "").strip().lower()
     # QuestDB has no DECIMAL/TIME/UUID natives — stamp honest DOUBLE/VARCHAR
     # before generic_sql normalize invents DECIMAL(38,15) Map stamps.
@@ -1433,16 +1449,14 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
             "redshift",
         }:
             return False
-        # Bare logical ``integer`` (width unknown) must NOT pass through as the
-        # dialect keyword INTEGER/INT — on PostgreSQL/MySQL that keyword is
-        # INT32, while ddl_type invents BIGINT. Explicit INT32 carriers
-        # (INTEGER/INT/INT32) keep integer_bit_width==32 and stay physical.
+        # Ambiguous INTEGER/INT (width unknown) must NOT pass through — those
+        # SQL keywords are INT32 on PG/MySQL while ddl_type invents BIGINT.
+        # Unambiguous INT4/INT32 keep integer_bit_width==32 and stay physical.
         if bare in {"INTEGER", "INT", "SIGNED"} and integer_bit_width(raw) is None:
             return False
         return True
-    # MySQL/Maria/SQL Server FLOAT is a real physical stamp when width is known
-    # (FLOAT32 / FLOAT4). Bare logical ``float`` (mantissa unknown) must still
-    # rematerialize via ddl_type → DOUBLE — never pass through as FLOAT32.
+    # Bare FLOAT (mantissa unknown) rematerializes via ddl_type → IEEE-64.
+    # Unambiguous FLOAT32 / FLOAT4 / REAL stay physical single-precision.
     if bare == "FLOAT":
         if float_mantissa_bits(raw) is None:
             return False
@@ -1498,13 +1512,27 @@ def materialize_dest_ddl(db_type: str, carrier: str | None) -> str:
     db = _normalize_dest_db(db_type)
     upper = raw.upper()
     if db == "iceberg":
+        # Rematerialize SQL/Spark ARRAY / VECTOR spellings to list<…>.
+        # Native Iceberg ``list<float>`` / ``list<int>`` are physical stamps —
+        # pass through (Property 1: do not rewrite dest-native IEEE-32 leaves).
         if (
             upper.startswith("ARRAY<")
             or upper.startswith("ARRAY(")
-            or upper.startswith("LIST<")
-            or upper.startswith("LIST(")
             or upper.endswith("[]")
             or normalize_logical_type(raw) == LOGICAL_VECTOR
+        ):
+            return ddl_type(db, raw)
+    # Property 1: nested ARRAY/LIST whose leaf is ambiguous INTEGER/INT/FLOAT
+    # must rematerialize — never pass through INT32/IEEE-32 element wire.
+    # Iceberg-native ``list<float>`` / ``list<int>`` are physical stamps (keep).
+    array_el = parse_array_element(raw)
+    if array_el is not None:
+        el = strip_identity_qualifier(array_el).strip()
+        el_u = el.upper()
+        iceberg_native_list = db == "iceberg" and upper.startswith("LIST")
+        if not iceberg_native_list and (
+            el_u in {"INTEGER", "INT", "FLOAT", "SIGNED"}
+            or el in {LOGICAL_INTEGER, LOGICAL_FLOAT}
         ):
             return ddl_type(db, raw)
     if _is_explicit_physical_stamp(raw, db):
@@ -1523,8 +1551,9 @@ def integer_width_carrier(native: str | None) -> str | None:
     """Width-preserving integer carrier for introspect / Map / DDL invent.
 
     SSOT for native→carrier integer spelling. Returns ``None`` when ``native``
-    is not an integer family type. Bare logical ``integer`` → ``BIGINT``
-    (never-narrower invent default). Explicit INT32 spellings stay ``INTEGER``.
+    is not an integer family type. Bare / ambiguous ``integer`` / ``INTEGER`` /
+    ``INT`` → ``BIGINT`` (never-narrower invent default). Unambiguous INT32
+    spellings (``INT4`` / ``INT32`` / ``SERIAL``) stay 32-bit carriers.
     """
     raw = strip_identity_qualifier(native)
     if not raw:
@@ -1543,7 +1572,7 @@ def integer_width_carrier(native: str | None) -> str | None:
         return m_ch.group(0)
     width = integer_bit_width(raw)
     if width is None:
-        # Bare logical family → safe 64-bit carrier.
+        # Bare / ambiguous family → safe 64-bit carrier.
         return "BIGINT"
     # Map width → canonical SQL carrier (UNSIGNED polarity preserved).
     if width <= 8 or (unsigned and width == 9):
@@ -1555,15 +1584,12 @@ def integer_width_carrier(native: str | None) -> str | None:
     if "MEDIUMINT" in upper or width in {24, 25}:
         return "MEDIUMINT UNSIGNED" if unsigned else "MEDIUMINT"
     if width <= 32 or (unsigned and width == 33):
-        # Prefer INT UNSIGNED token when source said INT/INTEGER UNSIGNED.
+        # Prefer unambiguous INT4 tokens (Property 1).
         if unsigned:
-            return "INT UNSIGNED" if re.search(r"\bINT\b", upper) and "INTEGER" not in upper else "INTEGER UNSIGNED"
-        # INT4 / INTEGER / INT / INT32 → INTEGER; keep INT when source was bare INT.
-        if re.search(r"\bINT32\b", upper) or "INTEGER" in upper or re.search(r"\bINT4\b", upper):
-            return "INTEGER"
-        if re.search(r"\bINT\b", upper):
-            return "INT"
-        return "INTEGER"
+            return "INT4 UNSIGNED"
+        if re.search(r"\bINT32\b", upper):
+            return "INT32"
+        return "INT4"
     # 64-bit (and unsigned 64 → DECIMAL path usually; if still integer logical)
     if unsigned:
         return "BIGINT UNSIGNED"
@@ -1587,7 +1613,7 @@ def float_width_carrier(native: str | None) -> str | None:
         return None
     if normalize_logical_type(raw) != LOGICAL_FLOAT:
         return None
-    if raw.strip() == LOGICAL_FLOAT:
+    if raw.strip().lower() == LOGICAL_FLOAT:
         return "DOUBLE"
     upper = re.sub(r"\bUNSIGNED\b", "", raw.upper()).strip()
     compact = upper.replace(" ", "")
@@ -1616,9 +1642,9 @@ def float_width_carrier(native: str | None) -> str | None:
         if "PRECISION" in upper:
             return "DOUBLE PRECISION"
         return "DOUBLE"
-    # Bare FLOAT carrier — keep token (dialect-default invent in ddl_type).
+    # Bare FLOAT (any case) — ambiguous; invent IEEE-64.
     if compact == "FLOAT" or compact.startswith("FLOAT"):
-        return "FLOAT"
+        return "DOUBLE"
     return "DOUBLE"
 
 

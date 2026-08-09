@@ -72,6 +72,7 @@ from services.decision_kernel.structural import (
     default_structural_strategy,
     stamp_mapping_array_strategies,
 )
+from services.decision_kernel.logical_type import LogicalType, NativeType, parse_type_ref
 from services.decision_kernel.types import (
     create_new_mapping_target_type,
     ddl_invent_never_narrower_than_table,
@@ -118,7 +119,9 @@ __all__ = [
     "FailureClass",
     "InventContext",
     "InventRefused",
+    "LogicalType",
     "MappingDecision",
+    "NativeType",
     "ProofPlan",
     "RiskLevel",
     "SchemaProfile",
@@ -162,6 +165,7 @@ __all__ = [
     "materialize_dest_ddl",
     "normalize_logical_type",
     "orchestrate_validation_summary",
+    "parse_type_ref",
     "profile_column",
     "profile_columns",
     "rank_suggested_target_type",

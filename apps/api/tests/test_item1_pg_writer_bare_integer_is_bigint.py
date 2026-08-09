@@ -33,10 +33,13 @@ def test_materialize_and_pg_type_bare_integer_are_bigint():
     assert expected == "BIGINT"
     assert materialize_dest_ddl("postgresql", "integer") == "BIGINT"
     assert pg_type("integer") == "BIGINT"
-    # Explicit INT32 carriers stay width-preserving.
-    assert materialize_dest_ddl("postgresql", "INTEGER") == "INTEGER"
-    assert pg_type("INTEGER") == "INTEGER"
-    assert integer_bit_width("INTEGER") == 32
+    # Ambiguous INTEGER invents 64; unambiguous INT4 stays width-preserving.
+    assert materialize_dest_ddl("postgresql", "INTEGER") == "BIGINT"
+    assert pg_type("INTEGER") == "BIGINT"
+    assert integer_bit_width("INTEGER") is None
+    assert materialize_dest_ddl("postgresql", "INT4") == "INTEGER"
+    assert pg_type("INT4") == "INTEGER"
+    assert integer_bit_width("INT4") == 32
 
 
 def test_materialize_bare_integer_never_narrower_across_sql_dests():

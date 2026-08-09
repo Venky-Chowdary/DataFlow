@@ -1,9 +1,10 @@
-"""Audit P0 — integer/float invent must never silently narrow width.
+"""Property 1 — integer/float invent must never silently narrow width.
 
 Contract:
-- Bare logical ``integer`` / ``float`` invent via DDL_TYPES (64-bit / IEEE-64).
-- Explicit INT32 / REAL carriers stay width-preserving.
-- PostgreSQL introspect emits BIGINT for bigint (never INTEGER).
+- Bare / ambiguous ``integer`` / ``INTEGER`` / ``INT`` invent via DDL_TYPES (64-bit).
+- Bare / ambiguous ``float`` / ``FLOAT`` invent IEEE-64.
+- Unambiguous INT4 / REAL / FLOAT32 carriers stay width-preserving.
+- PostgreSQL introspect emits INT4 for int4 (never ambiguous INTEGER).
 - ``ddl_type(dest, logical)`` is never narrower than ``DDL_TYPES[dest][logical]``.
 """
 
@@ -46,8 +47,8 @@ def test_bare_logical_float_never_narrower_than_ddl_types(dest: str):
 def test_pg_introspect_preserves_integer_float_width():
     assert _pg_to_logical("bigint") == "BIGINT"
     assert _pg_to_logical("int8") == "BIGINT"
-    assert _pg_to_logical("integer") == "INTEGER"
-    assert _pg_to_logical("int4") == "INTEGER"
+    assert _pg_to_logical("integer") == "INT4"
+    assert _pg_to_logical("int4") == "INT4"
     assert _pg_to_logical("smallint") == "SMALLINT"
     assert _pg_to_logical("double precision") == "DOUBLE PRECISION"
     assert _pg_to_logical("float8") == "DOUBLE PRECISION"
@@ -56,9 +57,13 @@ def test_pg_introspect_preserves_integer_float_width():
 
 
 def test_explicit_int32_carrier_stays_32_on_pg():
-    assert integer_bit_width("INTEGER") == 32
-    assert ddl_type("postgresql", "INTEGER") == "INTEGER"
+    assert integer_bit_width("INT4") == 32
+    assert integer_bit_width("INT32") == 32
+    assert ddl_type("postgresql", "INT4") == "INTEGER"
     assert ddl_type("postgresql", "BIGINT") == "BIGINT"
+    # Ambiguous INTEGER invents 64 — never case-select Int32.
+    assert integer_bit_width("INTEGER") is None
+    assert ddl_type("postgresql", "INTEGER") == "BIGINT"
 
 
 def test_bare_logical_integer_invents_64_on_pg():
@@ -72,16 +77,18 @@ def test_bare_logical_integer_invents_64_on_pg():
 
 def test_width_carriers_ssot():
     assert integer_width_carrier("bigint") == "BIGINT"
-    assert integer_width_carrier("INTEGER") == "INTEGER"
+    assert integer_width_carrier("INTEGER") == "BIGINT"
     assert integer_width_carrier("integer") == "BIGINT"
+    assert integer_width_carrier("INT4") == "INT4"
     assert float_width_carrier("double precision") == "DOUBLE PRECISION"
     assert float_width_carrier("real") == "REAL"
     assert float_width_carrier("float") == "DOUBLE"
+    assert float_width_carrier("FLOAT") == "DOUBLE"
 
 
-def test_bigint_to_integer_still_classified_lossy():
-    assert is_lossy_coercion("BIGINT", "INTEGER", dest_db="postgresql") is True
-    assert is_lossy_coercion("DOUBLE PRECISION", "FLOAT", dest_db="mysql") is True
+def test_bigint_to_int4_still_classified_lossy():
+    assert is_lossy_coercion("BIGINT", "INT4", dest_db="postgresql") is True
+    assert is_lossy_coercion("DOUBLE PRECISION", "FLOAT32", dest_db="mysql") is True
 
 
 def test_create_new_from_bigint_carrier_stays_64():

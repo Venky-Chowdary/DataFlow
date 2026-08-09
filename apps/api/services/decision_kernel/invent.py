@@ -70,6 +70,18 @@ def invent_dest_type(
                 "live schema / Map stamp (never invent capacity from source alone).",
                 context=ctx,
             )
+        # Live schema is physical authority. Ambiguous SQL keywords (INT/INTEGER/
+        # FLOAT) on an existing column mean the engine's native wire already
+        # present — never rewrite to the create-new 64-bit invent floor.
+        from services.type_system import strip_identity_qualifier
+
+        live = strip_identity_qualifier(existing).strip()
+        live_u = live.upper()
+        if live_u in {"INT", "INTEGER", "SIGNED", "FLOAT"} or live.lower() in {
+            "integer",
+            "float",
+        }:
+            return str(existing)
         # Materialize for dialect wire; do not widen beyond the proven stamp.
         return str(materialize_dest_ddl(db, existing) or existing)
 
