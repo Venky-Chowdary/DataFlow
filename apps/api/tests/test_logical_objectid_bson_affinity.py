@@ -32,10 +32,15 @@ def test_logical_objectid_first_class():
     assert create_new_mapping_target_type("OBJECTID", "mysql") == "CHAR(24)"
     assert is_lossy_coercion("OBJECTID", "VARCHAR(24)") is False
     assert is_lossy_coercion("OBJECTID", "CHAR(24)") is False
-    assert is_lossy_coercion("OBJECTID", "TEXT") is True
-    assert objectid_would_collapse("OBJECTID", "TEXT") is True
+    # Unbounded TEXT holds 24-char hex (existing-table Mongo→SQL) — value-preserving.
+    assert is_lossy_coercion("OBJECTID", "TEXT") is False
+    assert objectid_would_collapse("OBJECTID", "TEXT") is False
     assert objectid_would_collapse("OBJECTID", "VARCHAR(24)") is False
     assert objectid_would_collapse("OBJECTID", "CHAR(24)") is False
+    # Narrow VARCHAR still collapses the hex wire.
+    assert is_lossy_coercion("OBJECTID", "VARCHAR(12)") is True
+    assert objectid_would_collapse("OBJECTID", "VARCHAR(12)") is True
+    assert is_lossy_coercion("OBJECTID", "INTEGER") is True
 
 
 def test_assess_bson_affinity_blocks_objectid_to_number():

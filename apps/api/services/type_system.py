@@ -1625,16 +1625,32 @@ def document_domain_would_collapse(
     return tgt in {LOGICAL_STRING, LOGICAL_TEXT}
 
 
-def document_domain_would_invent(source_type: str, target_type: str) -> bool:
+def document_domain_would_invent(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    dest_table_exists: bool | None = None,
+) -> bool:
     """True when open string/text invents a JSON/VARIANT document domain.
 
     Writers may wrap scalars as JSON, but Map must Accept risk — never imply the
     source already carried document validation polarity.
+
+    Exception: loading into an **existing** dialect-native document column
+    (PG JSONB, MySQL JSON, …) is a destination load, not create-new invent —
+    write-time JSON parse still rejects non-documents.
     """
     if normalize_logical_type(target_type) != LOGICAL_JSON:
         return False
     src = normalize_logical_type(source_type)
-    return src in {LOGICAL_STRING, LOGICAL_TEXT}
+    if src not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return False
+    if dest_table_exists is True and is_dialect_native_document_wire(
+        target_type, dest_db=dest_db
+    ):
+        return False
+    return True
 
 
 def nested_to_native_document_wire_preserved(
@@ -4925,9 +4941,11 @@ def specialty_carrier_base(inferred: str | None) -> str | None:
 def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> bool:
     """True when target is the industry-standard wire for a specialty carrier.
 
-    Mongo ObjectId → ``CHAR/VARCHAR(24)`` hex or ``BINARY(12)`` (common RDBMS
-    practice). IP families → ``VARCHAR(45)`` (IPv6). Bare TEXT/STRING still
-    collapses polarity and must surface in preflight.
+    Mongo ObjectId → ``CHAR/VARCHAR(24)`` hex or ``BINARY(12)`` (preferred
+    create-new). Unbounded TEXT / CLOB / STRING / VARCHAR also preserve the
+    24-char hex *value* (Fivetran/Airbyte-class Mongo→SQL path) — domain is
+    not enforced at dest, but this is not silent numeric collapse. Narrow
+    ``VARCHAR(n<24)`` still collapses. IP families → ``VARCHAR(45)`` (IPv6).
     """
     raw = strip_identity_qualifier(target_type).strip()
     if not raw:
@@ -4936,6 +4954,23 @@ def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> b
     spec = (source_specialty or "").upper()
     if spec == "OBJECTID":
         if upper in {"BINARY(12)", "VARBINARY(12)"}:
+            return True
+        # Unbounded text LOBs hold hex ObjectIds (existing-table Mongo→SQL).
+        if upper in {
+            "TEXT",
+            "NTEXT",
+            "CLOB",
+            "NCLOB",
+            "LONGTEXT",
+            "MEDIUMTEXT",
+            "TINYTEXT",
+            "STRING",
+            "VARCHAR",
+            "NVARCHAR",
+            "CHARACTER VARYING",
+            "NVARCHAR(MAX)",
+            "VARCHAR(MAX)",
+        }:
             return True
         m = re.match(
             r"^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*\)$",
@@ -4968,7 +5003,13 @@ def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> b
     return False
 
 
-def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
+def specialty_domain_would_invent(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    dest_table_exists: bool | None = None,
+) -> bool:
     """True when open string/json/scalar invents a native specialty domain.
 
     ``TEXT→INET`` / ``TEXT→TSVECTOR`` / ``JSON→HSTORE`` look like free casts but
@@ -4976,6 +5017,9 @@ def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
     CITEXT invent is handled by :func:`case_fold_polarity_invent`.
 
     ``JSON→JSONB`` is a create-new dialect twin (same ``LOGICAL_JSON``) — not invent.
+
+    Exception: string/text → existing dialect-native document column (JSONB/JSON)
+    is a destination load — write-time parse still rejects non-documents.
     """
     tgt = specialty_carrier_base(target_type)
     if tgt is None or tgt == "CITEXT":
@@ -4986,6 +5030,13 @@ def specialty_domain_would_invent(source_type: str, target_type: str) -> bool:
     # Document polarity class → document specialty (JSONB) is dialect twin, not invent.
     # JSON→HSTORE still invents (HSTORE is not in the document class).
     if tgt in _DOCUMENT_POLARITY_BASES and src_l == LOGICAL_JSON:
+        return False
+    if (
+        dest_table_exists is True
+        and tgt in _DOCUMENT_POLARITY_BASES
+        and src_l in {LOGICAL_STRING, LOGICAL_TEXT}
+        and is_dialect_native_document_wire(target_type, dest_db=dest_db)
+    ):
         return False
     return src_l in {
         LOGICAL_STRING,
@@ -5201,11 +5252,11 @@ def uuid_capacity_string_carrier(target_type: str | None) -> bool:
 
 
 def objectid_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when ObjectId polarity collapses to opaque string/text.
+    """True when ObjectId polarity collapses away from a hex/binary wire.
 
-    Width-safe create-new wires (``VARCHAR(24)`` / ``BINARY(12)``) preserve the
-    hex contract and are not a collapse. Bare TEXT/VARCHAR/STRING drop domain
-    polarity and must surface in preflight — never silent green.
+    Preferred create-new: ``VARCHAR(24)`` / ``BINARY(12)``. Unbounded TEXT /
+    VARCHAR also preserve hex values (not a collapse). Narrow ``VARCHAR(n<24)``,
+    numeric, UUID, or JSON invents still collapse and must block.
     """
     if normalize_logical_type(source_type) != LOGICAL_OBJECTID:
         return False
@@ -6576,6 +6627,7 @@ def is_precision_collapse_coercion(
     target_type: str,
     *,
     dest_db: str = "",
+    dest_table_exists: bool | None = None,
 ) -> bool:
     """True when source→target collapses precision even if samples appear clean.
 
@@ -6657,7 +6709,12 @@ def is_precision_collapse_coercion(
         return True
     if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if specialty_domain_would_invent(source_type, target_type):
+    if specialty_domain_would_invent(
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
+    ):
         return True
     if specialty_polarity_mismatch(source_type, target_type):
         return True
@@ -6699,7 +6756,12 @@ def is_precision_collapse_coercion(
         return True
     if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if document_domain_would_invent(source_type, target_type):
+    if document_domain_would_invent(
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
+    ):
         return True
     if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
@@ -6822,8 +6884,7 @@ def assess_bson_affinity(
         # Specialty / domain → open string invents no validation at schemaless sinks.
         (LOGICAL_UUID, LOGICAL_STRING),
         (LOGICAL_UUID, LOGICAL_TEXT),
-        (LOGICAL_OBJECTID, LOGICAL_STRING),
-        (LOGICAL_OBJECTID, LOGICAL_TEXT),
+        # ObjectId → unbounded TEXT/STRING hex wire is value-preserving (not soft risk).
         (LOGICAL_BINARY, LOGICAL_STRING),
         (LOGICAL_BINARY, LOGICAL_TEXT),
         (LOGICAL_JSON, LOGICAL_STRING),
@@ -7001,7 +7062,13 @@ def assess_create_new_type_risk(
     return risks
 
 
-def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") -> bool:
+def is_lossy_coercion(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    dest_table_exists: bool | None = None,
+) -> bool:
     """True when converting sourceâ†’target may lose precision, fail silently, or
     change the semantic meaning of a value.
 
@@ -7095,7 +7162,12 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
             return True
         if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
-        if specialty_domain_would_invent(source_type, target_type):
+        if specialty_domain_would_invent(
+            source_type,
+            target_type,
+            dest_db=dest_db,
+            dest_table_exists=dest_table_exists,
+        ):
             return True
         if specialty_polarity_mismatch(source_type, target_type):
             return True
@@ -7164,9 +7236,23 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         target_type, dest_db=dest_db
     ):
         return False
+    # Existing-table string/text → dialect-native JSON/JSONB is a load (parse at
+    # write), not create-new document invent — must clear before allow-list fallthrough.
+    if (
+        dest_table_exists is True
+        and src in {LOGICAL_STRING, LOGICAL_TEXT}
+        and tgt == LOGICAL_JSON
+        and is_dialect_native_document_wire(target_type, dest_db=dest_db)
+    ):
+        return False
     # Dialect-aware collapse SSOT â€” same rules as G3/probe (never MySQL-default FSP
     # when dest_db is postgresql/redshift, never false-collapse JSONâ†’JSONB).
-    if is_precision_collapse_coercion(source_type, target_type, dest_db=dest_db):
+    if is_precision_collapse_coercion(
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
+    ):
         return True
     # Fielded STRUCT/MAP â†’ opaque JSON/VARIANT is intentional on many warehouses
     # (Airbyte V2) but is still a field-DDL collapse â€” treat as lossy so G3 surfaces it.
@@ -7230,7 +7316,12 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         return True
     if specialty_carrier_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if specialty_domain_would_invent(source_type, target_type):
+    if specialty_domain_would_invent(
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
+    ):
         return True
     if specialty_polarity_mismatch(source_type, target_type):
         return True
@@ -7268,7 +7359,12 @@ def is_lossy_coercion(source_type: str, target_type: str, *, dest_db: str = "") 
         return True
     if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if document_domain_would_invent(source_type, target_type):
+    if document_domain_would_invent(
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
+    ):
         return True
     # ARRAYâ†’ARRAY is in the safe allow-list below only when element types widen.
     if src == LOGICAL_ARRAY and tgt == LOGICAL_ARRAY and is_nested_shape_collapse(

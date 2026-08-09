@@ -442,10 +442,13 @@ def test_create_new_stamps_not_self_lossy():
         )
 
 
-def test_objectid_bare_string_still_collapses_on_bq():
+def test_objectid_bare_string_preserves_hex_wire_on_bq():
     from services.type_system import is_lossy_coercion
 
-    assert is_lossy_coercion("OBJECTID", "STRING", dest_db="bigquery") is True
+    # Unbounded STRING holds ObjectId hex (Airbyte/Fivetran-class). Narrow STRING(n<24) collapses.
+    assert is_lossy_coercion("OBJECTID", "STRING", dest_db="bigquery") is False
+    assert is_lossy_coercion("OBJECTID", "STRING(12)", dest_db="bigquery") is True
+    assert is_lossy_coercion("OBJECTID", "STRING(24)", dest_db="bigquery") is False
 
 def test_create_new_false_self_blocks_cleared():
     from services.type_system import (
@@ -549,14 +552,17 @@ def test_dest_db_aliases_normalize_inside_lossy_ssot():
     assert is_lossy_coercion("TIMESTAMPTZ", "DATETIME(6)", dest_db="mysql") is True
 
 
-def test_oracle_time_and_iceberg_objectid_remain_declared_lossy():
+def test_oracle_time_lossy_and_iceberg_objectid_hex_wire():
     from services.type_system import create_new_mapping_target_type, is_lossy_coercion
 
     oracle_time = create_new_mapping_target_type("TIME(6)", "oracle")
     assert "VARCHAR2" in oracle_time.upper()
     assert is_lossy_coercion("TIME(6)", oracle_time, dest_db="oracle") is True
+    # Iceberg create-new ObjectId → unbounded string holds hex (not a collapse).
     iceberg_oid = create_new_mapping_target_type("OBJECTID", "iceberg")
-    assert is_lossy_coercion("OBJECTID", iceberg_oid, dest_db="iceberg") is True
+    assert iceberg_oid.upper() == "STRING" or iceberg_oid.lower() == "string"
+    assert is_lossy_coercion("OBJECTID", iceberg_oid, dest_db="iceberg") is False
+    assert is_lossy_coercion("OBJECTID", "VARCHAR(12)", dest_db="iceberg") is True
 
 
 def test_spanner_does_not_invent_bigquery_types():

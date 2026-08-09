@@ -26,6 +26,7 @@ def validate_mapping_coercions(
     confidence_floor: float = 0.85,
     validation_mode: str = "strict",
     dest_db_type: str = "",
+    dest_table_exists: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Return structured coercion issues for each mapping pair.
 
@@ -92,10 +93,18 @@ def validate_mapping_coercions(
         if wire_ok and not type_locked:
             continue
         precision_collapse = is_precision_collapse_coercion(
-            src_type, tgt_type, dest_db=dest_db_type
+            src_type,
+            tgt_type,
+            dest_db=dest_db_type,
+            dest_table_exists=dest_table_exists,
         )
         lossy = (
-            is_lossy_coercion(src_type, tgt_type, dest_db=dest_db_type)
+            is_lossy_coercion(
+                src_type,
+                tgt_type,
+                dest_db=dest_db_type,
+                dest_table_exists=dest_table_exists,
+            )
             or precision_collapse
         )
         # Same logical family can still be lossy (YEAR→SMALLINT, MONEY→DECIMAL,

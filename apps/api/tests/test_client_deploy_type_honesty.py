@@ -680,6 +680,13 @@ def test_struct_int64_interval_identity_document_wave17():
     assert is_lossy_coercion("INT GENERATED ALWAYS AS IDENTITY", "BIGINT") is True
 
     assert document_domain_would_invent("STRING", "JSON") is True
+    # Existing dialect-native document columns are a load, not create-new invent.
+    assert document_domain_would_invent(
+        "VARCHAR", "JSONB", dest_db="postgresql", dest_table_exists=True
+    ) is False
+    assert is_lossy_coercion(
+        "VARCHAR", "JSONB", dest_db="postgresql", dest_table_exists=True
+    ) is False
     assert is_lossy_coercion("TEXT", "VARIANT") is True
     assert is_lossy_coercion("STRING", "JSON") is True
 

@@ -738,6 +738,7 @@ def run_mapping_pipeline(
         schema_policy=schema_policy,
         validation_mode=validation_mode,
         dest_db_type=destination_db_type,
+        dest_table_exists=destination_table_exists,
     )
     if coercion_issues:
         quality_issues = [*quality_issues, *[c["message"] for c in coercion_issues if c.get("severity") == "block"]]
@@ -762,6 +763,7 @@ def run_mapping_pipeline(
         source_types=declared_source_types,
         target_types=declared_target_types,
         destination_db_type=destination_db_type or "",
+        dest_table_exists=destination_table_exists,
     )
     enriched_mappings = _stamp_create_new_type_risks(
         enriched_mappings,
@@ -880,6 +882,7 @@ def run_mapping_pipeline(
         source_samples=source_samples,
         validation_mode=validation_mode,
         destination_db_type=destination_db_type,
+        dest_table_exists=destination_table_exists,
     )
     if integrity.get("blocks_transfer"):
         validation = {
