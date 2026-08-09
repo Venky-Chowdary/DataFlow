@@ -112,7 +112,8 @@ def test_mongo_bson_objectid_binary_timestamptz():
     assert _sample_logical_type(oid) == "OBJECTID"
     assert ddl_type("mongodb", "OBJECTID") == "objectId"
     assert ddl_type("postgresql", "OBJECTID") == "VARCHAR(24)"
-    assert specialty_carrier_would_collapse("OBJECTID", "TEXT") is True
+    assert specialty_carrier_would_collapse("OBJECTID", "TEXT") is False
+    assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR(12)") is True
 
     assert _sample_logical_type(Binary(b"\x01\x02")) == "BINARY"
     assert _sample_logical_type(Decimal128("12.34")) == "DECIMAL"

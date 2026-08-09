@@ -1460,8 +1460,12 @@ def reject_on_strict_policy(
             }
         )
         scope_note = f" ({', '.join(scopes[:4])})" if scopes else ""
+        # Details are per-cell findings; counting them as "rows" invented 28k
+        # rejects on a 2k-row Excel load (operator panic / wrong Resume hint).
+        cell_n = int(n or len(details))
+        row_n = len({int(d.get("row") or 0) for d in details if int(d.get("row") or 0) > 0})
         return (
-            f"{label} rejected {n or len(details)} row(s); "
+            f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
             f"Migration Risk Contract abort policy blocks partial write{scope_note}"
         )
 
@@ -1472,8 +1476,12 @@ def reject_on_strict_policy(
 
     if transform_error_policy(policy) == "fail":
         if details:
+            cell_n = len(details)
+            row_n = len(
+                {int(d.get("row") or 0) for d in details if int(d.get("row") or 0) > 0}
+            )
             return (
-                f"{label} rejected {len(details)} row(s); "
+                f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
                 "strict error policy blocks partial write"
             )
         if errs:
@@ -1575,6 +1583,8 @@ def map_rows_for_fingerprint(
     destination_pk_columns: list[str] | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
     contract_primary_key: str | None = None,
+    empty_cells_as_null: bool = False,
+    destination_column_nullability: dict[str, bool] | None = None,
 ) -> tuple[list[tuple], list[dict[str, Any]]]:
     """Map rows for Gate-8 fingerprints with write-path quarantine parity.
 
@@ -1597,6 +1607,8 @@ def map_rows_for_fingerprint(
         preserve_case=preserve_case,
         dest_kind=dest_kind,
         destination_pk_columns=destination_pk_columns,
+        empty_cells_as_null=empty_cells_as_null,
+        destination_column_nullability=destination_column_nullability,
         stream_contracts=stream_contracts,
         contract_primary_key=contract_primary_key,
     )
@@ -1656,6 +1668,44 @@ def build_mapped_rows(
     return mapped, errors
 
 
+def _is_blank_cell(val: Any) -> bool:
+    if val is None:
+        return True
+    return str(val).strip() == ""
+
+
+def _is_empty_typed_coerce_error(err: str | None) -> bool:
+    msg = str(err or "").strip().lower()
+    return msg.startswith("empty value cannot coerce")
+
+
+def _target_explicitly_not_null(
+    mapping: dict[str, Any] | None,
+    tgt_name: str,
+    dest_nullability: dict[str, bool],
+) -> bool:
+    """True only when Map/live catalog proves NOT NULL (unknown ⇒ nullable)."""
+    m = mapping if isinstance(mapping, dict) else {}
+    tgt_nullable = m.get("target_nullable")
+    if tgt_nullable is None:
+        tgt_nullable = m.get("nullable")
+    if tgt_nullable is None and dest_nullability:
+        key = str(tgt_name or "").strip()
+        if key in dest_nullability:
+            tgt_nullable = dest_nullability[key]
+        else:
+            tgt_nullable = dest_nullability.get(key.lower())
+    if tgt_nullable is False:
+        return True
+    if isinstance(tgt_nullable, str) and tgt_nullable.strip().lower() in {
+        "false",
+        "0",
+        "no",
+    }:
+        return True
+    return False
+
+
 def build_mapped_rows_with_details(
     *,
     headers: list[str],
@@ -1672,8 +1722,15 @@ def build_mapped_rows_with_details(
     contract_primary_key: str | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
     destination_column_nullability: dict[str, bool] | None = None,
+    empty_cells_as_null: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
-    """Returns mapped rows, error messages, and structured rejected-row details."""
+    """Returns mapped rows, error messages, and structured rejected-row details.
+
+    ``empty_cells_as_null`` (file/Excel/CSV sources): blank cells into nullable
+    typed columns become SQL NULL — spreadsheet absence, not silent loss of a
+    present value. NOT NULL destinations still fail/quarantine. DB→DB empty
+    strings keep requiring a Risk Contract unless this flag is set.
+    """
     from services.json_intelligence import materialize_struct_policies
 
     column_types = column_types or {}
@@ -1767,6 +1824,21 @@ def build_mapped_rows_with_details(
                         out[target_idx] = DF_MISSING_SENTINEL
                     continue
                 converted, err = apply_transform(val, transform)
+                # File/spreadsheet path: blank cell → SQL NULL on nullable typed cols
+                # (Airbyte-class empty→null for non-string). Never invent NULL into
+                # proven NOT NULL destinations.
+                if (
+                    err
+                    and empty_cells_as_null
+                    and _is_empty_typed_coerce_error(err)
+                    and _is_blank_cell(val)
+                    and not _target_explicitly_not_null(
+                        mapping if isinstance(mapping, dict) else None,
+                        tgt_name,
+                        dest_nullability,
+                    )
+                ):
+                    converted, err = None, None
             cell_policy = policy
             exec_pol: str | None = None
             risk_id: str | None = None

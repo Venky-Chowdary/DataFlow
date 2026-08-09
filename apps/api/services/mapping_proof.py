@@ -77,6 +77,7 @@ def mapping_fidelity(
     declared_source_type: str = "",
     declared_target_type: str = "",
     destination_db_type: str = "",
+    dest_table_exists: bool | None = None,
 ) -> dict[str, object]:
     """Canonical per-column fidelity verdict for one mapping.
 
@@ -182,7 +183,12 @@ def mapping_fidelity(
     else:
         tgt_type = stamp or src_type
 
-    if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
+    if is_lossy_coercion(
+        src_type,
+        tgt_type,
+        dest_db=dest,
+        dest_table_exists=dest_table_exists,
+    ):
         from services.conversion_contract import classify_conversion
 
         conv = classify_conversion(
@@ -255,6 +261,7 @@ def stamp_mapping_fidelity(
     source_types: dict[str, str] | None = None,
     target_types: dict[str, str] | None = None,
     destination_db_type: str = "",
+    dest_table_exists: bool | None = None,
 ) -> list[dict]:
     """Attach the canonical verdict to every mapping, in place of guessing.
 
@@ -271,6 +278,7 @@ def stamp_mapping_fidelity(
             declared_source_type=str(src_declared.get(str(m.get("source") or "")) or ""),
             declared_target_type=str(tgt_declared.get(str(m.get("target") or "")) or ""),
             destination_db_type=destination_db_type,
+            dest_table_exists=dest_table_exists,
         )
         out.append({
             **m,
@@ -344,6 +352,7 @@ def _mapping_risks(
     dest_mode: str,
     destination_db_type: str,
     sync_mode: str = "",
+    dest_table_exists: bool | None = None,
 ) -> list[dict[str, str]]:
     risks: list[dict[str, str]] = []
     transform = (mapping.get("transform") or "none").lower()
@@ -397,7 +406,12 @@ def _mapping_risks(
             dest = "databricks"
         if dest in {"apache_iceberg", "iceberg_rest", "nessie"}:
             dest = "iceberg"
-    if is_lossy_coercion(src_type, tgt_type, dest_db=dest):
+    if is_lossy_coercion(
+        src_type,
+        tgt_type,
+        dest_db=dest,
+        dest_table_exists=dest_table_exists,
+    ):
         risks.append({
             "code": "type_narrowing",
             "severity": "warn",
@@ -450,7 +464,12 @@ def _mapping_risks(
                 ),
             })
 
-    if is_precision_collapse_coercion and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest):
+    if is_precision_collapse_coercion and is_precision_collapse_coercion(
+        src_type,
+        tgt_type,
+        dest_db=dest,
+        dest_table_exists=dest_table_exists,
+    ):
         if not any(r.get("code") == "timezone_polarity_loss" for r in risks):
             risks.append({
                 "code": "precision_collapse",
@@ -785,7 +804,12 @@ def _sample_preview(mapping: dict) -> list[str]:
     return masked
 
 
-def _evidence(mapping: dict, *, destination_db_type: str = "") -> dict[str, Any]:
+def _evidence(
+    mapping: dict,
+    *,
+    destination_db_type: str = "",
+    dest_table_exists: bool | None = None,
+) -> dict[str, Any]:
     profile = mapping.get("column_profile") or {}
     sample_n = mapping.get("sample_count")
     if sample_n is None:
@@ -809,6 +833,7 @@ def _evidence(mapping: dict, *, destination_db_type: str = "") -> dict[str, Any]
         str(mapping.get("source_type") or ""),
         str(mapping.get("target_type") or mapping.get("source_type") or ""),
         dest_db=evidence_dest,
+        dest_table_exists=dest_table_exists,
     )
     preview, preview_clear = _sample_preview_pair(mapping)
     classification = None
@@ -970,15 +995,30 @@ def build_mapping_proof(
         confidences.append(conf)
         transform = m.get("transform") or "none"
         fidelity = transform_fidelity(str(transform))
-        verdict = mapping_fidelity(m, destination_db_type=destination_db_type)
+        # match_existing (or confirmed exists) clears existing-table document loads.
+        exists_for_fidelity = (
+            True
+            if dest_mode == "match_existing"
+            else (False if dest_mode == "create_new" else destination_table_exists)
+        )
+        verdict = mapping_fidelity(
+            m,
+            destination_db_type=destination_db_type,
+            dest_table_exists=exists_for_fidelity,
+        )
         risks = _mapping_risks(
             m,
             dest_mode=dest_mode,
             destination_db_type=destination_db_type,
             sync_mode=effective_sync,
+            dest_table_exists=exists_for_fidelity,
         )
         all_risks.extend(risks)
-        evidence = _evidence(m, destination_db_type=destination_db_type)
+        evidence = _evidence(
+            m,
+            destination_db_type=destination_db_type,
+            dest_table_exists=exists_for_fidelity,
+        )
         # Cap display confidence honesty for create-new identity
         display_conf = conf
         if evidence.get("create_new"):

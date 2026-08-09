@@ -82,11 +82,13 @@ def test_objectid_create_new_mysql_stamps_logical_and_passes_strict():
     assert coerce_blocks_transfer(issues_phys) is False
 
 
-def test_objectid_bare_text_still_collapses():
+def test_objectid_bare_text_preserves_hex_wire():
     from services.type_system import specialty_carrier_would_collapse
 
-    assert specialty_carrier_would_collapse("OBJECTID", "TEXT") is True
-    assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR") is True
+    # Unbounded TEXT/VARCHAR hold ObjectId hex; narrow width still collapses.
+    assert specialty_carrier_would_collapse("OBJECTID", "TEXT") is False
+    assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR") is False
+    assert specialty_carrier_would_collapse("OBJECTID", "VARCHAR(8)") is True
 
 
 def test_inet_create_new_off_engine_stamps_logical():

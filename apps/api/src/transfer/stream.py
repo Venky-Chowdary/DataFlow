@@ -636,6 +636,7 @@ def _write_batch(
     job_id: str | None = None,
     skip_preflight: bool = False,
     source_schema_catalog: dict[str, Any] | None = None,
+    empty_cells_as_null: bool = False,
 ) -> tuple[int, str, dict]:
     # Live dest nullability for write-time NOT NULL escalate (G3 / adapters parity).
     dest_nullability = dict(
@@ -690,6 +691,7 @@ def _write_batch(
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
             source_schema_catalog=source_schema_catalog,
+            empty_cells_as_null=empty_cells_as_null,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -735,6 +737,7 @@ def _write_batch(
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            empty_cells_as_null=empty_cells_as_null,
         )
         if not result.ok:
             _raise_write_failure(result, "MySQL batch write failed")
@@ -821,6 +824,7 @@ def _write_batch(
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
             source_schema_catalog=source_schema_catalog,
+            empty_cells_as_null=empty_cells_as_null,
         )
         if not result.ok:
             _raise_write_failure(result, "SQLite batch write failed")

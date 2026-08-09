@@ -343,6 +343,7 @@ class FilePreflightContext(PreflightContext):
             source_duplicate_probe_status=self.source_duplicate_probe_status,
             source_duplicate_probe_message=self.source_duplicate_probe_message,
             source_duplicate_probe_expected=self.source_duplicate_probe_expected,
+            dest_table_exists=getattr(self.plan.destination, "table_exists", None),
         )
         # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
         try:

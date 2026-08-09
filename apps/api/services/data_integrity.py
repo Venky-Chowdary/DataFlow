@@ -63,6 +63,7 @@ def _check_coercion_safety(
     schema_policy: str = "manual_review",
     validation_mode: str = "strict",
     rows: list[dict[str, Any]] | None = None,
+    dest_table_exists: bool | None = None,
 ) -> dict[str, Any]:
     from services.coercion_probe import samples_coerce_mapping
     from services.type_coercion_validator import (
@@ -79,6 +80,7 @@ def _check_coercion_safety(
         confidence_floor=floor,
         validation_mode=validation_mode,
         dest_db_type=dest_kind or "",
+        dest_table_exists=dest_table_exists,
     )
     schemaless = dest_kind in SCHEMALESS_DESTS
     if schemaless:
@@ -145,14 +147,28 @@ def _check_coercion_safety(
             source_type=src_t,
             dest_db_type=dest_kind,
         )
-        if mapping and is_precision_collapse_coercion(src_t, tgt_t, dest_db=dest_kind):
+        if mapping and is_precision_collapse_coercion(
+            src_t,
+            tgt_t,
+            dest_db=dest_kind,
+            dest_table_exists=dest_table_exists,
+        ):
             hardened.append(issue)
             continue
         from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
         risk_cleared = bool(mapping and mapping_has_clearing_risk_contract(mapping))
         # Match G3/G6: declared lossy cannot be sample-cleared without Risk Contract.
-        if mapping and is_lossy_coercion(src_t, tgt_t, dest_db=dest_kind) and not risk_cleared:
+        if (
+            mapping
+            and is_lossy_coercion(
+                src_t,
+                tgt_t,
+                dest_db=dest_kind,
+                dest_table_exists=dest_table_exists,
+            )
+            and not risk_cleared
+        ):
             hardened.append(issue)
             continue
         if mapping and samples_coerce_mapping(
@@ -1314,6 +1330,7 @@ def run_integrity_audit(
     source_duplicate_probe_status: str = "",
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
+    dest_table_exists: bool | None = None,
 ) -> dict[str, Any]:
     """
     Run all critical data integrity checks in one pass.
@@ -1391,6 +1408,7 @@ def run_integrity_audit(
                 schema_policy=schema_policy,
                 validation_mode=validation_mode,
                 rows=rows,
+                dest_table_exists=dest_table_exists,
             )
         )
         checks.append(
