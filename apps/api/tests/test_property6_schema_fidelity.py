@@ -25,6 +25,7 @@ from services.schema_fidelity import (
     is_safe_default_expr,
     plan_create_new_fidelity,
     render_create_column_defs,
+    resolve_create_fidelity_plan,
 )
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
@@ -414,6 +415,39 @@ def test_pg_create_new_carries_pk_not_null_default_live():
                 cur.execute(f'DROP TABLE IF EXISTS public."{src_table}"')
         finally:
             conn.close()
+
+
+def test_missing_catalog_still_emits_certificate_never_silent():
+    plan = resolve_create_fidelity_plan(
+        source_schema_catalog=None,
+        mappings=[{"source": "id", "target": "id"}],
+        target_columns=["id"],
+        target_types=["INTEGER"],
+        dest_dialect="sqlite",
+    )
+    report = plan.report.to_dict()
+    assert report["unsupported_count"] >= 1
+    assert set(REQUIRED_ASPECTS).issubset({i["aspect"] for i in report["items"]})
+    assert all(i["status"] == "unsupported" for i in report["items"])
+
+
+def test_check_and_fk_not_certified_absent_when_unprobed():
+    catalog = SourceSchemaCatalog(
+        dialect="sqlite",
+        columns=["id"],
+        nullable={"id": False},
+        primary_key=["id"],
+    )
+    plan = plan_create_new_fidelity(
+        catalog,
+        dest_dialect="sqlite",
+        target_columns=["id"],
+        target_types=["INTEGER"],
+        source_to_target={"id": "id"},
+    )
+    assert "unsupported" in _aspect_status(plan.report.to_dict(), "check")
+    assert "unsupported" in _aspect_status(plan.report.to_dict(), "foreign_key")
+    assert "skipped" not in _aspect_status(plan.report.to_dict(), "check")
 
 
 def test_build_catalog_filters_primary_unique_entry():

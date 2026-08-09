@@ -1371,12 +1371,13 @@ def write_mapped_rows(
                 for stmt in collect_pg_enum_prerequisites(logical_types):
                     cursor.execute(stmt)
             fidelity_plan = None
-            try:
-                from services.schema_fidelity import (
-                    render_create_column_defs,
-                    resolve_create_fidelity_plan,
-                )
+            from services.schema_fidelity import (
+                empty_unsupported_report,
+                render_create_column_defs,
+                resolve_create_fidelity_plan,
+            )
 
+            try:
                 # Probe existence so we do not claim PK carry on IF NOT EXISTS no-op.
                 cursor.execute(
                     """
@@ -1395,16 +1396,12 @@ def write_mapped_rows(
                     dest_dialect="postgresql",
                     table_already_exists=pg_table_existed,
                 )
-                if fidelity_plan and fidelity_plan.column_renames and fidelity_plan.dest_columns:
+                if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)
                 body = render_create_column_defs(
                     columns=target_cols,
                     types=target_types,
-                    plan=(
-                        fidelity_plan
-                        if fidelity_plan is not None and not pg_table_existed
-                        else None
-                    ),
+                    plan=(None if pg_table_existed else fidelity_plan),
                     dialect="postgresql",
                 )
                 cursor.execute(
@@ -1414,8 +1411,7 @@ def write_mapped_rows(
                         sql.SQL(body),
                     )
                 )
-                if fidelity_plan is not None:
-                    _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
+                _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
             except Exception as exc:
                 logger.warning(
                     "PostgreSQL schema fidelity plan failed; falling back to types-only CREATE: %s",
@@ -1432,6 +1428,15 @@ def write_mapped_rows(
                         col_defs,
                     )
                 )
+                # Never silence a types-only fallback — Property 6 certificate required.
+                _kwargs["_schema_fidelity_report"] = empty_unsupported_report(
+                    source_dialect="",
+                    dest_dialect="postgresql",
+                    reason=(
+                        f"Schema fidelity CREATE failed ({type(exc).__name__}); "
+                        "fell back to types-only CREATE TABLE — constraints not carried."
+                    ),
+                ).to_dict()
             # Track empty shell for orphan rollback if job fails before first ack.
             try:
                 from services.auto_create_lifecycle import register_auto_create

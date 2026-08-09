@@ -392,14 +392,28 @@ def resolve_create_fidelity_plan(
     target_types: list[str],
     dest_dialect: str,
     table_already_exists: bool = False,
-) -> CreateFidelityPlan | None:
-    """Build a create-new fidelity plan from a stream-supplied source catalog."""
+) -> CreateFidelityPlan:
+    """Build a create-new fidelity plan; always returns a certificate (never silent)."""
+    dest = (dest_dialect or "").strip().lower()
+    if dest in {"postgres", "redshift"}:
+        dest = "postgresql"
     catalog = catalog_from_payload(source_schema_catalog)
     if catalog is None:
-        return None
+        # Types-only CREATE still requires an explicit unsupported certificate.
+        return CreateFidelityPlan(
+            report=empty_unsupported_report(
+                source_dialect="",
+                dest_dialect=dest,
+                reason=(
+                    "Source schema catalog unavailable; create-new emitted column "
+                    "types only — PK/NOT NULL/DEFAULT/UNIQUE not certified carried."
+                ),
+            ),
+            dest_columns=list(target_columns),
+        )
     plan = plan_create_new_fidelity(
         catalog,
-        dest_dialect=dest_dialect,
+        dest_dialect=dest,
         target_columns=list(target_columns),
         target_types=list(target_types),
         source_to_target=source_to_target_from_mappings(mappings),
@@ -758,12 +772,16 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
                 )
             )
     else:
+        # Introspect does not yet load FKs for all dialects — never certify absence.
         report.items.append(
             SchemaFidelityItem(
                 aspect="foreign_key",
                 name="*",
-                status="skipped",
-                reason="No foreign keys on source catalog.",
+                status="unsupported",
+                reason=(
+                    "FOREIGN KEY not introspected for this source dialect in v1; "
+                    "refuse to certify absence. Multi-table carry is Property 7."
+                ),
             )
         )
 
@@ -779,12 +797,16 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
                 )
             )
     else:
+        # CHECK is not loaded from PG/SQLite catalogs yet — never certify absence.
         report.items.append(
             SchemaFidelityItem(
                 aspect="check",
                 name="*",
-                status="skipped",
-                reason="No CHECK constraints discovered on source (or not introspected).",
+                status="unsupported",
+                reason=(
+                    "CHECK constraints are not introspected for this source dialect "
+                    "in v1; refuse to certify absence."
+                ),
             )
         )
 

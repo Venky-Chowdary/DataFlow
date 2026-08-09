@@ -887,11 +887,11 @@ def write_mapped_rows(
                         use_ledger = False
                 if create_table:
                     from services.schema_fidelity import (
+                        empty_unsupported_report,
                         render_create_column_defs,
                         resolve_create_fidelity_plan,
                     )
 
-                    fidelity_plan = None
                     try:
                         fidelity_plan = resolve_create_fidelity_plan(
                             source_schema_catalog=_kwargs.get("source_schema_catalog"),
@@ -907,23 +907,53 @@ def write_mapped_rows(
                             exc,
                         )
                         fidelity_plan = None
-                    if fidelity_plan and fidelity_plan.column_renames and fidelity_plan.dest_columns:
-                        target_cols = list(fidelity_plan.dest_columns)
-                    col_defs = render_create_column_defs(
-                        columns=target_cols,
-                        types=target_types,
-                        plan=(
-                            fidelity_plan
-                            if fidelity_plan is not None and not table_existed
-                            else None
-                        ),
-                        dialect="sqlite",
-                    )
-                    cur.execute(
-                        f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})"
-                    )
+                        _kwargs["_schema_fidelity_report"] = empty_unsupported_report(
+                            source_dialect="",
+                            dest_dialect="sqlite",
+                            reason=(
+                                f"Schema fidelity planner raised ({type(exc).__name__}); "
+                                "create-new emitted column types only."
+                            ),
+                        ).to_dict()
                     if fidelity_plan is not None:
+                        if fidelity_plan.column_renames and fidelity_plan.dest_columns:
+                            target_cols = list(fidelity_plan.dest_columns)
+                            # INSERT was built before CREATE; rebuild after collision remaps.
+                            placeholders = ", ".join("?" for _ in target_cols)
+                            insert = (
+                                f"INSERT INTO {table_quoted} ("
+                                f"{', '.join(quote_sql_identifier(c) for c in target_cols)}"
+                                f") VALUES ({placeholders})"
+                            )
+                        col_defs = render_create_column_defs(
+                            columns=target_cols,
+                            types=target_types,
+                            plan=(None if table_existed else fidelity_plan),
+                            dialect="sqlite",
+                        )
+                        cur.execute(
+                            f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})"
+                        )
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
+                    else:
+                        col_defs = ", ".join(
+                            f"{quote_sql_identifier(c)} {t}"
+                            for c, t in zip(target_cols, target_types)
+                        )
+                        cur.execute(
+                            f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})"
+                        )
+                        _kwargs.setdefault(
+                            "_schema_fidelity_report",
+                            empty_unsupported_report(
+                                source_dialect="",
+                                dest_dialect="sqlite",
+                                reason=(
+                                    "Schema fidelity plan unavailable; "
+                                    "create-new emitted column types only."
+                                ),
+                            ).to_dict(),
+                        )
 
                 if backfill_new_fields:
                     existing = {
