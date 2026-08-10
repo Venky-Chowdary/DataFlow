@@ -4576,6 +4576,48 @@ def _object_store_target_sample(
     return rows[:lim]
 
 
+#: Oracle column types that cannot appear in ORDER BY / IN comparisons.
+_ORACLE_LOB_TYPES: Final = {"CLOB", "NCLOB", "BLOB", "LONG", "LONG RAW", "XMLTYPE"}
+
+
+def _oracle_comparable_expr(
+    conn: Any, table_name: str, schema: str | None, column: str
+) -> str:
+    """SQL expression for ``column`` usable as an Oracle comparison key.
+
+    LOB columns raise ORA-22848 in ORDER BY / IN, so they are compared on their
+    leading 4000 characters. Keys that differ only beyond that prefix would
+    collide; Oracle offers no wider comparison and refusing the read outright
+    would leave a written table unproven.
+    """
+    import sqlalchemy as sa
+
+    from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+
+    quoted = quote_sql_identifier(require_safe_identifier(column, preserve_case=True))
+    try:
+        # Case-insensitive match: a quoted lower-case table/column created by an
+        # older run is the same physical object as the folded spelling.
+        row = conn.execute(
+            sa.text(
+                "SELECT data_type FROM all_tab_columns "
+                "WHERE UPPER(table_name) = :t AND UPPER(column_name) = :c "
+                "AND (:s IS NULL OR UPPER(owner) = :s)"
+            ),
+            {
+                "t": str(table_name or "").upper(),
+                "c": str(column or "").upper(),
+                "s": str(schema).upper() if schema else None,
+            },
+        ).first()
+    except Exception:
+        return quoted
+    data_type = str((row or [""])[0] or "").upper()
+    if data_type in _ORACLE_LOB_TYPES:
+        return f"DBMS_LOB.SUBSTR({quoted}, 4000, 1)"
+    return quoted
+
+
 def read_target_sample(
     db_type: str,
     dest: dict[str, Any],
@@ -4821,13 +4863,6 @@ def read_target_sample(
             )
             sch = (schema or dest.get("schema") or dest.get("username") or "").strip() or None
             table_ref = quote_table_ref(table_name, schema=sch, dialect="oracle")
-            ora_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
             engine = get_sqlalchemy_engine(
                 {
                     "type": "oracle",
@@ -4841,10 +4876,20 @@ def read_target_sample(
                 }
             )
             with engine.connect() as conn:
+                # Oracle rejects a LOB wherever it needs a comparison key
+                # (ORA-22848), so ordering or ``IN``-filtering on a CLOB — what
+                # an unbounded source text column becomes here — made a written
+                # table read back as "sample unavailable". Compare on the
+                # leading 4000 characters instead, and order by ROWID when the
+                # caller supplied no key at all.
+                key_expr = (
+                    _oracle_comparable_expr(conn, table_name, sch, sort_key)
+                    if sort_key
+                    else ""
+                )
+                ora_order = key_expr or "ROWID"
                 if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
+                    key_col = key_expr
                     params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
                     params["lim"] = lim
                     placeholders = ",".join(f":k{i}" for i in range(len(keys)))

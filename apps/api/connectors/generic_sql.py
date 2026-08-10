@@ -987,6 +987,36 @@ _ORACLE_WIRES: Final = {"oracle", "oracledb", "oracle_autonomous", "oracle_adw",
 _MSSQL_WIRES: Final = {"sqlserver", "mssql", "azure_sql", "synapse", "azure_synapse"}
 
 
+def _resolve_physical_table_ident(
+    engine: Any, table: str, schema: str | None
+) -> tuple[str, str | None]:
+    """Physical spelling of a destination on case-folding engines.
+
+    Oracle/Snowflake/DB2 fold unquoted identifiers to upper case, but every
+    CREATE here is emitted quoted, so a lower-case name typed in Studio landed a
+    lower-case-quoted table that read-back (which folds, like every other client)
+    could not see: ``ORA-00942`` on a table the write had just reported written.
+    An existing table keeps its own spelling; only a table that does not exist
+    yet is created under the folded name the catalog will hand back.
+    """
+    dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "").lower()
+    if dialect not in _FOLDING_DIALECTS:
+        return table, schema
+    from services.dialect_profiles import fold_identifier
+
+    folded = fold_identifier(dialect, table)
+    folded_schema = fold_identifier(dialect, schema) if schema else schema
+    if folded == table and folded_schema == schema:
+        return table, schema
+    try:
+        if sa.inspect(engine).has_table(table, schema=schema):
+            return table, schema
+    except Exception:
+        # Catalog unreadable: keep the operator's spelling rather than guess.
+        return table, schema
+    return folded, folded_schema
+
+
 def _is_oracle_wire(dialect_name: str, db_type: str) -> bool:
     """True when DDL compiles through the Oracle dialect."""
     if oracle is None:
@@ -2317,6 +2347,10 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
     engine = _engine(cfg)
     try:
         schema = schema or _schema_name(cfg)
+        # A folding engine holding a lower-case-quoted table must be dropped
+        # under that spelling: dropping the folded name is a no-op, and a
+        # full_refresh would then append onto rows it reported as cleared.
+        table, schema = _resolve_physical_table_ident(engine, table, schema)
         qualified = _qualified_table_ref(cfg, table, schema)
         with engine.connect() as conn:
             conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
@@ -2488,11 +2522,17 @@ def _read_table_raw(
     # Oracle/DB2/Snowflake store case-insensitive names folded upper and the
     # driver hands them back lowercased; quoting that literal yields ORA-00904.
     # Restore the physical spelling before quoting.
-    order_name = denormalize_result_key(dialect, str(headers[0]))
-    if q == "[":
-        order_col = f"[{order_name.replace(']', ']]')}]"
+    order_header = _orderable_header(dialect, headers, probe)
+    if order_header is None:
+        # Oracle refuses ORDER BY on a LOB (ORA-22848); an all-CLOB table would
+        # otherwise be unreadable instead of merely unsorted.
+        order_col = "ROWID"
     else:
-        order_col = quote_sql_identifier(order_name, q)
+        order_name = denormalize_result_key(dialect, str(order_header))
+        if q == "[":
+            order_col = f"[{order_name.replace(']', ']]')}]"
+        else:
+            order_col = quote_sql_identifier(order_name, q)
     sql = f"{base} ORDER BY {order_col} {page_clause(dialect, offset, limit)}"  # nosec B608
     result = conn.execute(sa.text(sql))
     headers = list(result.keys())
@@ -2501,6 +2541,37 @@ def _read_table_raw(
         for row in result.fetchall()
     ]
     return headers, rows
+
+
+#: Driver type names that cannot appear in an ORDER BY on Oracle/DB2.
+_UNORDERABLE_TYPE_TOKENS: Final = ("CLOB", "NCLOB", "BLOB", "LONG", "XMLTYPE")
+
+
+def _orderable_header(dialect: str, headers: list[str], probe: Any) -> str | None:
+    """First column usable as a deterministic page order, or ``None``.
+
+    LOB columns are not sortable on Oracle/DB2, so paging a table whose first
+    column is a CLOB raised ORA-22848 and the whole read failed. Prefer the
+    first non-LOB column; callers fall back to a pseudo-column when every
+    column is a LOB.
+    """
+    if not headers:
+        return None
+    if (dialect or "").lower() not in {"oracle", "db2", "ibm_db_sa"}:
+        return headers[0]
+    description = getattr(getattr(probe, "cursor", None), "description", None)
+    if not description:
+        return headers[0]
+    for idx, header in enumerate(headers):
+        if idx >= len(description):
+            # No type evidence for this column: keep the ordinary first-column
+            # order rather than silently switching the page order to a
+            # pseudo-column.
+            return header
+        type_name = str(getattr(description[idx][1], "name", description[idx][1]))
+        if not any(tok in type_name.upper() for tok in _UNORDERABLE_TYPE_TOKENS):
+            return header
+    return None
 
 
 def _count_table_raw(
@@ -3652,6 +3723,9 @@ def write_mapped_rows(
     )
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
+    table_name, schema_name = _resolve_physical_table_ident(
+        engine, table_name, schema_name
+    )
 
     # SQL Server writes must fail closed on ANSI_WARNINGS — engine connect soft-applies
     # for introspect; re-assert require=True on the write connection.

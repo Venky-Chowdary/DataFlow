@@ -85,9 +85,19 @@ def _demote_untyped_varchar_confidence(
     mappings: list[dict],
     *,
     source_schemas: list[dict] | None,
+    source_types_authoritative: bool = False,
 ) -> list[dict]:
-    """Cap confidence when Map only has bare VARCHAR and zero samples."""
+    """Cap confidence when Map only has bare VARCHAR and zero samples.
+
+    A catalog-declared type is evidence in its own right: an all-NULL
+    ``TEXT`` column matched by name onto a text destination column was capped
+    to 0.78 and blocked Execute at the confidence floor, while the identical
+    column on a create-new route mapped at 0.95. The cap is for sources whose
+    VARCHAR is a placeholder (thin SaaS / failed introspect), so it only
+    applies when the declared type is unproven or the target is not text.
+    """
     by_name = {s["name"]: s for s in (source_schemas or [])}
+    text_logicals = {"string", "text", "varchar", "unknown"}
     refined: list[dict] = []
     for m in mappings:
         out = dict(m)
@@ -95,7 +105,12 @@ def _demote_untyped_varchar_confidence(
         src_type = str(out.get("source_type") or src.get("inferred_type") or "VARCHAR")
         samples = src.get("samples") or []
         logical = normalize_logical_type(src_type)
-        if logical in {"string", "text", "varchar", "unknown"} and not samples:
+        target_logical = normalize_logical_type(str(out.get("target_type") or ""))
+        catalog_typed = source_types_authoritative and logical != "unknown"
+        if catalog_typed and target_logical in text_logicals:
+            refined.append(out)
+            continue
+        if logical in text_logicals and not samples:
             conf = min(float(out.get("confidence") or 0), _UNTYPED_VARCHAR_CONF_CAP)
             out["confidence"] = round(conf, 3)
             out["requires_review"] = True
@@ -797,6 +812,7 @@ def run_mapping_pipeline(
     enriched_mappings = _demote_untyped_varchar_confidence(
         enriched_mappings,
         source_schemas=source_schemas,
+        source_types_authoritative=source_types_authoritative,
     )
     quality_issues = detect_cross_field_issues(enriched_mappings, source_schemas=source_schemas)
 
