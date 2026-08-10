@@ -53,7 +53,9 @@ from connectors.writer_common import (
     transform_error_policy_for_validation_mode,
 )
 from services.dest_precount import PRECOUNT_KEY, precount_table
+from services.excel_parser import sheet_headers
 from services.reconciliation import FingerprintAccumulator
+from services.tabular_rows import is_blank_row
 
 try:
     from services.csv_profiler import (
@@ -207,11 +209,13 @@ def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) 
         if not first:
             return [], [], 0
 
-        headers = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(first)]
+        headers = sheet_headers(first)
         preview: list[list[str]] = []
         total = 0
 
         for row in row_iter:
+            if is_blank_row(row):
+                continue
             total += 1
             if len(preview) < preview_rows:
                 preview.append([str(c).strip() if c is not None else "" for c in row])
@@ -242,9 +246,13 @@ def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
         if not first:
             return
 
-        headers = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(first)]
+        headers = sheet_headers(first)
         batch: list[dict] = []
         for row in row_iter:
+            # A formatting-only row is not a record; writing it would land an
+            # all-NULL row the source never had.
+            if is_blank_row(row):
+                continue
             # Wider data rows than the header silently lost trailing cells —
             # refuse rather than slice away columns (JSONL-style honesty).
             if len(row) > len(headers):
@@ -282,7 +290,11 @@ def _excel_count(content: bytes | str | os.PathLike) -> int:
         ws = wb.active
         if ws is None:
             return 0
-        return max(0, (ws.max_row or 1) - 1)
+        row_iter = ws.iter_rows(values_only=True)
+        if next(row_iter, None) is None:
+            return 0
+        # ``max_row`` is the used range, which formatting inflates.
+        return sum(1 for row in row_iter if not is_blank_row(row))
     finally:
         wb.close()
 
@@ -354,9 +366,11 @@ def peek_file_source(
                 headers = next(reader)
             except StopIteration:
                 raise ValueError("CSV file has no header row") from None
-            for i, row in enumerate(reader):
+            for row in reader:
+                if is_blank_row(row):
+                    continue
                 total += 1
-                if i < 100:
+                if len(preview_rows) < 100:
                     preview_rows.append([_csv_empty_to_none(c) for c in row])
         sample = [dict(zip(headers, row)) for row in preview_rows]
         schema = FileParser.infer_schema(sample)
@@ -532,7 +546,12 @@ def _iter_csv_batches(
         reader = csv.DictReader(reader_file, delimiter=delim)
         batch: list[dict] = []
         for row in reader:
-            batch.append({k: _csv_empty_to_none(v) for k, v in dict(row).items()})
+            values = dict(row)
+            # Must match count_csv_rows, or the source cardinality reconcile
+            # compares against is not the set of rows that was read.
+            if is_blank_row(values.values()):
+                continue
+            batch.append({k: _csv_empty_to_none(v) for k, v in values.items()})
             if len(batch) >= chunk_size:
                 yield batch
                 batch = []

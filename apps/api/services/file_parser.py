@@ -15,6 +15,7 @@ from typing import Any
 from services.csv_profiler import count_csv_rows, detect_delimiter, parse_csv_preview
 from services.platform_config import data_dir, upload_dir
 from services.schema_inference import infer_columns_from_rows
+from services.tabular_rows import is_blank_row
 from services.value_serializer import cell_to_string, json_default
 
 UPLOAD_DIR = upload_dir()
@@ -345,6 +346,8 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             headers = next(reader, [])
             chunk = []
             for row in reader:
+                if is_blank_row(row):
+                    continue
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
                     yield headers, chunk
@@ -689,7 +692,7 @@ class FileParser:
                 )
             delim = detect_delimiter(text[:8192])
             reader = csv.DictReader(io.StringIO(text), delimiter=delim)
-            records = list(reader)
+            records = [r for r in reader if not is_blank_row(dict(r).values())]
             columns = reader.fieldnames or []
             if not columns:
                 return ParseResult(
