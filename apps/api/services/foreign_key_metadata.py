@@ -197,7 +197,39 @@ _PG_ACTIONS = {
 }
 
 
+_DEFAULT_NAMESPACE_SQL = {
+    "postgresql": "SELECT current_schema()",
+    "mysql": "SELECT DATABASE()",
+    "sqlserver": "SELECT SCHEMA_NAME()",
+    "oracle": "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM dual",
+}
+
+
+def _resolve_namespace(cursor: Any, dialect: str, schema: str) -> str:
+    """The namespace the probe will actually read — never a blank one.
+
+    A caller whose connector config keeps the namespace elsewhere (MySQL puts
+    it in ``database``) used to hand an empty schema down here, and the catalog
+    query then returned an empty *measured* answer: a carried foreign key read
+    back as "not enforced on the destination". Resolving the session default is
+    the only honest answer; an unresolvable one raises so the caller reports
+    unknown rather than absent.
+    """
+    if schema:
+        return schema
+    sql = _DEFAULT_NAMESPACE_SQL.get(dialect)
+    rows = _rows(cursor, sql, ()) if sql else []
+    resolved = str(rows[0][0]) if rows and rows[0] and rows[0][0] else ""
+    if not resolved:
+        raise ValueError(
+            f"No {dialect} schema/database bound on this connection; the foreign "
+            "key catalog namespace is unknown, not empty."
+        )
+    return resolved
+
+
 def _probe_postgres(cursor: Any, schema: str, table: str) -> ForeignKeys:
+    schema = _resolve_namespace(cursor, "postgresql", schema)
     rows = _rows(cursor, _PG_SQL, (schema, table))
     mapped = [
         (
@@ -241,6 +273,9 @@ SELECT k.CONSTRAINT_NAME,
 
 
 def _probe_mysql(cursor: Any, schema: str, table: str) -> ForeignKeys:
+    # MySQL has no schema layer above the database: the namespace lives in
+    # ``database``, so an empty schema must resolve to the session's own.
+    schema = _resolve_namespace(cursor, "mysql", schema)
     rows = _rows(cursor, _MYSQL_SQL, (schema, table))
     return ForeignKeys(
         dialect="mysql",
@@ -276,6 +311,7 @@ SELECT fk.name,
 
 
 def _probe_sqlserver(cursor: Any, schema: str, table: str) -> ForeignKeys:
+    schema = _resolve_namespace(cursor, "sqlserver", schema)
     rows = _rows_any_paramstyle(cursor, _SQLSERVER_SQL, (schema, table))
     return ForeignKeys(
         dialect="sqlserver",
@@ -311,6 +347,7 @@ SELECT c.constraint_name,
 def _probe_oracle(cursor: Any, schema: str, table: str) -> ForeignKeys:
     # Oracle folds unquoted identifiers to upper case in the catalog; a lower
     # case argument would silently measure "no foreign keys".
+    schema = _resolve_namespace(cursor, "oracle", schema)
     rows = _rows(
         cursor, _ORACLE_SQL, {"owner": schema.upper(), "tab": table.upper()}
     )

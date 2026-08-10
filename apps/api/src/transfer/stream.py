@@ -2545,6 +2545,28 @@ def _stream_database_transfer_impl(
             }
     except Exception as exc:
         logger.debug("source_snapshot stamp skipped: %s", exc)
+    # Single-table jobs carry references too: the parent is already on the
+    # destination instead of arriving in this run, so without this the child
+    # landed with its foreign keys silently dropped and the run still went green.
+    fk_context = _foreign_key_context(source, [table])
+    if fk_context.source_keys:
+        fk_context.column_maps[table] = {
+            str(m.get("source") or ""): str(m.get("target") or "")
+            for m in (mappings or [])
+            if m.get("source") and m.get("target")
+        }
+        fk_summary = _carry_foreign_keys_after_load(
+            destination, fk_context, {table: dest_table}
+        )
+        if fk_summary is not None:
+            dest_summary["foreign_keys"] = fk_summary
+            for decision in fk_summary.get("decisions") or []:
+                if decision.get("status") in {"carried", "unsupported"} and decision.get(
+                    "dest_ddl"
+                ):
+                    ddl_log.append(
+                        f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}"
+                    )
     return written, ddl_log, dest_summary, columns
 
 
@@ -2569,7 +2591,11 @@ def _foreign_key_context(
     """
     context = _ForeignKeyContext()
     names = [t for t in tables if t]
-    if source.kind != "database" or len(names) < 2:
+    # A single table still declares references: its parents simply live on the
+    # destination already rather than in this job, so the keys are measured and
+    # planned against the destination catalog. Ordering is the only part that
+    # needs more than one stream.
+    if source.kind != "database" or not names:
         return context
     try:
         from services.foreign_key_orchestration import (
@@ -2580,7 +2606,8 @@ def _foreign_key_context(
         src_type = resolve_driver_type(source.format)
         src_cfg = resolve_connector_config(source)
         context.source_keys = measure_source_foreign_keys(src_type, src_cfg, names)
-        context.order, context.cycle = dependency_order(names, context.source_keys)
+        if len(names) > 1:
+            context.order, context.cycle = dependency_order(names, context.source_keys)
     except Exception as exc:
         logger.debug("foreign key ordering skipped: %s", exc, exc_info=exc)
     return context
@@ -2589,6 +2616,7 @@ def _foreign_key_context(
 def _carry_foreign_keys_after_load(
     destination: EndpointConfig,
     context: _ForeignKeyContext,
+    table_map: dict[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Add the planned constraints once every table has landed, then re-read."""
     if not context.source_keys or destination.kind != "database":
@@ -2601,7 +2629,7 @@ def _carry_foreign_keys_after_load(
         dest_schema = str(dest_cfg.get("schema") or "")
         # Multi-stream lands each source table under its own name; a rename
         # would arrive through the contract and change only this map.
-        table_map = {t: t for t in context.source_keys}
+        table_map = dict(table_map or {}) or {t: t for t in context.source_keys}
         summary = summarize(
             carry_foreign_keys(
                 dest_dialect=dest_type,

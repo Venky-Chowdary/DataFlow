@@ -119,3 +119,57 @@ def test_payload_roundtrip_tolerates_catalogs_without_actions():
 def test_action_normalization_is_case_and_underscore_insensitive():
     assert normalize_action("no_action") == "NO ACTION"
     assert normalize_action(None) == ""
+
+
+class ScriptedCursor(FakeCursor):
+    """Answers the namespace query, then the catalog query."""
+
+    def __init__(self, namespace, rows):
+        super().__init__(rows)
+        self.namespace = namespace
+        self._pending = None
+
+    def execute(self, sql, params=()):
+        self.calls.append((sql, params))
+        upper = sql.upper()
+        self._pending = (
+            [(self.namespace,)]
+            if "DATABASE()" in upper
+            or "CURRENT_SCHEMA" in upper
+            or "SCHEMA_NAME()" in upper
+            else list(self.rows)
+        )
+
+    def fetchall(self):
+        return list(self._pending or [])
+
+
+def test_blank_namespace_resolves_the_session_default_before_measuring():
+    """An empty schema must never be certified as "no foreign keys".
+
+    MySQL keeps the namespace in ``database``, so callers hand the probe an
+    empty schema; querying TABLE_SCHEMA = '' answered "measured, none" and a
+    carried key read back as not enforced on the destination.
+    """
+    cursor = ScriptedCursor(
+        "shop",
+        [("fk_o", "cust_id", "shop", "customers", "id", "NO ACTION", "NO ACTION")],
+    )
+    keys = probe_foreign_keys("mysql", cursor, "", "orders")
+    assert keys.measured is True
+    assert keys.schema == "shop"
+    assert [k.referenced_table for k in keys.items] == ["customers"]
+    assert any("DATABASE()" in sql.upper() for sql, _ in cursor.calls)
+
+
+def test_unresolvable_namespace_is_unknown_not_absent():
+    cursor = ScriptedCursor(None, [])
+    keys = probe_foreign_keys("mysql", cursor, "", "orders")
+    assert keys.measured is False
+    assert "unknown, not empty" in keys.detail
+
+
+def test_explicit_namespace_is_never_second_guessed():
+    cursor = ScriptedCursor("other", [])
+    probe_foreign_keys("postgresql", cursor, "public", "orders")
+    assert not any("CURRENT_SCHEMA" in sql.upper() for sql, _ in cursor.calls)
