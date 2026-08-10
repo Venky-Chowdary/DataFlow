@@ -36,6 +36,8 @@ REQUIRED_ASPECTS: tuple[str, ...] = (
     "charset",
     "index",
     "partitioning",
+    "tablespace",
+    "clustering",
     "comment",
     "view",
     "trigger",
@@ -69,7 +71,11 @@ _SAFE_DEFAULT_RE = re.compile(
 class SchemaFidelityItem:
     aspect: str
     name: str
-    status: str  # carried | unsupported | skipped
+    # carried | unsupported | skipped | unknown.
+    # "skipped" means measured-and-absent on source; "unknown" means the source
+    # catalog was never read for this aspect, which must never be presented as
+    # proof that the source does not have it.
+    status: str
     reason: str
     source_detail: str = ""
     dest_ddl: str = ""
@@ -91,6 +97,7 @@ class SchemaFidelityReport:
         carried = sum(1 for i in self.items if i.status == "carried")
         unsupported = sum(1 for i in self.items if i.status == "unsupported")
         skipped = sum(1 for i in self.items if i.status == "skipped")
+        unknown = sum(1 for i in self.items if i.status == "unknown")
         return {
             "version": self.version,
             "source_dialect": self.source_dialect,
@@ -99,6 +106,7 @@ class SchemaFidelityReport:
             "carried_count": carried,
             "unsupported_count": unsupported,
             "skipped_count": skipped,
+            "unknown_count": unknown,
             "items": [i.to_dict() for i in self.items],
             "name_collision_policy": dict(self.name_collision_policy or {}),
         }
@@ -125,9 +133,12 @@ class SourceSchemaCatalog:
     identity_columns: list[str] = field(default_factory=list)
     collations: dict[str, str] = field(default_factory=dict)
     comments: dict[str, str] = field(default_factory=dict)
-    has_partitioning: bool = False
-    has_enums: bool = False
-    has_nested_shapes: bool = False
+    # Tri-state: None means the source catalog was not read for this aspect.
+    has_partitioning: bool | None = None
+    has_enums: bool | None = None
+    has_nested_shapes: bool | None = None
+    # services.physical_storage_metadata.PhysicalStorage payload, when measured.
+    physical_storage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -318,10 +329,33 @@ def build_catalog_from_introspect(
         identity_columns=list(keys.get("identity_columns") or []),
         collations=dict(keys.get("collations") or {}),
         comments=dict(keys.get("comments") or {}),
-        has_partitioning=bool(keys.get("has_partitioning")),
-        has_enums=bool(keys.get("has_enums")),
-        has_nested_shapes=bool(keys.get("has_nested_shapes")),
+        has_partitioning=_partitioning_flag(keys),
+        has_enums=_tristate(keys.get("has_enums")),
+        has_nested_shapes=_tristate(keys.get("has_nested_shapes")),
+        physical_storage=_storage_payload(keys.get("physical_storage")),
     )
+
+
+def _tristate(value: Any) -> bool | None:
+    """Keep "never measured" distinct from "measured and absent"."""
+    return None if value is None else bool(value)
+
+
+def _storage_payload(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    return to_dict() if callable(to_dict) else None
+
+
+def _partitioning_flag(source: dict[str, Any]) -> bool | None:
+    """Prefer a measured physical probe over any caller-supplied hint."""
+    storage = _storage_payload(source.get("physical_storage"))
+    if storage and storage.get("status") == "measured":
+        return _tristate(storage.get("partitioned"))
+    return _tristate(source.get("has_partitioning"))
 
 
 def source_to_target_from_mappings(mappings: list[dict[str, Any]] | None) -> dict[str, str]:
@@ -366,9 +400,10 @@ def catalog_from_payload(payload: Any) -> SourceSchemaCatalog | None:
             identity_columns=list(payload.get("identity_columns") or []),
             collations=dict(payload.get("collations") or {}),
             comments=dict(payload.get("comments") or {}),
-            has_partitioning=bool(payload.get("has_partitioning")),
-            has_enums=bool(payload.get("has_enums")),
-            has_nested_shapes=bool(payload.get("has_nested_shapes")),
+            has_partitioning=_partitioning_flag(payload),
+            has_enums=_tristate(payload.get("has_enums")),
+            has_nested_shapes=_tristate(payload.get("has_nested_shapes")),
+            physical_storage=_storage_payload(payload.get("physical_storage")),
         )
     return build_catalog_from_introspect(
         dialect=str(payload.get("dialect") or ""),
@@ -810,7 +845,27 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
             )
         )
 
-    def _aspect_list(aspect: str, present: bool, reason_unsup: str, reason_skip: str) -> None:
+    def _aspect_list(
+        aspect: str,
+        present: bool | None,
+        reason_unsup: str,
+        reason_skip: str,
+        reason_unknown: str = "",
+    ) -> None:
+        if present is None:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect=aspect,
+                    name="*",
+                    status="unknown",
+                    reason=reason_unknown
+                    or (
+                        f"Source catalog was not read for {aspect}; "
+                        "unmeasured, not proven absent."
+                    ),
+                )
+            )
+            return
         report.items.append(
             SchemaFidelityItem(
                 aspect=aspect,
@@ -860,16 +915,11 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
         SchemaFidelityItem(
             aspect="charset",
             name="*",
-            status="skipped",
-            reason="Character set not introspected for this source dialect in v1.",
+            status="unknown",
+            reason="Character set is not introspected for this source dialect.",
         )
     )
-    _aspect_list(
-        "partitioning",
-        catalog.has_partitioning,
-        "Partitioning / clustering is not carried.",
-        "No partitioning on source.",
-    )
+    _emit_physical_storage_aspects(report, catalog)
     _aspect_list(
         "comment",
         bool(catalog.comments),
@@ -890,6 +940,91 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
     )
 
 
+def _emit_physical_storage_aspects(
+    report: SchemaFidelityReport,
+    catalog: SourceSchemaCatalog,
+) -> None:
+    """Certify partitioning / tablespace / clustering from a measured probe.
+
+    A transfer copies rows and logical schema, never physical placement, so
+    every measured placement is reported ``unsupported`` (operator must apply
+    it). Without a probe the aspect is ``unknown`` — the old code emitted
+    "No partitioning on source" from a flag nothing ever populated.
+    """
+    storage = catalog.physical_storage or {}
+    measured = storage.get("status") == "measured"
+    if not measured:
+        detail = str(storage.get("detail") or "").strip()
+        reason = (
+            "Physical storage catalog was not measured for this source; "
+            "partitioning, tablespace and clustering are unmeasured, not absent."
+        )
+        if detail:
+            reason = f"{reason} ({detail})"
+        for aspect in ("partitioning", "tablespace", "clustering"):
+            report.items.append(
+                SchemaFidelityItem(aspect=aspect, name="*", status="unknown", reason=reason)
+            )
+        return
+
+    partitioned = bool(storage.get("partitioned"))
+    keys = [str(k) for k in (storage.get("partition_keys") or [])]
+    strategy = str(storage.get("partition_strategy") or "").strip()
+    report.items.append(
+        SchemaFidelityItem(
+            aspect="partitioning",
+            name="*",
+            status="unsupported" if partitioned else "skipped",
+            reason=(
+                "Source table is partitioned; the destination is created "
+                "unpartitioned — reapply the partition scheme before cutover."
+                if partitioned
+                else "Source table is not partitioned (measured)."
+            ),
+            source_detail=(
+                f"{strategy or 'partitioned'} on {', '.join(keys) or 'unreported key'} "
+                f"({storage.get('partition_count')} partitions)"
+                if partitioned
+                else ""
+            ),
+        )
+    )
+
+    tablespace = str(storage.get("tablespace") or "").strip()
+    default_ts = storage.get("is_default_tablespace")
+    non_default = bool(tablespace) and default_ts is not True
+    report.items.append(
+        SchemaFidelityItem(
+            aspect="tablespace",
+            name="*",
+            status="unsupported" if non_default else "skipped",
+            reason=(
+                "Source table lives in a named tablespace/filegroup; the "
+                "destination is created in the default one."
+                if non_default
+                else "Source table uses the default tablespace/filegroup (measured)."
+            ),
+            source_detail=tablespace,
+        )
+    )
+
+    clustering = [str(c) for c in (storage.get("clustering") or [])]
+    report.items.append(
+        SchemaFidelityItem(
+            aspect="clustering",
+            name="*",
+            status="unsupported" if clustering else "skipped",
+            reason=(
+                "Source table has a clustering/CLUSTER index; physical row "
+                "order is not reproduced."
+                if clustering
+                else "No clustering index on source (measured)."
+            ),
+            source_detail=", ".join(clustering),
+        )
+    )
+
+
 def _ensure_all_aspects_present(report: SchemaFidelityReport) -> None:
     have = {i.aspect for i in report.items}
     for aspect in REQUIRED_ASPECTS:
@@ -899,7 +1034,10 @@ def _ensure_all_aspects_present(report: SchemaFidelityReport) -> None:
             SchemaFidelityItem(
                 aspect=aspect,
                 name="*",
-                status="skipped",
-                reason="No source evidence; aspect certified absent for this transfer.",
+                status="unknown",
+                reason=(
+                    "No source evidence was collected for this aspect; it is "
+                    "unmeasured, not proven absent."
+                ),
             )
         )

@@ -728,6 +728,7 @@ def _introspect_table_schema_rich(
         "identity_columns": [],
         "generated_columns": [],
         "collations": {},
+        "physical_storage": None,
         "warnings": [],
     }
 
@@ -758,6 +759,9 @@ def _introspect_table_schema_rich(
             "collations": dict(collations or {}),
             "foreign_keys": list(payload.get("foreign_keys") or []),
             "check_constraints": list(payload.get("check_constraints") or []),
+            # None when the dialect/probe never measured placement — the
+            # certificate reports "unknown", never "no partitioning".
+            "physical_storage": payload.get("physical_storage"),
             "warnings": warnings,
         }
 

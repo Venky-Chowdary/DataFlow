@@ -17,6 +17,7 @@ from services.unique_key_introspect import (
     _sqlite_fetch_unique_keys,
     _sqlserver_fetch_unique_keys,
 )
+from services.physical_storage_metadata import probe_physical_storage
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -470,6 +471,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                 "unique_keys": [],
             }
             foreign_keys: list[dict[str, Any]] = []
+            physical_storage: dict[str, Any] | None = None
             if target:
                 columns = _pg_fetch_columns(cur, schema, target)
                 # Table may live outside the requested schema (common when UI
@@ -506,6 +508,9 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                     if advisory_keys:
                         unique_meta = _mark_unique_keys_advisory(unique_meta)
                     foreign_keys = _pg_fetch_foreign_keys(cur, resolved_schema, target)
+                    physical_storage = probe_physical_storage(
+                        "postgresql", cur, resolved_schema, target
+                    ).to_dict()
         conn.close()
         out: dict[str, Any] = {
             "ok": True,
@@ -515,6 +520,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
             "foreign_keys": foreign_keys,
+            "physical_storage": physical_storage,
         }
         if advisory_keys and (out["primary_key_columns"] or out["unique_keys"]):
             out["warnings"] = [
@@ -1005,9 +1011,13 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 "unique_keys": [],
             }
             foreign_keys: list[dict[str, Any]] = []
+            physical_storage: dict[str, Any] | None = None
             if columns and target:
                 unique_meta = _mysql_fetch_unique_keys(cur, db_name, target)
                 foreign_keys = _mysql_fetch_foreign_keys(cur, db_name, target)
+                physical_storage = probe_physical_storage(
+                    "mysql", cur, db_name, target
+                ).to_dict()
         conn.close()
         return {
             "ok": True,
@@ -1017,6 +1027,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
             "foreign_keys": foreign_keys,
+            "physical_storage": physical_storage,
         }
     except ImportError:
         return {"ok": False, "error": "Install pymysql for MySQL schema introspection", "columns": [], "tables": []}
@@ -2348,6 +2359,11 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 "schema": owner,
                 "primary_key_columns": unique_meta.get("primary_key_columns") or [],
                 "unique_keys": unique_meta.get("unique_keys") or [],
+                "physical_storage": (
+                    probe_physical_storage("oracle", conn, owner, resolved_table).to_dict()
+                    if columns
+                    else None
+                ),
             }
     except Exception as exc:
         logger.warning("oracle introspect failed", exc_info=True)
@@ -2562,6 +2578,11 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                 "schema": schema,
                 "primary_key_columns": unique_meta.get("primary_key_columns") or [],
                 "unique_keys": unique_meta.get("unique_keys") or [],
+                "physical_storage": (
+                    probe_physical_storage("sqlserver", conn, schema, table).to_dict()
+                    if columns
+                    else None
+                ),
             }
     except Exception as exc:
         logger.warning("sqlserver introspect failed", exc_info=True)
