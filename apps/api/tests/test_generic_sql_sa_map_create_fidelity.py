@@ -90,12 +90,26 @@ def test_databricks_float4_materialize_float_not_double():
     assert not isinstance(nested, sa.Double)
 
 
-def test_sqlserver_integer_not_bigint_invent():
-    wire, sa_t = _sa("sqlserver", "INTEGER")
+def test_sqlserver_int32_source_stays_32_bit():
+    """A read SQL Server ``int`` keeps its width through Map→CREATE.
+
+    Introspect names the width (``INT4``) because the bare ``INTEGER`` keyword
+    is ambiguous across engines — Oracle ``INTEGER`` is ``NUMBER(38)``, which a
+    32-bit destination column would overflow at row 1 — so an unnamed stamp
+    still widens to BIGINT rather than risking silent overflow.
+    """
+    from services.schema_introspect import _sqlserver_to_logical
+
+    assert _sqlserver_to_logical("int") == "INT4"
+    wire, sa_t = _sa("sqlserver", "INT4")
     assert wire.upper() in {"INTEGER", "INT"}
     nested = getattr(sa_t, "nested_type", None) or sa_t
     assert isinstance(nested, sa.Integer)
     assert not isinstance(nested, sa.BigInteger)
+
+    ambiguous_wire, ambiguous_t = _sa("sqlserver", "INTEGER")
+    assert ambiguous_wire.upper() == "BIGINT"
+    assert isinstance(getattr(ambiguous_t, "nested_type", None) or ambiguous_t, sa.BigInteger)
 
 
 def test_sqlserver_bigint_keeps_bigint():

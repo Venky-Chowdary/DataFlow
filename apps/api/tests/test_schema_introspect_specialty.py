@@ -43,12 +43,16 @@ def test_pg_mysql_bq_sf_preserve_ieee_float():
     assert _pg_to_logical("float8") == "DOUBLE PRECISION"
     assert _pg_to_logical("numeric") == "DECIMAL"
     assert _mysql_to_logical("double") == "DOUBLE"
-    assert _mysql_to_logical("float") == "FLOAT"
+    # MySQL FLOAT is IEEE-32; the bare FLOAT keyword means IEEE-64 on
+    # PostgreSQL/SQL Server/Snowflake, so the width is named explicitly.
+    assert _mysql_to_logical("float") == "FLOAT32"
     assert _mysql_to_logical("decimal(10,2)") == "DECIMAL(10,2)"
     assert _bq_to_logical("FLOAT64") == "FLOAT64"
     # BIGNUMERIC stays distinct from NUMERIC/DECIMAL (76,38 vs 38,9 contract).
     assert _bq_to_logical("BIGNUMERIC") == "BIGNUMERIC"
-    assert _sf_to_logical("FLOAT") == "FLOAT"
+    # Snowflake FLOAT / FLOAT8 / DOUBLE are one IEEE-64 type — naming the width
+    # keeps a 32-bit destination from being invented from the spelling.
+    assert _sf_to_logical("FLOAT") == "DOUBLE"
     assert _sf_to_logical("FLOAT8") == "DOUBLE"
     assert _sf_to_logical("NUMBER(38,10)") == "DECIMAL(38,10)"
     assert _sample_logical_type(1.5) == "DOUBLE"

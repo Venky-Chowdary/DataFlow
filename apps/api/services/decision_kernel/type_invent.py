@@ -437,6 +437,16 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
         if db == "clickhouse":
             return strip_identity_qualifier(inferred).strip() or base_early
         return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # Oracle ANSI FLOAT(p) is NUMBER-backed binary precision (bare = FLOAT(126),
+    # ~38 decimal digits), so BINARY_DOUBLE would cut it to a 53-bit mantissa.
+    # The bare lowercase ``float`` is the logical family, not a stamp, and still
+    # invents BINARY_DOUBLE.
+    if (
+        db == "oracle"
+        and re.match(r"^FLOAT(\(\d+\))?$", base_early)
+        and strip_identity_qualifier(inferred).strip() != LOGICAL_FLOAT
+    ):
+        return base_early
     # IBM DECFLOAT — IEEE decimal float; never invent NUMBER(p,0) from digit count.
     if base_early == "DECFLOAT" or base_early.startswith("DECFLOAT("):
         if db in {
@@ -927,7 +937,7 @@ def create_new_mapping_target_type(
     from services.type_system import unicode_safe_target_carrier
 
     stamp = _create_new_mapping_target_type(
-        src_type, dest_db_type, samples=samples
+        src_type, dest_db_type, samples=samples, source_db=source_db
     )
     return unicode_safe_target_carrier(
         stamp, dest_db=dest_db_type, source_db=source_db
@@ -939,6 +949,7 @@ def _create_new_mapping_target_type(
     dest_db_type: str = "",
     *,
     samples: list | None = None,
+    source_db: str = "",
 ) -> str:
     """Target type stamped on create-new mappings for Validate + writers.
 
@@ -958,7 +969,14 @@ def _create_new_mapping_target_type(
     # fixed-point or open text sources (observe path elsewhere).
     if samples and normalize_logical_type(src_type) == LOGICAL_DECIMAL:
         p, _s = parse_numeric_precision_scale(src_type)
-        if p is None:
+        from services.decimal_observe import source_declares_numeric_domain
+
+        # A typed source (relational NUMBER/DECIMAL, BSON Decimal128) holds a
+        # domain the Validate sample never bounds — sizing create-new from that
+        # sample invents a carrier narrower than the source, which the product
+        # then blocks as its own fidelity collapse and which would quarantine
+        # unsampled rows. Fall through to the platform carrier instead.
+        if p is None and not source_declares_numeric_domain(source_db):
             from services.decimal_observe import (
                 create_new_decimal_carrier,
                 observe_numeric_samples,
@@ -1230,8 +1248,12 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "TIMESTAMP_TZ", "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIME", "TIMETZ", "YEAR",
         # Foreign IEEE → BINARY_FLOAT / BINARY_DOUBLE. Keep BINARY_*.
+        # FLOAT / FLOAT(p) is *not* foreign IEEE here: Oracle's ANSI FLOAT is
+        # NUMBER-backed binary precision (bare = 126 binary digits), so
+        # rematerializing it to BINARY_DOUBLE cuts an Oracle→Oracle column down
+        # to a 53-bit mantissa. Keep it native; it is never narrower.
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
-        "FLOAT64", "DOUBLE", "FLOAT",
+        "FLOAT64", "DOUBLE",
         # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
         "VECTOR", "HALFVEC", "SPARSEVEC",
         "BIT", "BOOL", "TINYINT",

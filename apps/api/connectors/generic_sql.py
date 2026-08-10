@@ -1135,6 +1135,17 @@ def _sa_type_for_logical(
         int_u = raw.upper().split("(", 1)[0].strip().replace(" ", "")
         carrier = integer_width_carrier(raw) or ""
         width = integer_bit_width(carrier) if carrier else None
+        if int_u in {"INT", "INTEGER"} and db_type:
+            # The bare keyword is ambiguous across engines, so the carrier
+            # widens it to 64-bit. Once the destination engine is named that
+            # ambiguity is gone: SQL Server / PostgreSQL / MySQL INT is int32,
+            # and binding it as BIGINT re-widens a column the operator declared
+            # 32-bit. Oracle/Snowflake report unbounded and keep the widen.
+            from services.numeric_fit import integer_storage_bounds
+
+            bounds = integer_storage_bounds(int_u, dest_db=db_type)
+            if bounds and bounds[1] == 2147483647:
+                return _maybe_nullable(sa.Integer())
         if int_u in {
             "BIGINT",
             "INT64",

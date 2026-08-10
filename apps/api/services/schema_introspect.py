@@ -738,24 +738,18 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             columns: list[dict] = []
             target_table = table or (tables[0] if tables else None)
             if target_table:
-                from connectors.snowflake_conn import resolve_or_fold_snowflake_table
+                from connectors.snowflake_conn import (
+                    resolve_or_fold_snowflake_table,
+                    snowflake_physical_column_rows,
+                )
 
                 try:
                     target_table = resolve_or_fold_snowflake_table(cur, schema, str(target_table))
                 except Exception as exc:
                     logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                cur.execute(
-                    """
-                    SELECT column_name, data_type, is_nullable,
-                           character_maximum_length, numeric_precision,
-                           numeric_scale, datetime_precision
-                    FROM information_schema.columns
-                    WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s
-                    ORDER BY ordinal_position
-                    """,
-                    (schema, target_table),
+                col_rows = snowflake_physical_column_rows(
+                    cur, schema, str(target_table)
                 )
-                col_rows = list(cur.fetchall() or [])
                 if not col_rows and not bool(kwargs.get("strict_namespace")):
                     cur.execute(
                         """
@@ -779,18 +773,9 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                             )
                         except Exception as exc:
                             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        cur.execute(
-                            """
-                            SELECT column_name, data_type, is_nullable,
-                                   character_maximum_length, numeric_precision,
-                                   numeric_scale, datetime_precision
-                            FROM information_schema.columns
-                            WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s
-                            ORDER BY ordinal_position
-                            """,
-                            (found_schema, found_table),
+                        col_rows = snowflake_physical_column_rows(
+                            cur, str(found_schema), str(found_table)
                         )
-                        col_rows = list(cur.fetchall() or [])
                         if col_rows:
                             schema = found_schema
                             target_table = found_table
@@ -1936,6 +1921,13 @@ def _oracle_to_logical(dtype: str) -> str:
         return f"DECIMAL({m.group(1)})"
     if d == "NUMBER" or d.startswith("NUMBER("):
         return "DECIMAL"
+    # Oracle ANSI FLOAT(p) is NUMBER-backed binary precision (bare FLOAT = 126
+    # binary digits ~ 38 decimal), not IEEE-64. Reading it as DOUBLE silently
+    # drops it to a 53-bit mantissa, so the declared carrier is preserved and
+    # the destination decides how to hold it.
+    m_float = re.match(r"^FLOAT(?:\((\d+)\))?$", d)
+    if m_float:
+        return f"FLOAT({m_float.group(1)})" if m_float.group(1) else "FLOAT"
     if d in {"BINARY_FLOAT", "BINARY_DOUBLE"} or d.startswith("FLOAT"):
         from services.type_system import float_width_carrier
 
@@ -2040,6 +2032,12 @@ def _sqlserver_to_logical(dtype: str) -> str:
     if d in {"int", "bigint", "smallint", "tinyint"}:
         from services.type_system import integer_width_carrier
 
+        # SQL Server INT is unambiguously 32-bit. The shared carrier widens the
+        # ambiguous INT/INTEGER keyword to BIGINT (never-narrower invent), which
+        # would turn a read int32 column into a BIGINT on the destination and
+        # lose the declared width — so name it explicitly, as PostgreSQL int4 is.
+        if d == "int":
+            return "INT4"
         return integer_width_carrier(d) or "BIGINT"
     if d == "bit":
         return "BOOLEAN"
