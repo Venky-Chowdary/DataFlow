@@ -574,25 +574,80 @@ def extract_column_from_sql_error(exc: BaseException | str) -> str | None:
     return None
 
 
+# Row-level contract violations: the *value* is unfit for the destination
+# column, so the row belongs in quarantine and the rest of the chunk must
+# still land. Duplicate/unique-key errors are deliberately absent — those are
+# an identity/replay concern, not a row-value defect, and quarantining them
+# would let a non-idempotent replay report success.
+_ROW_CONTRACT_ERROR_SIGNATURES = (
+    # temporal / numeric / cast (MySQL, PostgreSQL, SQL Server)
+    "incorrect datetime",
+    "incorrect date",
+    "incorrect time",
+    "truncated incorrect",
+    "data truncation",
+    "out of range value",
+    "invalid input syntax",
+    "invalid datetime",
+    "date/time field value out of range",
+    "cannot cast",
+    "invalid value",
+    "numeric value out of range",
+    "value too long for type",
+    "string or binary data would be truncated",
+    # NOT NULL
+    "violates not-null constraint",
+    "null value in column",
+    "cannot be null",
+    "cannot insert the value null",
+    "does not allow nulls",
+    # CHECK / FK
+    "violates check constraint",
+    "violates foreign key constraint",
+    "check constraint",
+    "foreign key constraint",
+    # Oracle: 01400 NULL insert, 01438/12899 too large, 02290 check, 02291 FK
+    "ora-01400",
+    "ora-01438",
+    "ora-12899",
+    "ora-02290",
+    "ora-02291",
+)
+
+# Unique/PK collisions must keep aborting the chunk (see above).
+_IDENTITY_COLLISION_SIGNATURES = (
+    "violates unique constraint",
+    "duplicate key value",
+    "duplicate entry",
+    "unique constraint",
+    "ora-00001",
+    "cannot insert duplicate key",
+)
+
+
+def is_identity_collision_error(exc: BaseException | str) -> bool:
+    """True for unique/primary-key collisions (replay identity, not row value)."""
+    return any(sig in str(exc).lower() for sig in _IDENTITY_COLLISION_SIGNATURES)
+
+
 def is_sql_data_error(exc: BaseException | str) -> bool:
-    """True for value/type contract errors that must not be retried as connection drops."""
+    """True for row-level value/contract errors.
+
+    Such an error must never be retried as a connection drop, and under a
+    quarantine policy it must be resolved row by row so the fit rows still
+    land and the unfit ones are counted — a whole-chunk abort leaves rows
+    neither written nor quarantined, which breaks the conservation ledger.
+
+    Driver classification is read from the exception's MRO, not from the
+    concrete class name: psycopg2 raises ``NotNullViolation``, pymysql raises
+    ``IntegrityError``, and only the base classes are DB-API contract.
+    """
     text = str(exc).lower()
-    name = type(exc).__name__.lower() if isinstance(exc, BaseException) else ""
-    if "dataerror" in name or "integrityerror" in name:
-        return True
-    return any(
-        sig in text
-        for sig in (
-            "incorrect datetime",
-            "incorrect date",
-            "incorrect time",
-            "truncated incorrect",
-            "data truncation",
-            "out of range value",
-            "invalid input syntax",
-            "invalid datetime",
-            "date/time field value out of range",
-            "cannot cast",
-            "invalid value",
-        )
-    )
+    if is_identity_collision_error(text):
+        return False
+    if isinstance(exc, BaseException):
+        for klass in type(exc).__mro__:
+            klass_name = klass.__name__.lower()
+            if "dataerror" in klass_name or "integrityerror" in klass_name:
+                return True
+    return any(sig in text for sig in _ROW_CONTRACT_ERROR_SIGNATURES)

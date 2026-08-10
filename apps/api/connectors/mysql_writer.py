@@ -692,6 +692,7 @@ def write_mapped_rows(
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
             candidate_by_col: dict[str, str] = {}
+            source_type_by_col: dict[str, str] = {}
             for col in target_cols:
                 mapping = active_by_tgt.get(col) or {}
                 source = mapping.get("source") or ""
@@ -704,6 +705,7 @@ def write_mapped_rows(
                 # keep Map/current ceiling (desired_types falls back to cur_type).
                 if not str(source_type or "").strip():
                     continue
+                source_type_by_col[col] = str(source_type)
                 candidate_by_col[col] = mysql_type(source_type)
 
             desired_types, alter_refusals = desired_types_honoring_map_stamps(
@@ -718,6 +720,7 @@ def write_mapped_rows(
                     alter_refusals,
                 )
 
+            suppressed_widens: dict[str, str] = {}
             widen_existing_columns_native(
                 cursor,
                 "mysql",
@@ -727,7 +730,14 @@ def write_mapped_rows(
                 desired_types,
                 backfill=backfill_new_fields,
                 skip_cols=conflict_columns or [],
+                source_types=source_type_by_col,
+                suppressed_out=suppressed_widens,
             )
+            if suppressed_widens:
+                desired_types = [
+                    suppressed_widens.get(col, typ)
+                    for col, typ in zip(target_cols, desired_types)
+                ]
             target_types = desired_types
             reflection_cache.invalidate_by_identity(_identity, "", table_name)
 

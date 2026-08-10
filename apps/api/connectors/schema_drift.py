@@ -577,12 +577,24 @@ def widen_existing_columns_native(
     *,
     backfill: bool = False,
     skip_cols: list[str] | None = None,
+    source_types: dict[str, str] | None = None,
+    suppressed_out: dict[str, str] | None = None,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen columns that are now too narrow.
 
     Returns the list of DDL statements executed.  ``backfill`` must be True for any
     DDL to be issued.  The function is idempotent: repeated calls will only emit
     ALTER statements when the target type is wider than the existing catalog type.
+
+    ``source_types`` (column → source logical type) suppresses widens that are an
+    artifact of create-new materialization rather than real drift: a destination
+    the writer would *invent* as BIGINT is no reason to ALTER an operator's
+    existing INTEGER column when the source column is itself INTEGER. Only a
+    carrier that cannot hold the incoming source type is widened.
+
+    ``suppressed_out`` receives ``column -> existing physical type`` for every
+    such suppressed widen, so the caller can keep its declared types equal to
+    the DDL that actually exists.
     """
     if not backfill or not target_cols or not target_types:
         return []
@@ -606,6 +618,18 @@ def widen_existing_columns_native(
             continue
         existing_type = existing[col]
         if not is_wider_type(existing_type, new_type, dest_db=dialect):
+            continue
+        source_type = str((source_types or {}).get(col) or "").strip()
+        if source_type and not is_lossy_coercion(source_type, existing_type, dest_db=dialect):
+            if suppressed_out is not None:
+                suppressed_out[col] = existing_type
+            logger.debug(
+                "Widen skipped for %s.%s: existing %s already holds source %s",
+                table_name,
+                col,
+                existing_type,
+                source_type,
+            )
             continue
         try:
             ddl = _build_widen_ddl(
