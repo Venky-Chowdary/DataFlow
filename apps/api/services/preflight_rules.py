@@ -33,6 +33,7 @@ HARD_GATE_IDS = {
     "schema_drift",
     "constraint_fk",
     "proof_bundle",
+    "g13_source_coverage",
 }
 
 SOFT_GATE_IDS = {
@@ -100,6 +101,30 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to fix type coercion"},
+        ],
+    },
+    "g13_source_coverage": {
+        "title": "Source column coverage",
+        "category": "hard",
+        "why": (
+            "A source column that is neither mapped to a destination column nor "
+            "declared an intentional omission would be dropped without anyone "
+            "deciding to drop it. That is silent data loss, and it is invisible "
+            "afterwards: the destination looks complete and the certificate "
+            "reports success."
+        ),
+        "fix": (
+            "Open Map and, for each listed column, either map it to a destination "
+            "column (create-new if the destination has no carrier for it) or mark "
+            "it as an intentional omission. Omissions are recorded in the Decision "
+            "Artifact and the proof bundle, so the drop stays auditable."
+        ),
+        "examples": [
+            "30-column source into an existing 20-column table → map 20, omit 10 explicitly.",
+            "Audit columns the destination does not carry → mark them omitted, not unmapped.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to account for every column"},
         ],
     },
     "g4_mapping_confidence": {

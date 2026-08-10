@@ -596,6 +596,13 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
                 "passed_count": pf.get("passed_count"),
                 "total_gates": pf.get("total_gates"),
                 "readiness_score": pf.get("readiness_score"),
+                # Which source columns the operator chose not to carry. Without
+                # it the pack cannot distinguish a declared omission from a drop.
+                "source_coverage": (
+                    pf.get("source_coverage")
+                    or (pf.get("proof_bundle") or {}).get("source_coverage")
+                    or {}
+                ),
             }
             if pf
             else None

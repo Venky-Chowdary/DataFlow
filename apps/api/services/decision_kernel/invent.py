@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any
 
 from services.column_case import column_type_or_none
+from services.mapping_constraints import is_intentional_omit
 
 
 class InventContext(str, Enum):
@@ -243,14 +244,7 @@ def stamp_additive_mapping_types(
             row.pop("dest_type", None)
             row["create_new"] = False
             continue
-        if row.get("intentional_omit") or row.get("intentionalOmit"):
-            continue
-        if str(row.get("transform") or "").lower() in {
-            "omit",
-            "intentional_omit",
-            "drop",
-            "exclude",
-        }:
+        if is_intentional_omit(row):
             continue
         tgt = str(row.get("target") or "").strip()
         if not tgt:

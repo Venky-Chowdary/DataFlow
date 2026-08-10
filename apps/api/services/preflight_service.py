@@ -34,6 +34,8 @@ from services.connector_capability_registry import (
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.destination_key_collision_probe import probe_append_key_collisions
 from services.secret_config import RedactedConfig, probe_config_from_endpoint
+from services.preflight_fk_gate import build_fk_block
+from services.source_coverage_gate import build_source_coverage_gate
 from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
     infer_date_locale,
@@ -1593,6 +1595,37 @@ def run_file_preflight(
     except Exception as vf_exc:
         logger.warning("validation_findings stamp failed: %s", vf_exc, exc_info=vf_exc)
 
+    # Source coverage — every source column is written, declared omitted, or
+    # blocks (see services/source_coverage_gate.py).
+    src_coverage, cov_gate = build_source_coverage_gate(
+        source_columns=list(columns or []), mappings=list(mappings or [])
+    )
+    out["source_coverage"] = src_coverage
+    if isinstance(out.get("proof_bundle"), dict):
+        out["proof_bundle"] = {**out["proof_bundle"], "source_coverage": src_coverage}
+    out["gates"] = [*out["gates"], cov_gate]
+    if cov_gate["status"] == "block":
+        out["blockers"] = [
+            *out["blockers"],
+            *enrich_blockers(
+                [
+                    {
+                        "id": cov_gate["id"],
+                        "message": cov_gate["message"],
+                        "details": cov_gate["details"],
+                    }
+                ],
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+            ),
+        ]
+        out["passed"] = False
+    out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
+    out["total_gates"] = len(out["gates"])
+    out["readiness_score"] = round(
+        out["passed_count"] / max(out["total_gates"], 1) * 100, 1
+    )
+
     # FK / relational constraint findings + sample orphan probe.
     # Schema unmapped-FK + sample orphans fail closed in strict/maximum unless
     # acknowledged. Sample orphan never invents population RI proof.
@@ -1731,50 +1764,12 @@ def run_file_preflight(
             validation_mode=validation_mode,
             fk_risk_acknowledged=bool(fk_risk_acknowledged),
         ):
-            block_msgs = [
-                str(f.get("message") or f.get("code") or "Foreign key coverage incomplete")
-                for f in findings
-                if isinstance(f, dict)
-                and str(f.get("severity") or "").lower() in {"block", "ack_required"}
-            ]
-            fk_msg = (
-                block_msgs[0]
-                if block_msgs
-                else "Destination FK columns unmapped — transfer blocked"
+            fk_msg, fk_details = build_fk_block(
+                findings,
+                ri_posture=ri_posture,
+                population_orphan_probe_ran=pop_ran,
+                sample_orphan_probe_ran=bool(orphan_report.get("ran")),
             )
-            if any(
-                isinstance(f, dict)
-                and f.get("coverage") == "population_orphan_probe"
-                and str(f.get("severity") or "").lower() in {"block", "ack_required"}
-                for f in findings
-            ):
-                coverage = "population_orphan_probe"
-            elif any(
-                isinstance(f, dict) and f.get("coverage") == "sample_orphan_probe"
-                for f in findings
-                if str(f.get("severity") or "").lower() in {"block", "ack_required"}
-            ):
-                coverage = "sample_orphan_probe"
-            else:
-                coverage = "destination_fk_metadata"
-            fk_details = {
-                "findings": findings,
-                "coverage": coverage,
-                "remediation_kind": "acknowledge_fk_risk",
-                "ack_required": True,
-                "population_orphan_proven": bool(ri_posture.get("proven")),
-                "population_orphan_probe_ran": pop_ran,
-                "sample_orphan_probe_ran": bool(orphan_report.get("ran")),
-                "rule_id": (
-                    "constraint_fk.population_orphan"
-                    if coverage == "population_orphan_probe"
-                    else (
-                        "constraint_fk.sample_orphan"
-                        if coverage == "sample_orphan_probe"
-                        else "constraint_fk.unmapped"
-                    )
-                ),
-            }
             fk_gate = {
                 "id": "constraint_fk",
                 "status": "block",

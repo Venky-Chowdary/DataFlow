@@ -1399,7 +1399,13 @@ def dry_run_sample(
     errors: list[str] = []
     source_idx = {h: i for i, h in enumerate(headers)}
 
+    from services.mapping_constraints import write_mappings
     from services.transform_resolver import resolve_transform
+
+    # A declared omission has no destination carrier, so there is no write-path
+    # transform to dry-run. Probing it reported the omission itself as a cast
+    # failure — the honest operator action was punished with a data error.
+    mappings = write_mappings(mappings)
 
     dest_types = {
         str(m.get("target")): str(m.get("target_type"))
@@ -1457,7 +1463,11 @@ def preview_quarantine_cells(
     coerce_count = 0
     ok_count = 0
 
+    from services.mapping_constraints import write_mappings
     from services.transform_resolver import resolve_transform
+
+    # Omitted columns are never written, so they have no cell to quarantine.
+    mappings = write_mappings(mappings)
 
     for m in mappings:
         src = m.get("source") or ""

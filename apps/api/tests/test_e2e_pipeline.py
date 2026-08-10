@@ -108,8 +108,9 @@ def test_e2e_upload_to_preflight(filename: str) -> None:
         sample_rows=sample_rows,
         estimated_bytes=record.get("file_size_bytes", 0),
     )
-    assert pf["total_gates"] == 9
+    assert pf["total_gates"] == 10
     by_id = {g["id"]: g for g in pf["gates"]}
+    assert "g13_source_coverage" in by_id
     assert by_id.get("g1_source", {}).get("status") == "pass", pf["gates"]
     assert by_id.get("g2_destination", {}).get("status") == "block", pf["gates"]
     # Offline warehouse map: G3/G4 may block on low confidence or residual coercion —

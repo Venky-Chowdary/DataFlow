@@ -98,10 +98,19 @@ def _compute_source_checksum(
 
 
 def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
-    """Return the ordered list of target column names used for reconciliation."""
+    """Return the ordered list of target column names used for reconciliation.
+
+    Declared omissions are excluded: they have no destination carrier, and
+    falling back to their source name asked the destination for a column that
+    was never created, which failed the read-back and reported Gate-8 as
+    unavailable on a write that had actually landed.
+    """
+    from services.mapping_constraints import write_mappings
+
     targets = list(dict.fromkeys(
         str(m.get("target") or m.get("source") or "")
-        for m in mappings if m.get("target") or m.get("source")
+        for m in write_mappings(mappings)
+        if m.get("target") or m.get("source")
     ))
     return targets or columns
 

@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from services.mapping_constraints import write_mappings
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 from services.decision_kernel import (
@@ -331,7 +332,8 @@ def analyze_coercion(
             "by_source": {},
         }
 
-    for m in mappings:
+    # Declared omissions have no destination carrier to coerce into.
+    for m in write_mappings(mappings):
         src = m.get("source", "")
         if not src:
             continue

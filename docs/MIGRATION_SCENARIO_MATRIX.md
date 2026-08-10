@@ -32,23 +32,28 @@ Source table: `id` + `c1..c30`. Destination: existing table with `id` + `c1..c20
 
 | # | Scenario | PostgreSQL | MySQL | Oracle | Verdict |
 |---|----------|-----------|-------|--------|---------|
-| 1.1 | 20 of 30 source columns mapped, remaining 10 **not mentioned at all** | written, 5 rows | written, 5 rows | written, 5 rows | **GAP-1 — silent drop** |
-| 1.2 | Same, remaining 10 marked `intentional_omit` | blocked pre-write | blocked pre-write | blocked pre-write | **GAP-2 — wrong reason** |
+| 1.1 | 20 of 30 source columns mapped, remaining 10 **not mentioned at all** | blocked pre-write | blocked pre-write | blocked pre-write | GAP-1 **fixed** |
+| 1.2 | Same, remaining 10 marked `intentional_omit` | written, 5 rows | written, 5 rows | written, 5 rows | GAP-2 **fixed** |
 | 1.3 | Destination has a `NOT NULL` column with no default and no mapping | blocked at write | blocked at write | blocked at write | **GAP-3 — not predicted** |
 | 1.4 | Destination has an extra **nullable** column nothing maps into | 5 rows written, job **failed** on checksum | same | same | **GAP-4 — false Gate-8 failure after commit** |
 
 Detail:
 
 - **1.1** is the exact case in the question ("source has 30, destination has
-  20"). The 10 unmatched source columns are dropped and the run is reported
-  green. That is silent data loss under our own standard, which requires every
-  source column to be *mapped*, *declared omitted*, or *blocking*.
-- **1.2** declaring the omission — the honest operator action — is punished:
-  the run is refused with `Sample transform / cast failures: 4 column(s) fail
-  write-path transforms on the Validate sample (c21, c22, c23, c24)`. An
-  omitted column has no target, so it should not be transform-checked at all.
-  The message also names 4 of the 10, which reads as a data problem rather
-  than a mapping-shape decision.
+  20"). It used to write 20 columns and report green. Gate `g13_source_coverage`
+  now refuses before any write and names the columns:
+  `10 source column(s) are neither mapped nor declared omitted: c21, c22, c23,
+  c24, c25, c26, c27, c28 (+2 more) — Datawrap will not drop them silently.`
+  Every source column must be a write mapping, an explicit `intentional_omit`,
+  or a blocker.
+- **1.2** declaring the omission — the honest operator action — used to be
+  punished with `Sample transform / cast failures: 4 column(s) fail write-path
+  transforms on the Validate sample (c21, c22, c23, c24)`. A declared omission
+  has no destination carrier, so it is now excluded from the transform dry run,
+  quarantine-cell preview, coercion probe, type-coercion validation and the
+  Gate-8 read-back projection, and recorded as the operator's decision in the
+  proof bundle (`source_coverage.omitted`) instead. Live re-run:
+  `/home/ubuntu/repro/gap1_source_coverage_live_results.json`.
 - **1.3** the destination's own `NOT NULL` is what stops the write
   (`ORA-01400`, MySQL `1364`, PG `not-null constraint`). The outcome is safe —
   0 rows land — but the operator learns at write time from an engine error
@@ -133,9 +138,9 @@ Not produced today, and needed for the scenarios above:
 
 | ID | Gap | Severity | Where |
 |----|-----|----------|-------|
-| GAP-1 | Unmapped source columns are dropped and the run is green | **Critical — silent data loss** | preflight mapping-shape gate |
+| GAP-1 | ~~Unmapped source columns are dropped and the run is green~~ **fixed** — `g13_source_coverage` hard gate | Was critical — silent data loss | `services/source_coverage_gate.py` |
 | GAP-4 | Untouched destination columns break Gate-8 checksum *after* rows are committed | **High — false failure + partial commit** | `services/reconciliation.py` fingerprint scope |
-| GAP-2 | Declared `intentional_omit` columns are transform-checked and refuse the run | High | preflight sample transform gate |
+| GAP-2 | ~~Declared `intentional_omit` columns are transform-checked and refuse the run~~ **fixed** — omissions excluded from every write-path probe | Was high | `services/mapping_constraints.write_mappings` call sites |
 | GAP-3 | Destination `NOT NULL`-without-default is caught by the engine, not predicted | Medium | preflight destination-requirement gate |
 | GAP-6 | `TEXT → TEXT` reported as fidelity collapse | Medium — false positive erodes trust | type fidelity classifier |
 | GAP-5 | Oracle `CLOB` not accepted as a JSON carrier | Low | type compatibility table |

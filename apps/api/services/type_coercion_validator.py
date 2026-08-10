@@ -9,6 +9,7 @@ from services.decision_kernel import (
     is_precision_collapse_coercion,
     normalize_logical_type,
 )
+from services.mapping_constraints import write_mappings
 from services.type_system import (
     resolve_mapping_target_type,
     specialty_carrier_base,
@@ -49,7 +50,10 @@ def validate_mapping_coercions(
     balanced = mode in {"balanced", "review"}
     floor = max(0.0, min(1.0, float(confidence_floor)))
     issues: list[dict[str, Any]] = []
-    for m in mappings:
+    # A declared omission has no destination type to coerce into; reading its
+    # empty target as "pending Studio/Map stamp" turned the operator's recorded
+    # decision into a data-integrity blocker.
+    for m in write_mappings(mappings):
         src = m.get("source", "")
         tgt = m.get("target", "")
         src_type = source_types.get(src, "VARCHAR")
