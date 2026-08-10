@@ -224,6 +224,7 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
             "absent": list(schema_objects.get("absent") or []),
             "unreadable": list(schema_objects.get("unreadable") or []),
             "aspects": _dict(schema_objects.get("aspects")),
+            "advisory": _dict(schema_objects.get("advisory")),
         },
         "referential_integrity": {
             "verified": bool(referential.get("verified")),
@@ -398,9 +399,10 @@ def build_migration_certificate(
             "reports as unavailable (missing parent tables, failed scans) — "
             "enforced and scanned relationships are proven.",
             "Exactly-once delivery — CDC and resume are at-least-once with upsert.",
-            "Triggers, check constraints, grants and storage options on the "
+            "Trigger bodies, grants and storage options on the "
             "destination — the physical state section reports only identity "
-            "watermarks, keys, unique constraints, foreign keys, indexes, "
+            "watermarks, keys, unique constraints, check constraints, "
+            "foreign keys, trigger timing/events, indexes, "
             "nullability and defaults.",
             "Any claim about rows this job did not read.",
         ],
@@ -532,10 +534,17 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
             for aspect, detail in aspects.items():
                 info = _dict(detail)
                 missing = ", ".join(info.get("missing") or []) or "—"
+                label = aspect.replace("_", " ")
+                if info.get("advisory"):
+                    label = f"{label} (advisory)"
                 lines.append(
-                    f"| {aspect.replace('_', ' ')} | {info.get('status', '')} | {missing} |"
+                    f"| {label} | {info.get('status', '')} | {missing} |"
                 )
             lines.append("")
+            for aspect, detail in aspects.items():
+                info = _dict(detail)
+                if info.get("advisory") and info.get("status") != "carried":
+                    lines += [f"- {info.get('note', '')}", ""]
         else:
             lines += [
                 f"- Constraints and indexes not compared — {objects.get('reason', '')}",

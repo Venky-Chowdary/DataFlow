@@ -12,6 +12,7 @@ from pathlib import Path
 
 from services.migration_certificate import physical_state_findings
 from services.physical_state_diff import (
+    ADVISORY_ASPECTS,
     ASPECTS,
     compare_physical_state,
     read_physical_state,
@@ -23,10 +24,14 @@ CREATE TABLE {name} (
   id INTEGER PRIMARY KEY,
   code TEXT NOT NULL UNIQUE,
   parent_id INTEGER REFERENCES parent(id),
-  note TEXT DEFAULT 'n'
+  note TEXT DEFAULT 'n',
+  qty INTEGER CHECK (qty > 0)
 )
 """
-BARE = "CREATE TABLE {name} (id INTEGER, code TEXT, parent_id INTEGER, note TEXT)"
+BARE = (
+    "CREATE TABLE {name} "
+    "(id INTEGER, code TEXT, parent_id INTEGER, note TEXT, qty INTEGER)"
+)
 
 
 def _db(tmp_path: Path, *statements: str) -> dict[str, str]:
@@ -60,7 +65,7 @@ def test_faithful_copy_verifies_every_aspect(tmp_path: Path) -> None:
     result = _verify(cfg, "src", "dst")
     assert result["verified"] is True
     assert result["absent"] == []
-    assert set(result["aspects"]) == set(ASPECTS)
+    assert set(result["aspects"]) == set(ASPECTS) | set(ADVISORY_ASPECTS)
     assert {a["status"] for a in result["aspects"].values()} == {"carried"}
 
 
@@ -178,3 +183,72 @@ def test_certificate_marks_missing_comparison_unverified() -> None:
     findings = physical_state_findings({})
     assert findings["schema_objects"]["verified"] is False
     assert "not compared" in findings["schema_objects"]["reason"]
+
+
+CHECKED = (
+    "CREATE TABLE {name} (id INTEGER PRIMARY KEY, qty INTEGER CHECK (qty > 0))"
+)
+UNCHECKED = "CREATE TABLE {name} (id INTEGER PRIMARY KEY, qty INTEGER)"
+
+
+def test_dropped_check_constraint_is_reported_absent(tmp_path: Path) -> None:
+    """A CHECK that did not survive lets bad values in tomorrow."""
+    cfg = _db(tmp_path, CHECKED.format(name="src"), UNCHECKED.format(name="dst"))
+    result = _verify(cfg, "src", "dst")
+    assert result["verified"] is False
+    assert "check_constraints" in result["absent"]
+    assert result["aspects"]["check_constraints"]["missing"] == ["qty>0"]
+
+
+def test_check_constraint_spelling_differences_still_match(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        CHECKED.format(name="src"),
+        'CREATE TABLE dst (id INTEGER PRIMARY KEY, qty INTEGER CHECK ( ("qty") > 0 ))',
+    )
+    result = _verify(cfg, "src", "dst")
+    assert result["aspects"]["check_constraints"]["status"] == "carried"
+
+
+def test_triggers_are_reported_but_never_block_the_verdict(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        UNCHECKED.format(name="src"),
+        UNCHECKED.format(name="dst"),
+        "CREATE TRIGGER trg_src AFTER INSERT ON src BEGIN SELECT 1; END",
+    )
+    result = _verify(cfg, "src", "dst")
+    triggers = result["aspects"]["triggers"]
+    assert triggers["advisory"] is True
+    assert triggers["status"] == "absent"
+    assert result["advisory"] == {"triggers": "absent"}
+    # Every blocking aspect carried, so the move is still verified.
+    assert result["absent"] == []
+    assert result["verified"] is True
+
+
+def test_matching_triggers_are_carried(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        UNCHECKED.format(name="src"),
+        UNCHECKED.format(name="dst"),
+        "CREATE TRIGGER trg_src AFTER INSERT ON src BEGIN SELECT 1; END",
+        "CREATE TRIGGER trg_dst AFTER INSERT ON dst BEGIN SELECT 1; END",
+    )
+    result = _verify(cfg, "src", "dst")
+    assert result["aspects"]["triggers"]["status"] == "carried"
+    assert result["advisory"] == {}
+
+def test_trigger_body_events_do_not_shadow_the_declared_event(tmp_path: Path) -> None:
+    """SQLite hands back the whole CREATE statement; the header event wins."""
+    cfg = _db(
+        tmp_path,
+        UNCHECKED.format(name="src"),
+        UNCHECKED.format(name="dst"),
+        "CREATE TRIGGER trg_src AFTER INSERT ON src "
+        "BEGIN UPDATE src SET qty = qty; END",
+        "CREATE TRIGGER trg_dst AFTER INSERT ON dst BEGIN SELECT 1; END",
+    )
+    state = read_physical_state(db_type="sqlite", cfg=cfg, table="src")
+    assert state.triggers == frozenset({("after", "insert")})
+    assert _verify(cfg, "src", "dst")["aspects"]["triggers"]["status"] == "carried"

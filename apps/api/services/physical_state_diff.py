@@ -21,6 +21,7 @@ some builds) come back ``unreadable`` with a reason rather than silently green.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -45,7 +46,62 @@ ASPECTS: tuple[str, ...] = (
     "indexes",
     "not_null",
     "defaults",
+    "check_constraints",
 )
+
+# Reported for the operator but never blocking: trigger bodies are procedural
+# code in a dialect the destination may not even speak, so "not carried" is the
+# expected outcome of a cross-engine move, not a defect the mover can fix.
+ADVISORY_ASPECTS: tuple[str, ...] = ("triggers",)
+
+# Longest first: "instead of" also contains no other timing, but "before each
+# row" and "after insert" must not be reduced to the wrong token.
+_TRIGGER_TIMINGS: tuple[str, ...] = ("instead of", "before", "after")
+_TRIGGER_EVENTS: tuple[str, ...] = ("insert", "update", "delete")
+
+# Parentheses an engine wraps around a lone identifier when it stores a CHECK.
+_BARE_PARENS = re.compile(r"\(([a-z0-9_$#.]+)\)")
+
+# Reflection hands back the dialect's own spelling of a name (SQLAlchemy folds
+# Oracle's stored CHK_SRC to chk_src), so every catalog lookup compares folded.
+_TRIGGER_SQL: dict[str, str] = {
+    "postgresql": (
+        "SELECT action_timing, event_manipulation FROM information_schema.triggers "
+        "WHERE lower(event_object_table) = lower(:t) "
+        "AND (:s = '' OR lower(event_object_schema) = lower(:s))"
+    ),
+    "mysql": (
+        "SELECT action_timing, event_manipulation FROM information_schema.triggers "
+        "WHERE lower(event_object_table) = lower(:t) "
+        "AND (:s = '' OR lower(event_object_schema) = lower(:s))"
+    ),
+    "mssql": (
+        "SELECT CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsInsteadOfTrigger') = 1 "
+        "THEN 'INSTEAD OF' ELSE 'AFTER' END, te.type_desc "
+        "FROM sys.triggers tr "
+        "JOIN sys.trigger_events te ON te.object_id = tr.object_id "
+        "WHERE lower(OBJECT_NAME(tr.parent_id)) = lower(:t) "
+        "AND (:s = '' OR lower(OBJECT_SCHEMA_NAME(tr.parent_id)) = lower(:s))"
+    ),
+    "oracle": (
+        "SELECT trigger_type, triggering_event FROM all_triggers "
+        "WHERE upper(table_name) = upper(:t) "
+        "AND (:s = '' OR upper(owner) = upper(:s))"
+    ),
+    "sqlite": (
+        "SELECT sql, '' FROM sqlite_master "
+        "WHERE type = 'trigger' AND lower(tbl_name) = lower(:t)"
+    ),
+}
+
+
+_CHECK_SQL: dict[str, str] = {
+    "mssql": (
+        "SELECT cc.definition FROM sys.check_constraints cc "
+        "WHERE lower(OBJECT_NAME(cc.parent_object_id)) = lower(:t) "
+        "AND (:s = '' OR lower(OBJECT_SCHEMA_NAME(cc.parent_object_id)) = lower(:s))"
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -61,6 +117,8 @@ class PhysicalState:
     indexes: frozenset[tuple[str, ...]] = frozenset()
     not_null: frozenset[str] = frozenset()
     defaults: frozenset[str] = frozenset()
+    check_constraints: frozenset[str] = frozenset()
+    triggers: frozenset[tuple[str, ...]] = frozenset()
     errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,6 +132,8 @@ class PhysicalState:
             "indexes": sorted("+".join(i) for i in self.indexes),
             "not_null": sorted(self.not_null),
             "defaults": sorted(self.defaults),
+            "check_constraints": sorted(self.check_constraints),
+            "triggers": sorted(" ".join(t) for t in self.triggers),
             "errors": list(self.errors),
         }
 
@@ -141,6 +201,13 @@ def read_physical_state(
         fks = collector.run("foreign_keys", lambda: inspector.get_foreign_keys(name, **args))
         indexes = collector.run("indexes", lambda: inspector.get_indexes(name, **args))
         columns = collector.run("columns", lambda: inspector.get_columns(name, **args))
+        checks = collector.run(
+            "check_constraints",
+            lambda: _check_constraints(inspector, conn, db_type, name, args, schema),
+        )
+        triggers = collector.run(
+            "triggers", lambda: _read_triggers(conn, db_type, name, schema)
+        )
 
     not_null: set[str] = set()
     defaults: set[str] = set()
@@ -179,8 +246,90 @@ def read_physical_state(
         indexes=frozenset(index_sets),
         not_null=frozenset(not_null),
         defaults=frozenset(defaults),
+        check_constraints=frozenset(
+            _normalize_predicate(c.get("sqltext"))
+            for c in checks or []
+            if _normalize_predicate(c.get("sqltext"))
+        ),
+        triggers=frozenset(triggers or ()),
         errors=tuple(collector.errors),
     )
+
+
+def _normalize_predicate(sqltext: Any) -> str:
+    """Strip the dialect's punctuation so ``("qty" > 0)`` and ``qty>0`` match.
+
+    Two engines never spell the same CHECK identically; comparing raw text would
+    report every constraint as missing. Whitespace, quoting styles and wrapping
+    parentheses carry no meaning, so they go.
+    """
+    text = str(sqltext or "").strip().casefold()
+    if not text:
+        return ""
+    for ch in ('"', "`", "[", "]", " ", "\t", "\n", "\r"):
+        text = text.replace(ch, "")
+    while text.startswith("(") and text.endswith(")"):
+        text = text[1:-1]
+    # ``("qty")>0`` and ``qty>0`` are the same rule; parentheses around a bare
+    # identifier are the engine's own echo, not part of the predicate.
+    text = _BARE_PARENS.sub(r"\1", text)
+    # Oracle reflects every NOT NULL as a CHECK; the not_null aspect owns those,
+    # and counting them here would report a phantom loss on every other engine.
+    if text.endswith("isnotnull"):
+        return ""
+    return text
+
+
+def _check_constraints(
+    inspector: Any,
+    conn: Any,
+    db_type: str,
+    table: str,
+    args: dict[str, Any],
+    schema: str,
+) -> list[dict[str, Any]]:
+    """CHECK predicates, from the catalog directly when reflection has no driver.
+
+    SQLAlchemy's pyodbc dialect raises ``NotImplementedError`` here, and an
+    unread CHECK would otherwise be indistinguishable from a dropped one.
+    """
+    try:
+        return list(inspector.get_check_constraints(table, **args))
+    except NotImplementedError:
+        sql = _CHECK_SQL.get(str(db_type or "").strip().casefold())
+        if not sql:
+            raise
+        rows = conn.execute(sa.text(sql), {"t": table, "s": schema or ""}).fetchall()
+        return [{"sqltext": row[0]} for row in rows]
+
+
+def _first_token(text: str, tokens: tuple[str, ...]) -> str:
+    """Earliest token wins: a SQLite trigger body may mention other events."""
+    hits = [(text.find(t), t) for t in tokens if t in text]
+    return min(hits)[1] if hits else ""
+
+
+def _trigger_behaviour(timing: Any, event: Any) -> tuple[str, str]:
+    """Reduce each dialect's phrasing to (timing, event).
+
+    Oracle says ``BEFORE EACH ROW``, SQLite hands back the whole CREATE
+    statement, SQL Server names the event ``INSERT``; the portable fact is the
+    same pair, so extract it rather than compare dialect prose.
+    """
+    text = f"{_fold(timing)} {_fold(event)}"
+    return _first_token(text, _TRIGGER_TIMINGS), _first_token(text, _TRIGGER_EVENTS)
+
+
+def _read_triggers(
+    conn: Any, db_type: str, table: str, schema: str
+) -> list[tuple[str, ...]]:
+    """Trigger timing/event pairs; names are never portable, behaviour is."""
+    sql = _TRIGGER_SQL.get(str(db_type or "").strip().casefold())
+    if not sql:
+        raise NotImplementedError(f"no trigger catalog query for {db_type}")
+    params = {"t": table, "s": schema or ""}
+    rows = conn.execute(sa.text(sql), params).fetchall()
+    return [_trigger_behaviour(row[0], row[1]) for row in rows]
 
 
 def _unique_constraints(inspector: Any, name: str, args: dict[str, Any]) -> list[dict]:
@@ -267,6 +416,19 @@ def compare_physical_state(
         "indexes": _diff_sets(source.indexes, destination.indexes),
         "not_null": _diff_sets(source.not_null, destination.not_null),
         "defaults": _diff_sets(source.defaults, destination.defaults),
+        "check_constraints": _diff_sets(
+            source.check_constraints, destination.check_constraints
+        ),
+    }
+    advisory = {
+        "triggers": {
+            **_diff_sets(source.triggers, destination.triggers),
+            "advisory": True,
+            "note": (
+                "Trigger bodies are not migrated; recreate them on the "
+                "destination before cutover if the application relies on them."
+            ),
+        }
     }
     # A partial read cannot certify the aspects it failed on.
     unreadable = sorted(
@@ -275,12 +437,18 @@ def compare_physical_state(
     for aspect in unreadable:
         if aspect in aspects:
             aspects[aspect]["status"] = "unreadable"
+        if aspect in advisory:
+            advisory[aspect]["status"] = "unreadable"
     absent = [a for a, v in aspects.items() if v["status"] == "absent"]
+    blocking_unreadable = [a for a in unreadable if a not in advisory]
     return {
-        "verified": not absent and not unreadable,
-        "aspects": aspects,
+        "verified": not absent and not blocking_unreadable,
+        "aspects": {**aspects, **advisory},
         "absent": absent,
-        "unreadable": unreadable,
+        "unreadable": blocking_unreadable,
+        "advisory": {
+            a: v["status"] for a, v in advisory.items() if v["status"] != "carried"
+        },
         "source": source.to_dict(),
         "destination": destination.to_dict(),
     }
