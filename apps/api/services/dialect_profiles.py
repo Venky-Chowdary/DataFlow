@@ -169,6 +169,128 @@ def schema_from_cfg(
     return normalize_schema(driver, raw, username=user) or ""
 
 
+# Dialects that reject ``LIMIT``/``OFFSET`` and use the SQL:2008 form instead.
+# Oracle (12c+), SQL Server (2012+), DB2 and Derby all parse
+# ``OFFSET n ROWS FETCH NEXT m ROWS ONLY``; emitting ``LIMIT`` there raises
+# ORA-03047 / incorrect-syntax and makes the source unreadable.
+_FETCH_FIRST_DIALECTS: frozenset[str] = frozenset(
+    {
+        "oracle",
+        "oracle+oracledb",
+        "oracle+cx_oracle",
+        "autonomous_database",
+        "amazon_rds_oracle",
+        "mssql",
+        "sqlserver",
+        "microsoft_sql_server",
+        "azure_sql_database",
+        "azure_sql_managed_instance",
+        "synapse_analytics",
+        "azure_synapse_dedicated",
+        "azure_synapse_serverless",
+        "google_cloud_sql_sql_server",
+        "amazon_rds_sql_server",
+        "db2",
+        "ibm_db2",
+        "db2_luw",
+        "db2_iseries",
+        "derby",
+    }
+)
+
+_ORACLE_LIKE: frozenset[str] = frozenset(
+    {"oracle", "oracle+oracledb", "oracle+cx_oracle", "autonomous_database", "amazon_rds_oracle"}
+)
+
+
+def uses_fetch_first_pagination(driver: str | None) -> bool:
+    """True when the dialect needs ``OFFSET … FETCH NEXT`` instead of ``LIMIT``."""
+    return normalize_driver(driver) in _FETCH_FIRST_DIALECTS or (driver or "").strip().lower() in _FETCH_FIRST_DIALECTS
+
+
+def is_oracle_like(driver: str | None) -> bool:
+    raw = (driver or "").strip().lower()
+    return normalize_driver(driver) in _ORACLE_LIKE or raw in _ORACLE_LIKE
+
+
+_UPPER_FOLDING_DIALECTS: frozenset[str] = frozenset(
+    {
+        "oracle",
+        "oracle+oracledb",
+        "oracle+cx_oracle",
+        "autonomous_database",
+        "amazon_rds_oracle",
+        "snowflake",
+        "db2",
+        "ibm_db2",
+        "db2_luw",
+        "db2_iseries",
+        "derby",
+        "h2",
+        "hsqldb",
+        "firebird",
+        "teradata",
+    }
+)
+
+
+def folds_identifiers_upper(driver: str | None) -> bool:
+    """True when unquoted identifiers are stored folded to UPPER CASE.
+
+    The canonical profile table only carries the engines it lists; the
+    Oracle/DB2 SKU aliases and other SQL-standard folders resolve here so every
+    caller agrees on identifier case.
+    """
+    raw = (driver or "").strip().lower()
+    if raw in _UPPER_FOLDING_DIALECTS or normalize_driver(driver) in _UPPER_FOLDING_DIALECTS:
+        return True
+    return dialect_profile(driver).fold == "upper"
+
+
+def denormalize_result_key(driver: str | None, name: str) -> str:
+    """Physical spelling of a DBAPI result key, for use inside quoted SQL.
+
+    Drivers for upper-folding engines (Oracle, DB2, Snowflake) hand back
+    case-insensitive column names lowercased, so quoting the key verbatim
+    references a column that does not exist (ORA-00904). A name that is already
+    mixed case was created quoted and is returned exactly as stored.
+    """
+    if not name:
+        return name
+    if not folds_identifiers_upper(driver):
+        return name
+    return name.upper() if name.islower() else name
+
+
+def page_clause(driver: str | None, offset: int, limit: int) -> str:
+    """Dialect-correct row-window clause (caller supplies its own ORDER BY)."""
+    if uses_fetch_first_pagination(driver):
+        return f"OFFSET {int(offset)} ROWS FETCH NEXT {int(limit)} ROWS ONLY"
+    return f"LIMIT {int(limit)} OFFSET {int(offset)}"
+
+
+def zero_row_probe_sql(driver: str | None, qualified: str) -> str:
+    """A ``SELECT`` that returns column metadata but no rows, on any dialect."""
+    raw = (driver or "").strip().lower()
+    if normalize_driver(driver) in {"mssql", "sqlserver"} or raw in {
+        "mssql",
+        "sqlserver",
+        "microsoft_sql_server",
+        "azure_sql_database",
+        "azure_sql_managed_instance",
+        "synapse_analytics",
+        "azure_synapse_dedicated",
+        "azure_synapse_serverless",
+        "google_cloud_sql_sql_server",
+        "amazon_rds_sql_server",
+    }:
+        return f"SELECT TOP 0 * FROM {qualified}"  # nosec B608
+    if uses_fetch_first_pagination(driver):
+        # ``LIMIT 0`` is a syntax error on Oracle/DB2; ``WHERE 1=0`` is universal.
+        return f"SELECT * FROM {qualified} WHERE 1=0"  # nosec B608
+    return f"SELECT * FROM {qualified} LIMIT 0"  # nosec B608
+
+
 def quote_char_for(driver: str | None) -> str:
     style = dialect_profile(driver).quote
     if style == "backtick":

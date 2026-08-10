@@ -2171,6 +2171,10 @@ def fits_decimal(
 
     if is_missing_sentinel(value):
         return True
+    from services.transform_engine import boolean_carrier_numeric_value
+
+    if boolean_carrier_numeric_value(value, precision, scale) is not None:
+        return True
     try:
         text = str(value).strip()
         if not text:

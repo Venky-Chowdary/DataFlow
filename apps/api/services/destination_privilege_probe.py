@@ -908,9 +908,21 @@ def _probe_sqlserver(
             else:
                 update_perm = True
 
+        # CREATE TABLE is a *database*-scoped permission in SQL Server:
+        # HAS_PERMS_BY_NAME(schema, 'SCHEMA', 'CREATE TABLE') returns NULL for
+        # every principal, including sysadmin, so probing it at schema scope
+        # denies writes to accounts that can plainly create tables. Creating a
+        # table needs CREATE TABLE on the database *and* ALTER on the schema
+        # that will own it.
         create_perm = bool(
             conn.execute(
-                sa.text("SELECT HAS_PERMS_BY_NAME(:sch, 'SCHEMA', 'CREATE TABLE')"),
+                sa.text(
+                    "SELECT CASE WHEN IS_SRVROLEMEMBER('sysadmin') = 1 "
+                    "OR IS_MEMBER('db_owner') = 1 THEN 1 "
+                    "WHEN HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CREATE TABLE') = 1 "
+                    "AND HAS_PERMS_BY_NAME(:sch, 'SCHEMA', 'ALTER') = 1 THEN 1 "
+                    "ELSE 0 END"
+                ),
                 {"sch": schema},
             ).scalar()
         )
@@ -1012,11 +1024,18 @@ def _probe_oracle(
                     ).fetchall()
                 }
 
+        # ALL_TAB_PRIVS lists *granted* privileges only — an owner never appears
+        # there, so a schema owner writing to its own table read as "denied".
+        session_user = str(
+            conn.execute(sa.text("SELECT USER FROM dual")).scalar() or ""
+        ).upper()
+
         can_write, can_create = evaluate_oracle_privileges(
             session_privs=session_privs,
             tab_privs=tab_privs,
             table_exists=bool(exists),
             need_update=need_update,
+            is_owner=bool(session_user) and session_user == owner,
         )
         return _finalize(
             engine="oracle",
@@ -1036,19 +1055,27 @@ def evaluate_oracle_privileges(
     tab_privs: set[str],
     table_exists: bool,
     need_update: bool = False,
+    is_owner: bool = False,
 ) -> tuple[bool, bool]:
-    """Evaluate Oracle privilege sets → (can_write, can_create). Public for tests."""
+    """Evaluate Oracle privilege sets → (can_write, can_create). Public for tests.
+
+    ``is_owner`` is the session user owning the target schema: Oracle grants an
+    owner implicit full DML on its own objects and never records it in
+    ALL_TAB_PRIVS, so it must be treated as INSERT/UPDATE.
+    """
     sp = {p.upper() for p in session_privs}
     tp = {p.upper() for p in tab_privs}
 
     can_create = bool(sp & {"CREATE TABLE", "CREATE ANY TABLE"} or "DBA" in sp)
     can_insert = bool(
-        tp & {"INSERT", "ALL"}
+        is_owner
+        or tp & {"INSERT", "ALL"}
         or sp & {"INSERT ANY TABLE"}
         or "DBA" in sp
     )
     can_update = bool(
-        tp & {"UPDATE", "ALL"}
+        is_owner
+        or tp & {"UPDATE", "ALL"}
         or sp & {"UPDATE ANY TABLE"}
         or "DBA" in sp
     )

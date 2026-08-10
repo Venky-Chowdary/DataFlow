@@ -2042,6 +2042,14 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> 
 
     if is_missing_sentinel(value):
         return value
+    from services.transform_engine import boolean_carrier_numeric_value
+
+    _p, _s = parse_numeric_precision_scale(ddl_type)
+    carrier_bool = boolean_carrier_numeric_value(value, _p, _s)
+    if carrier_bool is not None:
+        # NUMBER(1)/DECIMAL(1,0) is the boolean carrier on engines without a
+        # native boolean — binding 1/0 there is total, not an invented number.
+        return Decimal(carrier_bool)
     try:
         if isinstance(value, Decimal):
             d = value

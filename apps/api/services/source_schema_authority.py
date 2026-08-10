@@ -96,8 +96,20 @@ def reconcile_source_types(
     from services.type_system import normalize_logical_type
 
     merged = dict(declared or {})
+    # Oracle/Snowflake catalogs fold identifiers to upper case while the reader
+    # decodes rows under the case the operator sees. Keying the live type under
+    # the folded name left *both* spellings in the map, and every consumer that
+    # looked up the row's own column name kept reading the decoded guess
+    # (``amount`` sampled as DECIMAL(8,4)) instead of the live NUMBER(12,2).
+    declared_by_fold = {str(k).casefold(): str(k) for k in (declared or {})}
     drift: list[dict[str, str]] = []
     for col, live_type in (live or {}).items():
+        key = col
+        if col not in merged:
+            folded = declared_by_fold.get(str(col).casefold())
+            if folded is not None:
+                key = folded
+        col = key
         prior = str(merged.get(col) or "").strip()
         merged[col] = live_type
         if not prior:

@@ -240,6 +240,10 @@ class MapColumnsRequest(BaseModel):
     # "database"/"warehouse" means source_schema came from introspected DDL, so
     # sample inference must not re-guess DECIMAL(12,2) down to a bare DECIMAL.
     source_kind: str = ""
+    # Source engine id ("postgresql", "oracle", "csv"…). Text encoding polarity
+    # is a property of the source engine: a Unicode-only source must not be
+    # stamped onto a code-page destination carrier.
+    source_db_type: str = ""
     # Module 13 — prior operator mappings (user_override / risk contracts) must
     # survive re-map; engine alternatives attach as engine_suggestion only.
     prior_mappings: list[dict] = Field(default_factory=list)
@@ -402,6 +406,7 @@ async def map_columns_route(body: MapColumnsRequest):
             source_samples=body.source_samples or None,
             validation_mode=body.validation_mode,
             destination_db_type=body.destination_db_type or "",
+            source_db_type=(body.source_db_type or body.file_format or "").lower(),
             schema_policy=body.schema_policy or "manual_review",
             sync_mode=body.sync_mode or "",
             destination_table_exists=body.destination_table_exists,

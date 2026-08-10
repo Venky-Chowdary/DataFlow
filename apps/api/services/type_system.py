@@ -21,6 +21,8 @@ import re
 from functools import lru_cache
 from typing import Any, Final
 
+from services.source_engine_scope import active_source_engine
+
 LOGICAL_STRING = "string"
 LOGICAL_TEXT = "text"
 LOGICAL_INTEGER = "integer"
@@ -2247,12 +2249,15 @@ def ddl_carrier_type(inferred: str | None) -> str:
     if logical == LOGICAL_DATETIME:
         # Preserve TZ polarity for CREATE — never collapse TIMESTAMPTZ → TIMESTAMP.
         raw_u = raw.upper().replace("_", " ")
+        # Offset-pinned (``DATETIMEOFFSET``, ``WITH TIME ZONE``) and
+        # session-relative (``LTZ``, PG ``TIMESTAMPTZ``) are different wires:
+        # collapsing both onto the LTZ carrier made an Oracle create-new from a
+        # SQL Server DATETIMEOFFSET invent ``TIMESTAMP WITH LOCAL TIME ZONE``,
+        # which normalises to the database timezone and keeps no offset.
+        ltz_tokens = ("TIMESTAMP LTZ", "WITH LOCAL TIME ZONE")
         tz_tokens = (
-            "TIMESTAMPTZ",
             "TIMESTAMP TZ",
-            "TIMESTAMP LTZ",
             "TIMESTAMP WITH TIME ZONE",
-            "TIMESTAMP WITH LOCAL TIME ZONE",
             "DATETIMEOFFSET",
         )
         ntz_tokens = (
@@ -2261,15 +2266,22 @@ def ddl_carrier_type(inferred: str | None) -> str:
             "DATETIME2",
             "SMALLDATETIME",
         )
+        # Fractional-second precision travels with the carrier: dropping ``(6)``
+        # here made create-new stamp a bare destination type that the coercion
+        # validator then read back as a precision collapse.
+        digits = re.search(r"\((\d+)\)", raw_u)
+        suffix = f"({digits.group(1)})" if digits else ""
+        if any(t in raw_u for t in ltz_tokens) or raw_u.startswith("TIMESTAMPTZ"):
+            return f"TIMESTAMPTZ{suffix}"
         if any(t in raw_u for t in tz_tokens) or raw_u.endswith(" WITH TIME ZONE"):
-            return "TIMESTAMPTZ"
+            return f"TIMESTAMP_TZ{suffix}"
         if (
             any(t in raw_u for t in ntz_tokens)
             or raw_u.startswith("DATETIME(")
             or raw_u == "TIMESTAMP NTZ"
         ):
-            return "TIMESTAMP_NTZ"
-        return "TIMESTAMP"
+            return f"TIMESTAMP_NTZ{suffix}"
+        return f"TIMESTAMP{suffix}"
     if logical == LOGICAL_TIME:
         return "TIME"
     if logical == LOGICAL_UUID:
@@ -3743,13 +3755,20 @@ def is_timezone_polarity_loss(
     # Naive / NTZ → TZ-aware invents an instant (UTC stamp) — fail-closed.
     if src == "ntz" and tgt in {"tz", "ltz"}:
         return True
-    # Session-relative ↔ offset-pinned is a silent semantic rewrite — except on
-    # engines that expose a single aware carrier, where ``TIMESTAMPTZ`` and
-    # ``TIMESTAMP WITH TIME ZONE`` are two spellings of the same physical type.
-    # Without this a re-run against a table DataFlow itself created reads its own
-    # information_schema spelling back as a polarity collapse.
-    if {src, tgt} == {"tz", "ltz"}:
+    # Offset-pinned → session-relative drops an offset the source stored as data
+    # (SQL Server DATETIMEOFFSET keeps the writer's original offset; PG
+    # TIMESTAMPTZ / Snowflake LTZ keep only the instant), so that direction is a
+    # real representation loss — except on engines that expose a single aware
+    # carrier, where ``TIMESTAMPTZ`` and ``TIMESTAMP WITH TIME ZONE`` are two
+    # spellings of the same physical type. Without that a re-run against a table
+    # DataFlow itself created reads its own information_schema spelling back as a
+    # polarity collapse.
+    if src == "tz" and tgt == "ltz":
         return dest_db not in _SINGLE_AWARE_TIMESTAMP_DIALECTS
+    # Session-relative → offset-pinned is instant-preserving: the source holds no
+    # offset to lose and the writer binds aware UTC, so DATETIMEOFFSET/TIMESTAMP
+    # WITH TIME ZONE receives the same instant at +00:00. Surfaced as a normalize
+    # note, not a fidelity collapse.
     return False
 
 
@@ -3970,6 +3989,33 @@ def is_unlimited_string_carrier(inferred: str | None) -> bool:
     return normalize_logical_type(text) == LOGICAL_TEXT
 
 
+def string_carrier_length(inferred: str | None) -> int | None:
+    """Declared width of a bounded CHAR/VARCHAR carrier, else ``None``.
+
+    ``None`` means "no bounded width" — unlimited carriers (TEXT/CLOB/
+    VARCHAR(MAX)) and non-string carriers both answer ``None`` so callers keep
+    their LOB wire instead of inventing a width.
+    """
+    text = strip_identity_qualifier(inferred).strip()
+    if not text or is_unlimited_string_carrier(text):
+        return None
+    if normalize_logical_type(text) not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return None
+    m = _STRING_WIDTH_RE.search(text)
+    if not m:
+        return None
+    width = int(m.group(1))
+    return width if width > 0 else None
+
+
+def is_fixed_char_carrier(inferred: str | None) -> bool:
+    """True for blank-padded CHAR/NCHAR/CHARACTER(n) — false for VARCHAR family."""
+    compact = strip_identity_qualifier(inferred).upper().replace(" ", "")
+    if not compact or "VAR" in compact:
+        return False
+    return compact.startswith("CHAR") or compact.startswith("NCHAR")
+
+
 def is_national_string_carrier(inferred: str | None) -> bool:
     """True for NVARCHAR/NCHAR/NCLOB / NATIONAL CHARACTER (Unicode) carriers."""
     upper = strip_identity_qualifier(inferred).upper()
@@ -3987,23 +4033,182 @@ def is_national_string_carrier(inferred: str | None) -> bool:
     )
 
 
-def national_charset_would_collapse(source_type: str, target_type: str) -> bool:
-    """True when Unicode national string lands on non-national CHAR/VARCHAR/CLOB."""
+# Engines whose only character encoding is Unicode: they have no national string
+# type because every CHAR/VARCHAR/TEXT already stores the full repertoire, so
+# NVARCHAR→VARCHAR there is a rename, not a charset collapse. SQL Server, Oracle
+# and MySQL are excluded — their non-national types follow a code page / database
+# character set that can genuinely be single-byte.
+_UNICODE_ONLY_DESTS: frozenset[str] = frozenset(
+    {
+        "postgresql",
+        "postgres",
+        "redshift",
+        "cockroachdb",
+        "sqlite",
+        "duckdb",
+        "bigquery",
+        "snowflake",
+        "databricks",
+        "clickhouse",
+        "trino",
+        "presto",
+        "spark",
+        "mongodb",
+    }
+)
+
+
+def destination_is_unicode_only(dest_db: str | None) -> bool:
+    """True when the destination engine stores all text as Unicode."""
+    if not dest_db:
+        return False
+    return _normalize_dest_db(dest_db) in _UNICODE_ONLY_DESTS
+
+
+# Sources whose text columns can only ever hold Unicode. A file/object payload
+# is decoded to UTF-8 before it reaches a mapping, and the engines listed in
+# ``_UNICODE_ONLY_DESTS`` have no code-page text type at all. MySQL is absent on
+# purpose: a legacy ``latin1`` column really is single-byte, so promoting its
+# target would invent national polarity that the source never had.
+_UNICODE_TEXT_SOURCES: frozenset[str] = frozenset(
+    {
+        "csv",
+        "tsv",
+        "excel",
+        "xlsx",
+        "xls",
+        "json",
+        "jsonl",
+        "ndjson",
+        "xml",
+        "parquet",
+        "avro",
+        "orc",
+        "s3",
+        "gcs",
+        "azure_blob",
+        "sftp",
+        "ftp",
+        "http",
+        "rest_api",
+        "graphql",
+        "salesforce",
+        "hubspot",
+        "stripe",
+        "zendesk",
+        "shopify",
+        "netsuite",
+        "workday",
+        "dynamodb",
+        "cosmosdb",
+        "couchbase",
+        "elasticsearch",
+        "opensearch",
+        "cassandra",
+    }
+)
+
+
+def source_text_is_unicode(source_db: str | None) -> bool:
+    """True when every text value this source can emit is full Unicode."""
+    raw = (source_db or "").strip().lower()
+    if not raw:
+        return False
+    if raw in _UNICODE_TEXT_SOURCES:
+        return True
+    return _normalize_dest_db(raw) in _UNICODE_ONLY_DESTS
+
+
+_SQLSERVER_FAMILY: frozenset[str] = frozenset(
+    {"sqlserver", "mssql", "azure_sql", "azure_synapse", "synapse"}
+)
+
+
+def unicode_safe_target_carrier(
+    carrier: str,
+    *,
+    dest_db: str = "",
+    source_db: str = "",
+) -> str:
+    """Promote a create-new SQL Server text carrier to its national twin.
+
+    SQL Server ``VARCHAR``/``CHAR``/``TEXT`` store one byte per character in the
+    column collation's code page, so a Unicode source silently degrades to
+    ``?`` on write (``中`` has no Latin1 code point). When the source can only
+    emit Unicode, the sole non-lossy create-new carrier is ``NVARCHAR``/
+    ``NCHAR`` — the same default Microsoft's own SSMA applies. This is
+    preservation, not national invent: it never fires for a source whose text
+    is genuinely code-page bound (SQL Server, Oracle, MySQL), and never for a
+    ``_UTF8`` collation, where ``VARCHAR`` already holds the full repertoire.
+    """
+    text = (carrier or "").strip()
+    if not text:
+        return carrier
+    if _normalize_dest_db(dest_db) not in _SQLSERVER_FAMILY:
+        return carrier
+    if not source_text_is_unicode(source_db):
+        return carrier
+    if is_national_string_carrier(text):
+        return carrier
+    if re.search(r"COLLATE\s+\S*_UTF8\b", text, re.IGNORECASE):
+        return carrier
+    if normalize_logical_type(text) not in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return carrier
+
+    if is_unlimited_string_carrier(text):
+        return "NVARCHAR(MAX)"
+    upper = strip_identity_qualifier(text).upper()
+    if re.match(r"^\s*VARCHAR\s*\(\s*MAX\s*\)", upper):
+        return "NVARCHAR(MAX)"
+    width = parse_string_carrier_width(text)
+    if width is None:
+        return "NVARCHAR(MAX)"
+    if width > 4000:
+        return "NVARCHAR(MAX)"
+    return f"{'NCHAR' if is_fixed_width_char_carrier(text) else 'NVARCHAR'}({width})"
+
+
+def national_charset_would_collapse(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when Unicode national string lands on non-national CHAR/VARCHAR/CLOB.
+
+    ``dest_db`` matters: PostgreSQL/SQLite/warehouse text is Unicode by
+    construction, so NVARCHAR→TEXT keeps every code point there. Only engines
+    with a code-page-dependent non-national type can actually lose characters.
+    """
     if not is_national_string_carrier(source_type):
         return False
     if is_national_string_carrier(target_type):
+        return False
+    if destination_is_unicode_only(dest_db):
         return False
     tgt_l = normalize_logical_type(target_type)
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}
 
 
-def national_charset_would_invent(source_type: str, target_type: str) -> bool:
+def national_charset_would_invent(
+    source_type: str, target_type: str, *, source_db: str = ""
+) -> bool:
     """True when non-national CHAR/VARCHAR invents national NCHAR/NVARCHAR polarity.
 
     Exception: SQL Server's only LOB text wire is ``NVARCHAR(MAX)`` — create-new
     TEXT/CLOB/STRING→NVARCHAR(MAX) is platform LOB twin, not Unicode invent.
+
+    ``source_db`` decides whether the promotion invents anything at all. A
+    PostgreSQL ``VARCHAR(64)`` already holds every code point, so landing it on
+    SQL Server ``NVARCHAR(64)`` *preserves* the source repertoire — calling that
+    lossy blocked ``postgresql->mssql`` at Validate while the only alternative
+    (code-page ``VARCHAR``) rewrote ``中`` to ``?`` on read-back. It stays an
+    invent for a genuinely code-page source (SQL Server, Oracle, MySQL). When no
+    source engine is known the conservative answer is unchanged.
     """
     if is_national_string_carrier(source_type):
+        return False
+    if source_text_is_unicode(source_db or active_source_engine()):
         return False
     if not is_national_string_carrier(target_type):
         return False
@@ -6593,7 +6798,7 @@ def is_precision_collapse_coercion(
         return True
     if bounded_string_sink_would_truncate(source_type, target_type):
         return True
-    if national_charset_would_collapse(source_type, target_type):
+    if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if national_charset_would_invent(source_type, target_type):
         return True
@@ -7048,7 +7253,7 @@ def is_lossy_coercion(
             return True
         if bounded_string_sink_would_truncate(source_type, target_type):
             return True
-        if national_charset_would_collapse(source_type, target_type):
+        if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
         if national_charset_would_invent(source_type, target_type):
             return True
@@ -7218,7 +7423,7 @@ def is_lossy_coercion(
         return True
     if bounded_string_sink_would_truncate(source_type, target_type):
         return True
-    if national_charset_would_collapse(source_type, target_type):
+    if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if national_charset_would_invent(source_type, target_type):
         return True
@@ -7369,7 +7574,7 @@ def is_lossy_coercion(
             return True
         if kana_fold_polarity_invent(source_type, target_type):
             return True
-        if national_charset_would_collapse(source_type, target_type):
+        if national_charset_would_collapse(source_type, target_type, dest_db=dest_db):
             return True
         if national_charset_would_invent(source_type, target_type):
             return True

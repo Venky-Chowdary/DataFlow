@@ -1914,8 +1914,10 @@ def _apply_create_new_risk_stamps(
     destination_db_type: str = "",
     *,
     source_samples: dict[str, list] | None = None,
+    dest_table_exists: bool | None = None,
 ) -> list[dict]:
     """Stamp create-new type risks without importing mapping_pipeline (cycle-safe)."""
+    from services.mapping_proof import mapping_fidelity
     from services.decimal_observe import (
         ieee_float_create_new_risk,
         observe_numeric_samples,
@@ -1970,6 +1972,24 @@ def _apply_create_new_risk_stamps(
             tgt = stamped or src
         if tgt and tgt != stamped:
             row["target_type"] = tgt
+            # The projected carrier just became the destination's physical DDL
+            # (``TIMESTAMPTZ`` → SQL Server ``DATETIMEOFFSET``). Any verdict
+            # stamped against the old spelling compared a source-dialect token
+            # to a foreign dialect, so it read offset-pinned → session-relative
+            # as a collapse. The calibration below reads ``fidelity``, so a
+            # stale verdict caps a lossless create-new under the G4 floor and
+            # demands a Risk Contract. Re-derive on the type that will run.
+            verdict = mapping_fidelity(
+                row,
+                destination_db_type=db,
+                dest_table_exists=dest_table_exists,
+            )
+            row["fidelity"] = verdict["verdict"]
+            row["fidelity_reason"] = verdict["reason"]
+            row["type_narrowing"] = verdict["type_narrowing"]
+            row["conversion_class"] = verdict.get("conversion_class")
+            row["invents_capacity"] = verdict.get("invents_capacity")
+            row["requires_risk_contract"] = verdict.get("requires_risk_contract")
         risks = assess_create_new_type_risk(
             src, tgt, destination_db_type=db, samples=col_samples
         )

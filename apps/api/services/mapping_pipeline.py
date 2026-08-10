@@ -55,6 +55,7 @@ def _stamp_create_new_type_risks(
     mappings: list[dict],
     *,
     destination_db_type: str = "",
+    dest_table_exists: bool | None = None,
 ) -> list[dict]:
     """Annotate create-new mappings with cross-dialect precision/width risk.
 
@@ -63,7 +64,9 @@ def _stamp_create_new_type_risks(
     """
     from services.semantic_mapper import _apply_create_new_risk_stamps
 
-    return _apply_create_new_risk_stamps(mappings, destination_db_type)
+    return _apply_create_new_risk_stamps(
+        mappings, destination_db_type, dest_table_exists=dest_table_exists
+    )
 
 
 def _demote_untyped_varchar_confidence(
@@ -426,6 +429,7 @@ def run_mapping_pipeline(
     source_samples: dict[str, list[str]] | None = None,
     validation_mode: str = "strict",
     destination_db_type: str = "",
+    source_db_type: str = "",
     schema_policy: str = "manual_review",
     sync_mode: str = "",
     destination_table_exists: bool | None = None,
@@ -614,7 +618,10 @@ def run_mapping_pipeline(
             if "unsigned" in src_l and ("bigint" in src_l or normalize_logical_type(src_type) == "decimal"):
                 # Still sample-observe when possible — bare DECIMAL → (38,15) cliff.
                 tgt_type = create_new_mapping_target_type(
-                    "DECIMAL", destination_db_type or "", samples=col_samples
+                    "DECIMAL",
+                    destination_db_type or "",
+                    samples=col_samples,
+                    source_db=source_db_type,
                 ) if destination_db_type or col_samples else "DECIMAL"
             elif "unsigned" in src_l:
                 # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
@@ -627,7 +634,10 @@ def run_mapping_pipeline(
                 # Intentional create-new / ADD COLUMN — Decision Kernel invent.
                 # Distinct from pending_dest_schema (Studio names-only refuse).
                 tgt_type = create_new_mapping_target_type(
-                    src_type, destination_db_type, samples=col_samples
+                    src_type,
+                    destination_db_type,
+                    samples=col_samples,
+                    source_db=source_db_type,
                 )
             elif destination_db_type and destination_table_exists is True:
                 # Existing table, column missing from Studio, not create-new —
@@ -636,7 +646,10 @@ def run_mapping_pipeline(
                 tgt_type = ""
             elif destination_db_type:
                 tgt_type = create_new_mapping_target_type(
-                    src_type, destination_db_type, samples=col_samples
+                    src_type,
+                    destination_db_type,
+                    samples=col_samples,
+                    source_db=source_db_type,
                 )
             else:
                 # No dest dialect — still stamp observed DECIMAL(p,s) for Map honesty.
@@ -662,6 +675,7 @@ def run_mapping_pipeline(
                         src_type or tgt_type,
                         destination_db_type or "",
                         samples=col_samples,
+                        source_db=source_db_type,
                     )
                     if upgraded:
                         tgt_type = upgraded
@@ -709,7 +723,9 @@ def run_mapping_pipeline(
                         == normalize_logical_type(typed_target)
                         else typed_target
                     )
-                    tgt_type = create_new_mapping_target_type(seed, destination_db_type)
+                    tgt_type = create_new_mapping_target_type(
+                        seed, destination_db_type, source_db=source_db_type
+                    )
                 else:
                     tgt_type = typed_target
 
@@ -828,9 +844,14 @@ def run_mapping_pipeline(
         destination_db_type=destination_db_type or "",
         dest_table_exists=destination_table_exists,
     )
+    # Snapshot before the risk/Kernel stamps: both may replace a projected
+    # carrier with the destination's physical DDL, which invalidates the verdict
+    # just computed.
+    pre_stamp_targets = [str(m.get("target_type") or "") for m in enriched_mappings]
     enriched_mappings = _stamp_create_new_type_risks(
         enriched_mappings,
         destination_db_type=destination_db_type or "",
+        dest_table_exists=destination_table_exists,
     )
     # Additive create-new gaps: Kernel stamp before pending honesty pass.
     try:
@@ -855,6 +876,23 @@ def run_mapping_pipeline(
             backfill_new_fields=False,
             dest_table_exists=destination_table_exists,
         )
+        # These stamps replace projected carriers with the destination's own
+        # physical DDL (identity ``TIMESTAMPTZ`` → SQL Server ``DATETIMEOFFSET``).
+        # A verdict stamped against the pre-stamp spelling compares a source
+        # dialect token to a foreign dialect and reads offset-pinned → session
+        # relative as a collapse, so the mapping kept ``lossy_cast`` and Execute
+        # demanded a Risk Contract for a lossless write. Recompute on the final
+        # types — the verdict must always describe the type path that will run.
+        if [str(m.get("target_type") or "") for m in enriched_mappings] != (
+            pre_stamp_targets
+        ):
+            enriched_mappings = stamp_mapping_fidelity(
+                enriched_mappings,
+                source_types=declared_source_types,
+                target_types=declared_target_types,
+                destination_db_type=destination_db_type or "",
+                dest_table_exists=destination_table_exists,
+            )
     except Exception as stamp_exc:
         # Fail-closed honesty: leave create-new target_type blank so Map/Validate
         # cannot invent preserve@0.99 after Kernel stamp failed.

@@ -917,6 +917,28 @@ def create_new_mapping_target_type(
     dest_db_type: str = "",
     *,
     samples: list | None = None,
+    source_db: str = "",
+) -> str:
+    """Target type stamped on create-new mappings for Validate + writers.
+
+    ``source_db`` is the source engine id. It only widens the stamp: a source
+    that can emit any code point must not land on a SQL Server code-page
+    ``VARCHAR`` that silently rewrites it to ``?``."""
+    from services.type_system import unicode_safe_target_carrier
+
+    stamp = _create_new_mapping_target_type(
+        src_type, dest_db_type, samples=samples
+    )
+    return unicode_safe_target_carrier(
+        stamp, dest_db=dest_db_type, source_db=source_db
+    )
+
+
+def _create_new_mapping_target_type(
+    src_type: str,
+    dest_db_type: str = "",
+    *,
+    samples: list | None = None,
 ) -> str:
     """Target type stamped on create-new mappings for Validate + writers.
 

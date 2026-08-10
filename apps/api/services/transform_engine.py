@@ -635,6 +635,44 @@ def _parse_boolean(value: str) -> bool | None:
     return None
 
 
+def canonical_boolean_as_number(value: str) -> int | None:
+    """Canonical boolean wire → 1/0 for a numeric target, else ``None``.
+
+    Boolean-carrying sources (SQL Server ``BIT``, PostgreSQL ``BOOLEAN``, MySQL
+    ``TINYINT(1)``) serialize to ``"true"``/``"false"``, and engines without a
+    boolean type (Oracle before 23ai, DB2, most warehouses) receive them as
+    ``NUMBER(1)``/``SMALLINT``. That mapping is total and lossless, so refusing
+    it as ``Invalid integer`` blocked every boolean column on those routes. Only
+    the strict canonical wire converts — informal ``yes``/``on`` still refuses.
+    """
+    text = value.strip().lower()
+    if text in {"true", "t"}:
+        return 1
+    if text in {"false", "f"}:
+        return 0
+    return None
+
+
+def boolean_carrier_numeric_value(
+    value: object, precision: int | None, scale: int | None
+) -> int | None:
+    """1/0 when a boolean lands on an engine's boolean carrier, else ``None``.
+
+    Engines without a native boolean (Oracle, DB2) carry one as ``NUMBER(1)``,
+    so a ``BIT``/``BOOLEAN`` source arriving as ``"true"`` is in range there —
+    quarantining it as "decimal does not fit DECIMAL(1,0)" held out every
+    boolean column on those routes. Anything wider than a single integer digit
+    is a real numeric column and keeps refusing boolean wire.
+    """
+    if precision is None or int(precision) > 1 or int(scale or 0) != 0:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str):
+        return canonical_boolean_as_number(value)
+    return None
+
+
 def _json_reject_nonfinite(name: str) -> None:
     """Refuse NaN/Infinity → null (silent data loss on JSON/VARIANT/SUPER)."""
     raise ValueError(f"non-finite JSON constant: {name}")
@@ -1164,12 +1202,18 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
                 return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
 
     if transform == "decimal":
+        bool_as_number = canonical_boolean_as_number(text)
+        if bool_as_number is not None:
+            return Decimal(bool_as_number), None
         parsed = _parse_decimal(text)
         if parsed is None:
             return None, f"Invalid decimal: {text!r}"
         return parsed, None
 
     if transform == "integer":
+        bool_as_number = canonical_boolean_as_number(text)
+        if bool_as_number is not None:
+            return bool_as_number, None
         parsed_int = _parse_integer(text)
         if parsed_int is None:
             return None, f"Invalid integer: {text!r}"

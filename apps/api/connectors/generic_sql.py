@@ -20,13 +20,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 from connectors.base import ReadBatch
 from connectors.schema_drift import (
     _build_widen_ddl,
     add_missing_columns,
     is_wider_type,
+    raise_widen_refusal,
 )
 from connectors.sql_temporal import (
     coerce_sql_temporal,
@@ -55,7 +56,7 @@ logger = logging.getLogger(__name__)
 try:
     import sqlalchemy as sa
     from sqlalchemy import create_engine, inspect
-    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.dialects import mssql, oracle, postgresql
     from sqlalchemy.exc import NoSuchModuleError
 
     SQLALCHEMY_AVAILABLE = True
@@ -87,6 +88,8 @@ try:
 
 except (ImportError, AttributeError):  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
+    mssql = None  # type: ignore[assignment]
+    oracle = None  # type: ignore[assignment]
     ch_engines = None
     ChDateTime64 = None
     ChNullable = None
@@ -503,13 +506,29 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         if not query:
             query = None
 
+    database = cfg.get("database") or None
+    if drivername.startswith("oracle"):
+        # ``oracle+oracledb://u:p@host:port/NAME`` builds a *SID* DSN, and SIDs
+        # are legacy: every pluggable database, RAC service and Autonomous
+        # instance is reached by service name, so the connect fails with
+        # ORA-12505 / DPY-6003 on anything newer than a bare single instance.
+        # Honour an explicit ``sid`` when the operator sets one; otherwise the
+        # database name is a service name.
+        sid = str(cfg.get("sid") or "").strip()
+        service = str(cfg.get("service_name") or "").strip() or (database or "")
+        if sid:
+            database = sid
+        elif service:
+            database = None
+            query = {**(query or {}), "service_name": service}
+
     return sa.URL.create(
         drivername,
         username=cfg.get("username") or None,
         password=cfg.get("password") or None,
         host=cfg.get("host") or "localhost",
         port=port if port else None,
-        database=cfg.get("database") or None,
+        database=database,
         query=query,
     )
 
@@ -749,9 +768,6 @@ def _logical_type_from_sa(col_type: Any) -> str:
     if "tinyint" in repr_ and getattr(col_type, "display_width", 0) == 1:
         return "boolean"
 
-    if isinstance(col_type, (sa.Integer, sa.BigInteger, sa.SmallInteger)):
-        return "integer"
-
     # IEEE floats must stay FLOAT — never collapse into DECIMAL/NUMBER.
     if isinstance(col_type, (sa.Float, sa.Double, sa.REAL)):
         return "float"
@@ -761,6 +777,10 @@ def _logical_type_from_sa(col_type: Any) -> str:
     ) and "decimal" not in repr_ and "numeric" not in repr_ and "number" not in repr_:
         return "float"
 
+    # Fixed-point before integer: ``oracle.NUMBER`` subclasses *both* Numeric and
+    # Integer, so an Integer-first check read NUMBER(12,2) money as ``integer``
+    # and dropped the scale — every Oracle source column came back integral and
+    # the create-new target then collapsed to TEXT.
     if isinstance(col_type, (sa.Numeric,)):
         from services.type_system import (
             zero_scale_fits_signed_bigint,
@@ -778,7 +798,13 @@ def _logical_type_from_sa(col_type: Any) -> str:
             return f"DECIMAL({int(precision)},{int(scale)})"
         if precision is not None:
             return f"DECIMAL({int(precision)})"
+        if isinstance(col_type, (sa.Integer,)):
+            # Unconstrained NUMBER — integral wire, no declared scale to keep.
+            return "integer"
         return "decimal"
+
+    if isinstance(col_type, (sa.Integer, sa.BigInteger, sa.SmallInteger)):
+        return "integer"
 
     if isinstance(col_type, (sa.DateTime,)):
         # Preserve TIMESTAMPTZ vs NTZ — collapsing both to "datetime" loses TZ polarity
@@ -939,6 +965,39 @@ class _DuckDBJSON(sa.JSON):
         return lambda value: value
 
 
+#: Dialects whose catalogs fold unquoted identifiers to a single case.
+_FOLDING_DIALECTS: Final = {"oracle", "snowflake", "db2", "ibm_db_sa"}
+
+_ORACLE_WIRES: Final = {"oracle", "oracledb", "oracle_autonomous", "oracle_adw", "oracle_atp"}
+
+
+_MSSQL_WIRES: Final = {"sqlserver", "mssql", "azure_sql", "synapse", "azure_synapse"}
+
+
+def _is_oracle_wire(dialect_name: str, db_type: str) -> bool:
+    """True when DDL compiles through the Oracle dialect."""
+    if oracle is None:
+        return False
+    return (dialect_name or "").lower() == "oracle" or (db_type or "").lower() in _ORACLE_WIRES
+
+
+def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
+    """Naive-datetime carrier that keeps sub-second precision, else ``None``.
+
+    ``sa.DateTime()`` compiles to Oracle ``DATE`` (whole seconds, no fraction)
+    and SQL Server ``DATETIME`` (rounded to 1/300 s), so a PostgreSQL
+    microsecond stamp lands altered and a row checksum can only match by luck.
+    ``None`` means the dialect's own default already carries fractions.
+    """
+    if _is_oracle_wire(dialect_name, db_type):
+        return oracle.TIMESTAMP()
+    if mssql is not None and (
+        (dialect_name or "").lower() == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
+    ):
+        return mssql.DATETIME2()
+    return None
+
+
 def _sa_type_for_logical(
     logical: str,
     dialect_name: str,
@@ -1000,6 +1059,15 @@ def _sa_type_for_logical(
             return _maybe_nullable(sa.DateTime())
         if db_type == "trino" and TrinoTimestamp is not None:
             return TrinoTimestamp(precision=3, timezone=True)
+        if _is_oracle_wire(dialect_name, db_type):
+            # sa.DateTime(timezone=True) compiles to Oracle DATE — second
+            # granularity with no zone at all, so a live postgresql->oracle run
+            # created DATE for TIMESTAMPTZ and reconciled green only because the
+            # fixture held whole-second UTC values.
+            local = "local time zone" in raw_lower or "_ltz" in raw_lower
+            return _maybe_nullable(
+                oracle.TIMESTAMP(timezone=not local, local_timezone=local)
+            )
         return sa.DateTime(timezone=True)
     if (
         "timestamp_ntz" in raw_lower
@@ -1007,7 +1075,8 @@ def _sa_type_for_logical(
         or "datetime_ntz" in raw_lower
         or " without time zone" in raw_lower
     ):
-        return _maybe_nullable(sa.DateTime())
+        sub_second = _sub_second_naive_wire(dialect_name, db_type)
+        return _maybe_nullable(sub_second if sub_second is not None else sa.DateTime())
 
     if t == LOGICAL_INTEGER:
         # Width SSOT = decision_kernel integer_width_carrier / ddl_type.
@@ -1133,6 +1202,9 @@ def _sa_type_for_logical(
             return TrinoTimestamp(precision=3, timezone=False)
         if db_type == "presto":
             return sa.TIMESTAMP()
+        sub_second = _sub_second_naive_wire(dialect_name, db_type)
+        if sub_second is not None:
+            return _maybe_nullable(sub_second)
         # Map≡CREATE: LOGICAL_DATETIME without TZ markers is NTZ wall-clock on
         # Oracle/DuckDB/PG/SQL Server. Databricks TIMESTAMP is session-TZ aware
         # (TIMESTAMP_NTZ already returned naive above) — never invent the wrong
@@ -1213,7 +1285,40 @@ def _sa_type_for_logical(
     # Specialty carriers that normalize to STRING (HIERARCHYID, SQL_VARIANT, XML,
     # ROWVERSION, …) — DialectNativeType / typed wire via ddl_type; never invent
     # bare Text that rematerializes as Map VARCHAR over live specialty DDL.
-    from services.type_system import specialty_carrier_base
+    from services.type_system import (
+        is_fixed_char_carrier,
+        is_national_string_carrier,
+        specialty_carrier_base,
+        string_carrier_length,
+    )
+
+    # Unicode polarity and declared width survive to DDL. Collapsing every string
+    # carrier to sa.Text() made SQL Server CREATE a code-page VARCHAR(MAX) for an
+    # invented NVARCHAR(64), and a live postgresql->mssql read-back came back with
+    # ``中`` rewritten to ``?``. sa.Unicode/UnicodeText are the dialect-neutral
+    # national wires (NVARCHAR on SQL Server, NVARCHAR2 on Oracle, VARCHAR on
+    # engines that are Unicode-only anyway).
+    if is_national_string_carrier(raw):
+        width = string_carrier_length(raw)
+        if width is not None:
+            if is_fixed_char_carrier(raw):
+                return _maybe_nullable(sa.NCHAR(width))
+            return _maybe_nullable(sa.Unicode(width))
+        if dialect_name == "mssql" or db_type in {"sqlserver", "mssql", "azure_sql"}:
+            # sa.UnicodeText compiles to deprecated NTEXT; NVARCHAR(max) is the
+            # only supported SQL Server Unicode LOB wire.
+            return _maybe_nullable(sa.Unicode())
+        return _maybe_nullable(sa.UnicodeText())
+
+    # Declared width survives to DDL for the non-national carriers too: every
+    # bounded VARCHAR(n)/CHAR(n) used to land as sa.Text(), so a live
+    # postgresql->oracle CREATE turned VARCHAR(64) into CLOB — unindexable, and
+    # the destination no longer enforces the source's length contract.
+    width = string_carrier_length(raw)
+    if width is not None:
+        if is_fixed_char_carrier(raw):
+            return _maybe_nullable(sa.CHAR(width))
+        return _maybe_nullable(sa.String(width))
 
     spec = specialty_carrier_base(raw)
     if spec:
@@ -1266,6 +1371,12 @@ def _sa_type_for_logical(
         if _DialectNativeType is None:
             return _maybe_nullable(sa.Text())
         return _maybe_nullable(_DialectNativeType(native))
+    if mssql is not None and (
+        dialect_name == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
+    ):
+        # sa.Text() compiles to SQL Server TEXT, deprecated since 2005 and
+        # unusable with most string predicates. VARCHAR(max) is the wire.
+        return _maybe_nullable(mssql.VARCHAR(None))
     return _maybe_nullable(sa.Text())
 
 
@@ -1627,16 +1738,37 @@ def _reflect_table(
     from services.reflection_cache import get_or_load
 
     def _reflect() -> sa.Table:
-        metadata = sa.MetaData()
         # Quote identifiers for safety with reserved words and case-sensitive engines.
-        return sa.Table(
-            table,
-            metadata,
-            schema=schema,
-            quote=True,
-            quote_schema=True,
-            autoload_with=engine,
-        )
+        try:
+            return sa.Table(
+                table,
+                sa.MetaData(),
+                schema=schema,
+                quote=True,
+                quote_schema=True,
+                autoload_with=engine,
+            )
+        except sa.exc.NoSuchTableError:
+            # Oracle/DB2/Snowflake fold unquoted identifiers to upper case and
+            # SQLAlchemy expects the *normalised* (lower-case) spelling; forcing
+            # quote=True looks for a literal name, misses, and the caller
+            # degrades to an untyped ``SELECT *`` that loses every column type
+            # (an Oracle NUMBER(12,2) then scored off sampled values instead).
+            attempts: list[tuple[str, str | None]] = [(table, schema)]
+            if str(getattr(engine.dialect, "name", "")).lower() in _FOLDING_DIALECTS:
+                # Only folding dialects may retry a case-changed name: on
+                # PostgreSQL "Foo" and "foo" are different tables and guessing
+                # would read the wrong one.
+                attempts.append((table.lower(), (schema or "").lower() or None))
+            last: Exception | None = None
+            for name, sch in attempts:
+                try:
+                    return sa.Table(
+                        name, sa.MetaData(), schema=sch, autoload_with=engine
+                    )
+                except sa.exc.NoSuchTableError as retry_exc:
+                    last = retry_exc
+            raise last if last is not None else sa.exc.NoSuchTableError(table)
 
     table_obj = get_or_load(engine, schema, table, "reflect", _reflect)
     if columns is None:
@@ -1900,6 +2032,7 @@ def _widen_existing_columns_sa(
             logger.warning(
                 "Widen failed for %s.%s: %s", table_name, col, exc, exc_info=exc
             )
+            raise_widen_refusal(col, existing_type, desired_type, exc)
             raise
     return log
 
@@ -1943,6 +2076,7 @@ def _sample_raw_table(
     dialect: str = "ansi",
 ) -> tuple[list[str], list[Any]]:
     from connectors.sql_identifiers import quote_table_ref
+    from services.dialect_profiles import uses_fetch_first_pagination
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
     dialect_l = (dialect or "ansi").lower()
@@ -1954,6 +2088,9 @@ def _sample_raw_table(
         "azure_sql_database",
     }:
         stmt = f"SELECT TOP 200 * FROM {qualified}"  # nosec B608
+    elif uses_fetch_first_pagination(dialect):
+        # Oracle/DB2 reject LIMIT; FETCH FIRST needs no ORDER BY for a sample.
+        stmt = f"SELECT * FROM {qualified} FETCH FIRST 200 ROWS ONLY"  # nosec B608
     else:
         stmt = f"SELECT * FROM {qualified} LIMIT 200"  # nosec B608
     result = conn.execute(sa.text(stmt))
@@ -2278,6 +2415,36 @@ def fetch_pk_lsn_map(
         release_engine(engine)
 
 
+_ORACLE_TSTZ_READ_FORMAT: Final = 'YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'
+
+
+def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
+    """Select list that keeps an Oracle TIMESTAMP WITH TIME ZONE offset.
+
+    python-oracledb hands back a *naive* ``datetime`` for TIMESTAMP WITH
+    [LOCAL] TIME ZONE — a ``08:31+05:30`` row arrives as bare ``08:31`` and the
+    instant is silently rewritten. Rendering those columns server side with
+    ``TO_CHAR`` keeps the offset on the wire; every other dialect and column is
+    projected unchanged.
+    """
+    if not _is_oracle_wire(_dialect_key(cfg), str(cfg.get("type") or "")):
+        return list(cols)
+    out: list[Any] = []
+    for col in cols:
+        col_type = getattr(col, "type", None)
+        tz_carrier = bool(
+            getattr(col_type, "timezone", False)
+            or getattr(col_type, "local_timezone", False)
+        )
+        if tz_carrier and isinstance(col_type, sa.DateTime):
+            out.append(
+                sa.func.to_char(col, _ORACLE_TSTZ_READ_FORMAT).label(col.name)
+            )
+        else:
+            out.append(col)
+    return out
+
+
 def _read_table_raw(
     conn: Any,
     table: str,
@@ -2289,41 +2456,31 @@ def _read_table_raw(
 ) -> tuple[list[str], list[list[Any]]]:
     """Fallback read for engines whose SQLAlchemy reflection is incomplete."""
     from connectors.sql_identifiers import quote_table_ref
-    from services.dialect_profiles import quote_char_for
+    from services.dialect_profiles import (
+        denormalize_result_key,
+        page_clause,
+        quote_char_for,
+        zero_row_probe_sql,
+    )
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
     base = f"SELECT * FROM {qualified}"  # nosec B608
-    dialect_l = (dialect or "ansi").lower()
-    is_mssql = dialect_l in {
-        "mssql",
-        "sqlserver",
-        "microsoft_sql_server",
-        "azure_sql_database",
-        "synapse_analytics",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-        "google_cloud_sql_sql_server",
-        "amazon_rds_sql_server",
-    }
     # Discover columns so we can ORDER BY the first one — bare LIMIT/OFFSET is
     # non-deterministic and silently duplicates/skips rows across pages.
-    probe_sql = f"SELECT TOP 0 * FROM {qualified}" if is_mssql else f"{base} LIMIT 0"  # nosec B608
-    probe = conn.execute(sa.text(probe_sql))
+    probe = conn.execute(sa.text(zero_row_probe_sql(dialect, qualified)))
     headers = list(probe.keys())
     if not headers:
         return [], []
     q = quote_char_for(dialect) or '"'
+    # Oracle/DB2/Snowflake store case-insensitive names folded upper and the
+    # driver hands them back lowercased; quoting that literal yields ORA-00904.
+    # Restore the physical spelling before quoting.
+    order_name = denormalize_result_key(dialect, str(headers[0]))
     if q == "[":
-        order_col = f"[{str(headers[0]).replace(']', ']]')}]"
+        order_col = f"[{order_name.replace(']', ']]')}]"
     else:
-        order_col = quote_sql_identifier(headers[0], q)
-    if is_mssql:
-        sql = (
-            f"{base} ORDER BY {order_col} "
-            f"OFFSET {int(offset)} ROWS FETCH NEXT {int(limit)} ROWS ONLY"
-        )
-    else:
-        sql = f"{base} ORDER BY {order_col} LIMIT {int(limit)} OFFSET {int(offset)}"
+        order_col = quote_sql_identifier(order_name, q)
+    sql = f"{base} ORDER BY {order_col} {page_clause(dialect, offset, limit)}"  # nosec B608
     result = conn.execute(sa.text(sql))
     headers = list(result.keys())
     rows = [
@@ -2402,7 +2559,7 @@ def read_table_batch(
                 else:
                     columns = selected_cols = list(table_obj.c)
 
-                stmt = sa.select(*selected_cols)
+                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
                 # Stable order from page 0 — unordered OFFSET pages skip/duplicate under concurrent writes.
                 pk_cols = (
                     [c for c in table_obj.primary_key.columns]
@@ -2528,7 +2685,7 @@ def read_table_cursor_batch(
                 )
 
             key_cols = [table_obj.c[n] for n in key_names]
-            stmt = sa.select(*selected_cols)
+            stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
             if cursor_after:
                 stmt = stmt.where(
                     sqlalchemy_keyset_clause(sa, key_cols, str(cursor_after))

@@ -10,6 +10,8 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
+from services.column_case import column_type_or_none
+
 
 class InventContext(str, Enum):
     """Why invent is being asked — drives DDL authority."""
@@ -93,7 +95,13 @@ def invent_dest_type(
     # CREATE_NEW invent authority is create_new_mapping_target_type alone
     # (width-preserving + bare-logical 64-bit floor). Never re-widen here —
     # a second BIGINT floor made Map INT/SMALLINT disagree with Validate stamp.
-    stamped = create_new_mapping_target_type(src, db, samples=samples)
+    # Source engine (when a transfer bound one) only widens the stamp: a source
+    # that can emit any code point must not land on a code-page VARCHAR.
+    from services.source_engine_scope import active_source_engine
+
+    stamped = create_new_mapping_target_type(
+        src, db, samples=samples, source_db=active_source_engine()
+    )
     if stamped:
         return str(stamped)
     return str(ddl_type(db, src) or src or "TEXT")
@@ -267,9 +275,12 @@ def stamp_additive_mapping_types(
             or backfill_new_fields
             or create_table_authority
         )
+        # Case-tolerant: Oracle/Snowflake catalogs fold to upper case while the
+        # mapping carries the operator's case — an exact-key miss used to fall
+        # through to "TEXT" and invent a text column for live NUMBER(12,2).
         src = (
             str(row.get("source_type") or "").strip()
-            or str(src_types.get(str(row.get("source") or "")) or "").strip()
+            or column_type_or_none(src_types, str(row.get("source") or ""))
             or "TEXT"
         )
         # Source-as-dest FE bootstrap (target_type == source_type) is NOT Kernel

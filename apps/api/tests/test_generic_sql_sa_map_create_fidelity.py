@@ -68,9 +68,10 @@ def test_sa_ntz_stamps_are_timezone_naive(dest: str, stamp: str):
 def test_sa_tz_stamps_remain_timezone_aware(dest: str, stamp: str):
     wire, sa_t = _sa(dest, stamp)
     assert isinstance(sa_t, sa.DateTime), (dest, stamp, wire, sa_t)
-    assert sa_t.timezone is True, (
-        f"{dest} {stamp} wire={wire!r} lost timezone polarity"
-    )
+    # Oracle carries session-relative awareness on ``local_timezone`` — its
+    # WITH LOCAL TIME ZONE wire is aware even though ``timezone`` is False.
+    aware = bool(sa_t.timezone) or bool(getattr(sa_t, "local_timezone", False))
+    assert aware, f"{dest} {stamp} wire={wire!r} lost timezone polarity"
 
 
 def test_databricks_float_stamp_not_double_invent():

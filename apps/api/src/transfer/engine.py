@@ -610,7 +610,9 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
 
 
 def _authoritative_source_schema(
-    source: EndpointConfig, schema: dict[str, str]
+    source: EndpointConfig,
+    schema: dict[str, str],
+    columns: list[str] | None = None,
 ) -> dict[str, str]:
     """Merge the source's declared types over the reader's decoded shape.
 
@@ -628,12 +630,37 @@ def _authoritative_source_schema(
 
         live = endpoint_source_column_types(source)
         if not live:
-            return schema
+            return _rekey_to_read_columns(schema, columns)
         merged, _drift = reconcile_source_types(schema, live)
-        return merged
+        return _rekey_to_read_columns(merged, columns)
     except Exception as exc:
         logger.debug("source schema authority merge failed: %s", exc, exc_info=exc)
         return schema
+
+
+def _rekey_to_read_columns(
+    schema: dict[str, str], columns: list[str] | None
+) -> dict[str, str]:
+    """Re-key declared types onto the spelling the reader gave the rows.
+
+    Oracle/DB2/Snowflake introspection reports the folded catalog name
+    (``AMOUNT``) while the same read hands rows back as ``amount``. Every
+    consumer keyed on the row's own column name then missed the declaration and
+    fell back to a sampled guess — ``NUMBER(12,2)`` money was scored as
+    ``DECIMAL(8,4)``. Only an unambiguous single fold match is renamed.
+    """
+    if not schema or not columns:
+        return schema
+    out = dict(schema)
+    for col in columns:
+        name = str(col)
+        if name in out:
+            continue
+        folded = name.casefold()
+        hits = [k for k in out if str(k).casefold() == folded]
+        if len(hits) == 1:
+            out[name] = out.pop(hits[0])
+    return out
 
 
 def _source_nullability_probe(source: EndpointConfig) -> dict[str, bool]:
@@ -1486,6 +1513,8 @@ def _auto_map(
             # Property 2: auto-derived identity maps must satisfy create-new
             # gates — stamp CREATE authority so Kernel invents target_type
             # instead of blocking with "lack Map target_type under partial Studio".
+            from services.column_case import column_type_or_none
+
             mappings = default_mappings(columns)
             for m in mappings:
                 if not isinstance(m, dict):
@@ -1494,7 +1523,13 @@ def _auto_map(
                 m.setdefault("assignment_strategy", "create_compatible_new")
                 src_name = str(m.get("source") or "")
                 if src_name and not str(m.get("source_type") or "").strip():
-                    m["source_type"] = schema.get(src_name, "TEXT")
+                    # Leave blank rather than stamping "TEXT" for a column the
+                    # introspected schema does not describe: a wrong declared
+                    # source type outranks sample evidence at invent and lands
+                    # the whole table as text.
+                    declared = column_type_or_none(schema, src_name)
+                    if declared:
+                        m["source_type"] = declared
         else:
             target_schema, dest_exists = _destination_schema_probe(
                 request.destination,
@@ -1540,6 +1575,7 @@ def _auto_map(
                         use_llm=False,
                         schema_policy=request.schema_policy,
                         destination_db_type=(request.destination.format or "").lower(),
+                        source_db_type=(request.source.format or "").lower(),
                         destination_table_exists=dest_exists,
                         source_types_authoritative=source_types_are_authoritative(
                             request.source.kind or "",
@@ -1632,6 +1668,7 @@ def _auto_map(
                         # exact-digit carrier our own DDL picks on SQLite. Every
                         # existing-destination route shares this call.
                         destination_db_type=(request.destination.format or "").lower(),
+                        source_db_type=(request.source.format or "").lower(),
                         destination_table_exists=dest_exists,
                         source_types_authoritative=source_types_are_authoritative(
                             request.source.kind or "",
@@ -1834,7 +1871,16 @@ class UniversalTransferEngine:
             rollback_uncommitted_auto_creates,
         )
 
-        with bind_auto_create_job(job_id):
+        from services.source_engine_scope import bind_source_engine
+
+        # Resolve first: a connector_id reference carries the engine id that
+        # create-new invention needs, and an inline format may be empty.
+        self._resolve_saved_connectors(request)
+        # Create-new invention needs the source engine to keep Unicode polarity
+        # (PostgreSQL VARCHAR → SQL Server NVARCHAR, not code-page VARCHAR).
+        with bind_auto_create_job(job_id), bind_source_engine(
+            request.source.format or ""
+        ):
             result = self._execute_tracked_inner(request, job_id, resume=resume)
         try:
             written = int(
@@ -2288,7 +2334,7 @@ class UniversalTransferEngine:
                     max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0
                 ),
             )
-            schema = _authoritative_source_schema(request.source, schema)
+            schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
             records = _apply_priority_and_limit(
@@ -3420,7 +3466,7 @@ class UniversalTransferEngine:
             columns, schema, total_rows, sample_rows = peek_stream_source(
                 request.source
             )
-            schema = _authoritative_source_schema(request.source, schema)
+            schema = _authoritative_source_schema(request.source, schema, columns)
             if request.limit > 0:
                 total_rows = min(total_rows, request.limit)
             if total_rows == 0:
