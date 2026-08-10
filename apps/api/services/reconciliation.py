@@ -3277,8 +3277,10 @@ def fingerprint_for_reconcile(
     ``\"true\"`` / MySQL ``0`` / Postgres ``False`` compare as equal.
     """
     from services.transform_engine import apply_transform
+    from services.type_system import instant_date_carrier
     from services.value_serializer import cell_to_string
 
+    ddl_type = instant_date_carrier(engine, ddl_type)
     wire: Any = value
     tname = (transform or "").strip().lower()
     if tname and tname not in {"", "none", "identity", "passthrough"}:

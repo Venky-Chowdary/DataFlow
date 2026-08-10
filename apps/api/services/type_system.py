@@ -1623,6 +1623,30 @@ def is_dialect_native_document_wire(
     return upper == native_u or bare == re.sub(r"\s*\(\s*\d+\s*\)", "", native_u).strip()
 
 
+# Engines whose "date" token is a UTC-millisecond instant (BSON date,
+# Elasticsearch date), not a calendar date. They have no date-only type, so
+# DDL_TYPES stamps the same token for logical date and datetime; binding it as
+# SQL DATE would truncate time-of-day and hide real clock loss behind a green
+# digest.
+_INSTANT_DATE_TOKEN_ENGINES: Final[frozenset[str]] = frozenset(
+    {"mongodb", "documentdb", "cosmosdb", "elasticsearch", "opensearch"}
+)
+
+
+def instant_date_carrier(engine: str | None, ddl_type_token: str | None) -> str:
+    """Return the carrier to bind/fingerprint ``ddl_type_token`` against.
+
+    Identity for SQL engines. On document stores the bare ``date`` token stores
+    an offset-normalized instant, so it resolves to ``TIMESTAMPTZ`` — an
+    offset-bearing wire keeps its instant instead of the wall clock a bare
+    ``TIMESTAMP`` bind would preserve.
+    """
+    token = (ddl_type_token or "").strip()
+    if (engine or "").strip().lower() not in _INSTANT_DATE_TOKEN_ENGINES:
+        return token
+    return "TIMESTAMPTZ" if token.upper() == "DATE" else token
+
+
 def document_domain_would_collapse(
     source_type: str,
     target_type: str,
@@ -2849,6 +2873,12 @@ _TZ_AWARE_DDL: Final[dict[str, str]] = {
     # so TIMESTAMPTZ round-trips the offset-bearing ISO-8601 wire (the
     # SQLAlchemy/Django convention) instead of an anonymous TEXT column.
     "sqlite": "TIMESTAMPTZ",
+    # Unrecognized SQLAlchemy engines: the writer compiles TIMESTAMPTZ to
+    # ``DateTime(timezone=True)``. Falling back to bare TIMESTAMP made the
+    # created column NTZ, and every offset-bearing row was then quarantined by
+    # the write-time TZ guard — a fidelity collapse this map invented, not one
+    # the destination imposed.
+    "generic_sql": "TIMESTAMPTZ",
 }
 _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "postgresql": "TIMESTAMP",
@@ -2869,6 +2899,7 @@ _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "trino": "timestamp(3)",
     "presto": "timestamp",
     "iceberg": "timestamp",
+    "generic_sql": "TIMESTAMP",
 }
 
 
