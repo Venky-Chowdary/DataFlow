@@ -169,6 +169,7 @@ from services.checkpoint_service import (
     Checkpoint,
     CheckpointService,
 )
+from src.transfer.resume_state import resolve_resume_checkpoint
 
 logger = logging.getLogger("dataflow.transfer")
 
@@ -2211,70 +2212,18 @@ class UniversalTransferEngine:
     ) -> TransferResult:
         mongo = get_mongodb_service()
         checkpoint_service = CheckpointService(mongo)
-        checkpoint = None
         if resume:
-            try:
-                checkpoint = checkpoint_service.load(job_id)
-            except Exception as exc:
-                logger.warning("resume checkpoint load failed: %s", exc, exc_info=exc)
-                checkpoint = None
-            # Prefer job.records_processed when the checkpoint blob was cleared
-            # after a completed partial wave (Studio Resume / multi-batch upsert).
-            prior_rows = 0
-            # An unreadable or absent job document does not mean "nothing was
-            # written" — for an append, treating unknown as zero is a duplicated
-            # load. Track which of the two we actually learned.
-            prior_rows_known = True
-            if not _checkpoint_has_progress(checkpoint):
-                try:
-                    job_doc = mongo.get_job(job_id)
-                    prior_rows_known = isinstance(job_doc, dict) and bool(job_doc)
-                    prior_rows = int((job_doc or {}).get("records_processed") or 0)
-                except Exception as exc:
-                    logger.warning(
-                        "resume job=%s: committed-row count unreadable: %s",
-                        job_id,
-                        exc,
-                        exc_info=exc,
-                    )
-                    prior_rows = 0
-                    prior_rows_known = False
-                if prior_rows > 0:
-                    checkpoint = Checkpoint(
-                        job_id=job_id,
-                        rows_processed=prior_rows,
-                        offset=prior_rows,
-                    )
-            if not _checkpoint_has_progress(checkpoint):
-                # Module 14 — insert/append resume-from-zero silently duplicates.
-                # Idempotent modes may restart from zero when control-plane lost
-                # the checkpoint. Contract SSOT owns the refuse/allow decision.
-                contract = resolve_sync_contract(request.stream_contracts)
-                sync = resolve_effective_sync_mode(
+            contract = resolve_sync_contract(request.stream_contracts)
+            checkpoint = resolve_resume_checkpoint(
+                job_id=job_id,
+                mongo=mongo,
+                checkpoint_service=checkpoint_service,
+                has_progress=_checkpoint_has_progress,
+                sync_mode=resolve_effective_sync_mode(
                     request.sync_mode,
                     contract.sync_mode if contract else None,
-                )
-                from services.execution_engine_contract import (
-                    ExecutionContractError,
-                    assert_resume_allowed,
-                )
-
-                try:
-                    decision = assert_resume_allowed(
-                        resume_requested=True,
-                        checkpoint_has_progress=False,
-                        sync_mode=sync,
-                        rows_committed=prior_rows,
-                        rows_committed_known=prior_rows_known,
-                    )
-                except ExecutionContractError as exc:
-                    raise ValueError(str(exc)) from exc
-                logger.warning(
-                    "resume job=%s without durable checkpoint — %s",
-                    job_id,
-                    decision.get("reason"),
-                )
-                checkpoint = Checkpoint(job_id=job_id)
+                ),
+            )
         else:
             checkpoint = Checkpoint(job_id=job_id)
 

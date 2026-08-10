@@ -2846,7 +2846,16 @@ def _sf_to_logical(
             r"^(INT|INTEGER|BIGINT|SMALLINT|TINYINT|BYTEINT)",
             d,
         )
-        return integer_width_carrier(tok.group(1) if tok else d) or "BIGINT"
+        # Every one of these spellings is an alias of NUMBER(38,0) in Snowflake
+        # — the narrow ones included: SMALLINT holds 38 digits there, not 5. A
+        # width carrier read off the spelling would hand the destination a
+        # BIGINT and overflow on the 19th digit, which is exactly what the
+        # NUMBER(p,0) branch above refuses to do. Carry the declared precision.
+        from services.type_system import zero_scale_numeric_carrier
+
+        return zero_scale_numeric_carrier(num_prec or 38) or (
+            integer_width_carrier(tok.group(1) if tok else d) or "BIGINT"
+        )
     # Snowflake FLOAT / DOUBLE / REAL — preserve IEEE width polarity.
     if d in {"FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLE PRECISION", "REAL"} or d.startswith("FLOAT"):
         from services.type_system import float_width_carrier

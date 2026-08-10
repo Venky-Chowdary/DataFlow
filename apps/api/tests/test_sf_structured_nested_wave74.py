@@ -37,8 +37,9 @@ def test_sf_structured_object_map_not_decimal_trap():
 
     assert _sf_to_logical("MAP") == "MAP"
     assert _sf_to_logical("MAP(VARCHAR, NUMBER)") == "MAP<TEXT,DECIMAL>"
-    # INT / INTEGER are dialect twins on the MAP value polarity.
-    assert _sf_to_logical("MAP<STRING,INT>") in {"MAP<TEXT,INTEGER>", "MAP<TEXT,INT>"}
+    # Snowflake INT is an alias of NUMBER(38,0), inside a MAP as much as at the
+    # top level: reading it as a 64-bit integer overflows on the 19th digit.
+    assert _sf_to_logical("MAP<STRING,INT>") == "MAP<TEXT,DECIMAL(38,0)>"
     assert _sf_to_logical("MAP<STRING,INT>") != "DECIMAL"
 
     assert parse_struct_fields("OBJECT(a VARCHAR, b NUMBER(10,2))") == [

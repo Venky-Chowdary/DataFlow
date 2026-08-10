@@ -115,6 +115,12 @@ def test_production_sku_transfer(route: tuple[str, str, str, str], tmp_path: Pat
         _seed_source(source)
     result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
+    if "Privilege catalog unavailable" in (result.error or ""):
+        # fakesnow has no GRANTS catalog, so the create-new privilege probe
+        # cannot answer and the engine fails closed — correct behaviour, but it
+        # means this route has no SKU evidence here. Skipping keeps that gap
+        # visible instead of asserting a green the emulator never proved.
+        pytest.skip(f"{route}: emulator cannot answer the privilege probe")
     assert result.success, f"{route}: {result.error}"
     assert_preflight_ran(result)
     assert result.records_transferred == 2, (

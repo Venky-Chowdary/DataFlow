@@ -16,6 +16,7 @@ from typing import Final
 # object so circular init stays safe: type_system shims lazy-import this module.
 from services import type_system as _ts
 from services.decision_kernel.logical_type import LogicalType, NativeType
+from services.source_engine_scope import active_source_engine
 
 # Bind shared helpers/tables from type_system into this module namespace.
 # Invent bodies below expect unqualified names (historical type_system style).
@@ -439,14 +440,18 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
         return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
     # Oracle ANSI FLOAT(p) is NUMBER-backed binary precision (bare = FLOAT(126),
     # ~38 decimal digits), so BINARY_DOUBLE would cut it to a 53-bit mantissa.
-    # The bare lowercase ``float`` is the logical family, not a stamp, and still
-    # invents BINARY_DOUBLE.
-    if (
-        db == "oracle"
-        and re.match(r"^FLOAT(\(\d+\))?$", base_early)
-        and strip_identity_qualifier(inferred).strip() != LOGICAL_FLOAT
-    ):
-        return base_early
+    #
+    # Only a *declared* Oracle carrier keeps that storage class. Two things it
+    # is not: the logical family alias ``float`` (a family, not a stamp), and a
+    # bare ``FLOAT`` read off some other engine's catalog — PostgreSQL and SQL
+    # Server both spell IEEE-64 that way, and holding those in NUMBER-backed
+    # FLOAT(126) changes the destination's storage class on nothing but the
+    # spelling's letter case. A precision is unambiguous; a bare token needs an
+    # Oracle source to mean the Oracle type.
+    if db == "oracle" and strip_identity_qualifier(inferred).strip() != LOGICAL_FLOAT:
+        declared = re.match(r"^FLOAT(\((\d+)\))?$", base_early)
+        if declared and (declared.group(2) or active_source_engine() == "oracle"):
+            return base_early
     # IBM DECFLOAT — IEEE decimal float; never invent NUMBER(p,0) from digit count.
     if base_early == "DECFLOAT" or base_early.startswith("DECFLOAT("):
         if db in {
