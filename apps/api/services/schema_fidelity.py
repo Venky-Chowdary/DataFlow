@@ -126,6 +126,9 @@ class SourceSchemaCatalog:
     # Aspects present on source that v1 cannot carry.
     foreign_keys: list[dict[str, Any]] = field(default_factory=list)
     check_constraints: list[str] = field(default_factory=list)
+    # services.check_constraints.CheckConstraints payload: keeps "catalog
+    # unreadable" distinct from "table has no CHECK constraints".
+    check_constraints_meta: dict[str, Any] | None = None
     indexes: list[dict[str, Any]] = field(default_factory=list)
     views: list[str] = field(default_factory=list)
     triggers: list[str] = field(default_factory=list)
@@ -322,6 +325,7 @@ def build_catalog_from_introspect(
         unique_keys=unique_keys,
         foreign_keys=list(foreign_keys or keys.get("foreign_keys") or []),
         check_constraints=list(check_constraints or keys.get("check_constraints") or []),
+        check_constraints_meta=_check_payload(keys.get("check_constraints_meta")),
         views=list(views or keys.get("views") or []),
         triggers=list(triggers or keys.get("triggers") or []),
         indexes=list(keys.get("indexes") or []),
@@ -339,6 +343,11 @@ def build_catalog_from_introspect(
 def _tristate(value: Any) -> bool | None:
     """Keep "never measured" distinct from "measured and absent"."""
     return None if value is None else bool(value)
+
+
+def _check_payload(value: Any) -> dict[str, Any] | None:
+    """Accept a CheckConstraints dataclass or its dict form."""
+    return _storage_payload(value)
 
 
 def _storage_payload(value: Any) -> dict[str, Any] | None:
@@ -393,6 +402,7 @@ def catalog_from_payload(payload: Any) -> SourceSchemaCatalog | None:
             ],
             foreign_keys=list(payload.get("foreign_keys") or []),
             check_constraints=list(payload.get("check_constraints") or []),
+            check_constraints_meta=_check_payload(payload.get("check_constraints_meta")),
             indexes=list(payload.get("indexes") or []),
             views=list(payload.get("views") or []),
             triggers=list(payload.get("triggers") or []),
@@ -678,8 +688,17 @@ def plan_create_new_fidelity(
             )
         )
 
+    # --- CARRY: CHECK constraints (portable predicates only) ---
+    check_handled = _emit_check_aspect(
+        report,
+        catalog,
+        dest=dest,
+        dest_name_for_source=_dest_name_for_source,
+        table_constraints=table_constraints,
+    )
+
     # --- Explicit unsupported / skipped for remaining aspects ---
-    _emit_unsupported_catalog(report, catalog)
+    _emit_unsupported_catalog(report, catalog, skip_check=check_handled)
 
     # Column order — carried as mapping order (honest).
     report.items.append(
@@ -791,7 +810,113 @@ def _normalize_default_sql(expr: str, dest_dialect: str) -> str:
     return text
 
 
-def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchemaCatalog) -> None:
+def _emit_check_aspect(
+    report: SchemaFidelityReport,
+    catalog: SourceSchemaCatalog,
+    *,
+    dest: str,
+    dest_name_for_source: Any,
+    table_constraints: list[str],
+) -> bool:
+    """Carry portable CHECK predicates; return True when the aspect is settled.
+
+    A CHECK is an integrity guarantee, so a predicate the destination would
+    evaluate differently is refused, not approximated. Returning False leaves
+    the legacy "not introspected — refuse to certify absence" line in charge.
+    """
+    from services.check_constraints import CheckConstraint, CheckConstraints, plan_check_carry
+
+    payload = catalog.check_constraints_meta
+    if not payload:
+        return False
+    status = str(payload.get("status") or "")
+    if status != "measured":
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="check",
+                name="*",
+                status="unknown",
+                reason=(
+                    str(payload.get("detail"))
+                    or "Source CHECK catalog was unreadable; unmeasured, not proven absent."
+                ),
+            )
+        )
+        return True
+
+    items = tuple(
+        CheckConstraint(
+            name=str(i.get("name") or ""),
+            predicate=str(i.get("predicate") or ""),
+            columns=tuple(str(c) for c in (i.get("columns") or [])),
+        )
+        for i in (payload.get("items") or [])
+        if isinstance(i, dict)
+    )
+    if not items:
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="check",
+                name="*",
+                status="skipped",
+                reason="Source catalog read: table has no CHECK constraints.",
+            )
+        )
+        return True
+
+    column_map: dict[str, str] = {}
+    for src_col in catalog.columns:
+        dest_col = dest_name_for_source(src_col)
+        if dest_col:
+            column_map[str(src_col).casefold()] = dest_col
+
+    decisions = plan_check_carry(
+        CheckConstraints(
+            dialect=str(payload.get("dialect") or catalog.dialect),
+            status="measured",
+            items=items,
+        ),
+        dest_dialect=dest,
+        column_map=column_map,
+        quote=_q,
+    )
+    for decision in decisions:
+        name = decision.source.name or "check"
+        if decision.carried:
+            ddl = f"CHECK ({decision.dest_sql})"
+            table_constraints.append(ddl)
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="check",
+                    name=name,
+                    status="carried",
+                    reason="CHECK predicate re-rendered for the destination dialect.",
+                    source_detail=decision.source.predicate[:240],
+                    dest_ddl=ddl,
+                )
+            )
+        else:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="check",
+                    name=name,
+                    status="unsupported",
+                    reason=(
+                        f"{decision.reason} Destination will not enforce this rule — "
+                        "apply it manually or reject the source rows upstream."
+                    ),
+                    source_detail=decision.source.predicate[:240],
+                )
+            )
+    return True
+
+
+def _emit_unsupported_catalog(
+    report: SchemaFidelityReport,
+    catalog: SourceSchemaCatalog,
+    *,
+    skip_check: bool = False,
+) -> None:
     if catalog.foreign_keys:
         for fk in catalog.foreign_keys[:20]:
             report.items.append(
@@ -820,7 +945,9 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
             )
         )
 
-    if catalog.check_constraints:
+    if skip_check:
+        pass
+    elif catalog.check_constraints:
         for chk in catalog.check_constraints[:20]:
             report.items.append(
                 SchemaFidelityItem(

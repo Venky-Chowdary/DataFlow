@@ -17,6 +17,7 @@ from services.unique_key_introspect import (
     _sqlite_fetch_unique_keys,
     _sqlserver_fetch_unique_keys,
 )
+from services.check_constraints import probe_check_constraints
 from services.physical_storage_metadata import probe_physical_storage
 from services.value_serializer import json_default
 
@@ -473,6 +474,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             }
             foreign_keys: list[dict[str, Any]] = []
             physical_storage: dict[str, Any] | None = None
+            check_meta: dict[str, Any] | None = None
             if target:
                 columns = _pg_fetch_columns(cur, schema, target)
                 # Table may live outside the requested schema (common when UI
@@ -512,6 +514,9 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                     physical_storage = probe_physical_storage(
                         "postgresql", cur, resolved_schema, target
                     ).to_dict()
+                    check_meta = probe_check_constraints(
+                        "postgresql", cur, resolved_schema, target
+                    ).to_dict()
         conn.close()
         out: dict[str, Any] = {
             "ok": True,
@@ -522,6 +527,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             "unique_keys": unique_meta.get("unique_keys") or [],
             "foreign_keys": foreign_keys,
             "physical_storage": physical_storage,
+            "check_constraints_meta": check_meta,
         }
         if advisory_keys and (out["primary_key_columns"] or out["unique_keys"]):
             out["warnings"] = [
@@ -1013,10 +1019,14 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             }
             foreign_keys: list[dict[str, Any]] = []
             physical_storage: dict[str, Any] | None = None
+            check_meta: dict[str, Any] | None = None
             if columns and target:
                 unique_meta = _mysql_fetch_unique_keys(cur, db_name, target)
                 foreign_keys = _mysql_fetch_foreign_keys(cur, db_name, target)
                 physical_storage = probe_physical_storage(
+                    "mysql", cur, db_name, target
+                ).to_dict()
+                check_meta = probe_check_constraints(
                     "mysql", cur, db_name, target
                 ).to_dict()
         conn.close()
@@ -1029,6 +1039,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             "unique_keys": unique_meta.get("unique_keys") or [],
             "foreign_keys": foreign_keys,
             "physical_storage": physical_storage,
+            "check_constraints_meta": check_meta,
         }
     except ImportError:
         return {"ok": False, "error": "Install pymysql for MySQL schema introspection", "columns": [], "tables": []}
@@ -2367,6 +2378,11 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                     if columns
                     else None
                 ),
+                "check_constraints_meta": (
+                    probe_check_constraints("oracle", conn, owner, resolved_table).to_dict()
+                    if columns
+                    else None
+                ),
             }
     except Exception as exc:
         logger.warning("oracle introspect failed", exc_info=True)
@@ -2583,6 +2599,11 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                 "unique_keys": unique_meta.get("unique_keys") or [],
                 "physical_storage": (
                     probe_physical_storage("sqlserver", conn, schema, table).to_dict()
+                    if columns
+                    else None
+                ),
+                "check_constraints_meta": (
+                    probe_check_constraints("sqlserver", conn, schema, table).to_dict()
                     if columns
                     else None
                 ),

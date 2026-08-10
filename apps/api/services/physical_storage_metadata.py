@@ -81,17 +81,23 @@ class _DriverCursorShim:
         self._connection = connection
         self._result: Any = None
 
-    def execute(self, sql: str, params: tuple) -> None:
-        self._result = self._connection.exec_driver_sql(sql, tuple(params))
+    def execute(self, sql: str, params: Any) -> None:
+        # A dict must stay a dict: Oracle's driver binds `:name` by key.
+        bound = params if isinstance(params, dict) else tuple(params)
+        self._result = self._connection.exec_driver_sql(sql, bound)
 
     def fetchall(self) -> list[tuple]:
         return list(self._result.fetchall() or []) if self._result is not None else []
 
 
-def _as_cursor(cursor_or_connection: Any) -> Any:
+def as_driver_cursor(cursor_or_connection: Any) -> Any:
+    """Accept a DB-API cursor or a SQLAlchemy connection; return a cursor."""
     if hasattr(cursor_or_connection, "exec_driver_sql"):
         return _DriverCursorShim(cursor_or_connection)
     return cursor_or_connection
+
+
+_as_cursor = as_driver_cursor
 
 
 def _rows(cursor: Any, sql: str, params: tuple) -> list[tuple]:
