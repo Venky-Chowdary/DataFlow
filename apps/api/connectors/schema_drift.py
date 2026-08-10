@@ -680,7 +680,6 @@ def add_missing_columns(
     # SQLite rejects "ADD COLUMN IF NOT EXISTS" (syntax error near EXISTS).
     if_not_exists = " IF NOT EXISTS" if supports_if_not_exists else ""
     log: list[str] = []
-    quoted_schema = f'"{schema}"' if schema else None
 
     def _column_exists_error(exc: Exception) -> bool:
         text = str(exc).lower()
@@ -694,20 +693,30 @@ def add_missing_columns(
             )
         )
 
+    # The T-SQL compiler resolves a column's owning Table to emit its DDL
+    # fragment ("mssql requires Table-bound columns in order to generate DDL"),
+    # so an unbound Column silently disabled add-column drift on every SQL
+    # Server destination. Bind the columns to a throwaway Table, which also
+    # gives the dialect's own preparer the correct quoting for the table
+    # reference (backticks / brackets / case-preserving quotes) instead of the
+    # hardcoded ANSI double quotes this used to emit.
+    bound = sa.Table(
+        table_name,
+        sa.MetaData(),
+        *[
+            sa.Column(col, sa_col_types[col], quote=True)
+            for col in missing
+            if sa_col_types.get(col) is not None
+        ],
+        schema=schema,
+        quote=True,
+    )
+    qualified = dialect.identifier_preparer.format_table(bound)
+
     def _run(conn: Any) -> None:
-        for col in missing:
-            sa_type = sa_col_types.get(col)
-            if sa_type is None:
-                continue
-            col_ddl = str(
-                sa.schema.CreateColumn(sa.Column(col, sa_type, quote=True)).compile(
-                    dialect=dialect
-                )
-            )
-            if quoted_schema:
-                qualified = f'{quoted_schema}."{table_name}"'
-            else:
-                qualified = f'"{table_name}"'
+        for column in list(bound.columns):
+            col = column.name
+            col_ddl = str(sa.schema.CreateColumn(column).compile(dialect=dialect))
             alter = f"ALTER TABLE {qualified} {keyword}{if_not_exists} {col_ddl}"
             try:
                 conn.execute(sa.text(alter))

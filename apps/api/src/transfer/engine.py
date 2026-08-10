@@ -382,6 +382,27 @@ def _request_decision_artifact_payload(request) -> dict | None:
     return None
 
 
+def _operator_contract_maps(request, mappings: list) -> list:
+    """Mappings an operator-stamped artifact/fingerprint was hashed over.
+
+    Validate hashes the Map rows the operator approved (``request.mappings``).
+    Execute re-derives its own set (``_auto_map`` → enrich → auto-propagate →
+    additive stamps), so hashing the derived set compared a stamp against
+    facts the operator never saw: an untouched Map came back as "Decision
+    Artifact DDL identity diverged from current Map". Whenever the caller
+    supplies a stamp, it must be checked against the contract it was taken
+    over; only an unstamped run falls back to the derived set.
+    """
+    supplied = bool(
+        str(getattr(request, "approved_ddl_identity_hash", "") or "").strip()
+        or str(getattr(request, "approved_decision_artifact_hash", "") or "").strip()
+        or _request_decision_artifact_payload(request)
+    )
+    if not supplied:
+        return mappings
+    return list(getattr(request, "mappings", None) or []) or mappings
+
+
 def _enforce_decision_artifact(
     pf: dict | None,
     mappings: list,
@@ -2577,15 +2598,12 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            identity_maps = mappings
+            # A stamped hash/artifact is always checked against the operator
+            # Map contract it was taken over — never against post-enrich stamps.
+            identity_maps = _operator_contract_maps(request, mappings)
             approved_hash = str(
                 getattr(request, "approved_ddl_identity_hash", "") or ""
             )
-            # skip_preflight + stamped hash: identity is over the operator Map
-            # contract (request.mappings), not post-enrich stamps — Validate path
-            # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
-            if pf is None and approved_hash:
-                identity_maps = list(request.mappings or []) or mappings
             dest_db_fmt = str(getattr(request.destination, "format", None) or "")
             ddl_err = _enforce_ddl_identity(
                 pf,
@@ -3622,15 +3640,12 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            identity_maps = mappings
+            # A stamped hash/artifact is always checked against the operator
+            # Map contract it was taken over — never against post-enrich stamps.
+            identity_maps = _operator_contract_maps(request, mappings)
             approved_hash = str(
                 getattr(request, "approved_ddl_identity_hash", "") or ""
             )
-            # skip_preflight + stamped hash: identity is over the operator Map
-            # contract (request.mappings), not post-enrich stamps — Validate path
-            # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
-            if pf is None and approved_hash:
-                identity_maps = list(request.mappings or []) or mappings
             dest_db_fmt = str(getattr(request.destination, "format", None) or "")
             ddl_err = _enforce_ddl_identity(
                 pf,
@@ -4393,15 +4408,12 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            identity_maps = mappings
+            # A stamped hash/artifact is always checked against the operator
+            # Map contract it was taken over — never against post-enrich stamps.
+            identity_maps = _operator_contract_maps(request, mappings)
             approved_hash = str(
                 getattr(request, "approved_ddl_identity_hash", "") or ""
             )
-            # skip_preflight + stamped hash: identity is over the operator Map
-            # contract (request.mappings), not post-enrich stamps — Validate path
-            # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
-            if pf is None and approved_hash:
-                identity_maps = list(request.mappings or []) or mappings
             dest_db_fmt = str(getattr(request.destination, "format", None) or "")
             ddl_err = _enforce_ddl_identity(
                 pf,

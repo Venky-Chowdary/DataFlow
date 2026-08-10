@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { typeBadgeClass } from "../../lib/typeDisplay";
+import { nullWireLabel } from "../../lib/nullWire";
 import { Dialog } from "./Dialog";
 
 interface StructurePreviewProps {
@@ -29,6 +30,8 @@ interface StructurePreviewProps {
 /** Table cells: compact JSON for objects/arrays and JSON-looking strings (Mongo wire). */
 function formatPreviewCell(raw: unknown): string {
   if (raw == null) return "—";
+  const wireNull = nullWireLabel(raw);
+  if (wireNull) return wireNull;
   if (typeof raw === "object") {
     try {
       return JSON.stringify(raw);

@@ -857,6 +857,35 @@ def transform_error_policy(
     return "quarantine"
 
 
+def summarize_reject_findings(
+    rejected_details: list[dict[str, Any]] | None, *, limit: int = 3
+) -> str:
+    """Name the columns and reasons behind a refusal.
+
+    A bare "rejected 1 cell finding(s); strict error policy blocks partial
+    write" tells an operator nothing they can act on. Every refusal must carry
+    the offending column, the row, and the engine's own reason so the next
+    correct action (fix the mapping, widen the destination, allow quarantine)
+    is obvious from the run itself.
+    """
+    seen: list[str] = []
+    for d in rejected_details or []:
+        col = str(d.get("target") or d.get("column") or "").strip()
+        reason = " ".join(str(d.get("reason") or "").split())[:180]
+        if not col and not reason:
+            continue
+        row = d.get("row")
+        where = f"{col} (row {row})" if col and row else col or f"row {row}"
+        entry = f"{where}: {reason}" if reason else where
+        if entry not in seen:
+            seen.append(entry)
+        if len(seen) >= limit:
+            break
+    if not seen:
+        return ""
+    return " — " + "; ".join(seen)
+
+
 def reject_on_strict_policy(
     policy: str | None,
     rejected_details: list[dict[str, Any]] | None,
@@ -910,6 +939,7 @@ def reject_on_strict_policy(
         return (
             f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
             f"Migration Risk Contract abort policy blocks partial write{scope_note}"
+            f"{summarize_reject_findings(details)}"
         )
 
     if details and rejected_details_are_continue_contract_only(details):
@@ -926,6 +956,7 @@ def reject_on_strict_policy(
             return (
                 f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
                 "strict error policy blocks partial write"
+                f"{summarize_reject_findings(details)}"
             )
         if errs:
             return f"Transform errors: {'; '.join(errs[:3])}"

@@ -59,6 +59,32 @@ def is_missing_sentinel(value: Any) -> bool:
     return value is Missing or value == DF_MISSING_SENTINEL
 
 
+# Wire spellings that mean "no value here" — a DuckDB reader adds its own.
+NULL_WIRE_SENTINELS: frozenset[str] = frozenset(
+    {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL, "__df_ddb_null__"}
+)
+
+
+def is_null_evidence(value: Any) -> bool:
+    """True when a cell carries no type evidence (NULL / absent / blank)."""
+    if value is None or value is Missing:
+        return True
+    text = str(value).strip()
+    return not text or text in NULL_WIRE_SENTINELS
+
+
+def evidence_samples(values: Any, *, limit: int | None = None) -> list[str]:
+    """Sample values usable as type evidence.
+
+    A NULL is the *absence* of evidence, never evidence of text. Feeding the
+    wire sentinel to inference made an all-NULL ``DECIMAL(7,3)`` column look
+    like non-numeric strings, so Map invented a lossy ``<col>_text`` LONGTEXT
+    destination for a column whose declared type was perfectly representable.
+    """
+    out = [str(v).strip() for v in (values or []) if not is_null_evidence(v)]
+    return out[:limit] if limit else out
+
+
 def public_mapped_cell(value: Any, *, dense_null: bool = False) -> Any:
     """Normalize a mapped cell for public / writer consumption.
 

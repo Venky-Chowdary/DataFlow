@@ -40,14 +40,26 @@ _TYPED_TRANSFORM_TARGET_TYPE: dict[str, str] = {
 
 
 def _canonicalize_schema_rows(schemas: list[dict] | None) -> list[dict] | None:
-    """Prefer native_type / parametric carriers over collapsed VARCHAR labels."""
+    """Prefer native_type / parametric carriers over collapsed VARCHAR labels.
+
+    Also drops NULL wire sentinels from the sample evidence: an all-NULL
+    ``DECIMAL(7,3)`` column arrived carrying ``__DF_SQL_NULL__`` strings, which
+    read as non-numeric text and made Map invent a lossy ``<col>_text``
+    LONGTEXT destination instead of honouring the declared numeric type.
+    """
+    from services.value_serializer import evidence_samples
+
     if not schemas:
         return schemas
     out: list[dict] = []
     for s in schemas:
         raw = s.get("native_type") or s.get("inferred_type") or "VARCHAR"
         carrier = ddl_carrier_type(str(raw))
-        out.append({**s, "inferred_type": carrier})
+        out.append({
+            **s,
+            "inferred_type": carrier,
+            "samples": evidence_samples(s.get("samples")),
+        })
     return out
 
 
@@ -466,6 +478,11 @@ def run_mapping_pipeline(
 
     if source_samples and source_columns:
         from services.data_profiler import merge_profiler_schema, profile_dataset
+        from services.value_serializer import evidence_samples
+
+        source_samples = {
+            col: evidence_samples(vals) for col, vals in source_samples.items()
+        }
 
         max_len = max((len(v) for v in source_samples.values()), default=0)
         profile_rows: list[dict] = []
