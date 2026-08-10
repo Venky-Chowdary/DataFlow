@@ -103,6 +103,10 @@ import {
   type MappingTransform,
 } from "../lib/mapping";
 import {
+  carryOperatorDecisions,
+  holdOutRowsAndContinue,
+} from "../lib/mappingDecisions";
+import {
   Connector,
   EnhancedAnalysis,
   ParsedUpload,
@@ -281,6 +285,10 @@ export function TransferPage({
   /** Per-stream cursor/PK when source lists multiple tables (comma-separated). */
   const [streamFields, setStreamFields] = useState<Record<string, StreamFieldContract>>({});
   const [columnMappings, setColumnMappings] = useState<EditableMapping[]>([]);
+  // Regeneration (step change, dest schema reload) must not wipe operator
+  // approvals — carryOperatorDecisions replays them by decision fingerprint.
+  const columnMappingsRef = useRef<EditableMapping[]>([]);
+  columnMappingsRef.current = columnMappings;
   /** Per-stream column mappings when source lists multiple tables. */
   const [streamMappings, setStreamMappings] = useState<Record<string, EditableMapping[]>>({});
   const [mapActiveStream, setMapActiveStream] = useState<string | null>(null);
@@ -1116,8 +1124,12 @@ export function TransferPage({
         proof: import("../components/MappingProofDrawer").MappingProof | null,
       ) => {
         if (gen !== mappingGenRef.current) return next;
+        const prior = columnMappingsRef.current;
         if (!next.length && sourceCols.length) {
-          const identity = buildMappingsFromSource(analysisCols, targetCols);
+          const identity = carryOperatorDecisions(
+            buildMappingsFromSource(analysisCols, targetCols),
+            prior,
+          );
           if (identity.length) {
             setColumnMappings(identity);
             setLlmMappingUsed(false);
@@ -1125,10 +1137,11 @@ export function TransferPage({
             return identity;
           }
         }
-        setColumnMappings(next);
+        const carried = carryOperatorDecisions(next, prior);
+        setColumnMappings(carried);
         setLlmMappingUsed(llmUsed);
         setMappingProof(proof);
-        return next;
+        return carried;
       };
       try {
         // Prefer direct map when fresh dest schema is in-hand — plan persistence
@@ -2690,6 +2703,37 @@ export function TransferPage({
 
   const approveAllMappings = () => {
     setColumnMappings((prev) => approveMappingsHonestly(prev));
+  };
+
+  /**
+   * Validate's forward door — sign holdout Risk Contracts in place and re-run,
+   * instead of bouncing to Map. Failing rows go to the DLQ for replay; nothing
+   * is written lossily and nothing is silently dropped.
+   */
+  const holdOutRowsAndRevalidate = async () => {
+    const { mappings: next, signed } = holdOutRowsAndContinue(columnMappings, {
+      rowsSampled: parsed?.data?.length ?? parsed?.sample_data?.length ?? 0,
+      estimatedRows: parsed?.row_count ?? sourceRowEstimate ?? null,
+      planId: persistedPlanId || undefined,
+      table: targetCollection || "",
+    });
+    if (!signed.length) {
+      toast({
+        title: "Nothing to hold out",
+        message: "No column is blocking on unacknowledged fidelity risk.",
+        tone: "warning",
+      });
+      return;
+    }
+    setColumnMappings(next);
+    toast({
+      title: "Running with rows held out",
+      message: `Signed a quarantine Risk Contract for ${signed.length} column(s): ${signed
+        .slice(0, 3)
+        .join(", ")}${signed.length > 3 ? "…" : ""}. Failing rows go to quarantine for replay — re-validating…`,
+      tone: "success",
+    });
+    await executePreflight(next);
   };
 
   const approveAllAndPreflight = async () => {
@@ -5738,6 +5782,8 @@ export function TransferPage({
             onRunPreflight={() => void executePreflight()}
             onApproveMappings={() => void approveAllAndPreflight()}
             onOpenMapForRisk={() => setStep(STEP_MAP)}
+            onHoldOutRows={() => void holdOutRowsAndRevalidate()}
+            holdingOutRows={preflighting}
             onExecute={() => void executeTransfer()}
             onOpenJobTheater={openJobTheater}
             onSaveAsContract={() => void handleSaveAsContract()}

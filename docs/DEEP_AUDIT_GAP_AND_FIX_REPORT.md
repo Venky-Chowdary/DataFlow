@@ -1323,6 +1323,8 @@ Every route is classified `written` / `blocked_at_validate` / `failed_at_write` 
 | Before this cycle (`matrix_run.log`) | 1/32 | 22 | **9** |
 | After shared-path fixes (`matrix_run11.log`) | 16/32 | 14 | **2** |
 | After the append collision probe (`matrix_run12.log`) | 16/32 | 16 | **0** |
+| With Gate-8 append delta proof, before the streaming pre-count | 13/32 | 16 | **3** |
+| After the streaming pre-count (`matrix_run13.log`) | 16/32 | 16 | **0** |
 
 **`failed_at_write` is now 0.** No route reaches Execute with a blocker that Validate
 could have proven. The 16 blocks are honest refusals (mapping confidence floor, ObjectId /
@@ -1343,8 +1345,19 @@ key-addressed destinations, unsigned Risk Contract) — not silent passes. Raisi
 | Healthy append reported as checksum failure | batch digest compared against whole-table digest | `checksum_scope="whole_table_not_comparable"`, `assurance_level="row_count"` |
 | PG keyed read-back "unproven" | `bigint = text` in the read-back predicate | `CAST(pk AS text) = ANY(%s)` |
 | **Append aborted on `duplicate key value violates unique constraint`** | G6 only probed duplicates *within* the batch, never against rows already at rest | `services/destination_key_collision_probe.py` + G6 block |
+| Streamed append reported "delta unverified" although the rows landed | the pre-write count was captured only in the buffered writer; file and DB streaming call the batch writer directly | `dest_precount.precount_table` stamped in `file_stream` / `stream` before the first batch (skipped on resume, where the count is no longer a "before") |
 
-### 23.4 Append collision probe
+### 23.4 Append delta proof
+
+`target_rows >= expected_rows` is not a proof for append: a table that already held 30
+rows satisfies it even if the writer appended nothing. Gate-8 therefore requires the
+delta `rows_after - rows_before == expected_rows`, which needs the cardinality taken
+*before* the writer runs (`services/dest_precount.py`, one query per destination family).
+When that count is unavailable the report degrades to `assurance_level="none"` instead of
+reporting an unproven append as verified. On resume the destination already holds rows
+this job wrote, so no count is stamped and the delta stays honestly unproven.
+
+### 23.5 Append collision probe
 
 `probe_append_key_collisions` runs only when the write can actually collide: an
 append-family sync mode, a destination table that already exists, and a **single-column**

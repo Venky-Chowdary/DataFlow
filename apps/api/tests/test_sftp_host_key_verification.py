@@ -100,3 +100,29 @@ def test_explicit_insecure_policy_is_the_only_bypass(server_key):
     verify_host_key(
         _cfg(host_key_policy="insecure_ignore"), _FakeTransport(server_key)
     )
+
+
+def _md5_fingerprint(key) -> str:
+    import hashlib
+
+    digest = hashlib.md5(key.asbytes()).hexdigest()
+    return ":".join(digest[i : i + 2] for i in range(0, len(digest), 2))
+
+
+def test_md5_pin_is_refused_even_when_it_matches(server_key):
+    """MD5 is chosen-prefix broken, so a matching MD5 pin proves nothing."""
+    with pytest.raises(RuntimeError) as exc:
+        verify_host_key(
+            _cfg(host_key=f"MD5:{_md5_fingerprint(server_key)}"),
+            _FakeTransport(server_key),
+        )
+    assert "MD5" in str(exc.value)
+    assert host_key_fingerprint(server_key) in str(exc.value)
+
+
+def test_bare_md5_hex_pin_is_refused(server_key):
+    with pytest.raises(RuntimeError) as exc:
+        verify_host_key(
+            _cfg(host_key=_md5_fingerprint(server_key)), _FakeTransport(server_key)
+        )
+    assert "MD5" in str(exc.value)

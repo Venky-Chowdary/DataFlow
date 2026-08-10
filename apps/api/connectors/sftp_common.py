@@ -8,6 +8,7 @@ import hashlib
 import logging
 import os
 import re
+from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlparse
 
@@ -51,6 +52,22 @@ def _default_port(scheme: str) -> int:
     return 22 if scheme in ("sftp", "ssh", "") else 22
 
 
+def host_key_settings(source: Mapping[str, Any]) -> dict[str, str]:
+    """Host-key trust settings lifted out of a connection config.
+
+    Every path that rebuilds an ``SFTPConfig`` (writer, connection test,
+    Gate-8 read-back, destination sample) must carry these through: dropping
+    them silently downgrades that connection to "no pinned key", so a route the
+    operator pinned would verify on write and fall back to ``known_hosts`` (or
+    fail) when read back.
+    """
+    return {
+        "host_key": str(source.get("host_key") or ""),
+        "known_hosts": str(source.get("known_hosts") or ""),
+        "host_key_policy": str(source.get("host_key_policy") or ""),
+    }
+
+
 def parse_sftp_config(
     *,
     connection_string: str = "",
@@ -72,9 +89,14 @@ def parse_sftp_config(
     """Merge explicit fields with an sftp:// URI."""
     cfg = SFTPConfig()
     cfg.private_key_passphrase = (private_key_passphrase or "").strip()
-    cfg.host_key = (host_key or "").strip()
+    # Saved connectors do not carry host-key trust yet, so the environment is
+    # the reachable control for it; an inline value still wins when a caller
+    # (endpoint extra, request field) supplies one.
+    cfg.host_key = (host_key or os.getenv("DATAFLOW_SFTP_HOST_KEY", "")).strip()
     cfg.known_hosts = (known_hosts or os.getenv("DATAFLOW_SFTP_KNOWN_HOSTS", "")).strip()
-    cfg.host_key_policy = (host_key_policy or "").strip().lower()
+    cfg.host_key_policy = (
+        host_key_policy or os.getenv("DATAFLOW_SFTP_HOST_KEY_POLICY", "")
+    ).strip().lower()
     raw = (connection_string or "").strip()
 
     if raw:
@@ -137,12 +159,18 @@ def _pinned_host_key_matches(pinned: str, server_key: Any) -> bool:
     if token.upper().startswith("SHA256:"):
         want = token.split(":", 1)[1].strip().rstrip("=")
         return host_key_fingerprint(server_key).split(":", 1)[1] == want
-    if token.upper().startswith("MD5:") or re.fullmatch(r"(?:[0-9a-fA-F]{2}:){15}[0-9a-fA-F]{2}", token):
-        # Legacy MD5 fingerprint — accepted for pinning parity with OpenSSH
-        # clients, but it is not collision resistant; prefer SHA256.
-        want = token.split(":", 1)[1] if token.upper().startswith("MD5:") else token
-        got = hashlib.md5(server_key.asbytes()).hexdigest()  # nosec B324
-        return want.replace(":", "").lower() == got
+    if token.upper().startswith("MD5:") or re.fullmatch(
+        r"(?:[0-9a-fA-F]{2}:){15}[0-9a-fA-F]{2}", token
+    ):
+        # MD5 is chosen-prefix collision broken, so an MD5 fingerprint cannot
+        # bind a host key: an attacker able to MITM can present a colliding key
+        # that satisfies the pin. Refuse rather than pretend the transport is
+        # verified — the operator is told exactly what to pin instead.
+        raise RuntimeError(
+            "SFTP host key pin uses an MD5 fingerprint, which is not collision "
+            "resistant and cannot authenticate a host key. Re-pin with the "
+            f"SHA256 fingerprint the server presented: {host_key_fingerprint(server_key)}"
+        )
     # OpenSSH ``known_hosts``-style line or a bare base64 key blob.
     blob = token.split()[-1] if " " in token else token
     try:
@@ -207,9 +235,10 @@ def verify_host_key(cfg: SFTPConfig, transport: Any) -> None:
     raise RuntimeError(
         f"SFTP host key for {cfg.host}:{cfg.port} is not trusted "
         f"({server_key.get_name()} {host_key_fingerprint(server_key)}). Pin it "
-        "via the connection's host_key field, add it to a known_hosts file "
-        "(DATAFLOW_SFTP_KNOWN_HOSTS), or set host_key_policy=insecure_ignore "
-        "to accept an unverified transport."
+        "with DATAFLOW_SFTP_HOST_KEY, add it to a known_hosts file "
+        "(DATAFLOW_SFTP_KNOWN_HOSTS), or set "
+        "DATAFLOW_SFTP_HOST_KEY_POLICY=insecure_ignore to accept an "
+        "unverified transport."
     )
 
 
@@ -292,9 +321,17 @@ def test_sftp(
     service_account: str = "",
     api_key: str = "",
     private_key: str = "",
+    host_key: str = "",
+    known_hosts: str = "",
+    host_key_policy: str = "",
     **_kwargs: Any,
 ) -> tuple[bool, str]:
-    """Verify SFTP connectivity and optional directory access."""
+    """Verify SFTP connectivity and optional directory access.
+
+    Host-key settings are forwarded so the test proves the *same* trust the
+    transfer will use — a test that verified under looser trust than the write
+    is worse than no test.
+    """
     try:
         cfg = parse_sftp_config(
             connection_string=connection_string,
@@ -307,6 +344,9 @@ def test_sftp(
             service_account=service_account,
             api_key=api_key,
             private_key=private_key,
+            host_key=host_key,
+            known_hosts=known_hosts,
+            host_key_policy=host_key_policy,
         )
         if not cfg.host:
             return False, "SFTP host is required. Use an sftp:// URL or the host/port fields."

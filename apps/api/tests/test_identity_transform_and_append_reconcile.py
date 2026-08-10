@@ -74,7 +74,7 @@ def test_family_parse_guard_counts_as_passthrough() -> None:
     assert _is_passthrough_transform("trim", "double", "double") is False
 
 
-def test_append_into_non_empty_table_passes_on_row_count_only() -> None:
+def test_append_into_non_empty_table_passes_on_proven_delta() -> None:
     report = reconcile(
         source_rows=15,
         target_rows=30,
@@ -82,6 +82,7 @@ def test_append_into_non_empty_table_passes_on_row_count_only() -> None:
         target_checksum="bbb",
         allow_extra_rows=True,
         strict_checksum=False,
+        target_rows_before=15,
     )
     assert report.passed is True
     assert report.assurance_level == "row_count"
@@ -90,6 +91,39 @@ def test_append_into_non_empty_table_passes_on_row_count_only() -> None:
     assert stamped["passed"] is True
     assert stamped["phase"] == "post_write_row_count"
     assert stamped["migration_proven"] is False
+
+
+def test_append_without_pre_write_count_is_not_verified() -> None:
+    # 30 >= 15 is satisfied by the rows that were already there; nothing proves
+    # this job appended anything, so Gate-8 must not report a verified count.
+    report = reconcile(
+        source_rows=15,
+        target_rows=30,
+        source_checksum="aaa",
+        target_checksum="bbb",
+        allow_extra_rows=True,
+        strict_checksum=False,
+    )
+    assert report.passed is False
+    assert report.assurance_level == "none"
+    assert "unverified" in report.message.lower()
+    assert report.to_dict()["migration_proven"] is False
+
+
+def test_append_delta_short_of_expected_fails() -> None:
+    # Table grew by 5, not the 15 rows the batch claimed to append.
+    report = reconcile(
+        source_rows=15,
+        target_rows=30,
+        source_checksum="aaa",
+        target_checksum="bbb",
+        allow_extra_rows=True,
+        strict_checksum=False,
+        target_rows_before=25,
+    )
+    assert report.passed is False
+    assert report.assurance_level == "none"
+    assert "delta mismatch" in report.message.lower()
 
 
 def test_strict_mode_still_fails_incomparable_append() -> None:

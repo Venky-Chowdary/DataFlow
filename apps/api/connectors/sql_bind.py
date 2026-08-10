@@ -2220,7 +2220,7 @@ def normalize_sql_bind_value(
         } or eng.startswith("postgres")
         return coerce_set_wire(value, ddl_type=ddl_type, as_list=pg_set_list)
 
-    temporal = coerce_sql_temporal(value, ddl_type)
+    temporal = coerce_sql_temporal(value, ddl_type, engine=eng)
     if temporal is not value:
         return temporal
 

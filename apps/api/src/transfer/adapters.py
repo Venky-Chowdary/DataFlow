@@ -40,6 +40,8 @@ except (
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.value_serializer import cell_to_string, json_default
 
+from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
+
 from .connector_registry import run_probe
 from .models import EndpointConfig
 from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
@@ -399,86 +401,6 @@ def _find_implicit_connector_id(
     return None
 
 
-def _is_masked_secret(value: Any) -> bool:
-    """True when a credential value is empty, placeholder, or redacted."""
-    if value is None:
-        return True
-    if isinstance(value, str):
-        v = value.strip()
-        if not v or v == "****":
-            return True
-        if "****" in v or "<redacted>" in v.lower():
-            return True
-    return False
-
-
-def _sync_credentials_into_connection_string(cfg: dict[str, Any]) -> None:
-    """Rewrite a SQL URL so its embedded user/password match explicit fields.
-
-    Generic SQLAlchemy paths (introspection, duplicate-key probes, schema drift)
-    build the engine from the ``connection_string`` and do not merge an explicit
-    ``password`` field. If a saved connector has a stale URL password but a fresh
-    ``password`` field, the connector Test can pass while Validate/Run fail.
-    Synchronizing the URL keeps every code path consistent.
-    """
-    cstr = (cfg.get("connection_string") or "").strip()
-    password = cfg.get("password") or ""
-    username = cfg.get("username") or ""
-    if not cstr or _is_masked_secret(cstr) or _is_masked_secret(password):
-        return
-
-    family = (cfg.get("type") or cfg.get("format") or "").lower()
-    sql_families = {
-        "mysql",
-        "mariadb",
-        "postgresql",
-        "postgres",
-        "redshift",
-        "cockroachdb",
-        "timescaledb",
-        "aurora",
-        "amazon_aurora",
-        "azure_database_for_mysql",
-        "google_cloud_sql_mysql",
-        "amazon_rds_mysql",
-        "generic_sql",
-    }
-    if family not in sql_families:
-        return
-
-    from connectors.sql_dsn import normalize_sql_dsn
-    from urllib.parse import quote, unquote, urlparse, urlunparse
-
-    normalized = normalize_sql_dsn(cstr, family=family)
-    if "://" not in normalized:
-        return
-    parsed = urlparse(normalized)
-    if not parsed.hostname:
-        return
-    old_user = unquote(parsed.username or "")
-    old_pass = unquote(parsed.password or "")
-    # Only update if the explicit password is different or the explicit username
-    # differs and is non-empty. Keep the connection string's host/port/path/query.
-    new_user = username or old_user
-    new_pass = password or old_pass
-    if str(new_user) == old_user and str(new_pass) == old_pass:
-        return
-    if not new_pass:
-        return
-
-    def _q(value: str) -> str:
-        return quote(value, safe="") if value else ""
-
-    host_part = parsed.hostname
-    if parsed.port:
-        host_part = f"{host_part}:{parsed.port}"
-    if new_user:
-        netloc = f"{_q(new_user)}:{_q(new_pass)}@{host_part}"
-    else:
-        netloc = f":{_q(new_pass)}@{host_part}"
-    cfg["connection_string"] = urlunparse(parsed._replace(netloc=netloc))
-
-
 def resolve_connector_config(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> dict[str, Any]:
@@ -577,37 +499,13 @@ def resolve_connector_config(
         conn_dict = _lookup_saved_connector(connector_id, workspace_id=workspace_id)
         if not conn_dict:
             raise ValueError(f"Connector {connector_id} not found")
-        # Inline values take precedence over a saved connector so users can override
-        # per transfer.  The UI uses "test_db" as an empty placeholder default, so
-        # treat it like an empty database name.
-        inline_database = cfg.get("database") or ""
-        if inline_database and inline_database not in ("test_db", "test"):
-            chosen_database = inline_database
-        else:
-            saved_database = conn_dict.get("database") or ""
-            if fmt == "mongodb" and not saved_database:
-                from connectors.mongodb_common import mongodb_database_from_uri
+        from services.destination_identity import resolve_saved_vs_inline
 
-                saved_database = (
-                    mongodb_database_from_uri(conn_dict.get("connection_string", ""))
-                    or ""
-                )
-            chosen_database = saved_database or inline_database
-
-        def _is_masked(value: Any) -> bool:
-            if value is None:
-                return True
-            if isinstance(value, str):
-                v = value.strip()
-                if not v or v == "****":
-                    return True
-                # Masked connection strings keep the host but hide the password.
-                if "****" in v or "<redacted>" in v.lower():
-                    return True
-            return False
+        identity = resolve_saved_vs_inline(cfg, conn_dict, fmt=fmt)
+        chosen_database = identity.database
 
         def _pick(inline: Any, saved: Any, sensitive: bool = False) -> Any:
-            if sensitive and _is_masked(inline):
+            if sensitive and is_masked_secret(inline):
                 return saved if saved is not None else ""
             return (
                 inline
@@ -663,7 +561,8 @@ def resolve_connector_config(
         for key, value in {**cfg, **conn_dict}.items():
             if key not in merged_cfg:
                 merged_cfg[key] = value
-        _sync_credentials_into_connection_string(merged_cfg)
+        merged_cfg["destination_identity"] = identity.as_dict()
+        sync_credentials_into_connection_string(merged_cfg)
         cfg = merged_cfg
     # Stamp connector_id so CDC fingerprints / incremental snapshots match adapters.
     if connector_id:
@@ -692,7 +591,7 @@ def resolve_connector_config(
         )
     # Ensure generic SQLAlchemy paths (introspection, schema drift, duplicate-key
     # probes) use the same credentials as the explicit user/pass fields.
-    _sync_credentials_into_connection_string(cfg)
+    sync_credentials_into_connection_string(cfg)
     return cfg
 
 
@@ -1463,6 +1362,32 @@ def write_destination_database(
     columns: list[str],
     schema: dict[str, str],
     mappings: list[dict],
+    **options: Any,
+) -> tuple[int, list[str], dict]:
+    """Write to a database destination, stamping the pre-write row count.
+
+    Gate-8 cannot prove an append into a non-empty table from the final count
+    alone, so the count is taken here — before the writer runs — and carried on
+    the destination summary for ``reconcile()`` to check the delta against.
+    Keyword options are forwarded verbatim to ``_write_destination_database``.
+    """
+    from services.dest_precount import PRECOUNT_KEY, precount_destination
+
+    rows_before = precount_destination(endpoint, resolve_connector_config(endpoint))
+    rows_written, ddl_log, summary = _write_destination_database(
+        endpoint, records, columns, schema, mappings, **options
+    )
+    if rows_before is not None and isinstance(summary, dict):
+        summary.setdefault(PRECOUNT_KEY, int(rows_before))
+    return rows_written, ddl_log, summary
+
+
+def _write_destination_database(
+    endpoint: EndpointConfig,
+    records: list[dict],
+    columns: list[str],
+    schema: dict[str, str],
+    mappings: list[dict],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
     validation_mode: str = "strict",
     backfill_new_fields: bool = False,
@@ -1925,8 +1850,10 @@ def write_destination_database(
         )
 
     if db_type == "sftp":
+        from connectors.sftp_common import host_key_settings
         from connectors.sftp_writer import write_mapped_rows
 
+        common.update(host_key_settings(cfg))
         for col in columns:
             ddl_log.append(f"SFTP FIELD {col}")
         if (

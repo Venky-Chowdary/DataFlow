@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 _MYSQL_SCHEMES = frozenset({"mysql", "mysql+pymysql", "mariadb"})
 _PG_SCHEMES = frozenset({"postgresql", "postgres", "postgresql+psycopg2", "pgsql"})
@@ -197,3 +197,81 @@ def private_cloud_host_hint(host: str = "", connection_string: str = "") -> str:
             "Use the provider's public proxy host and port unless Datawrap is running on that same private network."
         )
     return ""
+
+
+def is_masked_secret(value: Any) -> bool:
+    """True when a credential value is empty, placeholder, or redacted."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        v = value.strip()
+        if not v or v == "****":
+            return True
+        if "****" in v or "<redacted>" in v.lower():
+            return True
+    return False
+
+
+def sync_credentials_into_connection_string(cfg: dict[str, Any]) -> None:
+    """Rewrite a SQL URL so its embedded user/password match explicit fields.
+
+    Generic SQLAlchemy paths (introspection, duplicate-key probes, schema drift)
+    build the engine from the ``connection_string`` and do not merge an explicit
+    ``password`` field. If a saved connector has a stale URL password but a fresh
+    ``password`` field, the connector Test can pass while Validate/Run fail.
+    Synchronizing the URL keeps every code path consistent.
+    """
+    cstr = (cfg.get("connection_string") or "").strip()
+    password = cfg.get("password") or ""
+    username = cfg.get("username") or ""
+    if not cstr or is_masked_secret(cstr) or is_masked_secret(password):
+        return
+
+    family = (cfg.get("type") or cfg.get("format") or "").lower()
+    sql_families = {
+        "mysql",
+        "mariadb",
+        "postgresql",
+        "postgres",
+        "redshift",
+        "cockroachdb",
+        "timescaledb",
+        "aurora",
+        "amazon_aurora",
+        "azure_database_for_mysql",
+        "google_cloud_sql_mysql",
+        "amazon_rds_mysql",
+        "generic_sql",
+    }
+    if family not in sql_families:
+        return
+
+
+    normalized = normalize_sql_dsn(cstr, family=family)
+    if "://" not in normalized:
+        return
+    parsed = urlparse(normalized)
+    if not parsed.hostname:
+        return
+    old_user = unquote(parsed.username or "")
+    old_pass = unquote(parsed.password or "")
+    # Only update if the explicit password is different or the explicit username
+    # differs and is non-empty. Keep the connection string's host/port/path/query.
+    new_user = username or old_user
+    new_pass = password or old_pass
+    if str(new_user) == old_user and str(new_pass) == old_pass:
+        return
+    if not new_pass:
+        return
+
+    def _q(value: str) -> str:
+        return quote(value, safe="") if value else ""
+
+    host_part = parsed.hostname
+    if parsed.port:
+        host_part = f"{host_part}:{parsed.port}"
+    if new_user:
+        netloc = f"{_q(new_user)}:{_q(new_pass)}@{host_part}"
+    else:
+        netloc = f":{_q(new_pass)}@{host_part}"
+    cfg["connection_string"] = urlunparse(parsed._replace(netloc=netloc))

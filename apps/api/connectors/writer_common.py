@@ -2747,12 +2747,32 @@ def quarantine_unfit_booleans(
     return out
 
 
+def _mysql_timestamp_range_violation(
+    target_type: str, value: Any, *, dest_db: str = ""
+) -> bool:
+    """True for a MySQL ``TIMESTAMP`` cell outside the 1970..2038 epoch window."""
+    from services.type_system import _normalize_dest_db
+
+    if not dest_db or _normalize_dest_db(dest_db) != "mysql":
+        return False
+    from services.timezone_policy import (
+        is_mysql_timestamp_carrier,
+        mysql_timestamp_out_of_range,
+    )
+
+    if not is_mysql_timestamp_carrier(target_type):
+        return False
+    return mysql_timestamp_out_of_range(value)
+
+
 def quarantine_unfit_temporals(
     mapped_rows: list[tuple],
     target_cols: list[str],
     target_types: list[str],
     rejected_details: list[dict[str, Any]],
     policy: str,
+    *,
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out temporal cells that would invent NULL, lose FSP, or strip TZ.
 
@@ -2760,6 +2780,11 @@ def quarantine_unfit_temporals(
       Arrow / SQL bind parity)
     - ``TIME(6)`` → ``TIME(0)`` truncates fractional seconds
     - Offset-aware / ``Z`` wire into NTZ/DATETIME strips the offset (Airbyte invent)
+    - MySQL ``TIMESTAMP`` outside 1970..2038 — the carrier is an instant, but an
+      epoch-bounded one, so out-of-range values are held out rather than zeroed
+
+    ``dest_db`` decides bare ``TIMESTAMP`` polarity: on MySQL it is a UTC instant
+    carrier, so an offset-bearing wire is *not* a strip and must not quarantine.
     """
 
     from services.type_system import (
@@ -2777,7 +2802,10 @@ def quarantine_unfit_temporals(
         if logical not in {"date", "time", "datetime"}:
             continue
         check_fsp = parse_temporal_fractional_precision(typ) is not None
-        check_tz = logical == "datetime" and datetime_timezone_polarity(typ) == "ntz"
+        check_tz = (
+            logical == "datetime"
+            and datetime_timezone_polarity(typ, dest_db=dest_db) == "ntz"
+        )
         # Always include temporal columns so empty refuse runs even without FSP/TZ.
         temporal_cols.append((i, typ, check_fsp, check_tz))
     if not temporal_cols:
@@ -2803,6 +2831,12 @@ def quarantine_unfit_temporals(
                 reason = (
                     f"fractional seconds exceed destination {typ} "
                     "— quarantined (refuse silent truncate)"
+                )
+            elif _mysql_timestamp_range_violation(typ, raw, dest_db=dest_db):
+                reason = (
+                    f"value outside the MySQL TIMESTAMP epoch range for {typ} "
+                    "— quarantined; map to DATETIME(6) with a UTC-normalize "
+                    "contract to carry instants beyond 2038"
                 )
             elif check_tz and temporal_value_has_timezone(raw):
                 reason = (

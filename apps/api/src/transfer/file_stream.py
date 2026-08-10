@@ -52,6 +52,7 @@ from connectors.writer_common import (
     row_fingerprints,
     transform_error_policy_for_validation_mode,
 )
+from services.dest_precount import PRECOUNT_KEY, precount_table
 from services.reconciliation import FingerprintAccumulator
 
 try:
@@ -852,6 +853,13 @@ def stream_file_to_database(
     chunk_idx = checkpoint.chunk_index or 0
     resumed = chunk_idx > 0 or written > 0
     dest_summary: dict[str, Any] = {}
+    # Gate-8 append proof needs the cardinality from before the first batch. On a
+    # resume the destination already holds rows this job wrote, so the count is
+    # no longer a "before" and the delta stays unproven rather than wrong.
+    if not resumed:
+        rows_before = precount_table(dest_type, dest_cfg, dest_table)
+        if rows_before is not None:
+            dest_summary[PRECOUNT_KEY] = int(rows_before)
     last_checksum = ""
     rejected_total = 0
     coerced_null_total = 0
@@ -1104,7 +1112,12 @@ def stream_file_to_database(
         if isinstance(batch_summary, dict) and batch_summary:
             # Merge batch writer meta; accumulate written_ids across chunks.
             prior_ids = list(dest_summary.get("written_ids") or [])
+            # The pre-write count belongs to the FIRST batch: later batches see
+            # rows this job already appended, which would hide the delta.
+            prior_precount = dest_summary.get(PRECOUNT_KEY)
             dest_summary = dict(batch_summary)
+            if prior_precount is not None:
+                dest_summary[PRECOUNT_KEY] = prior_precount
             batch_ids = list(batch_summary.get("written_ids") or [])
             if prior_ids or batch_ids:
                 merged: list[str] = []

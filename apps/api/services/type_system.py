@@ -3027,9 +3027,13 @@ _TZ_AWARE_DDL: Final[dict[str, str]] = {
     "postgresql": "TIMESTAMPTZ",
     "redshift": "TIMESTAMPTZ",
     "snowflake": "TIMESTAMP_TZ",
-    # MySQL TIMESTAMP is session-TZ — not offset-preserving. Prefer DATETIME(6)
-    # and document UTC-normalize at write rather than invent TIMESTAMPTZ fidelity.
-    "mysql": "DATETIME(6)",
+    # MySQL TIMESTAMP(6) stores UTC and converts on read, so an aware source
+    # keeps its instant in a self-describing carrier. DATETIME(6) would hold the
+    # same digits with no polarity marker — instant only by convention, which is
+    # why that carrier needs a UTC-normalize contract (services.timezone_policy).
+    # TIMESTAMP is epoch-bounded (1970..2038); out-of-range instants are caught
+    # at Validate and quarantined at write, never silently zeroed.
+    "mysql": "TIMESTAMP(6)",
     "sqlserver": "DATETIMEOFFSET",
     "oracle": "TIMESTAMP WITH TIME ZONE",
     "bigquery": "TIMESTAMP",
@@ -3635,20 +3639,12 @@ def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> st
     # destination engine's TIMESTAMP token is an instant (BQ / Databricks).
     if collapsed in {"DATETIME", "TIMESTAMP"} or collapsed.startswith("DATETIME "):
         if collapsed == "TIMESTAMP":
-            db = (dest_db or "").strip().lower()
-            if db in {
-                "bigquery",
-                "bq",
-                "spanner",
-                "google_spanner",
-                "cloud_spanner",
-                "databricks",
-                "spark",
-                "delta",
-                "delta_lake",
-                "databricks_sql",
-                "unity_catalog",
-            }:
+            # MySQL TIMESTAMP is stored as UTC and converted with the session
+            # time_zone, so it is an instant carrier exactly like BigQuery's —
+            # only DATETIME is wall-clock there. See services.timezone_policy.
+            from services.timezone_policy import INSTANT_TIMESTAMP_DIALECTS
+
+            if _normalize_dest_db(dest_db) in INSTANT_TIMESTAMP_DIALECTS:
                 return "ltz"
         return "ntz"
     return None

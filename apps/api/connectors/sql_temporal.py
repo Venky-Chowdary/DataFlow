@@ -228,8 +228,25 @@ def parse_sql_date(value: Any) -> date | None:
     return None
 
 
-def coerce_sql_temporal(value: Any, source_type: str) -> Any:
-    """Coerce a cell to a Python temporal for the given SQL DDL type, else return value."""
+def _is_mysql_engine(engine: str) -> bool:
+    """True for the MySQL family (mariadb/tidb/aurora-mysql all normalize here)."""
+    eng = (engine or "").strip().lower()
+    if not eng:
+        return False
+    from services.type_system import _normalize_dest_db
+
+    return _normalize_dest_db(eng) == "mysql"
+
+
+def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> Any:
+    """Coerce a cell to a Python temporal for the given SQL DDL type, else return value.
+
+    ``engine`` disambiguates the bare ``TIMESTAMP`` token. On MySQL it is an
+    instant carrier (stored UTC, converted with the session ``time_zone``, which
+    writers pin to ``+00:00``), so an offset-bearing wire is converted to UTC
+    rather than having its offset stripped off the civil digits. Everywhere else
+    bare ``TIMESTAMP`` stays wall-clock.
+    """
     base = sql_base_type(source_type)
     # Empty → SQL NULL / MySQL zero-date on upsert wipe. Quarantine owns the cell.
     if base in _TEMPORAL_BASES and isinstance(value, str) and not value.strip():
@@ -237,6 +254,26 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
             f"empty string cannot coerce to {base} — "
             "refuse silent NULL invent (quarantine or remap upstream)"
         )
+    if base == "TIMESTAMP" and _is_mysql_engine(engine):
+        from services.timezone_policy import (
+            MYSQL_TIMESTAMP_MAX,
+            MYSQL_TIMESTAMP_MIN,
+            mysql_timestamp_out_of_range,
+        )
+
+        if mysql_timestamp_out_of_range(value):
+            raise ValueError(
+                "value is outside the MySQL TIMESTAMP epoch range "
+                f"({MYSQL_TIMESTAMP_MIN.date()} .. {MYSQL_TIMESTAMP_MAX.date()}) "
+                "— quarantined; map to DATETIME(6) with a UTC-normalize contract "
+                "to carry instants beyond 2038"
+            )
+        # Session time_zone is pinned to UTC, so a naive UTC bind stores the
+        # same instant the aware wire carried.
+        parsed = parse_sql_datetime(value, aware_utc=True)
+        if parsed is None:
+            return value
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
     if base in {
         "TIMESTAMPTZ",
         "TIMESTAMP_TZ",
@@ -425,9 +462,9 @@ def logical_to_temporal_ddl(logical: str) -> str | None:
     return None
 
 
-def format_wire_value(value: Any, source_type: str) -> str | None:
+def format_wire_value(value: Any, source_type: str, *, engine: str = "") -> str | None:
     """Human-readable form that would bind to MySQL/PG after coerce."""
-    coerced = coerce_sql_temporal(value, source_type)
+    coerced = coerce_sql_temporal(value, source_type, engine=engine)
     base = sql_base_type(source_type)
     if isinstance(coerced, datetime):
         if base == "DATE":
@@ -442,8 +479,12 @@ def format_wire_value(value: Any, source_type: str) -> str | None:
     return None
 
 
-def wire_check_temporal(value: Any, ddl_type: str) -> dict[str, Any]:
+def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[str, Any]:
     """Simulate destination bind for temporal DDL (same helpers writers use).
+
+    ``engine`` must be the destination engine so Validate simulates the *same*
+    bind Execute will run — MySQL ``TIMESTAMP`` is an instant carrier with epoch
+    bounds, and a range violation has to surface here, not at write time.
 
     Returns ``{ok, wire_value, reason, needs_normalize}``.
     ``needs_normalize`` is True when the engine would emit ISO-Z text that
@@ -467,8 +508,8 @@ def wire_check_temporal(value: Any, ddl_type: str) -> dict[str, Any]:
         }
 
     try:
-        coerced = coerce_sql_temporal(value, ddl_type)
-        wire = format_wire_value(value, ddl_type)
+        coerced = coerce_sql_temporal(value, ddl_type, engine=engine)
+        wire = format_wire_value(value, ddl_type, engine=engine)
     except ValueError as exc:
         return {
             "ok": False,

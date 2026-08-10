@@ -20,6 +20,7 @@ from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow
 from typing import Any, Callable, Iterable
 
+from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
     append_row_count_report,
     extra_rows_note,
@@ -540,6 +541,7 @@ def reconcile(
     sample_compare: dict[str, Any] | None = None,
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
+    target_rows_before: int | None = None,
 ) -> ReconciliationReport:
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
     rows_skipped = max(int(rows_skipped or 0), 0)
@@ -626,6 +628,7 @@ def reconcile(
             return append_row_count_report(
                 source_rows=source_rows,
                 target_rows=target_rows,
+                target_rows_before=target_rows_before,
                 expected_rows=expected_rows,
                 source_checksum=source_checksum,
                 target_checksum=target_checksum,
@@ -1496,55 +1499,6 @@ def verify_s3_object(
         return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_sftp_object(
-    *,
-    host: str = "",
-    port: int = 22,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    database: str = "",
-    table_name: str = "",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent SFTP download + parse for Gate-8 (parity with S3/GCS/ADLS)."""
-    try:
-        from connectors.sftp_common import connect_sftp, parse_sftp_config
-
-        cfg = parse_sftp_config(
-            connection_string=connection_string,
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            database=database,
-            table=table_name,
-        )
-        if not cfg.host or not cfg.path:
-            return -1, ""
-        transport, sftp = connect_sftp(cfg)
-        try:
-            with sftp.file(cfg.path, "rb") as fh:
-                body = fh.read()
-        finally:
-            sftp.close()
-            transport.close()
-        rows, headers = _rows_from_object_bytes(body, cfg.path, target_columns)
-        columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(
-            rows,
-            columns,
-            limit=limit,
-            dest_db_type="sftp",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("SFTP reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -3076,6 +3030,8 @@ def verify_target(
             dest_types=dest_types,
         )
     elif db_type == "sftp":
+        from connectors.sftp_common import host_key_settings
+
         count, chk = verify_sftp_object(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 22),
@@ -3087,6 +3043,7 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            **host_key_settings(dest),
         )
     elif db_type in {
         "databricks",
@@ -5858,7 +5815,11 @@ def read_target_sample(
                 conn.close()
 
         if db_type == "sftp":
-            from connectors.sftp_common import connect_sftp, parse_sftp_config
+            from connectors.sftp_common import (
+                connect_sftp,
+                host_key_settings,
+                parse_sftp_config,
+            )
 
             cfg = parse_sftp_config(
                 connection_string=dest.get("connection_string", ""),
@@ -5868,6 +5829,7 @@ def read_target_sample(
                 password=dest.get("password", ""),
                 database=dest.get("database", "") or schema or "",
                 table=table_name,
+                **host_key_settings(dest),
             )
             if not cfg.host or not cfg.path:
                 raise TargetSampleUnavailable(

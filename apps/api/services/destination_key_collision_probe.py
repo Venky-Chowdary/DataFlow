@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from collections.abc import Mapping
 from typing import Any, Literal
 
 from services.source_duplicate_probe import SQLISH_SOURCE_TYPES
@@ -176,7 +177,7 @@ def probe_append_key_collisions(
     sync_mode: str,
     dest_kind: str,
     validation_mode: str,
-    destination_config: dict[str, Any] | None,
+    destination_config: Mapping[str, Any] | None,
     destination_db_type: str,
     destination_table: str,
     destination_table_exists: bool | None,
@@ -246,7 +247,7 @@ def probe_append_key_collisions(
 
 def probe_destination_key_collisions(
     *,
-    destination_config: dict[str, Any] | None = None,
+    destination_config: Mapping[str, Any] | None = None,
     destination_db_type: str = "",
     destination_table: str = "",
     key_column: str = "",

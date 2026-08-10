@@ -15,7 +15,12 @@ from typing import Any
 from services.value_serializer import cell_to_string, json_default
 
 from connectors.object_store_common import resolve_object_store_write_dest_types
-from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
+from connectors.sftp_common import (
+    connect_sftp,
+    host_key_settings,
+    parse_sftp_config,
+    split_remote_path,
+)
 from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
 from connectors.writer_common import (
     _coerced_null_row_count,
@@ -67,6 +72,7 @@ def write_mapped_rows(
         password=password,
         database=database,
         table=table_name,
+        **host_key_settings(_kwargs),
     )
     if not cfg.host:
         return WriteResult(

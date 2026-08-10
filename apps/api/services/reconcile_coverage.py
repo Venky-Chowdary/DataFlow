@@ -30,7 +30,11 @@ def row_count_scope_stamp(out: dict[str, Any]) -> dict[str, Any] | None:
         post_write_pending=False,
         preview=False,
         coverage="row_count",
-        assurance_level="row_count",
+        # An unproven append delta already reported assurance "none"; the scope
+        # stamp must not upgrade it back to "row_count".
+        assurance_level=(
+            "row_count" if out.get("passed") else out.get("assurance_level") or "none"
+        ),
         checksum_match=False,
         population_proof=False,
         migration_proven=False,
@@ -97,33 +101,76 @@ def append_row_count_report(
     coerced_null_rows: int,
     rows_skipped: int,
     sample_compare: dict[str, Any] | None,
+    target_rows_before: int | None = None,
 ) -> Any:
-    """Row-count-level pass for an append into a non-empty destination.
+    """Cardinality verdict for an append into a non-empty destination.
 
-    Cardinality is verified; per-cell fidelity is explicitly *not* claimed, and
-    the operator is told which sync mode would produce full checksum proof.
+    The only cardinality proof available for append is the *delta*:
+    ``target_rows - target_rows_before == expected_rows``. The final count on
+    its own proves nothing — a table that already held more rows than the batch
+    satisfies ``target_rows >= expected_rows`` even if the writer appended
+    nothing. So the delta decides the verdict:
+
+    * delta known and exact — pass at ``row_count`` assurance (per-cell fidelity
+      still not claimed);
+    * delta known and wrong — fail; rows are missing or duplicated;
+    * delta unknown (no pre-write count) — do **not** pass. Report
+      ``assurance_level="none"`` and say the append is unverified rather than
+      printing "row count verified" over an unproven write.
     """
     from services.reconciliation import ReconciliationReport
 
+    common = {
+        "source_rows": source_rows,
+        "target_rows": target_rows,
+        "source_checksum": source_checksum,
+        "target_checksum": target_checksum,
+        "rejected_rows": rejected_rows,
+        "coerced_null_rows": coerced_null_rows,
+        "rows_skipped": rows_skipped,
+        "sample_compare": sample_compare,
+        "checksum_match": False,
+        "population_proof": False,
+        "checksum_scope": WHOLE_TABLE_NOT_COMPARABLE,
+    }
+
+    if target_rows_before is None:
+        return ReconciliationReport(
+            passed=False,
+            message=(
+                "Append delta unverified: destination held an unknown number of "
+                f"rows before this write, so the final count ({target_rows}) "
+                f"cannot prove the {expected_rows} expected row(s) landed. "
+                "Whole-table digests are not comparable for append into "
+                "pre-existing rows. Use overwrite, or upsert with a primary "
+                f"key, for full_checksum proof.{sample_note}"
+            ),
+            assurance_level="none",
+            **common,
+        )
+
+    delta = target_rows - int(target_rows_before)
+    if delta != expected_rows:
+        return ReconciliationReport(
+            passed=False,
+            message=(
+                f"Append delta mismatch: destination held {target_rows_before} "
+                f"row(s) before the write and {target_rows} after — {delta} "
+                f"appended, {expected_rows} expected.{sample_note}"
+            ),
+            assurance_level="none",
+            **common,
+        )
+
     return ReconciliationReport(
         passed=True,
-        source_rows=source_rows,
-        target_rows=target_rows,
-        source_checksum=source_checksum,
-        target_checksum=target_checksum,
         message=(
-            f"Row count verified ({expected_rows} row(s) appended into a "
-            f"non-empty table now holding {target_rows}). Whole-table digests "
-            "are not comparable for append into pre-existing rows — per-cell "
+            f"Append delta verified ({expected_rows} row(s) appended: "
+            f"{target_rows_before} → {target_rows}). Whole-table digests are "
+            "not comparable for append into pre-existing rows — per-cell "
             "fidelity is NOT proven. Use overwrite, or upsert with a primary "
             f"key, for full_checksum proof.{sample_note}"
         ),
-        rejected_rows=rejected_rows,
-        coerced_null_rows=coerced_null_rows,
-        rows_skipped=rows_skipped,
-        sample_compare=sample_compare,
-        checksum_match=False,
-        population_proof=False,
         assurance_level="row_count",
-        checksum_scope=WHOLE_TABLE_NOT_COMPARABLE,
+        **common,
     )

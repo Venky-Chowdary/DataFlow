@@ -302,7 +302,12 @@ def _mysql_materialize_mapped_batch(
         mapped_rows, target_cols, target_types, rejected_details, policy
     )
     mapped_rows = quarantine_unfit_temporals(
-        mapped_rows, target_cols, target_types, rejected_details, policy
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dest_db="mysql",
     )
     mapped_rows = quarantine_unfit_specialty_types(
         mapped_rows, target_cols, target_types, rejected_details, policy

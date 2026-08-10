@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from services.connector_capability_registry import (
 )
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.destination_key_collision_probe import probe_append_key_collisions
+from services.secret_config import RedactedConfig, probe_config_from_endpoint
 from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
     infer_date_locale,
@@ -818,7 +820,7 @@ def run_file_preflight(
     destination_pk_columns: list[str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
-    destination_config: dict[str, Any] | None = None,
+    destination_config: Mapping[str, Any] | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
     date_locale: str = "",
     cursor_fields: list[str] | None = None,
@@ -2222,12 +2224,17 @@ def inspect_destination_for_preflight(
             endpoint_from_saved_connector,
             probe_saved_connector,
         )
+        from services.destination_identity import stamp_destination_identity
 
         ok, msg, cfg = probe_saved_connector(connector_id)
         db_type = (cfg.get("type") or dest_type or "").lower()
         out["db_type"] = db_type
-        out["_saved_cfg"] = cfg
-        out["_probe_cfg"] = cfg
+        # Credentials travel to the collision probe / engine inside a general
+        # metadata dict — carry them redaction-safe so a stray log or response
+        # cannot print the destination password. The privilege probe below still
+        # reads the real values through the mapping interface.
+        out["_saved_cfg"] = RedactedConfig(cfg)
+        out["_probe_cfg"] = RedactedConfig(cfg)
         if not ok:
             out["connected"] = False
             out["message"] = msg or "Destination unreachable"
@@ -2243,6 +2250,7 @@ def inspect_destination_for_preflight(
         if not endpoint:
             out["message"] = f"Connector '{connector_id}' not found"
             return out
+        stamp_destination_identity(out, endpoint)
         # Prefer operator-chosen auth_source override from Studio when present.
         if dest_auth_source:
             endpoint.auth_source = dest_auth_source
@@ -2270,17 +2278,7 @@ def inspect_destination_for_preflight(
             api_key=dest_api_key or "",
             service_account=dest_service_account or "",
         )
-        out["_probe_cfg"] = {
-            "type": db_type,
-            "host": endpoint.host,
-            "port": endpoint.port,
-            "database": endpoint.database,
-            "schema": endpoint.schema,
-            "username": endpoint.username,
-            "password": endpoint.password,
-            "connection_string": endpoint.connection_string,
-            "auth_source": endpoint.auth_source,
-        }
+        out["_probe_cfg"] = probe_config_from_endpoint(db_type, endpoint)
     else:
         out["message"] = "Destination not configured"
         return out

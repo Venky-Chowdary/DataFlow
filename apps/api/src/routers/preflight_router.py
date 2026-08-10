@@ -381,6 +381,16 @@ async def run_preflight(body: PreflightRequest):
                 status_code=500,
                 detail="Could not record acknowledgment audit event — acknowledgment not accepted",
             ) from exc
+    dest_identity = dest_meta.get("destination_identity")
+    if isinstance(dest_identity, dict) and dest_identity.get("database"):
+        # Show the effective destination before Execute — the write must never be
+        # the first place the operator learns which value won.
+        result["destination_identity"] = dest_identity
+        if dest_identity.get("conflict") and dest_identity.get("note"):
+            bucket = result.setdefault("warnings", [])
+            note = str(dest_identity["note"])
+            if note not in bucket:
+                bucket.append(note)
     if source_type_drift:
         # The operator's Map rows disagreed with the live source. Gates already
         # ran on the live truth — say so instead of silently rescoring.

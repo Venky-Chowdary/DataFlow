@@ -10,6 +10,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
+from services.dest_precount import PRECOUNT_KEY
 from services.reconciliation import (
     TargetSampleUnavailable,
     checksum_rows,
@@ -499,6 +500,10 @@ def run_reconciliation(
         not is_overwrite_sync(sync_mode_early)
         and sync_mode_early.lower() not in {"full_refresh_mirror", "mirror", "scd2"}
     )
+    # Pre-write destination cardinality, stamped by the write adapter. Without
+    # it an append into a non-empty table has no cardinality proof at all.
+    raw_before = dest_summary.get(PRECOUNT_KEY)
+    rows_before = int(raw_before) if isinstance(raw_before, int) else None
     written_ids = [
         str(x)
         for x in (dest_summary.get("written_ids") or [])
@@ -838,5 +843,6 @@ def run_reconciliation(
         sample_compare=sample_compare,
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
+        target_rows_before=rows_before,
     )
     return _finalize(report.to_dict())

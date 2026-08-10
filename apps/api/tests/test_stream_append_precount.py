@@ -1,0 +1,104 @@
+"""Streaming writers must stamp the pre-write destination count.
+
+The buffered writer captures it in ``write_destination_database``, but files and
+database sources go through the streaming paths, which call the batch writer
+directly. Without the stamp Gate-8 cannot tell "appended 20 rows" from "table
+already held 20 rows", so every streamed append reported an unproven delta.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+from services.checkpoint_service import CheckpointService
+from services.dest_precount import PRECOUNT_KEY
+from src.transfer.file_stream import stream_file_to_database
+from src.transfer.models import EndpointConfig
+from src.transfer.stream import stream_database_transfer
+
+
+class _FakeMongo:
+    def __init__(self) -> None:
+        self.jobs: dict[str, dict] = {}
+
+    def get_job(self, job_id: str) -> dict | None:
+        return self.jobs.get(job_id)
+
+    def update_job_status(self, job_id: str, status: str, **kwargs: object) -> bool:
+        self.jobs.setdefault(job_id, {}).update(kwargs, status=status)
+        return True
+
+
+ROWS = "id,name\n1,alice\n2,bob\n"
+SCHEMA = {"id": "integer", "name": "string"}
+MAPPINGS = [
+    {"source": "id", "target": "id", "confidence": 0.99},
+    {"source": "name", "target": "name", "confidence": 0.99},
+]
+
+
+def _sqlite_dest(path: Path, table: str) -> EndpointConfig:
+    return EndpointConfig(
+        kind="database", format="sqlite", database=str(path), table=table
+    )
+
+
+def _seed(path: Path, table: str, rows: list[tuple[int, str]]) -> None:
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"CREATE TABLE IF NOT EXISTS {table} (id INTEGER, name TEXT)")
+        conn.executemany(f"INSERT INTO {table} VALUES (?, ?)", rows)
+
+
+def test_file_stream_stamps_precount_of_existing_rows(tmp_path: Path) -> None:
+    db = tmp_path / "dest.db"
+    _seed(db, "landing", [(9, "seed"), (10, "seed")])
+
+    _, _, summary, _ = stream_file_to_database(
+        ROWS.encode(),
+        "rows.csv",
+        _sqlite_dest(db, "landing"),
+        MAPPINGS,
+        SCHEMA,
+        sync_mode="full_refresh_append",
+    )
+
+    assert summary[PRECOUNT_KEY] == 2
+
+
+def test_file_stream_precount_is_zero_for_create_new(tmp_path: Path) -> None:
+    # A table that does not exist yet is a known-empty destination — that is a
+    # proof of the "before" cardinality, not an unknown.
+    db = tmp_path / "dest.db"
+    _, _, summary, _ = stream_file_to_database(
+        ROWS.encode(),
+        "rows.csv",
+        _sqlite_dest(db, "fresh"),
+        MAPPINGS,
+        SCHEMA,
+        sync_mode="full_refresh_append",
+    )
+
+    assert summary[PRECOUNT_KEY] == 0
+
+
+def test_database_stream_stamps_precount(tmp_path: Path) -> None:
+    src_db = tmp_path / "src.db"
+    dst_db = tmp_path / "dst.db"
+    _seed(src_db, "people", [(1, "alice"), (2, "bob")])
+    _seed(dst_db, "people", [(7, "seed")])
+
+    source = EndpointConfig(
+        kind="database", format="sqlite", database=str(src_db), table="people"
+    )
+    _, _, summary, _ = stream_database_transfer(
+        source,
+        _sqlite_dest(dst_db, "people"),
+        MAPPINGS,
+        SCHEMA,
+        sync_mode="full_refresh_append",
+        job_id="0" * 24,
+        checkpoint_service=CheckpointService(_FakeMongo()),
+    )
+
+    assert summary[PRECOUNT_KEY] == 1

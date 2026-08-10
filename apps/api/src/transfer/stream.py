@@ -30,6 +30,7 @@ from connectors.writer_common import (  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
+from services.dest_precount import PRECOUNT_KEY, precount_table
 from services.engine_pool import release_engine
 from services.resilience import (  # noqa: E402, F401
     ResilientBatcher,
@@ -1260,6 +1261,13 @@ def _stream_database_transfer_impl(
     written = checkpoint.rows_processed or 0
     offset = checkpoint.offset or 0
     dest_summary: dict[str, Any] = {}
+    # Gate-8 append proof needs the cardinality from before the first batch. A
+    # resumed run already appended rows, so its count is not a "before" and the
+    # delta stays unproven rather than being reported wrong.
+    if not (written or offset):
+        rows_before = precount_table(dest_type, dest_cfg, dest_table)
+        if rows_before is not None:
+            dest_summary[PRECOUNT_KEY] = int(rows_before)
     last_checksum = ""
     # Phase F1 — accumulate fingerprints during the write pass (avoids double source I/O).
     write_pass_fp = FingerprintAccumulator()

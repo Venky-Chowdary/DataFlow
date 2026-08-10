@@ -429,7 +429,11 @@ def analyze_coercion(
                     val, typ, engine=_d
                 )
             else:
-                wire_check_fn = wire_check_temporal
+                # Validate must simulate the destination engine's bind, not a
+                # generic one (MySQL TIMESTAMP is instant + epoch-bounded).
+                wire_check_fn = lambda val, typ, _d=dest_l: wire_check_temporal(  # noqa: E731
+                    val, typ, engine=_d
+                )
         except ImportError:
             wire_check_fn = None
 

@@ -100,9 +100,18 @@ def endpoint_from_saved_connector(
     schema: str = "",
     database: str = "",
     workspace_id: str | None = None,
+    override_acknowledged: bool = False,
 ):
-    """Build an EndpointConfig from the saved connector (credentials never empty)."""
+    """Build an EndpointConfig from the saved connector (credentials never empty).
+
+    The saved connector owns the destination identity; an inline Studio
+    ``database`` only wins under :mod:`services.destination_identity` precedence,
+    and the outcome is stamped on ``extra['destination_identity']`` so Validate
+    and Execute resolve to the same target and can show the operator which
+    value won.
+    """
     from services.connector_store import get_connector
+    from services.destination_identity import resolve_destination_database
     from src.transfer.models import EndpointConfig
 
     conn = get_connector(connector_id, workspace_id=workspace_id)
@@ -112,13 +121,20 @@ def endpoint_from_saved_connector(
     from services.dialect_profiles import normalize_schema
 
     db_type = (conn.type or "").lower()
+    identity = resolve_destination_database(
+        saved_database=cfg["database"] or "",
+        requested_database=database,
+        db_type=db_type,
+        override_acknowledged=override_acknowledged,
+    )
     return EndpointConfig(
+        extra={"destination_identity": identity.as_dict()},
         kind="database",
         format=db_type,
         connector_id=connector_id,
         host=cfg["host"],
         port=int(cfg["port"] or 0),
-        database=database or cfg["database"] or "",
+        database=identity.database,
         schema=normalize_schema(
             db_type,
             schema or cfg.get("schema") or "",
