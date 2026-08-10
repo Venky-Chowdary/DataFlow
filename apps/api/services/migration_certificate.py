@@ -196,8 +196,43 @@ def _rejected_details(
     return hydrated if len(hydrated) > len(rows) else rows
 
 
+def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
+    """Destination state a row checksum cannot prove, as certificate evidence.
+
+    Today that is generator watermarks: keys can be byte-identical while the
+    destination sequence still points inside the migrated range, so the first
+    application insert after cutover collides.
+    """
+    state = _dict(recon.get("physical_state"))
+    identity = _dict(state.get("identity_watermark"))
+    if not identity:
+        return {
+            "identity_watermark": {
+                "verified": False,
+                "reason": "no generator watermark evidence was captured for this run",
+            }
+        }
+    return {"identity_watermark": identity}
+
+
+def _identity_blockers(physical: dict[str, Any]) -> list[str]:
+    identity = _dict(physical.get("identity_watermark"))
+    collisions = [str(c) for c in identity.get("collisions") or []]
+    if not collisions:
+        return []
+    return [
+        "Destination identity/sequence generator is behind the migrated data on "
+        f"{', '.join(collisions)} - the next application insert will collide on "
+        "the primary key."
+    ]
+
+
 def _verdict(
-    *, pack: dict[str, Any], ledger: dict[str, Any], job_status: str
+    *,
+    pack: dict[str, Any],
+    ledger: dict[str, Any],
+    job_status: str,
+    physical_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Single headline verdict, degraded by the row ledger.
 
@@ -213,6 +248,7 @@ def _verdict(
         blockers.append(str(ledger.get("note") or "row accounting did not balance"))
     for reason in pack.get("proof_incomplete_reasons") or []:
         blockers.append(str(reason))
+    blockers.extend(_identity_blockers(physical_state or {}))
     if job_status and job_status not in ("completed", "succeeded", "success"):
         blockers.append(f"Job status is {job_status!r}, not a completed run.")
 
@@ -257,6 +293,7 @@ def build_migration_certificate(
         expected=_as_int(ledger.get("rows_quarantined")),
     )
     recon = _dict(job.get("reconciliation"))
+    physical = physical_state_findings(recon)
     status = str(job.get("status") or "")
 
     body: dict[str, Any] = {
@@ -277,7 +314,12 @@ def build_migration_certificate(
             "started_at": str(job.get("created_at") or ""),
             "finished_at": str(job.get("updated_at") or ""),
         },
-        "verdict": _verdict(pack=pack, ledger=ledger, job_status=status),
+        "verdict": _verdict(
+            pack=pack,
+            ledger=ledger,
+            job_status=status,
+            physical_state=physical,
+        ),
         "row_accounting": ledger,
         "reconciliation": {
             "passed": bool(recon.get("passed")),
@@ -301,6 +343,7 @@ def build_migration_certificate(
                 "stored payload; it does not re-read the source."
             ),
         },
+        "physical_state": physical,
         "accepted_risks": pack.get("accepted_risks") or [],
         "hashes": pack.get("hashes") or {},
         "connector_versions": pack.get("connector_versions") or {},
@@ -316,6 +359,8 @@ def build_migration_certificate(
             "Referential integrity across the destination population unless a "
             "population orphan scan was run.",
             "Exactly-once delivery — CDC and resume are at-least-once with upsert.",
+            "Indexes, foreign keys, defaults and triggers on the destination — of "
+            "the physical state, only identity/sequence watermarks were inspected.",
             "Any claim about rows this job did not read.",
         ],
     }
@@ -409,6 +454,33 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
     else:
         lines.append(str(burn.get("note") or "Burn-down unavailable."))
     lines += ["", str(quarantine.get("remediation") or ""), ""]
+
+    identity = _dict(_dict(cert.get("physical_state")).get("identity_watermark"))
+    if identity:
+        lines += ["## Destination physical state", ""]
+        if identity.get("supported") is False:
+            lines += [f"- Identity/sequence watermark: {identity.get('reason', '')}", ""]
+        else:
+            for entry in identity.get("checked") or []:
+                col = entry.get("column", "")
+                if not entry.get("available"):
+                    lines.append(f"- `{col}` generator unverified — {entry.get('reason', '')}")
+                    continue
+                state = (
+                    "COLLIDES"
+                    if entry.get("collides")
+                    else ("repaired forward-only" if entry.get("repaired_to") else "ahead of data")
+                )
+                lines.append(
+                    f"- `{col}` {entry.get('mechanism', 'generator')} "
+                    f"`{entry.get('generator', '')}` next={entry.get('next_value')} "
+                    f"max={entry.get('max_value')} — {state}"
+                )
+            if not identity.get("checked"):
+                lines.append(
+                    f"- Identity/sequence watermark not verified — {identity.get('reason', '')}"
+                )
+            lines.append("")
 
     blockers = verdict.get("blockers") or []
     if blockers:

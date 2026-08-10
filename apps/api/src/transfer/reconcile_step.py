@@ -304,6 +304,47 @@ def _maybe_attach_verification_ladder(
     return attach_ladder_to_reconcile_report(report, ladder)
 
 
+def _identity_watermark_evidence(
+    *,
+    db_type: str,
+    cfg: dict[str, Any],
+    schema: str,
+    table: str,
+    pk_cols: list[str],
+) -> dict[str, Any]:
+    """Generator state for the destination keys after the write.
+
+    Row checksums cannot see this: a migration that carries explicit key values
+    leaves Postgres and Oracle generators at their pre-migration value, so the
+    first application insert after cutover collides on the primary key. Repair
+    is forward-only and opt-out via ``identity_watermark_repair``.
+    """
+    from services.identity_watermark import (
+        identity_watermark_supported,
+        verify_identity_watermark,
+    )
+
+    if not (table and pk_cols):
+        return {}
+    if not identity_watermark_supported(db_type):
+        return {
+            "supported": False,
+            "verified": False,
+            "reason": f"generator state is not readable on '{db_type}'",
+        }
+    repair = cfg.get("identity_watermark_repair")
+    evidence = verify_identity_watermark(
+        db_type,
+        cfg,
+        schema=schema or "",
+        table=str(table),
+        columns=pk_cols,
+        repair=True if repair is None else bool(repair),
+    )
+    evidence["supported"] = True
+    return evidence
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -318,6 +359,8 @@ def run_reconciliation(
     source_endpoint: EndpointConfig | None = None,
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
+    # Destination facts a row checksum cannot prove (generator watermarks today).
+    physical_state: dict[str, Any] = {}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
         # Property 3 — carry source snapshot id onto the reconcile report /
@@ -339,6 +382,8 @@ def run_reconciliation(
             logging.getLogger(__name__).warning(
                 "verification ladder skipped: %s", exc, exc_info=exc
             )
+        if physical_state:
+            stamped["physical_state"] = dict(physical_state)
         return stamped
 
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
@@ -442,6 +487,26 @@ def run_reconciliation(
             logging.getLogger(__name__).debug(
                 "Gate-8 identity resolve skipped: %s", exc, exc_info=exc
             )
+    try:
+        identity_state = _identity_watermark_evidence(
+            db_type=db_type,
+            cfg=cfg,
+            schema=str(schema or ""),
+            table=str(table_name or ""),
+            pk_cols=[str(c) for c in pk_cols if c],
+        )
+        if identity_state:
+            physical_state["identity_watermark"] = identity_state
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "identity watermark verification skipped: %s", exc, exc_info=exc
+        )
+        physical_state["identity_watermark"] = {
+            "supported": True,
+            "verified": False,
+            "reason": f"probe failed: {exc}",
+        }
+
     source_checksum = _compute_source_checksum(
         records,
         columns,
