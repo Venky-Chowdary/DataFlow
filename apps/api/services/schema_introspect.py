@@ -204,6 +204,7 @@ def introspect_schema(
             connection_string=connection_string,
             ssl=ssl,
             table=table,
+            strict_namespace=strict_namespace,
         )
     if db_type in ("sqlserver", "mssql", "sql_server", "azure_sql"):
         return _introspect_sqlserver(
@@ -2278,7 +2279,9 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                         sa.text(_oracle_col_sql),
                         {"owner": owner, "table": resolved_table},
                     ).fetchall()
-            if not col_rows:
+            # Destination probes must NOT heal across owners: another schema's
+            # columns would mark a create-new target as already existing.
+            if not col_rows and not bool(kwargs.get("strict_namespace")):
                 found = conn.execute(
                     sa.text(
                         """
