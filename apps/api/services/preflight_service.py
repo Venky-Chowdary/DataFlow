@@ -35,7 +35,7 @@ from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.destination_key_collision_probe import probe_append_key_collisions
 from services.secret_config import RedactedConfig, probe_config_from_endpoint
 from services.preflight_fk_gate import build_fk_block
-from services.source_coverage_gate import build_source_coverage_gate
+from services.destination_requirements_gate import build_mapping_contract_gates
 from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
     infer_date_locale,
@@ -801,6 +801,9 @@ def run_file_preflight(
     validation_mode: str = "strict",
     destination_column_types: dict[str, str] | None = None,
     destination_column_nullability: dict[str, bool] | None = None,
+    destination_column_defaults: dict[str, str] | None = None,
+    destination_identity_columns: list[str] | None = None,
+    destination_generated_columns: list[str] | None = None,
     destination_table_exists: bool | None = None,
     destination_can_create: bool | None = None,
     destination_can_write: bool | None = None,
@@ -1595,26 +1598,26 @@ def run_file_preflight(
     except Exception as vf_exc:
         logger.warning("validation_findings stamp failed: %s", vf_exc, exc_info=vf_exc)
 
-    # Source coverage — every source column is written, declared omitted, or
-    # blocks (see services/source_coverage_gate.py).
-    src_coverage, cov_gate = build_source_coverage_gate(
-        source_columns=list(columns or []), mappings=list(mappings or [])
+    # Mapping contract — every source column accounted for (G13) and every
+    # required destination column filled (G14).
+    src_coverage, contract_gates, contract_blockers = build_mapping_contract_gates(
+        source_columns=list(columns or []),
+        mappings=list(mappings or []),
+        destination_table_exists=destination_table_exists,
+        column_nullability=destination_column_nullability,
+        column_defaults=destination_column_defaults,
+        identity_columns=destination_identity_columns,
+        generated_columns=destination_generated_columns,
     )
     out["source_coverage"] = src_coverage
     if isinstance(out.get("proof_bundle"), dict):
         out["proof_bundle"] = {**out["proof_bundle"], "source_coverage": src_coverage}
-    out["gates"] = [*out["gates"], cov_gate]
-    if cov_gate["status"] == "block":
+    out["gates"] = [*out["gates"], *contract_gates]
+    if contract_blockers:
         out["blockers"] = [
             *out["blockers"],
             *enrich_blockers(
-                [
-                    {
-                        "id": cov_gate["id"],
-                        "message": cov_gate["message"],
-                        "details": cov_gate["details"],
-                    }
-                ],
+                contract_blockers,
                 dest_kind=dest_kind,
                 validation_mode=validation_mode,
             ),
@@ -2200,6 +2203,9 @@ def inspect_destination_for_preflight(
         "can_create_table": False,
         "column_types": {},
         "column_nullability": {},
+        "column_defaults": {},
+        "identity_columns": [],
+        "generated_columns": [],
         "columns": [],
         "db_type": (dest_type or "").lower(),
         "message": "",
@@ -2304,9 +2310,14 @@ def inspect_destination_for_preflight(
     out["columns"] = cols
     out["column_types"] = schema
     out["column_nullability"] = {
-        str(k): bool(v)
-        for k, v in dict(info.get("schema_nullability") or {}).items()
+        str(k): bool(v) for k, v in dict(info.get("schema_nullability") or {}).items()
     }
+    # What fills a required column when the mapping does not (G14).
+    out["column_defaults"] = {
+        str(k): str(v) for k, v in dict(info.get("schema_defaults") or {}).items()
+    }
+    out["identity_columns"] = [str(c) for c in (info.get("identity_columns") or [])]
+    out["generated_columns"] = [str(c) for c in (info.get("generated_columns") or [])]
     # Live UNIQUE / PK catalog — feeds identity uniqueness + append PK enforce.
     out["primary_key_columns"] = list(info.get("primary_key_columns") or [])
     out["unique_keys"] = list(info.get("unique_keys") or [])

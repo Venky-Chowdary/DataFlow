@@ -799,9 +799,16 @@ def _destination_schema_probe(
         # stale shape. Append/upsert keep live nullability for G3 contracts.
         if is_overwrite_sync(sync_mode):
             extra["schema_nullability"] = {}
+            extra["schema_defaults"] = {}
+            extra["identity_columns"] = []
+            extra["generated_columns"] = []
             destination.extra = extra
             return {}, exists
         extra["schema_nullability"] = nullability
+        # Who fills a required column when the mapping does not (G14).
+        extra["schema_defaults"] = dict(info.get("schema_defaults") or {})
+        extra["identity_columns"] = list(info.get("identity_columns") or [])
+        extra["generated_columns"] = list(info.get("generated_columns") or [])
         destination.extra = extra
         return schema, exists
     except Exception as exc:
@@ -816,11 +823,24 @@ def _destination_schema_probe(
             "schema_probe_error": str(exc)[:500],
             "schema_probe_message": str(exc)[:500],
             "schema_nullability": {},
+            "schema_defaults": {},
+            "identity_columns": [],
+            "generated_columns": [],
             "primary_key_columns": [],
             "unique_keys": [],
             "foreign_keys": [],
         }
         return {}, None
+
+
+def _destination_filler_metadata(extra: dict[str, Any] | None) -> dict[str, Any]:
+    """Catalog facts about who fills a destination column when no mapping does (G14)."""
+    meta = dict(extra or {})
+    return {
+        "destination_column_defaults": dict(meta.get("schema_defaults") or {}),
+        "destination_identity_columns": list(meta.get("identity_columns") or []),
+        "destination_generated_columns": list(meta.get("generated_columns") or []),
+    }
 
 
 def _preflight_sample_rows(records: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -2550,6 +2570,7 @@ class UniversalTransferEngine:
                     destination_column_nullability=(
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
+                    **_destination_filler_metadata(request.destination.extra),
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -3593,6 +3614,7 @@ class UniversalTransferEngine:
                     destination_column_nullability=(
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
+                    **_destination_filler_metadata(request.destination.extra),
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -4362,6 +4384,7 @@ class UniversalTransferEngine:
                     destination_column_nullability=(
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
+                    **_destination_filler_metadata(request.destination.extra),
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(

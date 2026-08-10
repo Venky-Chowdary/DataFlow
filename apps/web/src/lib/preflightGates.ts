@@ -67,6 +67,12 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "Every source column is mapped to a destination column or declared an intentional omission — unaccounted columns block instead of being dropped.",
   },
   {
+    id: "g14_destination_requirements",
+    label: "Destination required columns",
+    icon: "layers",
+    rule: "Every NOT NULL destination column is filled by a mapping, a DEFAULT, or an identity/generated value — otherwise the write is refused before it starts.",
+  },
+  {
     id: "constraint_fk",
     label: "Foreign key coverage",
     icon: "shield",

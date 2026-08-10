@@ -34,6 +34,7 @@ HARD_GATE_IDS = {
     "constraint_fk",
     "proof_bundle",
     "g13_source_coverage",
+    "g14_destination_requirements",
 }
 
 SOFT_GATE_IDS = {
@@ -125,6 +126,28 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to account for every column"},
+        ],
+    },
+    "g14_destination_requirements": {
+        "title": "Destination required columns",
+        "category": "hard",
+        "why": (
+            "A destination column that is NOT NULL, has no default and is neither an "
+            "identity nor a generated column can only be filled by a mapping. With "
+            "none, the database rejects the very first row — the operator learns "
+            "from a driver error mid-write instead of from Validate."
+        ),
+        "fix": (
+            "Open Map and give each listed destination column a source mapping or a "
+            "constant/derived value. If the destination should fill it, add a DEFAULT "
+            "or make it an identity column on the destination first."
+        ),
+        "examples": [
+            "Destination `tenant_id BIGINT NOT NULL` with no default and no source column.",
+            "Audit column `created_by NOT NULL` — add a DEFAULT on the destination or map a constant.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to fill required columns"},
         ],
     },
     "g4_mapping_confidence": {

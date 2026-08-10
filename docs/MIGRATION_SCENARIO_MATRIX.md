@@ -34,7 +34,8 @@ Source table: `id` + `c1..c30`. Destination: existing table with `id` + `c1..c20
 |---|----------|-----------|-------|--------|---------|
 | 1.1 | 20 of 30 source columns mapped, remaining 10 **not mentioned at all** | blocked pre-write | blocked pre-write | blocked pre-write | GAP-1 **fixed** |
 | 1.2 | Same, remaining 10 marked `intentional_omit` | written, 5 rows | written, 5 rows | written, 5 rows | GAP-2 **fixed** |
-| 1.3 | Destination has a `NOT NULL` column with no default and no mapping | blocked at write | blocked at write | blocked at write | **GAP-3 — not predicted** |
+| 1.3 | Destination has a `NOT NULL` column with no default and no mapping | blocked pre-write | blocked pre-write | blocked pre-write | GAP-3 **fixed** |
+| 1.3b | Destination `NOT NULL` columns filled by DEFAULT / identity / generated | 5 rows written, job passed | same | same | no false block |
 | 1.4 | Destination has an extra **nullable** column nothing maps into | 5 rows written, job passed | same | same | GAP-4 **fixed** |
 
 Detail:
@@ -54,11 +55,26 @@ Detail:
   Gate-8 read-back projection, and recorded as the operator's decision in the
   proof bundle (`source_coverage.omitted`) instead. Live re-run:
   `/home/ubuntu/repro/gap1_source_coverage_live_results.json`.
-- **1.3** the destination's own `NOT NULL` is what stops the write
-  (`ORA-01400`, MySQL `1364`, PG `not-null constraint`). The outcome is safe —
-  0 rows land — but the operator learns at write time from an engine error
-  instead of at Validate from a gate that says "destination requires
-  `tenant_id`; it has no default and no source mapping".
+- **1.3** the destination's own `NOT NULL` used to be what stopped the write
+  (`ORA-01400`, MySQL `1364`, PG `not-null constraint`): safe — 0 rows land —
+  but the operator learned it from a driver error after approving. Gate
+  `g14_destination_requirements` now refuses at Validate:
+  `1 destination column(s) are NOT NULL with no default and no source mapping:
+  tenant_id — the write would be rejected row 1.` The engine's own rejection
+  stays as the fallback. A column is only treated as filled when the catalog
+  proves a filler: a write mapping, a `DEFAULT`, an identity column or a
+  generated column — an unreadable nullability catalog reports *unmeasured*,
+  never pass. Collecting that proof exposed two further defects: MySQL, SQL
+  Server and Oracle introspection never read `COLUMN_DEFAULT` / `DATA_DEFAULT`
+  at all, and the Oracle column query selected `VIRTUAL_COLUMN` from
+  `ALL_TAB_COLUMNS`, which does not have that column — the query failed with
+  ORA-00904 on every Oracle and silently degraded to an identity-blind
+  fallback, so virtual and identity columns looked like ordinary insertable
+  ones. Live re-run:
+  `/home/ubuntu/repro/gap3_destination_requirements_live_results.json`.
+- **1.3b** guards the other direction: a destination whose required columns are
+  filled by `DEFAULT`, identity or generated values must still run. 5 rows
+  written on all three engines.
 - **1.4** the untouched nullable column was read back by Gate-8 on the
   destination side but had no counterpart on the source side, so the checksums
   differed and the job was marked failed **after** committing 5 rows — a false
@@ -136,8 +152,6 @@ Not produced today, and needed for the scenarios above:
 - a **mapping-shape panel**: source column count vs destination column count,
   mapped pairs, declared omissions, destination-only columns and how each will
   be filled (default / generated / NULL / blocked);
-- a **destination-requirement** verdict at Validate for `NOT NULL`-without-
-  default columns (currently the database is the first thing to object);
 - a Risk-Contract path for accepted-lossy conversions such as 2.3.
 
 ## 6. Gap list (ordered by severity)
@@ -147,7 +161,7 @@ Not produced today, and needed for the scenarios above:
 | GAP-1 | ~~Unmapped source columns are dropped and the run is green~~ **fixed** — `g13_source_coverage` hard gate | Was critical — silent data loss | `services/source_coverage_gate.py` |
 | GAP-4 | ~~Untouched destination columns break Gate-8 checksum *after* rows are committed~~ **fixed** — read-back digests the mapped projection | Was high | `services/readback_projection.py` |
 | GAP-2 | ~~Declared `intentional_omit` columns are transform-checked and refuse the run~~ **fixed** — omissions excluded from every write-path probe | Was high | `services/mapping_constraints.write_mappings` call sites |
-| GAP-3 | Destination `NOT NULL`-without-default is caught by the engine, not predicted | Medium | preflight destination-requirement gate |
+| GAP-3 | ~~Destination `NOT NULL`-without-default is caught by the engine, not predicted~~ **fixed** — `g14_destination_requirements` hard gate | Was medium | `services/destination_requirements_gate.py` |
 | GAP-6 | `TEXT → TEXT` reported as fidelity collapse | Medium — false positive erodes trust | type fidelity classifier |
 | GAP-5 | Oracle `CLOB` not accepted as a JSON carrier | Low | type compatibility table |
 | GAP-7 | No Risk-Contract path for accepted timezone loss | Low | conversion contract wiring |

@@ -932,7 +932,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 cur.execute(
                     """
                     SELECT column_name, column_type, is_nullable, EXTRA,
-                           COLLATION_NAME, CHARACTER_SET_NAME
+                           COLLATION_NAME, CHARACTER_SET_NAME, COLUMN_DEFAULT
                     FROM information_schema.columns
                     WHERE table_schema = %s AND table_name = %s
                     ORDER BY ordinal_position
@@ -944,7 +944,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                     cur.execute(
                         """
                         SELECT column_name, column_type, is_nullable, EXTRA,
-                               COLLATION_NAME, CHARACTER_SET_NAME
+                               COLLATION_NAME, CHARACTER_SET_NAME, COLUMN_DEFAULT
                         FROM information_schema.columns
                         WHERE table_schema = %s AND LOWER(table_name) = LOWER(%s)
                         ORDER BY ordinal_position
@@ -977,7 +977,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         cur.execute(
                             """
                             SELECT column_name, column_type, is_nullable, EXTRA,
-                                   COLLATION_NAME, CHARACTER_SET_NAME
+                                   COLLATION_NAME, CHARACTER_SET_NAME, COLUMN_DEFAULT
                             FROM information_schema.columns
                             WHERE table_schema = %s AND table_name = %s
                             ORDER BY ordinal_position
@@ -1002,10 +1002,14 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         logical = f"{logical} GENERATED ALWAYS"
                     if collation:
                         logical = f"{logical} COLLATE {collation}"
+                    default = row[6] if len(row) > 6 else None
                     columns.append({
                         "name": name,
                         "inferred_type": logical,
                         "nullable": nullable == "YES",
+                        "default": (
+                            str(default) if default is not None else None
+                        ),
                         "is_identity": "auto_increment" in extra,
                         "generation": (
                             "always"
@@ -2267,17 +2271,22 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
             if _ident.exists and _ident.schema:
                 owner = _ident.schema
             # VIRTUAL_COLUMN / IDENTITY_COLUMN — client INSERT must omit ALWAYS.
+            # ALL_TAB_COLS (not ALL_TAB_COLUMNS) is the view that exposes
+            # VIRTUAL_COLUMN; the join used to fail with ORA-00904 on every
+            # Oracle and silently degrade to the identity-blind fallback, so a
+            # virtual or identity column looked like an ordinary insertable one.
             _oracle_col_sql = """
                     SELECT atc.column_name, atc.data_type, atc.data_precision, atc.data_scale,
                            atc.nullable, atc.char_length, atc.char_used,
                            atc.virtual_column, atc.identity_column,
-                           ic.generation_type
-                    FROM all_tab_columns atc
+                           ic.generation_type, atc.data_default
+                    FROM all_tab_cols atc
                     LEFT JOIN all_tab_identity_cols ic
                       ON atc.owner = ic.owner
                      AND atc.table_name = ic.table_name
                      AND atc.column_name = ic.column_name
                     WHERE atc.owner = :owner AND atc.table_name = :table
+                      AND atc.hidden_column = 'NO'
                     ORDER BY atc.column_id
                     """
             try:
@@ -2289,9 +2298,10 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 # Pre-12c / limited grants: fall back without identity join.
                 _oracle_col_sql = """
                     SELECT column_name, data_type, data_precision, data_scale, nullable,
-                           char_length, char_used, virtual_column, 'NO', NULL
-                    FROM all_tab_columns
+                           char_length, char_used, virtual_column, 'NO', NULL, data_default
+                    FROM all_tab_cols
                     WHERE owner = :owner AND table_name = :table
+                      AND hidden_column = 'NO'
                     ORDER BY column_id
                     """
                 try:
@@ -2302,7 +2312,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 except Exception:
                     _oracle_col_sql = """
                         SELECT column_name, data_type, data_precision, data_scale, nullable,
-                               char_length, char_used, 'NO', 'NO', NULL
+                               char_length, char_used, 'NO', 'NO', NULL, data_default
                         FROM all_tab_columns
                         WHERE owner = :owner AND table_name = :table
                         ORDER BY column_id
@@ -2348,6 +2358,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 virtual_col = row[7] if len(row) > 7 else "NO"
                 identity_col = row[8] if len(row) > 8 else "NO"
                 generation = row[9] if len(row) > 9 else None
+                data_default = row[10] if len(row) > 10 else None
                 dtype = str(data_type or "")
                 dtype_u = dtype.upper()
                 if dtype_u == "NUMBER" and precision is not None:
@@ -2379,6 +2390,13 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                         "name": name,
                         "inferred_type": logical,
                         "nullable": str(nullable).upper() == "Y",
+                        "default": (
+                            str(data_default).strip()
+                            if data_default is not None
+                            and str(data_default).strip() not in ("", "NULL")
+                            else None
+                        ),
+                        "is_identity": str(identity_col or "").upper() == "YES",
                         "data_type": dtype,
                     }
                 )
@@ -2494,7 +2512,8 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                       c.CHARACTER_MAXIMUM_LENGTH,
                       c.DATETIME_PRECISION,
                       c.COLLATION_NAME,
-                      c.IS_NULLABLE
+                      c.IS_NULLABLE,
+                      c.COLUMN_DEFAULT
                     FROM INFORMATION_SCHEMA.COLUMNS c
                     WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
                     ORDER BY c.ORDINAL_POSITION
@@ -2531,7 +2550,8 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                               c.CHARACTER_MAXIMUM_LENGTH,
                               c.DATETIME_PRECISION,
                               c.COLLATION_NAME,
-                              c.IS_NULLABLE
+                              c.IS_NULLABLE,
+                              c.COLUMN_DEFAULT
                             FROM INFORMATION_SCHEMA.COLUMNS c
                             WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
                             ORDER BY c.ORDINAL_POSITION
@@ -2543,16 +2563,18 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         schema = found_schema
                         break
             columns: list[dict] = []
-            for (
-                name,
-                data_type,
-                precision,
-                scale,
-                char_len,
-                dt_prec,
-                collation,
-                nullable,
-            ) in col_rows:
+            for row in col_rows:
+                (
+                    name,
+                    data_type,
+                    precision,
+                    scale,
+                    char_len,
+                    dt_prec,
+                    collation,
+                    nullable,
+                ) = tuple(row)[:8]
+                column_default = row[8] if len(row) > 8 else None
                 dtype = str(data_type or "")
                 base = dtype.lower()
                 if base in {"decimal", "numeric"} and precision is not None:
@@ -2581,6 +2603,11 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         "name": name,
                         "inferred_type": logical,
                         "nullable": str(nullable).upper() == "YES",
+                        "default": (
+                            str(column_default)
+                            if column_default is not None
+                            else None
+                        ),
                         "data_type": dtype,
                         "collation": coll,
                     }

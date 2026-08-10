@@ -193,7 +193,7 @@ def test_oracle_cross_owner_recovery():
             return FakeResult([("APP", "JOBS")])
         if "FROM ALL_TABLES" in sql:
             return FakeResult([])
-        if "FROM ALL_TAB_COLUMNS" in sql:
+        if "FROM ALL_TAB_COL" in sql:  # ALL_TAB_COLS / ALL_TAB_COLUMNS
             if params and params.get("owner") == "APP":
                 return FakeResult([
                     ("ID", "VARCHAR2", None, None, "Y"),
