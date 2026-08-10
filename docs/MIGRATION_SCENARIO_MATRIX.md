@@ -222,7 +222,50 @@ rather than connector bugs.
 
 Scenarios deliberately absent from this run, so they must not be claimed:
 generated/identity destination columns, CHECK-constraint rejection on append,
-foreign-key ordering across multiple tables, sequence high-water marks,
+sequence high-water marks,
 SQL Server and SQLite for sections 1–2, warehouse
 and SaaS destinations (credentials not provisioned), and quarantine/replay
 row-count invariants under partial failure.
+
+
+## 8. Foreign keys across a multi-table transfer (measured 2026-08-10)
+
+Harness `foreign_key_live.py`, artifact
+`/home/ubuntu/repro/foreign_key_live_results.json` — 9/9 cases on live
+PostgreSQL 16, MySQL 8, SQL Server 2022 and Oracle Free.
+
+| Case | Engine | Verdict |
+|------|--------|---------|
+| Parent/child, child listed first | PG | parents loaded first; key `carried` after catalog re-read; orphan INSERT rejected |
+| Three-level chain | PG | order `customers → orders → lines`; both keys carried |
+| Self-referential key | PG | carried; the self-reference does not affect ordering |
+| Child rows with no parent | PG | `ALTER` rejected → `integrity_violation`, verdict `referential_integrity_violated` |
+| Referenced table neither transferred nor present | PG | `unsupported`, naming the missing table |
+| Mutual cycle A→B→A | PG | reported as a cycle; no invented order |
+| Parent/child | MySQL | carried; orphan INSERT rejected (errno 1452) |
+| Parent/child | SQL Server | carried; orphan INSERT rejected (msg 547) |
+| Parent/child | Oracle | carried; orphan INSERT rejected (ORA-02291) |
+
+`carried` is written only after re-reading the destination catalog, and the
+`ALTER TABLE … ADD CONSTRAINT` is issued after the load so the engine validates
+the rows that were actually written — a row count and a checksum both report
+green on an orphaned child table.
+
+Two defects this matrix found, both invisible to unit tests:
+
+- **Constraint names are schema-scoped** on MySQL, SQL Server and Oracle, so
+  reusing the source constraint name failed the `ALTER` (`errno 1826`, msg
+  2714) whenever source and destination shared a schema. Destination names are
+  now derived from the destination table and key columns.
+- **Uppercase source columns lost their PRIMARY KEY and NOT NULL on
+  create-new** — every Oracle source. The fidelity planner case-folded the
+  column names it planned (`ID` → `id`), the writer created them verbatim, and
+  the writer's exact-match guard then dropped the constraints while the
+  certificate still read `carried` (proved by ORA-02270 when the foreign key
+  looked for the parent key). The planner now preserves case, and the writer
+  resolves plan names against the columns it is creating.
+
+Still not carried: cyclic graphs are reported, not resolved with deferred
+constraints; referenced-column mapping assumes the parent key keeps its source
+spelling; cross-schema references land in the child's schema; SQLite cannot
+take a post-load `ALTER` and is refused.

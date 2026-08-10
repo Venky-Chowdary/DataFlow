@@ -18,6 +18,7 @@ from services.unique_key_introspect import (
     _sqlserver_fetch_unique_keys,
 )
 from services.check_constraints import probe_check_constraints
+from services.foreign_key_metadata import probe_foreign_keys
 from services.physical_storage_metadata import probe_physical_storage
 from services.secondary_indexes import probe_secondary_indexes
 from services.value_serializer import json_default
@@ -474,6 +475,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                 "unique_keys": [],
             }
             foreign_keys: list[dict[str, Any]] = []
+            foreign_keys_meta: dict[str, Any] | None = None
             physical_storage: dict[str, Any] | None = None
             check_meta: dict[str, Any] | None = None
             indexes_meta: dict[str, Any] | None = None
@@ -512,7 +514,9 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                     unique_meta = _pg_fetch_unique_keys(cur, resolved_schema, target)
                     if advisory_keys:
                         unique_meta = _mark_unique_keys_advisory(unique_meta)
-                    foreign_keys = _pg_fetch_foreign_keys(cur, resolved_schema, target)
+                    foreign_keys, foreign_keys_meta = _fetch_foreign_keys(
+                        "postgresql", cur, resolved_schema, target
+                    )
                     physical_storage = probe_physical_storage(
                         "postgresql", cur, resolved_schema, target
                     ).to_dict()
@@ -531,6 +535,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
             "foreign_keys": foreign_keys,
+            "foreign_keys_meta": foreign_keys_meta,
             "physical_storage": physical_storage,
             "check_constraints_meta": check_meta,
             "indexes_meta": indexes_meta,
@@ -1028,12 +1033,15 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 "unique_keys": [],
             }
             foreign_keys: list[dict[str, Any]] = []
+            foreign_keys_meta: dict[str, Any] | None = None
             physical_storage: dict[str, Any] | None = None
             check_meta: dict[str, Any] | None = None
             indexes_meta: dict[str, Any] | None = None
             if columns and target:
                 unique_meta = _mysql_fetch_unique_keys(cur, db_name, target)
-                foreign_keys = _mysql_fetch_foreign_keys(cur, db_name, target)
+                foreign_keys, foreign_keys_meta = _fetch_foreign_keys(
+                    "mysql", cur, db_name, target
+                )
                 physical_storage = probe_physical_storage(
                     "mysql", cur, db_name, target
                 ).to_dict()
@@ -1052,6 +1060,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
             "foreign_keys": foreign_keys,
+            "foreign_keys_meta": foreign_keys_meta,
             "physical_storage": physical_storage,
             "check_constraints_meta": check_meta,
             "indexes_meta": indexes_meta,
@@ -1408,127 +1417,17 @@ def _pg_apply_identity_carrier(logical: str, attidentity: str, default_expr: str
     return logical
 
 
-def _pg_fetch_foreign_keys(cur: Any, schema: str, table: str) -> list[dict[str, Any]]:
-    """Return FOREIGN KEY metadata for ``schema.table`` (information_schema).
+def _fetch_foreign_keys(
+    dialect: str, cur: Any, schema: str, table: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Measured foreign keys for ``schema.table`` plus the full status payload.
 
-    Shape matches constraint_hints / sample_orphan_probe:
-    ``{name, columns, referenced_schema, referenced_table, referenced_columns}``.
-    Never invents FKs — empty list on query failure.
+    One canonical probe (``services.foreign_key_metadata``) for every dialect:
+    the carry planner and the post-load destination re-read must compare the
+    same evidence shape the source was measured with.
     """
-    by_name: dict[str, dict[str, Any]] = {}
-    try:
-        cur.execute(
-            """
-            SELECT tc.constraint_name,
-                   kcu.column_name,
-                   kcu.ordinal_position,
-                   ccu.table_schema AS foreign_table_schema,
-                   ccu.table_name AS foreign_table_name,
-                   ccu.column_name AS foreign_column_name
-            FROM information_schema.table_constraints AS tc
-            JOIN information_schema.key_column_usage AS kcu
-              ON tc.constraint_catalog = kcu.constraint_catalog
-             AND tc.constraint_schema = kcu.constraint_schema
-             AND tc.constraint_name = kcu.constraint_name
-            JOIN information_schema.constraint_column_usage AS ccu
-              ON ccu.constraint_catalog = tc.constraint_catalog
-             AND ccu.constraint_schema = tc.constraint_schema
-             AND ccu.constraint_name = tc.constraint_name
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_schema = %s
-              AND tc.table_name = %s
-            ORDER BY tc.constraint_name, kcu.ordinal_position
-            """,
-            (schema, table),
-        )
-        for (
-            cname,
-            col,
-            _ord,
-            ref_schema,
-            ref_table,
-            ref_col,
-        ) in cur.fetchall() or []:
-            key = str(cname)
-            bucket = by_name.setdefault(
-                key,
-                {
-                    "name": key,
-                    "columns": [],
-                    "referenced_schema": str(ref_schema or "").strip(),
-                    "referenced_table": str(ref_table or "").strip(),
-                    "referenced_columns": [],
-                },
-            )
-            col_s = str(col).strip()
-            ref_s = str(ref_col).strip()
-            if col_s and col_s not in bucket["columns"]:
-                bucket["columns"].append(col_s)
-            if ref_s and ref_s not in bucket["referenced_columns"]:
-                bucket["referenced_columns"].append(ref_s)
-            if ref_schema and not bucket.get("referenced_schema"):
-                bucket["referenced_schema"] = str(ref_schema).strip()
-            if ref_table and not bucket.get("referenced_table"):
-                bucket["referenced_table"] = str(ref_table).strip()
-    except Exception as exc:
-        logger.debug("pg foreign key introspect failed: %s", exc, exc_info=exc)
-        return []
-    return list(by_name.values())
-
-
-def _mysql_fetch_foreign_keys(cur: Any, schema: str, table: str) -> list[dict[str, Any]]:
-    """Return FOREIGN KEY metadata from ``KEY_COLUMN_USAGE`` (MySQL / MariaDB)."""
-    by_name: dict[str, dict[str, Any]] = {}
-    try:
-        cur.execute(
-            """
-            SELECT CONSTRAINT_NAME,
-                   COLUMN_NAME,
-                   ORDINAL_POSITION,
-                   REFERENCED_TABLE_SCHEMA,
-                   REFERENCED_TABLE_NAME,
-                   REFERENCED_COLUMN_NAME
-            FROM information_schema.KEY_COLUMN_USAGE
-            WHERE TABLE_SCHEMA = %s
-              AND TABLE_NAME = %s
-              AND REFERENCED_TABLE_NAME IS NOT NULL
-            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
-            """,
-            (schema, table),
-        )
-        for (
-            cname,
-            col,
-            _ord,
-            ref_schema,
-            ref_table,
-            ref_col,
-        ) in cur.fetchall() or []:
-            key = str(cname)
-            bucket = by_name.setdefault(
-                key,
-                {
-                    "name": key,
-                    "columns": [],
-                    "referenced_schema": str(ref_schema or "").strip(),
-                    "referenced_table": str(ref_table or "").strip(),
-                    "referenced_columns": [],
-                },
-            )
-            col_s = str(col).strip()
-            ref_s = str(ref_col).strip()
-            if col_s and col_s not in bucket["columns"]:
-                bucket["columns"].append(col_s)
-            if ref_s and ref_s not in bucket["referenced_columns"]:
-                bucket["referenced_columns"].append(ref_s)
-            if ref_schema and not bucket.get("referenced_schema"):
-                bucket["referenced_schema"] = str(ref_schema).strip()
-            if ref_table and not bucket.get("referenced_table"):
-                bucket["referenced_table"] = str(ref_table).strip()
-    except Exception as exc:
-        logger.debug("mysql foreign key introspect failed: %s", exc, exc_info=exc)
-        return []
-    return list(by_name.values())
+    measured = probe_foreign_keys(dialect, cur, schema, table)
+    return [fk.to_dict() for fk in measured.items], measured.to_dict()
 
 
 def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
@@ -2405,6 +2304,11 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 if columns
                 else {"primary_key_columns": [], "unique_keys": []}
             )
+            foreign_keys, foreign_keys_meta = (
+                _fetch_foreign_keys("oracle", conn, owner, resolved_table)
+                if columns
+                else ([], None)
+            )
             return {
                 "ok": True,
                 "columns": columns,
@@ -2412,6 +2316,8 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 "schema": owner,
                 "primary_key_columns": unique_meta.get("primary_key_columns") or [],
                 "unique_keys": unique_meta.get("unique_keys") or [],
+                "foreign_keys": foreign_keys,
+                "foreign_keys_meta": foreign_keys_meta,
                 "physical_storage": (
                     probe_physical_storage("oracle", conn, owner, resolved_table).to_dict()
                     if columns
@@ -2643,6 +2549,11 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                 if columns
                 else {"primary_key_columns": [], "unique_keys": []}
             )
+            foreign_keys, foreign_keys_meta = (
+                _fetch_foreign_keys("sqlserver", conn, schema, table)
+                if columns
+                else ([], None)
+            )
             return {
                 "ok": True,
                 "columns": columns,
@@ -2650,6 +2561,8 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                 "schema": schema,
                 "primary_key_columns": unique_meta.get("primary_key_columns") or [],
                 "unique_keys": unique_meta.get("unique_keys") or [],
+                "foreign_keys": foreign_keys,
+                "foreign_keys_meta": foreign_keys_meta,
                 "physical_storage": (
                     probe_physical_storage("sqlserver", conn, schema, table).to_dict()
                     if columns

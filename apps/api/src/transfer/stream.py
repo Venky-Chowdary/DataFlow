@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -2541,6 +2542,88 @@ def _stream_database_transfer_impl(
     return written, ddl_log, dest_summary, columns
 
 
+@dataclass
+class _ForeignKeyContext:
+    """Measured source references for the tables of one multi-stream job."""
+
+    source_keys: dict[str, Any] = field(default_factory=dict)
+    order: list[str] = field(default_factory=list)
+    cycle: list[str] = field(default_factory=list)
+    column_maps: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+def _foreign_key_context(
+    source: EndpointConfig, tables: list[str]
+) -> _ForeignKeyContext:
+    """Measure source foreign keys and derive a parents-first load order.
+
+    A failure here never blocks the transfer: the keys are then reported as
+    unmeasured (``unknown``) rather than absent, and the streams keep the
+    operator's declared order.
+    """
+    context = _ForeignKeyContext()
+    names = [t for t in tables if t]
+    if source.kind != "database" or len(names) < 2:
+        return context
+    try:
+        from services.foreign_key_orchestration import (
+            dependency_order,
+            measure_source_foreign_keys,
+        )
+
+        src_type = resolve_driver_type(source.format)
+        src_cfg = resolve_connector_config(source)
+        context.source_keys = measure_source_foreign_keys(src_type, src_cfg, names)
+        context.order, context.cycle = dependency_order(names, context.source_keys)
+    except Exception as exc:
+        logger.debug("foreign key ordering skipped: %s", exc, exc_info=exc)
+    return context
+
+
+def _carry_foreign_keys_after_load(
+    destination: EndpointConfig,
+    context: _ForeignKeyContext,
+) -> dict[str, Any] | None:
+    """Add the planned constraints once every table has landed, then re-read."""
+    if not context.source_keys or destination.kind != "database":
+        return None
+    try:
+        from services.foreign_key_orchestration import carry_foreign_keys, summarize
+
+        dest_type = resolve_driver_type(destination.format)
+        dest_cfg = resolve_connector_config(destination)
+        dest_schema = str(dest_cfg.get("schema") or "")
+        # Multi-stream lands each source table under its own name; a rename
+        # would arrive through the contract and change only this map.
+        table_map = {t: t for t in context.source_keys}
+        summary = summarize(
+            carry_foreign_keys(
+                dest_dialect=dest_type,
+                dest_cfg=dest_cfg,
+                dest_schema=dest_schema,
+                source_keys=context.source_keys,
+                table_map=table_map,
+                column_maps=context.column_maps,
+                dest_columns={
+                    t: list(cols.values()) for t, cols in context.column_maps.items()
+                },
+            )
+        )
+        if context.cycle:
+            summary["cycle"] = list(context.cycle)
+        return summary
+    except Exception as exc:
+        logger.warning("foreign key carry failed: %s", exc, exc_info=exc)
+        return {
+            "decisions": [],
+            "counts": {"unknown": len(context.source_keys)},
+            "integrity_violations": 0,
+            "carried": 0,
+            "verdict": "unknown",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
     """Drop the remapped destination object (overwrite sync, multi-stream).
 
@@ -2629,11 +2712,31 @@ def run_non_cdc_multi_stream_sequential(
             skip_preflight=skip_preflight,
         )
 
+    # Foreign keys are the one aspect a single-table create cannot carry: the
+    # parent must exist first. Measure the source references, load parents
+    # before children, and add the constraints once every table has landed —
+    # the ALTER then validates the rows we just wrote.
+    fk_context = _foreign_key_context(source, [c.name or "" for c in selected_list])
+    if fk_context.order:
+        by_name = {(c.name or ""): c for c in selected_list}
+        selected_list = [by_name[n] for n in fk_context.order if n in by_name] + [
+            c for c in selected_list if (c.name or "") not in set(fk_context.order)
+        ]
+
     total_rows = 0
     ddl_log: list[str] = [
         f"MULTI-STREAM sequential ({len(selected_list)} streams, sync={sync_mode}; "
         "each stream has its own watermark; at-least-once)"
     ]
+    if fk_context.order:
+        ddl_log.append(
+            "FK dependency order: " + " -> ".join(fk_context.order)
+            + (
+                f" (cycle, no valid order: {', '.join(fk_context.cycle)})"
+                if fk_context.cycle
+                else ""
+            )
+        )
     headers: list[str] = list(schema.keys()) if schema else []
     stream_health: list[dict[str, Any]] = []
     last_summary: dict[str, Any] = {}
@@ -2679,6 +2782,15 @@ def run_non_cdc_multi_stream_sequential(
             use_mappings = (
                 stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
             )
+            # The FK planner translates key columns through this map; without it
+            # a reference would be emitted against a destination column name
+            # that the load never wrote.
+            context_map = {
+                str(m.get("source") or ""): str(m.get("target") or m.get("source") or "")
+                for m in use_mappings
+                if isinstance(m, dict) and m.get("source")
+            }
+            fk_context.column_maps[stream_name] = context_map
 
             # Per-stream overwrite: drop remapped dest (outer engine skip when N>1).
             if should_drop_destination_for_sync(
@@ -2756,6 +2868,14 @@ def run_non_cdc_multi_stream_sequential(
     last_summary["streams"] = stream_health
     last_summary["multi_stream"] = True
     last_summary["multi_stream_mode"] = "sequential"
+    fk_summary = _carry_foreign_keys_after_load(destination, fk_context)
+    if fk_summary is not None:
+        last_summary["foreign_keys"] = fk_summary
+        for decision in fk_summary.get("decisions") or []:
+            if decision.get("status") in {"carried", "unsupported"} and decision.get(
+                "dest_ddl"
+            ):
+                ddl_log.append(f"{decision['status'].upper()} FK: {decision['dest_ddl']}")
     return total_rows, ddl_log, last_summary, headers
 
 

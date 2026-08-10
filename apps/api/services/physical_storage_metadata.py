@@ -98,8 +98,15 @@ class _DriverCursorShim:
 
 
 def as_driver_cursor(cursor_or_connection: Any) -> Any:
-    """Accept a DB-API cursor or a SQLAlchemy connection; return a cursor."""
-    if hasattr(cursor_or_connection, "exec_driver_sql"):
+    """Accept a DB-API cursor or a SQLAlchemy connection; return a cursor.
+
+    A cursor is identified by ``fetchall``: SQLAlchemy's ``Connection`` has
+    ``exec_driver_sql`` and no ``fetchall``, so probing for the method alone
+    misroutes any object that exposes both.
+    """
+    if hasattr(cursor_or_connection, "exec_driver_sql") and not hasattr(
+        cursor_or_connection, "fetchall"
+    ):
         return _DriverCursorShim(cursor_or_connection)
     return cursor_or_connection
 

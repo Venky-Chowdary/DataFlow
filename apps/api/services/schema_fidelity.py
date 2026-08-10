@@ -542,10 +542,16 @@ def plan_create_new_fidelity(
     tgt_to_src = {v: k for k, v in src_to_tgt.items() if v}
 
     # Collision policy on the target column names we are about to emit.
+    # Case is preserved on every dialect because every create-new writer emits
+    # quoted identifiers verbatim. Folding here produced a plan whose PK/NOT
+    # NULL/UNIQUE column names ("id") did not match the columns the writer
+    # created ("ID"), so on an uppercase source — every Oracle and most SQL
+    # Server catalogs — those constraints were dropped while the certificate
+    # still read "carried". Sanitizing, truncation and collision suffixes stay.
     dest_cols, name_items, renames = resolve_identifier_collisions(
         target_columns,
         dialect=dest,
-        preserve_case=dest in {"postgresql", "sqlite"},
+        preserve_case=True,
     )
     # Apply renames to dest column list already returned.
 
@@ -1300,8 +1306,10 @@ def _emit_unsupported_catalog(
                     name=str(fk.get("name") or fk.get("constraint") or "fk"),
                     status="unsupported",
                     reason=(
-                        "FOREIGN KEY create-new is not carried in v1 "
-                        "(multi-table ordering is Property 7)."
+                        "CREATE TABLE does not add this reference: the parent must "
+                        "hold its rows first. A multi-table transfer adds and "
+                        "re-reads it after the load (job report 'foreign_keys'); a "
+                        "single-table create leaves it uncarried."
                     ),
                     source_detail=str(fk)[:240],
                 )
@@ -1314,8 +1322,10 @@ def _emit_unsupported_catalog(
                 name="*",
                 status="unsupported",
                 reason=(
-                    "FOREIGN KEY not introspected for this source dialect in v1; "
-                    "refuse to certify absence. Multi-table carry is Property 7."
+                    "Source foreign keys were not read for this catalog; refuse to "
+                    "certify absence. Where they are measured, a multi-table "
+                    "transfer carries them after the load and proves them from the "
+                    "destination catalog."
                 ),
             )
         )

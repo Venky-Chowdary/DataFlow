@@ -11,10 +11,9 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.schema_introspect import (  # noqa: E402
-    _mysql_fetch_foreign_keys,
+    _fetch_foreign_keys,
     _mysql_fetch_unique_keys,
     _oracle_fetch_unique_keys,
-    _pg_fetch_foreign_keys,
     _pg_fetch_unique_keys,
     _sqlserver_fetch_unique_keys,
 )
@@ -91,10 +90,14 @@ def test_mysql_fetch_unique_keys_primary_and_unique():
 
 def test_pg_fetch_foreign_keys_groups_columns():
     cur = MagicMock()
+    # pg_constraint row: name, col, ref schema, ref table, ref col,
+    # confdeltype, confupdtype, ordinal.
     cur.fetchall.return_value = [
-        ("orders_customer_fkey", "customer_id", 1, "public", "customers", "id"),
+        ("orders_customer_fkey", "customer_id", "public", "customers", "id", "c", "a", 1),
     ]
-    fks = _pg_fetch_foreign_keys(cur, "public", "orders")
+    fks, meta = _fetch_foreign_keys("postgresql", cur, "public", "orders")
+    assert meta["status"] == "measured"
+    assert fks[0]["on_delete"] == "CASCADE"
     assert len(fks) == 1
     assert fks[0]["columns"] == ["customer_id"]
     assert fks[0]["referenced_table"] == "customers"
@@ -105,9 +108,10 @@ def test_pg_fetch_foreign_keys_groups_columns():
 def test_mysql_fetch_foreign_keys():
     cur = MagicMock()
     cur.fetchall.return_value = [
-        ("fk_ord_cust", "customer_id", 1, "app", "customers", "id"),
+        ("fk_ord_cust", "customer_id", "app", "customers", "id", "CASCADE", "NO ACTION"),
     ]
-    fks = _mysql_fetch_foreign_keys(cur, "app", "orders")
+    fks, meta = _fetch_foreign_keys("mysql", cur, "app", "orders")
+    assert meta["status"] == "measured"
     assert len(fks) == 1
     assert fks[0]["name"] == "fk_ord_cust"
     assert fks[0]["referenced_table"] == "customers"

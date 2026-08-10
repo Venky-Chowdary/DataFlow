@@ -65,8 +65,8 @@ def test_pg_cross_schema_recovery():
         "services.schema_introspect._pg_fetch_unique_keys",
         return_value={"primary_key_columns": [], "unique_keys": []},
     ), patch(
-        "services.schema_introspect._pg_fetch_foreign_keys",
-        return_value=[],
+        "services.schema_introspect._fetch_foreign_keys",
+        return_value=([], {"status": "measured", "items": []}),
     ):
         result = _introspect_postgresql(
             host="h", port=5432, database="db", username="u", password="p",

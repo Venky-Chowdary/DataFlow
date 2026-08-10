@@ -1910,8 +1910,31 @@ def _build_table_for_write(
             (str(n), str(p))
             for n, p in (getattr(fidelity_plan, "check_predicates", []) or [])
         ]
-        plan_pk = [c for c in (getattr(fidelity_plan, "primary_key", []) or [])]
-        if not pk_set and plan_pk and all(c in columns for c in plan_pk):
+        # Resolve the plan's names against the columns actually being created.
+        # An exact-match-only lookup silently dropped the PRIMARY KEY when the
+        # two spellings differed only by case, and the certificate still said
+        # "carried" — a mismatch must resolve or be visible, never vanish.
+        by_fold = {str(c).casefold(): c for c in columns}
+        plan_pk = [
+            by_fold[str(c).casefold()]
+            for c in (getattr(fidelity_plan, "primary_key", []) or [])
+            if str(c).casefold() in by_fold
+        ]
+        plan_not_null = {
+            by_fold[c.casefold()] for c in plan_not_null if c.casefold() in by_fold
+        }
+        plan_defaults = {
+            by_fold[c.casefold()]: v
+            for c, v in plan_defaults.items()
+            if c.casefold() in by_fold
+        }
+        plan_uniques = [
+            [by_fold[c.casefold()] for c in u if c.casefold() in by_fold]
+            for u in plan_uniques
+        ]
+        if not pk_set and plan_pk and len(plan_pk) == len(
+            getattr(fidelity_plan, "primary_key", []) or []
+        ):
             pk_set = set(plan_pk)
 
     cols = []
