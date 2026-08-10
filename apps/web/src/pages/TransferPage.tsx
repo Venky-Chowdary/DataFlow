@@ -3692,6 +3692,11 @@ export function TransferPage({
         || preflight?.proof_bundle?.decision_artifact?.content_hash
         || "",
     ).trim();
+    // Map→DDL fingerprint Validate stamped over these same Map rows. Execute
+    // checks the operator contract against it instead of re-deriving its own.
+    const approvedDdlIdentityHash = String(
+      preflight?.proof_bundle?.ddl_identity?.ddl_identity_hash || "",
+    ).trim();
     if (
       enforcePreflight
       && (!approvedDecisionArtifactHash || approvedDecisionArtifactHash.length !== 64)
@@ -3852,6 +3857,7 @@ export function TransferPage({
           fkRiskAcknowledged ? "FK risk acknowledged on Validate" : "",
         ].filter(Boolean).join("; ") || undefined,
         approvedDecisionArtifactHash: approvedDecisionArtifactHash || undefined,
+        approvedDdlIdentityHash: approvedDdlIdentityHash || undefined,
         decisionArtifact:
           preflight?.proof_bundle?.decision_artifact
           && typeof preflight.proof_bundle.decision_artifact === "object"

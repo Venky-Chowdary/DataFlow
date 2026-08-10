@@ -273,22 +273,12 @@ def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str
     return {"primary_key_columns": pk, "unique_keys": unique_keys}
 
 
-def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, Any]:
-    """Return PRIMARY/UNIQUE constraints + function-based unique indexes.
-
-    ``CREATE UNIQUE INDEX … (UPPER(email))`` lives in ``ALL_IND_EXPRESSIONS``,
-    not ``ALL_CONSTRAINTS`` — must be read or Validate false-greens Abc/abc.
-    """
+def _oracle_unique_constraint_rows(conn: Any, owner: str, table: str) -> list[Any]:
+    """PRIMARY/UNIQUE constraint columns for one exact owner/table spelling."""
     import sqlalchemy as sa
-    from services.type_system import parse_case_insensitive_index_expression
 
-    pk: list[str] = []
-    unique_keys: list[dict[str, Any]] = []
-    by_name: dict[str, dict[str, Any]] = {}
-    owner_u = (owner or "").upper()
-    table_u = (table or "").upper()
-    try:
-        rows = conn.execute(
+    return list(
+        conn.execute(
             sa.text(
                 """
                 SELECT
@@ -308,8 +298,39 @@ def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, An
                 ORDER BY ac.constraint_name, acc.position
                 """
             ),
-            {"owner": owner_u, "table": table_u},
+            {"owner": owner, "table": table},
         ).fetchall()
+    )
+
+
+def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, Any]:
+    """Return PRIMARY/UNIQUE constraints + function-based unique indexes.
+
+    ``CREATE UNIQUE INDEX … (UPPER(email))`` lives in ``ALL_IND_EXPRESSIONS``,
+    not ``ALL_CONSTRAINTS`` — must be read or Validate false-greens Abc/abc.
+    """
+    import sqlalchemy as sa
+    from services.type_system import parse_case_insensitive_index_expression
+
+    pk: list[str] = []
+    unique_keys: list[dict[str, Any]] = []
+    by_name: dict[str, dict[str, Any]] = {}
+    # Oracle keeps quoted identifiers verbatim, so folding the spelling the
+    # caller already resolved found no constraints on a lower-case table:
+    # Validate then saw "no destination PK" and skipped the duplicate gate.
+    # Try the exact spelling first, upper case only as the fallback.
+    owner_u = (owner or "").upper()
+    table_u = (table or "").upper()
+    attempts = [(str(owner or ""), str(table or ""))]
+    if (owner_u, table_u) != attempts[0]:
+        attempts.append((owner_u, table_u))
+    try:
+        rows: list[Any] = []
+        for owner_try, table_try in attempts:
+            rows = _oracle_unique_constraint_rows(conn, owner_try, table_try)
+            if rows:
+                owner_u, table_u = owner_try, table_try
+                break
     except Exception:
         return {"primary_key_columns": [], "unique_keys": []}
 
@@ -328,7 +349,6 @@ def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, An
             },
         )
         bucket["columns"].append(str(col))
-
     # Unique function-based indexes (UPPER/LOWER) — not constraint-backed.
     try:
         fbi_rows = conn.execute(

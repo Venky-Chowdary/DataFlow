@@ -358,15 +358,22 @@ def classify_mapping(
     )
 
 
-def approved_mapping_ddl_fingerprint(
+def ddl_identity_columns(
     mappings: list[dict[str, Any]] | None,
     *,
     dest_db: str = "",
-) -> str:
-    """Stable hash of approved Map stamps after ``materialize_dest_ddl``.
+) -> list[dict[str, str]]:
+    """Canonical destination DDL each mapping row materializes to.
 
-    Map → materialize must equal Execute CREATE/ALTER stamps. Any drift changes
-    this fingerprint and requires re-validation.
+    Identity is the *physical column contract*: target name plus the DDL the
+    destination will actually receive. Map stamp spelling is deliberately not
+    part of it — a live catalog reporting ``VARCHAR(255) COLLATE utf8mb4_…``
+    for the operator's ``VARCHAR(255)`` materializes to the same column, and
+    so does ``TIMESTAMP`` vs ``TIMESTAMP_NTZ(6)`` on MySQL. Transforms are the
+    conversion contract's concern (Decision Artifact), not DDL.
+
+    A stamp that cannot be materialized keeps its raw text, marked, so an
+    unmaterializable stamp never hashes equal to a materialized one.
     """
     from services.decision_kernel.types import materialize_dest_ddl
 
@@ -381,24 +388,72 @@ def approved_mapping_ddl_fingerprint(
         if not src or not tgt:
             continue
         stamp = str(m.get("target_type") or m.get("dest_type") or "").strip()
-        wire = materialize_dest_ddl(dest_db, stamp) if stamp else ""
-        rows.append(
-            {
-                "source": src,
-                "target": tgt,
-                "map_stamp": stamp,
-                "materialized_ddl": str(wire or ""),
-                "transform": str(m.get("transform") or "none"),
-            }
-        )
+        wire = str(materialize_dest_ddl(dest_db, stamp) or "") if stamp else ""
+        if stamp and not wire:
+            wire = f"unmaterialized:{stamp}"
+        rows.append({"source": src, "target": tgt, "materialized_ddl": wire})
     rows.sort(key=lambda r: (r["source"], r["target"]))
+    return rows
+
+
+def approved_mapping_ddl_fingerprint(
+    mappings: list[dict[str, Any]] | None,
+    *,
+    dest_db: str = "",
+) -> str:
+    """Stable hash of approved Map stamps after ``materialize_dest_ddl``.
+
+    Map → materialize must equal Execute CREATE/ALTER stamps. Any drift changes
+    this fingerprint and requires re-validation.
+    """
     payload = {
         "version": CONVERSION_CONTRACT_VERSION,
         "dest_db": (dest_db or "").strip().lower(),
-        "columns": rows,
+        "columns": ddl_identity_columns(mappings, dest_db=dest_db),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def ddl_identity_divergence(
+    approved_columns: list[dict[str, Any]] | None,
+    mappings: list[dict[str, Any]] | None,
+    *,
+    dest_db: str = "",
+    limit: int = 5,
+) -> list[str]:
+    """Per-column ``approved → current`` lines for a fingerprint mismatch.
+
+    Empty when the approved column set was not carried alongside the hash: a
+    hash alone cannot name what diverged, and inventing a cause is worse than
+    saying nothing.
+    """
+    if not approved_columns:
+        return []
+    approved = {
+        (str(r.get("target") or ""), str(r.get("source") or "")): str(
+            r.get("materialized_ddl") or ""
+        )
+        for r in approved_columns
+        if isinstance(r, dict)
+    }
+    current = {
+        (r["target"], r["source"]): r["materialized_ddl"]
+        for r in ddl_identity_columns(mappings, dest_db=dest_db)
+    }
+    lines: list[str] = []
+    for key in sorted(set(approved) | set(current)):
+        was, now = approved.get(key), current.get(key)
+        if was == now:
+            continue
+        col = key[0] or key[1]
+        if was is None:
+            lines.append(f"{col}: not in approved Map → {now}")
+        elif now is None:
+            lines.append(f"{col}: {was} → dropped from Map")
+        else:
+            lines.append(f"{col}: {was} → {now}")
+    return lines[:limit]
 
 
 def assert_ddl_identity(
@@ -406,6 +461,7 @@ def assert_ddl_identity(
     mappings: list[dict[str, Any]] | None,
     *,
     dest_db: str = "",
+    approved_columns: list[dict[str, Any]] | None = None,
 ) -> str:
     """Fail closed when materialize/Execute DDL diverges from approved Map."""
     expected = (approved_fingerprint or "").strip().lower()
@@ -417,9 +473,13 @@ def assert_ddl_identity(
         )
     actual = approved_mapping_ddl_fingerprint(mappings, dest_db=dest_db)
     if actual.lower() != expected:
+        diverged = ddl_identity_divergence(
+            approved_columns, mappings, dest_db=dest_db
+        )
+        detail = f" Diverged: {'; '.join(diverged)}." if diverged else ""
         raise DdlIdentityError(
             "DDL identity mismatch — Map stamp / materialize diverged from last "
-            "Validate approval. Re-validate before Execute.",
+            f"Validate approval. Re-validate before Execute.{detail}",
             expected=expected,
             actual=actual,
         )
@@ -439,6 +499,7 @@ def ddl_identity_report(
     return {
         "contract_version": CONVERSION_CONTRACT_VERSION,
         "ddl_identity_hash": fp,
+        "columns": ddl_identity_columns(mappings, dest_db=dest_db),
         "approved_ddl_identity_hash": approved or None,
         "matches_approved": matches,
         "dest_db": (dest_db or "").strip().lower(),

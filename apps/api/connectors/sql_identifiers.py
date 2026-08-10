@@ -151,8 +151,16 @@ def quote_table_ref(
     else:
         tbl = require_safe_identifier(table, allow_raw=True)
         sch = require_safe_identifier(schema, allow_raw=True) if schema else None
-    # Dialect fold (Snowflake UPPER, etc.) — never leak Postgres lowercase into warehouses.
-    if dialect in ("snowflake", "oracle", "postgresql", "postgres", "redshift"):
+    # Dialect fold (Snowflake UPPER, etc.) — never leak Postgres lowercase into
+    # warehouses. ``preserve_case`` means the caller resolved the stored spelling
+    # from the catalog: folding it again would address a different object.
+    if not preserve_case and dialect in (
+        "snowflake",
+        "oracle",
+        "postgresql",
+        "postgres",
+        "redshift",
+    ):
         try:
             from services.dialect_profiles import fold_identifier
 

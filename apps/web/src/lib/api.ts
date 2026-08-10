@@ -2130,6 +2130,8 @@ export async function runUniversalTransfer(options: {
   acknowledgmentReason?: string;
   /** Phase C11 — 64-hex Decision Artifact content_hash from last green Validate. */
   approvedDecisionArtifactHash?: string;
+  /** Map→DDL fingerprint stamped by the same Validate run. */
+  approvedDdlIdentityHash?: string;
   /** Optional full artifact payload (content_hash must match approved hash). */
   decisionArtifact?: Record<string, unknown>;
 }) {
@@ -2211,6 +2213,10 @@ export async function runUniversalTransfer(options: {
   const approvedHash = (options.approvedDecisionArtifactHash || "").trim();
   if (approvedHash) {
     formData.append("approved_decision_artifact_hash", approvedHash);
+  }
+  const approvedDdlHash = (options.approvedDdlIdentityHash || "").trim();
+  if (approvedDdlHash) {
+    formData.append("approved_ddl_identity_hash", approvedDdlHash);
   }
   if (options.decisionArtifact && Object.keys(options.decisionArtifact).length) {
     formData.append("decision_artifact_json", JSON.stringify(options.decisionArtifact));
@@ -2294,6 +2300,7 @@ export async function executeTransferJson(payload: {
   acknowledgmentActor?: string;
   acknowledgmentReason?: string;
   approvedDecisionArtifactHash?: string;
+  approvedDdlIdentityHash?: string;
   decisionArtifact?: Record<string, unknown>;
 }) {
   const idempotencyKey =
@@ -2325,6 +2332,8 @@ export async function executeTransferJson(payload: {
       acknowledgment_reason: payload.acknowledgmentReason || undefined,
       approved_decision_artifact_hash:
         (payload.approvedDecisionArtifactHash || "").trim() || undefined,
+      approved_ddl_identity_hash:
+        (payload.approvedDdlIdentityHash || "").trim() || undefined,
       decision_artifact: payload.decisionArtifact || undefined,
     }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,

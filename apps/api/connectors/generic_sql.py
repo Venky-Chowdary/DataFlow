@@ -1003,17 +1003,20 @@ def _resolve_physical_table_ident(
     if dialect not in _FOLDING_DIALECTS:
         return table, schema
     from services.dialect_profiles import fold_identifier
+    from services.sql_object_identity import resolve_object_identity
 
     folded = fold_identifier(dialect, table)
     folded_schema = fold_identifier(dialect, schema) if schema else schema
     if folded == table and folded_schema == schema:
         return table, schema
-    try:
-        if sa.inspect(engine).has_table(table, schema=schema):
-            return table, schema
-    except Exception:
+    # ``has_table`` folds like every other client, so a quoted lower-case table
+    # read as absent and the write created a second, folded one beside it.
+    ident = resolve_object_identity(engine, table, schema)
+    if not ident.resolved:
         # Catalog unreadable: keep the operator's spelling rather than guess.
         return table, schema
+    if ident.exists:
+        return ident.table, ident.schema
     return folded, folded_schema
 
 

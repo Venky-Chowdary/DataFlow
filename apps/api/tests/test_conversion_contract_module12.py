@@ -139,11 +139,13 @@ def test_assert_ddl_identity_fail_closed_on_drift():
     fp = approved_mapping_ddl_fingerprint(maps, dest_db="postgresql")
     assert assert_ddl_identity(fp, maps, dest_db="postgresql") == fp
 
+    # INTEGER and BIGINT materialize to the same Postgres column under the
+    # never-narrower rule; SMALLINT is a different physical column.
     drifted = [
         {
             "source": "id",
             "target": "id",
-            "target_type": "BIGINT",
+            "target_type": "SMALLINT",
             "transform": "none",
         }
     ]

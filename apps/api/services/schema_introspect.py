@@ -2255,7 +2255,17 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 return {"ok": True, "columns": [], "tables": tables, "schema": schema}
 
             owner = schema or (kwargs.get("username") or "").upper()
-            resolved_table = table.upper()
+            # Stored spelling inside the requested owner: a quoted lower-case
+            # table read as "does not exist" under the folded name, so Validate
+            # planned create-new (and skipped the destination PK / duplicate
+            # gate) for a table that was really there. Same-owner resolution
+            # only — cross-owner healing stays behind ``strict_namespace``.
+            from services.sql_object_identity import resolve_object_identity
+
+            _ident = resolve_object_identity(conn, table, owner)
+            resolved_table = _ident.table if _ident.exists else table.upper()
+            if _ident.exists and _ident.schema:
+                owner = _ident.schema
             # VIRTUAL_COLUMN / IDENTITY_COLUMN — client INSERT must omit ALWAYS.
             _oracle_col_sql = """
                     SELECT atc.column_name, atc.data_type, atc.data_precision, atc.data_scale,

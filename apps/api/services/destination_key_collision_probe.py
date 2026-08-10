@@ -107,6 +107,29 @@ def destination_enforces_key(
     return False
 
 
+#: Dialects whose unbounded text type cannot appear in a comparison.
+_LOB_TEXT_DIALECTS = frozenset({"oracle", "db2", "ibm_db_sa"})
+
+#: Widest bounded character carrier those dialects accept in a comparison.
+_BOUNDED_TEXT_LEN = 4000
+
+
+def key_comparison_carrier(dialect_name: str, values: list[str]) -> Any:
+    """Type to cast an identity key to for an ``IN (…)`` comparison.
+
+    ``Text`` compiles to CLOB on Oracle/DB2 and no comparison operator accepts a
+    LOB (ORA-22849), so the probe errored and the append lost its pre-write
+    duplicate verdict. A bounded VARCHAR compares everywhere; keys wider than it
+    keep ``Text`` rather than compare truncated and invent a collision.
+    """
+    import sqlalchemy as sa
+
+    if (dialect_name or "").lower() not in _LOB_TEXT_DIALECTS:
+        return sa.Text()
+    widest = max((len(str(v)) for v in values), default=0)
+    return sa.String(_BOUNDED_TEXT_LEN) if widest <= _BOUNDED_TEXT_LEN else sa.Text()
+
+
 def _sql_existing_keys(
     cfg: dict[str, Any],
     table: str,
@@ -117,17 +140,30 @@ def _sql_existing_keys(
     import sqlalchemy as sa
 
     from connectors.generic_sql import _engine
+    from services.sql_object_identity import resolve_object_identity
 
     engine = _engine(cfg)
     schema = (cfg.get("schema") or "").strip() or None
+    # Case-folding engines (Oracle/Snowflake/DB2) render an unquoted lower-case
+    # name folded, so the probe hit "table does not exist" and degraded to
+    # ``error`` — a skip that is not proof of a clean append. Address the object
+    # the catalog actually holds, with its stored column spelling.
+    ident = resolve_object_identity(engine, table, schema, columns=[key_column])
+    if ident.exists:
+        table = sa.sql.quoted_name(ident.table, True)
+        schema = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
+        key_column = ident.columns.get(key_column, key_column)
     tbl = sa.table(table, schema=schema)
-    col = sa.column(key_column)
+    col = sa.column(sa.sql.quoted_name(key_column, True) if ident.exists else key_column)
     # Compare as text: the batch carries stringified keys while the column may be
     # bigint / uuid / numeric, and an uncast IN () raises "operator does not exist".
+    key_carrier = key_comparison_carrier(
+        str(getattr(engine.dialect, "name", "")), values
+    )
     stmt = (
         sa.select(col)
         .select_from(tbl)
-        .where(sa.cast(col, sa.Text).in_(values))
+        .where(sa.cast(col, key_carrier).in_(values))
         .limit(limit)
     )
     with engine.connect() as conn:

@@ -220,6 +220,9 @@ class ExecuteTransferRequest(BaseModel):
     # Phase C11 — pin Validate Decision Artifact (64-hex content_hash).
     approved_decision_artifact_hash: str = ""
     decision_artifact: dict = Field(default_factory=dict)
+    # Map→DDL fingerprint the operator saw pass at Validate. Without it Execute
+    # can only re-check its own derived stamps against themselves.
+    approved_ddl_identity_hash: str = ""
 
 
 class MapColumnsRequest(BaseModel):
@@ -701,6 +704,7 @@ async def execute_transfer_json(
         approved_decision_artifact_hash=str(
             body.approved_decision_artifact_hash or ""
         ).strip(),
+        approved_ddl_identity_hash=str(body.approved_ddl_identity_hash or "").strip(),
         decision_artifact=dict(body.decision_artifact or {}),
     )
     from services.batch_progress import effective_backfill_new_fields
@@ -888,6 +892,7 @@ async def run_universal_transfer(
     acknowledgment_actor: str = Form(""),
     acknowledgment_reason: str = Form(""),
     approved_decision_artifact_hash: str = Form(""),
+    approved_ddl_identity_hash: str = Form(""),
     decision_artifact_json: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
@@ -1024,6 +1029,7 @@ async def run_universal_transfer(
         acknowledgment_actor=(acknowledgment_actor or "").strip() or _actor_email(request),
         acknowledgment_reason=(acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=(approved_decision_artifact_hash or "").strip(),
+        approved_ddl_identity_hash=(approved_ddl_identity_hash or "").strip(),
     )
     if decision_artifact_json.strip():
         try:

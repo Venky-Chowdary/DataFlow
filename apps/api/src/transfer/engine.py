@@ -323,6 +323,7 @@ def _enforce_ddl_identity(
     dest_db: str,
     approved_ddl_identity_hash: str = "",
     skip_preflight: bool = False,
+    preflight_mappings: list | None = None,
 ) -> str | None:
     """Module 12 / GA — fail closed when Map→DDL fingerprint drifts after Validate.
 
@@ -337,15 +338,26 @@ def _enforce_ddl_identity(
     UI Validate→Execute (``skip_preflight=False``) still requires a stamped hash
     from preflight proof or ``approved_ddl_identity_hash``. When a hash is
     present, drift vs current mappings is always refused.
+
+    A fingerprint is only meaningful against the mapping set it was taken over.
+    The operator's hash (from Validate) is checked against the operator contract
+    rows; Execute's *own* preflight hash is checked against the rows that
+    preflight ran on. Crossing them refused every UI job whose destination
+    catalog spells a bound column differently from the Map stamp.
     """
     has_maps = bool(mappings)
-    approved = ""
-    if pf:
-        approved = ((pf.get("proof_bundle") or {}).get("ddl_identity") or {}).get(
-            "ddl_identity_hash"
-        ) or ""
-    if not approved:
-        approved = (approved_ddl_identity_hash or "").strip()
+    operator_approved = (approved_ddl_identity_hash or "").strip()
+    approved = operator_approved
+    approved_columns: list[dict] = []
+    checked = mappings
+    if not approved and pf:
+        stamp = (pf.get("proof_bundle") or {}).get("ddl_identity") or {}
+        approved = stamp.get("ddl_identity_hash") or ""
+        approved_columns = [
+            c for c in (stamp.get("columns") or []) if isinstance(c, dict)
+        ]
+        if preflight_mappings is not None:
+            checked = preflight_mappings
 
     if not approved:
         if has_maps and skip_preflight:
@@ -366,7 +378,12 @@ def _enforce_ddl_identity(
     try:
         from services.decision_kernel import DdlIdentityError, assert_ddl_identity
 
-        assert_ddl_identity(str(approved), mappings, dest_db=dest_db or "")
+        assert_ddl_identity(
+            str(approved),
+            checked,
+            dest_db=dest_db or "",
+            approved_columns=approved_columns,
+        )
     except DdlIdentityError as exc:
         return str(exc)
     except Exception as exc:  # pragma: no cover — never invent soft-pass on check crash
@@ -2611,6 +2628,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
+                preflight_mappings=mappings,
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -3653,6 +3671,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
+                preflight_mappings=mappings,
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -4421,6 +4440,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
+                preflight_mappings=mappings,
             )
             if ddl_err:
                 mongo.update_job_status(
