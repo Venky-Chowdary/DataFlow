@@ -4,8 +4,23 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.decision_kernel.findings import typed_cast_incompatible_with_text_sink
 from services.transform_engine import infer_transform_for_mapping
 from services.type_system import normalize_logical_type
+
+
+class LiveDestTypes(dict[str, str]):
+    """Destination carriers proven by introspecting the physical object.
+
+    ``dest_types`` is a mixed-provenance channel: Map/Studio stamps are a
+    *projection* of what create-new will invent, while these are read back off
+    an object that already exists. Only the latter may retire an inferred typed
+    cast, so provenance travels with the mapping rather than as a flag threaded
+    through every writer. Produced by ``writer_common.rematerialize_live_dest_types``.
+    """
+
+    __slots__ = ()
+
 
 ENGINE_TO_UI: dict[str, str] = {
     "none": "none",
@@ -169,7 +184,6 @@ def resolve_transform(
             or mapping.get("risk_acknowledged")
             or mapping.get("riskAcknowledged")
         ):
-            from services.decision_kernel import typed_cast_incompatible_with_text_sink
             from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
             if typed_cast_incompatible_with_text_sink(str(raw), target_type):
@@ -181,12 +195,22 @@ def resolve_transform(
                 return "none"
             return str(raw)
 
-    return infer_transform_for_mapping(
+    inferred = infer_transform_for_mapping(
         mapping["source"],
         mapping["target"],
         source_type,
         target_type,
     )
+    if live_hit and isinstance(dest_types, LiveDestTypes):
+        # The destination physically exists and is a text carrier: it stores the
+        # source token verbatim, so a typed cast can only *invent* a failure the
+        # sink never had. Inference legitimately types a Y/N column BOOLEAN off
+        # samples, but the write path coerces canonical wire only and rejected
+        # every row with "Invalid boolean: 'Y'". Map/Studio stamps arrive on this
+        # same argument as a projection, so only proven-live carriers qualify.
+        if typed_cast_incompatible_with_text_sink(inferred, target_type):
+            return "none"
+    return inferred
 
 
 def attach_transforms_to_mappings(

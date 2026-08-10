@@ -1121,11 +1121,24 @@ def _sample_consistency_boost(samples: list[str] | None, source_type: str, targe
     """Boost score when sample values parse cleanly for target logical type."""
     if not samples or len(samples) < 2:
         return 0.0
+    from services.decision_kernel import (
+        normalize_logical_type,
+        typed_cast_incompatible_with_text_sink,
+    )
     from services.transform_engine import apply_transform, infer_transform_for_mapping
 
     transform = infer_transform_for_mapping(
         "col", "col", source_type, target_type, source_samples=samples,
     )
+    if typed_cast_incompatible_with_text_sink(
+        transform, normalize_logical_type(target_type)
+    ):
+        # A text carrier stores the token verbatim, so scoring the samples
+        # through a typed cast measures a coercion the write never performs.
+        # Y/N inferred BOOLEAN parsed 0/2 here and demoted an exact-name match
+        # onto an existing TEXT column below the floor — Map then invented a
+        # BOOLEAN `<col>_text` beside the operator's own column.
+        return 0.0
     ok = 0
     checked = 0
     for raw in samples[:8]:

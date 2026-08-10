@@ -23,6 +23,9 @@ from decimal import Decimal, InvalidOperation, Overflow
 from typing import Any, Callable, Final, Iterable, Iterator
 
 from connectors.sql_identifiers import quote_sql_identifier
+from services.decision_kernel.findings import (
+    typed_cast_incompatible_with_text_sink,
+)
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
     WRITTEN_BATCH_KEYS,
@@ -39,6 +42,7 @@ from services.transform_engine import (
     _parse_datetime,
     apply_transform,
 )
+from services.type_system import normalize_logical_type
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -4309,6 +4313,15 @@ def sample_compare_rows(
                 if str(m.get("target") or "") == tgt_col:
                     ddl = str(m.get("target_type") or m.get("inferredType") or "")
                     break
+        if ddl and typed_cast_incompatible_with_text_sink(
+            transform or "", normalize_logical_type(ddl)
+        ):
+            # The write path drops a typed cast into a text carrier and stores
+            # the token verbatim. Fingerprinting the source *through* that cast
+            # compares a value the destination never held: 'Y' failed the
+            # boolean cast, became the NULL sentinel, and Gate-8 reported
+            # corruption on a row that landed correctly.
+            transform = None
         if eng and ddl:
             try:
                 return fingerprint_for_reconcile(

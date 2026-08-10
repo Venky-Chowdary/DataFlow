@@ -623,6 +623,12 @@ def _parse_integer(value: str) -> int | None:
 _STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
 
+#: Every token the write path can actually coerce to a boolean. A column typed
+#: BOOLEAN off ``Y``/``N`` samples is rejected here on every row ("Invalid
+#: boolean: 'Y'"), so any caller routing values through the boolean transform
+#: must first check the destination can hold the outcome.
+CANONICAL_BOOLEAN_TOKENS: frozenset[str] = _STRICT_BOOL_TRUE | _STRICT_BOOL_FALSE
+
 
 def _parse_boolean(value: str) -> bool | None:
     text = value.strip().lower()

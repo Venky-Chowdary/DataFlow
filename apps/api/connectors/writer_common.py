@@ -12,7 +12,7 @@ from typing import Any
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
-from services.transform_resolver import resolve_transform
+from services.transform_resolver import LiveDestTypes, resolve_transform
 from services.value_serializer import SQL_NULL_SENTINEL
 
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
@@ -1836,6 +1836,10 @@ def resolve_studio_or_map_dest_types(
     polarity invent). Callers with an existing typed sink should rematerialize
     from live DDL after this helper; create-new / empty sinks must refuse
     ``error`` when Studio was incomplete.
+
+    The Studio branch returns ``LiveDestTypes`` (introspected physical carriers);
+    the Map branch returns a plain dict, because a create-new stamp only projects
+    what the DDL *will* invent. Transform resolution reads that difference.
     """
     from connectors.saas_common import merge_saas_live_types
 
@@ -1850,12 +1854,13 @@ def resolve_studio_or_map_dest_types(
             for k, v in studio.items()
             if k and str(v or "").strip()
         }
-        return merge_saas_live_types(
+        merged, err = merge_saas_live_types(
             live,
             list(target_cols or []),
             studio_types=None,
             product=product,
         )
+        return (merged if err else LiveDestTypes(merged)), err
     return (
         resolve_mapping_dest_types(
             target_cols,
@@ -1933,8 +1938,11 @@ def rematerialize_live_dest_types(
     target_cols: list[str],
     *,
     product: str,
-) -> dict[str, str] | None:
+) -> LiveDestTypes | None:
     """Live sink carriers only for rematerialize — never Map VARCHAR gap-fill.
+
+    The ``LiveDestTypes`` return type is load-bearing: it is how downstream
+    transform resolution tells a proven physical carrier from a Map projection.
 
     Returns ``None`` when ``physical`` is empty or does not cover every mapped
     column (caller must have fail-closed via ``require_physical`` / Studio).
@@ -1956,7 +1964,7 @@ def rematerialize_live_dest_types(
     )
     if err:
         return None
-    return merged
+    return LiveDestTypes(merged)
 
 
 def resolve_mapping_dest_types(
