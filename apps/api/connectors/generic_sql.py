@@ -1850,6 +1850,14 @@ def _fidelity_dialect(db_type: str, dialect_name: str) -> str:
     return aliases.get(d, d)
 
 
+def _with_placement_suffix(ddl: str, suffix: str) -> str:
+    """Append the planned PARTITION BY / TABLESPACE clause to a compiled CREATE."""
+    clause = suffix.strip()
+    if not clause:
+        return ddl
+    return f"{ddl.rstrip().rstrip(';')} {clause}"
+
+
 def _build_table_for_write(
     engine: Any,
     table_name: str,
@@ -4672,7 +4680,11 @@ def write_mapped_rows(
                 # types and an upsert PK and nothing else — source NOT NULL,
                 # DEFAULT, UNIQUE and CHECK were dropped without a certificate.
                 fidelity_plan = None
+                placement_suffix = ""
                 try:
+                    from services.physical_placement_ddl import (
+                        list_destination_tablespaces,
+                    )
                     from services.schema_fidelity import resolve_create_fidelity_plan
 
                     fidelity_plan = resolve_create_fidelity_plan(
@@ -4686,7 +4698,11 @@ def write_mapped_rows(
                         table_already_exists=False,
                         dest_table=table_name,
                         dest_schema=schema_name or "",
+                        dest_tablespaces=list_destination_tablespaces(
+                            _fidelity_dialect(dest_db, dialect_name), conn
+                        ),
                     )
+                    placement_suffix = fidelity_plan.create_suffix
                     table_obj = _build_table_for_write(
                         engine,
                         table_name,
@@ -4748,11 +4764,35 @@ def write_mapped_rows(
                     ):
                         # T-SQL has no CREATE TABLE IF NOT EXISTS. Existence was
                         # already probed via inspector — emit plain CREATE TABLE.
-                        conn.execute(sa.schema.CreateTable(table_obj))
-                    else:
                         conn.execute(
-                            sa.schema.CreateTable(table_obj, if_not_exists=True)
+                            sa.text(
+                                _with_placement_suffix(
+                                    str(
+                                        sa.schema.CreateTable(table_obj).compile(
+                                            dialect=engine.dialect
+                                        )
+                                    ),
+                                    placement_suffix,
+                                )
+                            )
                         )
+                    else:
+                        create = sa.schema.CreateTable(
+                            table_obj, if_not_exists=True
+                        )
+                        if placement_suffix:
+                            # Placement lives inside CREATE: no engine can
+                            # partition or relocate a table after the fact.
+                            conn.execute(
+                                sa.text(
+                                    _with_placement_suffix(
+                                        str(create.compile(dialect=engine.dialect)),
+                                        placement_suffix,
+                                    )
+                                )
+                            )
+                        else:
+                            conn.execute(create)
                     if fidelity_plan is not None:
                         from services.schema_fidelity import apply_post_create_sql
 
@@ -4766,6 +4806,17 @@ def write_mapped_rows(
 
                         conn.commit()
                         apply_post_create_sql(fidelity_plan, _run_post_create)
+                        from services.schema_fidelity import (
+                            certify_placement_on_destination,
+                        )
+
+                        certify_placement_on_destination(
+                            fidelity_plan,
+                            dialect=_fidelity_dialect(dest_db, dialect_name),
+                            cursor=conn,
+                            schema=schema_name or (cfg.get("database") or ""),
+                            table=table_name,
+                        )
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     conn.commit()
                 except Exception as exc:

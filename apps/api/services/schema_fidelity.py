@@ -18,6 +18,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
+from services.physical_placement_ddl import plan_physical_placement, verify_placement
+
 logger = logging.getLogger(__name__)
 
 SCHEMA_FIDELITY_VERSION = 1
@@ -171,10 +173,18 @@ class CreateFidelityPlan:
     check_predicates: list[tuple[str, str]] = field(default_factory=list)
     not_null_columns: list[str] = field(default_factory=list)
     column_defaults: dict[str, str] = field(default_factory=dict)
+    # Clause appended after CREATE TABLE (...): PARTITION BY … / TABLESPACE …
+    # (see services/physical_placement_ddl.py). Empty when nothing is carried.
+    create_suffix: str = ""
+    placement_decisions: list[Any] = field(default_factory=list)
+    # The measured source placement the decisions were made from, kept so the
+    # post-CREATE destination re-read can compare like for like.
+    source_storage: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "report": self.report.to_dict(),
+            "create_suffix": self.create_suffix,
             "column_suffixes": {k: list(v) for k, v in self.column_suffixes.items()},
             "table_constraints": list(self.table_constraints),
             "post_create_sql": list(self.post_create_sql),
@@ -458,6 +468,7 @@ def resolve_create_fidelity_plan(
     table_already_exists: bool = False,
     dest_table: str = "",
     dest_schema: str = "",
+    dest_tablespaces: set[str] | None = None,
 ) -> CreateFidelityPlan:
     """Build a create-new fidelity plan; always returns a certificate (never silent)."""
     dest = (dest_dialect or "").strip().lower()
@@ -485,6 +496,7 @@ def resolve_create_fidelity_plan(
         source_to_target=source_to_target_from_mappings(mappings),
         dest_table=dest_table,
         dest_schema=dest_schema,
+        dest_tablespaces=dest_tablespaces,
     )
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.
@@ -505,6 +517,8 @@ def resolve_create_fidelity_plan(
         plan.check_predicates = []
         plan.not_null_columns = []
         plan.column_defaults = {}
+        plan.create_suffix = ""
+        plan.placement_decisions = []
     return plan
 
 
@@ -517,6 +531,7 @@ def plan_create_new_fidelity(
     source_to_target: dict[str, str] | None = None,
     dest_table: str = "",
     dest_schema: str = "",
+    dest_tablespaces: set[str] | None = None,
 ) -> CreateFidelityPlan:
     """Plan CREATE TABLE fidelity for mapped columns on dest_dialect."""
     dest = (dest_dialect or "").strip().lower()
@@ -749,6 +764,21 @@ def plan_create_new_fidelity(
         unique_constraints=struct_unique,
     )
 
+    # --- CARRY: physical placement (partitioning / tablespace / clustering) ---
+    placement = plan_physical_placement(
+        source_storage=catalog.physical_storage,
+        source_dialect=catalog.dialect,
+        dest_dialect=dest,
+        dest_schema=dest_schema,
+        dest_table=dest_table,
+        dest_columns=list(dest_cols),
+        primary_key=list(pk_dest),
+        unique_constraints=struct_unique,
+        dest_tablespaces=dest_tablespaces,
+    )
+    post_sql.extend(placement.post_create_sql)
+    report.items.extend(placement_items(placement.decisions))
+
     # --- Explicit unsupported / skipped for remaining aspects ---
     _emit_unsupported_catalog(
         report, catalog, skip_check=check_handled, skip_index=index_handled
@@ -783,6 +813,95 @@ def plan_create_new_fidelity(
         check_predicates=struct_checks,
         not_null_columns=struct_not_null,
         column_defaults=struct_defaults,
+        create_suffix=placement.create_suffix,
+        placement_decisions=list(placement.decisions),
+        source_storage=catalog.physical_storage,
+    )
+
+
+def placement_items(decisions: list[Any]) -> list[SchemaFidelityItem]:
+    """Certificate items for placement decisions.
+
+    ``planned`` is deliberately certified ``unsupported`` until
+    ``finalize_placement`` re-reads the destination: emitted DDL is a claim, and
+    a certificate must never award a carry on intent alone.
+    """
+    items: list[SchemaFidelityItem] = []
+    for decision in decisions:
+        planned = decision.status == "planned"
+        items.append(
+            SchemaFidelityItem(
+                aspect=decision.aspect,
+                name="*",
+                status="unsupported" if planned else decision.status,
+                reason=(
+                    f"{decision.reason} Not yet verified on the destination catalog."
+                    if planned
+                    else decision.reason
+                ),
+                source_detail=decision.source_detail,
+                dest_ddl=decision.dest_ddl,
+            )
+        )
+    return items
+
+
+def finalize_placement(
+    plan: CreateFidelityPlan | None,
+    *,
+    source_storage: dict[str, Any] | None,
+    dest_storage: dict[str, Any] | None,
+) -> None:
+    """Replace placement items with the verdict of a destination catalog re-read."""
+    if plan is None or not plan.placement_decisions:
+        return
+    verified = verify_placement(
+        decisions=list(plan.placement_decisions),
+        source_storage=source_storage,
+        dest_storage=dest_storage,
+    )
+    plan.placement_decisions = list(verified)
+    aspects = {d.aspect for d in verified}
+    plan.report.items = [i for i in plan.report.items if i.aspect not in aspects]
+    plan.report.items.extend(
+        SchemaFidelityItem(
+            aspect=d.aspect,
+            name="*",
+            status=d.status,
+            reason=d.reason,
+            source_detail=d.source_detail,
+            dest_ddl=d.dest_ddl,
+        )
+        for d in verified
+    )
+
+
+def certify_placement_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dialect: str,
+    cursor: Any,
+    schema: str,
+    table: str,
+) -> None:
+    """Re-read the destination catalog and settle every placement aspect.
+
+    The one place a writer needs to call after CREATE: emitting
+    ``PARTITION BY``/``TABLESPACE`` is a claim, and engines are free to ignore
+    or redirect placement, so the certificate is only allowed to say "carried"
+    after the destination itself reports it.
+    """
+    if plan is None or not plan.placement_decisions:
+        return
+    from services.physical_storage_metadata import probe_physical_storage
+
+    try:
+        dest_storage = probe_physical_storage(dialect, cursor, schema, table).to_dict()
+    except Exception as exc:  # noqa: BLE001 — verification must not fail the load
+        logger.debug("destination placement re-read failed: %s", exc)
+        dest_storage = None
+    finalize_placement(
+        plan, source_storage=plan.source_storage, dest_storage=dest_storage
     )
 
 
@@ -1303,7 +1422,6 @@ def _emit_unsupported_catalog(
             reason="Character set is not introspected for this source dialect.",
         )
     )
-    _emit_physical_storage_aspects(report, catalog)
     _aspect_list(
         "comment",
         bool(catalog.comments),
@@ -1321,91 +1439,6 @@ def _emit_unsupported_catalog(
         catalog.has_nested_shapes,
         "Array/struct nested shapes are type-level only; structural reshape uncertified.",
         "No nested structural shapes flagged on source.",
-    )
-
-
-def _emit_physical_storage_aspects(
-    report: SchemaFidelityReport,
-    catalog: SourceSchemaCatalog,
-) -> None:
-    """Certify partitioning / tablespace / clustering from a measured probe.
-
-    A transfer copies rows and logical schema, never physical placement, so
-    every measured placement is reported ``unsupported`` (operator must apply
-    it). Without a probe the aspect is ``unknown`` — the old code emitted
-    "No partitioning on source" from a flag nothing ever populated.
-    """
-    storage = catalog.physical_storage or {}
-    measured = storage.get("status") == "measured"
-    if not measured:
-        detail = str(storage.get("detail") or "").strip()
-        reason = (
-            "Physical storage catalog was not measured for this source; "
-            "partitioning, tablespace and clustering are unmeasured, not absent."
-        )
-        if detail:
-            reason = f"{reason} ({detail})"
-        for aspect in ("partitioning", "tablespace", "clustering"):
-            report.items.append(
-                SchemaFidelityItem(aspect=aspect, name="*", status="unknown", reason=reason)
-            )
-        return
-
-    partitioned = bool(storage.get("partitioned"))
-    keys = [str(k) for k in (storage.get("partition_keys") or [])]
-    strategy = str(storage.get("partition_strategy") or "").strip()
-    report.items.append(
-        SchemaFidelityItem(
-            aspect="partitioning",
-            name="*",
-            status="unsupported" if partitioned else "skipped",
-            reason=(
-                "Source table is partitioned; the destination is created "
-                "unpartitioned — reapply the partition scheme before cutover."
-                if partitioned
-                else "Source table is not partitioned (measured)."
-            ),
-            source_detail=(
-                f"{strategy or 'partitioned'} on {', '.join(keys) or 'unreported key'} "
-                f"({storage.get('partition_count')} partitions)"
-                if partitioned
-                else ""
-            ),
-        )
-    )
-
-    tablespace = str(storage.get("tablespace") or "").strip()
-    default_ts = storage.get("is_default_tablespace")
-    non_default = bool(tablespace) and default_ts is not True
-    report.items.append(
-        SchemaFidelityItem(
-            aspect="tablespace",
-            name="*",
-            status="unsupported" if non_default else "skipped",
-            reason=(
-                "Source table lives in a named tablespace/filegroup; the "
-                "destination is created in the default one."
-                if non_default
-                else "Source table uses the default tablespace/filegroup (measured)."
-            ),
-            source_detail=tablespace,
-        )
-    )
-
-    clustering = [str(c) for c in (storage.get("clustering") or [])]
-    report.items.append(
-        SchemaFidelityItem(
-            aspect="clustering",
-            name="*",
-            status="unsupported" if clustering else "skipped",
-            reason=(
-                "Source table has a clustering/CLUSTER index; physical row "
-                "order is not reproduced."
-                if clustering
-                else "No clustering index on source (measured)."
-            ),
-            source_detail=", ".join(clustering),
-        )
     )
 
 

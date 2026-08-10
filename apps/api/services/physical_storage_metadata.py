@@ -47,6 +47,9 @@ class PhysicalStorage:
     dialect: str
     status: PhysicalStorageStatus
     detail: str = ""
+    # Source table this placement was measured on; a partition carry needs it
+    # to rename child partitions after the destination table.
+    table: str = ""
     # Postgres/Oracle tablespace, SQL Server filegroup, MySQL tablespace.
     tablespace: str | None = None
     is_default_tablespace: bool | None = None
@@ -54,6 +57,10 @@ class PhysicalStorage:
     partition_strategy: str | None = None
     partition_keys: list[str] | None = None
     partition_count: int | None = None
+    # Per-partition name + bound expression, in declaration order. Needed to
+    # *recreate* a partitioned table: the scheme alone gives a parent no row
+    # can be inserted into. ``None`` = bounds not read on this dialect.
+    partition_bounds: list[dict[str, str]] | None = None
     # Postgres CLUSTER index, SQL Server clustered index, Oracle IOT.
     clustering: list[str] | None = None
 
@@ -154,9 +161,11 @@ def _probe_postgres(cursor: Any, schema: str, table: str) -> PhysicalStorage:
         )
     tspace, default_ts, partitioned, strat, child_count, part_keys, cluster_cols = rows[0]
     strategies = {"r": "range", "l": "list", "h": "hash"}
+    bounds = _postgres_partition_bounds(cursor, schema, table) if partitioned else []
     return PhysicalStorage(
         dialect="postgresql",
         status="measured",
+        table=str(table),
         detail="pg_class/pg_partitioned_table/pg_tablespace",
         tablespace=str(tspace),
         is_default_tablespace=bool(default_ts),
@@ -164,8 +173,33 @@ def _probe_postgres(cursor: Any, schema: str, table: str) -> PhysicalStorage:
         partition_strategy=strategies.get(str(strat or ""), None) if partitioned else None,
         partition_keys=[str(c) for c in (part_keys or [])],
         partition_count=int(child_count or 0) if partitioned else 0,
+        partition_bounds=bounds,
         clustering=[str(c) for c in (cluster_cols or [])],
     )
+
+
+def _postgres_partition_bounds(
+    cursor: Any, schema: str, table: str
+) -> list[dict[str, str]]:
+    """Child partition names and their ``FOR VALUES``/``DEFAULT`` bounds."""
+    rows = _rows(
+        cursor,
+        """
+        SELECT child.relname, pg_get_expr(child.relpartbound, child.oid)
+          FROM pg_inherits i
+          JOIN pg_class parent ON parent.oid = i.inhparent
+          JOIN pg_namespace n ON n.oid = parent.relnamespace
+          JOIN pg_class child ON child.oid = i.inhrelid
+         WHERE n.nspname = %s AND parent.relname = %s
+         ORDER BY child.relname
+        """,
+        (schema, table),
+    )
+    return [
+        {"name": str(name), "bound": str(bound or "")}
+        for name, bound in rows
+        if name
+    ]
 
 
 def _mysql_tablespace(cursor: Any, schema: str, table: str) -> str | None:
@@ -207,6 +241,14 @@ def _probe_mysql(cursor: Any, schema: str, table: str) -> PhysicalStorage:
                (SELECT MIN(p.partition_expression) FROM information_schema.partitions p
                  WHERE p.table_schema = t.table_schema
                    AND p.table_name = t.table_name
+                   AND p.partition_name IS NOT NULL),
+               (SELECT GROUP_CONCAT(
+                          CONCAT(p.partition_name, '\\t',
+                                 COALESCE(p.partition_description, ''))
+                          ORDER BY p.partition_ordinal_position SEPARATOR '\\n')
+                  FROM information_schema.partitions p
+                 WHERE p.table_schema = t.table_schema
+                   AND p.table_name = t.table_name
                    AND p.partition_name IS NOT NULL)
           FROM information_schema.tables t
          WHERE t.table_schema = %s AND t.table_name = %s
@@ -219,8 +261,13 @@ def _probe_mysql(cursor: Any, schema: str, table: str) -> PhysicalStorage:
             f"{schema}.{table} not visible in information_schema for this user; "
             "physical placement unmeasured (not proof of absence)",
         )
-    _name, part_count, method, expression = rows[0]
+    _name, part_count, method, expression, bound_blob = rows[0]
     tspace = _mysql_tablespace(cursor, schema, table)
+    bounds = [
+        {"name": line.split("\t", 1)[0], "bound": line.split("\t", 1)[1]}
+        for line in str(bound_blob or "").split("\n")
+        if "\t" in line
+    ]
     keys = [
         part.strip().strip("`")
         for part in str(expression or "").split(",")
@@ -229,6 +276,7 @@ def _probe_mysql(cursor: Any, schema: str, table: str) -> PhysicalStorage:
     return PhysicalStorage(
         dialect="mysql",
         status="measured",
+        table=str(table),
         detail="information_schema.tables/partitions",
         tablespace=tspace,
         # A per-table tablespace name is only meaningful for InnoDB general
@@ -238,6 +286,7 @@ def _probe_mysql(cursor: Any, schema: str, table: str) -> PhysicalStorage:
         partition_strategy=str(method).lower() if method else None,
         partition_keys=keys,
         partition_count=int(part_count or 0),
+        partition_bounds=bounds,
         # InnoDB always clusters on the PK; that is engine behaviour, not a
         # per-table choice, so it is reported as an empty explicit measurement.
         clustering=[],
@@ -249,7 +298,11 @@ def _probe_sqlserver(cursor: Any, schema: str, table: str) -> PhysicalStorage:
         cursor,
         """
         SELECT COALESCE(fg.name, ps.name),
-               CASE WHEN ps.data_space_id IS NULL THEN 1 ELSE 0 END,
+               -- Whether the table's own filegroup is the database default.
+               -- (The old expression asked "is this not a partition scheme?",
+               --  so a table deliberately placed on a secondary filegroup was
+               --  reported as sitting in the default and never carried.)
+               fg.is_default,
                (SELECT COUNT(*) FROM sys.partitions p
                  WHERE p.object_id = t.object_id AND p.index_id IN (0, 1)),
                (SELECT STRING_AGG(c.name, ',') FROM sys.index_columns ic
@@ -278,9 +331,12 @@ def _probe_sqlserver(cursor: Any, schema: str, table: str) -> PhysicalStorage:
     return PhysicalStorage(
         dialect="sqlserver",
         status="measured",
+        table=str(table),
         detail="sys.tables/sys.partitions/sys.filegroups",
         tablespace=str(space) if space else None,
-        is_default_tablespace=bool(is_default),
+        # NULL when the table sits on a partition scheme rather than a
+        # filegroup: unmeasured, not "default".
+        is_default_tablespace=(None if is_default is None else bool(is_default)),
         partitioned=partitioned,
         partition_strategy="partition_scheme" if partitioned else None,
         partition_keys=[],
@@ -328,6 +384,7 @@ def _probe_oracle(cursor: Any, schema: str, table: str) -> PhysicalStorage:
     return PhysicalStorage(
         dialect="oracle",
         status="measured",
+        table=str(table),
         detail="all_tables/all_part_tables/all_part_key_columns",
         # An Oracle table always names a tablespace; partitioned tables may
         # place it per partition, in which case the table-level value is NULL.

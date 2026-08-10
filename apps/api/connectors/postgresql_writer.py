@@ -1408,6 +1408,10 @@ def write_mapped_rows(
                     (schema, table_name),
                 )
                 pg_table_existed = cursor.fetchone() is not None
+                from services.physical_placement_ddl import (
+                    list_destination_tablespaces,
+                )
+
                 fidelity_plan = resolve_create_fidelity_plan(
                     source_schema_catalog=_kwargs.get("source_schema_catalog"),
                     mappings=mappings,
@@ -1417,6 +1421,9 @@ def write_mapped_rows(
                     table_already_exists=pg_table_existed,
                     dest_table=table_name,
                     dest_schema=schema,
+                    dest_tablespaces=list_destination_tablespaces(
+                        "postgresql", cursor
+                    ),
                 )
                 if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)
@@ -1426,11 +1433,14 @@ def write_mapped_rows(
                     plan=(None if pg_table_existed else fidelity_plan),
                     dialect="postgresql",
                 )
+                # Placement (PARTITION BY / TABLESPACE) is part of the CREATE
+                # itself — a table cannot be partitioned after the fact.
                 cursor.execute(
-                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
+                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({}) {}").format(
                         sql.Identifier(schema),
                         sql.Identifier(table_name),
                         sql.SQL(body),
+                        sql.SQL(fidelity_plan.create_suffix or ""),
                     )
                 )
                 from services.schema_fidelity import apply_post_create_sql
@@ -1448,6 +1458,17 @@ def write_mapped_rows(
                     cursor.execute("RELEASE SAVEPOINT df_post_create")
 
                 apply_post_create_sql(fidelity_plan, _run_post_create)
+                from services.schema_fidelity import (
+                    certify_placement_on_destination,
+                )
+
+                certify_placement_on_destination(
+                    fidelity_plan,
+                    dialect="postgresql",
+                    cursor=cursor,
+                    schema=schema,
+                    table=table_name,
+                )
                 _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
             except Exception as exc:
                 logger.warning(

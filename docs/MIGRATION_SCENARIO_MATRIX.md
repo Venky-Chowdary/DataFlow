@@ -138,6 +138,54 @@ collision probe and Gate-8 read-back now resolve one catalog identity.
 | overwrite / upsert / merge | Require an explicit sync contract; append never silently becomes one |
 | resume | Needs a committed checkpoint; a failed run offers Validate, not Resume |
 
+## 4b. Physical placement on create-new
+
+Measured live through the real writer path on PostgreSQL 16, MySQL 8, SQL
+Server 2022 and Oracle Free; every verdict below is decided by **re-reading the
+destination catalog after the write**, never by the SQL the planner emitted.
+Artifact: `physical_placement_live_results.json` (10/10).
+
+| # | Source → destination | Source placement (measured) | Certificate | Destination re-read |
+|---|----------------------|------------------------------|-------------|---------------------|
+| 4b.1 | PG → PG | RANGE on `created`, 2 partitions | `carried` | partitioned, 2 children, rows in them, an out-of-bound row rejected |
+| 4b.2 | PG → PG, PK omits the partition key | RANGE on `created` | `unsupported`, names `PRIMARY KEY` | unpartitioned, PK intact |
+| 4b.3 | PG → PG, secondary tablespace | `df_fast` | `carried` | table is on `df_fast` |
+| 4b.4 | PG → PG, tablespace absent on destination | `no_such_space` | `unsupported` — "create it on the destination first" | default tablespace, rows written |
+| 4b.5 | PG → PG, plain table | measured, unpartitioned, default | `skipped` (measured absence) | matches |
+| 4b.6 | MySQL → MySQL | RANGE on `yr`, 3 partitions incl. `MAXVALUE` | `carried` | partitioned, 3 partitions, rows present |
+| 4b.7 | PG → MySQL | RANGE on `created` | `unsupported` — bounds do not translate | unpartitioned |
+| 4b.8 | PG → Oracle | RANGE on `created` | `unsupported` | unpartitioned |
+| 4b.9 | SQL Server → SQL Server, secondary filegroup | `df_fg` | `carried` | table is on `df_fg` |
+| 4b.10 | PG → SQL Server | RANGE on `created` | `unsupported` | unpartitioned, on `PRIMARY` |
+
+Rules this pins:
+
+- a partition scheme is only carried when the source **bounds** were read as
+  well: a partitioned parent with no children accepts no row;
+- PostgreSQL requires every unique constraint to contain the partition key, so
+  a scheme that would cost the PRIMARY KEY is refused rather than carried;
+- cross-engine partitioning is never invented — bounds and strategy semantics
+  do not translate, and the certificate says so instead of reporting a heap as
+  faithful;
+- a tablespace/filegroup is only named on CREATE when the **destination**
+  catalog lists it; when the destination catalog cannot be read the aspect is
+  `unknown`, never "absent";
+- `carried` is written only after the destination catalog re-read agrees with
+  the source; a re-read that disagrees downgrades to `unsupported`, and a
+  re-read that fails downgrades to `unknown`.
+
+Two defects this matrix caught, both invisible to unit tests: child partitions
+were created under the *source* child names, which `CREATE TABLE IF NOT EXISTS`
+turns into a silent no-op when source and destination share a schema (parent
+with zero partitions, every row quarantined); and the SQL Server probe reported
+"default filegroup" for any table not on a partition scheme, so a table
+deliberately placed on a secondary filegroup was never carried.
+
+Still not carried on create-new: SQL Server partition functions/schemes, Oracle
+partitioned tables and per-partition tablespaces, PostgreSQL `CLUSTER`
+ordering. Those report `unsupported` with the reason, which is honest but not
+finished.
+
 ## 5. What the operator is shown
 
 Produced today: mapping pairs with confidence and fidelity risk per column,
@@ -175,6 +223,6 @@ rather than connector bugs.
 Scenarios deliberately absent from this run, so they must not be claimed:
 generated/identity destination columns, CHECK-constraint rejection on append,
 foreign-key ordering across multiple tables, sequence high-water marks,
-partitioned destinations, SQL Server and SQLite for sections 1–2, warehouse
+SQL Server and SQLite for sections 1–2, warehouse
 and SaaS destinations (credentials not provisioned), and quarantine/replay
 row-count invariants under partial failure.

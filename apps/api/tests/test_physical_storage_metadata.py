@@ -70,7 +70,12 @@ def test_probe_unavailable_keeps_placement_unknown():
     assert "not visible" in _aspect(report, "partitioning")["reason"]
 
 
-def test_measured_partitioning_is_certified_unsupported_with_detail():
+def test_partition_key_outside_pk_is_refused_with_reason():
+    """PostgreSQL rejects a unique constraint that misses the partition key.
+
+    Carrying the scheme anyway would cost the PRIMARY KEY, so the certificate
+    must refuse the placement and say which constraint blocks it.
+    """
     measured = PhysicalStorage(
         dialect="postgresql",
         status="measured",
@@ -86,8 +91,12 @@ def test_measured_partitioning_is_certified_unsupported_with_detail():
     part = _aspect(report, "partitioning")
     assert part["status"] == "unsupported"
     assert "range on created" in part["source_detail"]
-    assert _aspect(report, "tablespace")["status"] == "unsupported"
-    assert _aspect(report, "tablespace")["source_detail"] == "fast_ssd"
+    assert "PRIMARY KEY" in part["reason"]
+    # The destination tablespace catalog was never read here, so "fast_ssd is
+    # missing" is not a claim this run may make.
+    tablespace = _aspect(report, "tablespace")
+    assert tablespace["status"] == "unknown"
+    assert tablespace["source_detail"] == "fast_ssd"
     assert _aspect(report, "clustering")["status"] == "unsupported"
 
 
@@ -184,3 +193,42 @@ def test_live_postgres_partitioning_is_measured_from_the_catalog():
         with conn.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS public."{part}" CASCADE')
         conn.close()
+
+
+class _FakeSqlServerCursor:
+    """Returns whatever the probe's own SELECT list asks for, in order."""
+
+    def __init__(self, row: tuple) -> None:
+        self._row = row
+        self.description = None
+
+    def execute(self, sql: str, params=None) -> None:  # noqa: ARG002
+        assert "sys.filegroups" in sql
+        assert "fg.is_default" in sql, (
+            "the filegroup default flag must come from the table's own filegroup"
+        )
+        self.description = [("a",), ("b",), ("c",), ("d",)]
+
+    def fetchall(self) -> list[tuple]:
+        return [self._row]
+
+
+def test_sqlserver_secondary_filegroup_is_not_reported_as_default():
+    """A table placed ON [df_fg] must not read back as sitting in the default.
+
+    The old expression answered "is this not a partition scheme?", so every
+    deliberately placed table looked default and was never carried.
+    """
+    measured = probe_physical_storage(
+        "sqlserver", _FakeSqlServerCursor(("df_fg", 0, 1, "id")), "dbo", "t"
+    )
+    assert measured.status == "measured"
+    assert measured.tablespace == "df_fg"
+    assert measured.is_default_tablespace is False
+
+    on_scheme = probe_physical_storage(
+        "sqlserver", _FakeSqlServerCursor(("ps_range", None, 4, "id")), "dbo", "t"
+    )
+    # On a partition scheme there is no single filegroup: unmeasured, not default.
+    assert on_scheme.is_default_tablespace is None
+    assert on_scheme.partitioned is True
