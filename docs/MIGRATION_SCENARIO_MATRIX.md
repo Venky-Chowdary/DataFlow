@@ -35,7 +35,7 @@ Source table: `id` + `c1..c30`. Destination: existing table with `id` + `c1..c20
 | 1.1 | 20 of 30 source columns mapped, remaining 10 **not mentioned at all** | blocked pre-write | blocked pre-write | blocked pre-write | GAP-1 **fixed** |
 | 1.2 | Same, remaining 10 marked `intentional_omit` | written, 5 rows | written, 5 rows | written, 5 rows | GAP-2 **fixed** |
 | 1.3 | Destination has a `NOT NULL` column with no default and no mapping | blocked at write | blocked at write | blocked at write | **GAP-3 — not predicted** |
-| 1.4 | Destination has an extra **nullable** column nothing maps into | 5 rows written, job **failed** on checksum | same | same | **GAP-4 — false Gate-8 failure after commit** |
+| 1.4 | Destination has an extra **nullable** column nothing maps into | 5 rows written, job passed | same | same | GAP-4 **fixed** |
 
 Detail:
 
@@ -59,11 +59,17 @@ Detail:
   0 rows land — but the operator learns at write time from an engine error
   instead of at Validate from a gate that says "destination requires
   `tenant_id`; it has no default and no source mapping".
-- **1.4** the untouched nullable column is read back by Gate-8 on the
-  destination side but has no counterpart on the source side, so the checksums
-  differ and the job is marked failed **after** committing 5 rows. Two
-  problems in one: a false failure, and a committed write behind it. Gate-8
-  must fingerprint the *mapped projection*, not the destination row.
+- **1.4** the untouched nullable column was read back by Gate-8 on the
+  destination side but had no counterpart on the source side, so the checksums
+  differed and the job was marked failed **after** committing 5 rows — a false
+  failure with a real write behind it. Every read-back issues `SELECT *` and
+  used the returned cursor description as the digest columns; it now projects
+  to the mapped target columns through `services/readback_projection.py`
+  before hashing, on all thirteen SQL/warehouse read-back paths. A mapped
+  column the destination did **not** return is left unprojected so the
+  mismatch still surfaces — narrowing the digest to hide it would be the same
+  silent-drop failure. Live re-run:
+  `/home/ubuntu/repro/gap4_mapped_projection_live_results.json`.
 
 ## 2. Type and fidelity scenarios
 
@@ -139,7 +145,7 @@ Not produced today, and needed for the scenarios above:
 | ID | Gap | Severity | Where |
 |----|-----|----------|-------|
 | GAP-1 | ~~Unmapped source columns are dropped and the run is green~~ **fixed** — `g13_source_coverage` hard gate | Was critical — silent data loss | `services/source_coverage_gate.py` |
-| GAP-4 | Untouched destination columns break Gate-8 checksum *after* rows are committed | **High — false failure + partial commit** | `services/reconciliation.py` fingerprint scope |
+| GAP-4 | ~~Untouched destination columns break Gate-8 checksum *after* rows are committed~~ **fixed** — read-back digests the mapped projection | Was high | `services/readback_projection.py` |
 | GAP-2 | ~~Declared `intentional_omit` columns are transform-checked and refuse the run~~ **fixed** — omissions excluded from every write-path probe | Was high | `services/mapping_constraints.write_mappings` call sites |
 | GAP-3 | Destination `NOT NULL`-without-default is caught by the engine, not predicted | Medium | preflight destination-requirement gate |
 | GAP-6 | `TEXT → TEXT` reported as fidelity collapse | Medium — false positive erodes trust | type fidelity classifier |

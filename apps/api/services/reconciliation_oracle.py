@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Final
 
+from services.readback_projection import project_readback
 from services.reconciliation import (
     canonical_checksum_from_iter,
     keyed_readback_sa_clause,
@@ -178,9 +179,9 @@ def verify_oracle_table(
                     f"SELECT * FROM {table_ref} {where}"  # nosec B608
                 ).bindparams(**params)
             names, result = sa_streaming_result(conn, select)
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, (tuple(row) for row in result))
             checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="oracle",

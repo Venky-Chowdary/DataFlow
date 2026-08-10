@@ -27,6 +27,7 @@ from connectors.sql_identifiers import quote_sql_identifier
 from services.decision_kernel.findings import (
     typed_cast_incompatible_with_text_sink,
 )
+from services.readback_projection import project_readback
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
     WRITTEN_BATCH_KEYS,
@@ -981,9 +982,9 @@ def verify_postgres_table(
             else:
                 cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names, rows = dbapi_streaming_rows(cur)
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, rows)
             checksum = canonical_checksum_from_iter(
-                rows,
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="postgresql",
@@ -1482,9 +1483,9 @@ def verify_mysql_table(
             else:
                 cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names, rows = dbapi_streaming_rows(cur)
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, rows)
             checksum = canonical_checksum_from_iter(
-                rows,
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="mysql",
@@ -1546,9 +1547,9 @@ def verify_sqlserver_table(
             else:
                 cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="sqlserver",
@@ -1623,8 +1624,6 @@ def verify_bigquery_table(
         table = client.get_table(table_id)
         count = table.num_rows or 0
         field_names = [field.name for field in table.schema] if table.schema else []
-        columns = field_names or target_columns or []
-
         def _row_iter():
             yielded = 0
             for row in client.list_rows(table_id):
@@ -1633,8 +1632,9 @@ def verify_bigquery_table(
                 yield list(row.values()) if hasattr(row, "values") else list(row)
                 yielded += 1
 
+        columns, projected = project_readback(field_names, target_columns, _row_iter())
         return int(count), canonical_checksum_from_iter(
-            _row_iter(), columns, limit=limit
+            projected, columns, limit=limit
         )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -2314,9 +2314,9 @@ def verify_databricks_table(
                     f"SELECT * FROM {table_ref} {where}"  # nosec B608
                 ).bindparams(**params)
             names, result = sa_streaming_result(conn, select)
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, (tuple(row) for row in result))
             checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="databricks",
@@ -2371,10 +2371,8 @@ def verify_sqlite_table(
         else:
             cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
-        columns = names or target_columns or []
-        checksum = canonical_checksum_from_iter(
-            _iter_fetchmany(cur), columns, limit=limit
-        )
+        columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
+        checksum = canonical_checksum_from_iter(projected, columns, limit=limit)
         conn.close()
         return int(count), checksum
     except sqlite3.OperationalError as exc:
@@ -2422,10 +2420,8 @@ def verify_duckdb_table(
         else:
             cur = conn.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
-        columns = names or target_columns or []
-        checksum = canonical_checksum_from_iter(
-            _iter_fetchmany(cur), columns, limit=limit
-        )
+        columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
+        checksum = canonical_checksum_from_iter(projected, columns, limit=limit)
         conn.close()
         return int(count), checksum
     except Exception as exc:
@@ -2498,9 +2494,9 @@ def verify_clickhouse_table(
                 ).bindparams(**params)
             result = conn.execute(select)
             names = list(result.keys())
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, (tuple(row) for row in result))
             checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="clickhouse",
@@ -2567,9 +2563,9 @@ def verify_generic_sql_table(
                     f"SELECT * FROM {table_ref} {where}"  # nosec B608
                 ).bindparams(**params)
             names, result = sa_streaming_result(conn, select)
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, (tuple(row) for row in result))
             checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type=hint or dialect,
@@ -2900,9 +2896,9 @@ def verify_snowflake_table(
             else:
                 cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="snowflake",
