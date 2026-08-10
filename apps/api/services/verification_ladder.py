@@ -16,14 +16,26 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import uuid
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 logger = logging.getLogger(__name__)
 
 # Operator-facing alias — 500-row probes are screening, never population proof.
 DEFAULT_SCREENING_LIMIT = 500
+
+# Rows pulled per round trip while streaming a population read.
+_READ_BATCH = 10_000
+
+
+def _fetch_size(budget: int, read_so_far: int) -> int:
+    """Never pull more than one row past the budget we are about to refuse."""
+    if not budget:
+        return _READ_BATCH
+    return max(min(_READ_BATCH, budget - read_so_far + 1), 1)
+
 
 # Full-table load for L2/L4/L5 is correct but memory-bound. Above this cap we
 # refuse to pretend we finished population localization (honest skip).
@@ -33,6 +45,18 @@ try:
     MAX_LADDER_ROWS = int(_getenv_brand("VERIFICATION_LADDER_MAX_ROWS", "250000") or "250000")
 except Exception:
     MAX_LADDER_ROWS = 250_000
+
+
+class PopulationTooLarge(RuntimeError):
+    """Raised by the readers before an oversized population reaches memory."""
+
+    def __init__(self, rows_read: int, budget: int) -> None:
+        super().__init__(
+            f"population exceeds the {budget}-row ladder budget "
+            f"(stopped after reading {rows_read})"
+        )
+        self.rows_read = rows_read
+        self.budget = budget
 
 
 @dataclass(frozen=True)
@@ -429,8 +453,9 @@ def read_sqlite_rows(
     columns: list[str] | None = None,
     connection_string: str = "",
     host: str = "",
+    max_rows: int = MAX_LADDER_ROWS,
 ) -> list[dict[str, Any]]:
-    """Full-population read of a SQLite table into dict rows."""
+    """Population read of a SQLite table, bounded by the ladder row budget."""
     import sqlite3
 
     from connectors.sqlite_common import sqlite_file_path
@@ -444,10 +469,16 @@ def read_sqlite_rows(
     try:
         conn.row_factory = sqlite3.Row
         cur = conn.execute(f"SELECT * FROM {table_ref}")  # nosec B608
-        rows = [dict(r) for r in cur.fetchall()]
-        if columns:
-            return [{c: r.get(c) for c in columns} for r in rows]
-        return rows
+        rows: list[dict[str, Any]] = []
+        while True:
+            batch = cur.fetchmany(_fetch_size(max_rows, len(rows)))
+            if not batch:
+                return rows
+            for r in batch:
+                row = dict(r)
+                rows.append({c: row.get(c) for c in columns} if columns else row)
+            if max_rows and len(rows) > max_rows:
+                raise PopulationTooLarge(len(rows), max_rows)
     finally:
         conn.close()
 
@@ -464,8 +495,15 @@ def read_postgres_rows(
     columns: list[str] | None = None,
     connection_string: str = "",
     ssl: bool = False,
+    max_rows: int = MAX_LADDER_ROWS,
 ) -> list[dict[str, Any]]:
-    """Full-population read of a PostgreSQL table into dict rows."""
+    """Population read of a PostgreSQL table, bounded by the ladder row budget.
+
+    Uses a server-side cursor: the previous ``fetchall()`` on a client-side
+    cursor buffered the whole result set in libpq *and* again as dicts, so a
+    10M-row destination cost ~15 GB in the verification step — after the data
+    was already written, which is the worst possible place to run out of memory.
+    """
     from connectors.postgresql_conn import get_connection
     from psycopg2 import sql
 
@@ -479,8 +517,10 @@ def read_postgres_rows(
         connection_string=connection_string,
         ssl=ssl,
     )
+    cursor_name = f"df_ladder_{uuid.uuid4().hex}"
     try:
-        with conn.cursor() as cur:
+        with conn.cursor(name=cursor_name) as cur:
+            cur.itersize = _READ_BATCH
             if columns:
                 col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
                 q = sql.SQL("SELECT {} FROM {}.{}").format(
@@ -494,8 +534,17 @@ def read_postgres_rows(
                     sql.Identifier(table),
                 )
             cur.execute(q)
-            names = [d[0] for d in cur.description] if cur.description else []
-            return [dict(zip(names, row)) for row in cur.fetchall()]
+            rows: list[dict[str, Any]] = []
+            names: list[str] = []
+            while True:
+                batch = cur.fetchmany(_fetch_size(max_rows, len(rows)))
+                if not batch:
+                    return rows
+                if not names:
+                    names = [d[0] for d in cur.description] if cur.description else []
+                rows.extend(dict(zip(names, row)) for row in batch)
+                if max_rows and len(rows) > max_rows:
+                    raise PopulationTooLarge(len(rows), max_rows)
     finally:
         conn.close()
 

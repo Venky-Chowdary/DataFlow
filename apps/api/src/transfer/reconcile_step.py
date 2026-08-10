@@ -177,6 +177,38 @@ def _source_key_values(
     return values
 
 
+def _as_count(value: Any) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ladder_declined(report: dict[str, Any], rows: int, budget: int) -> dict[str, Any]:
+    """Record why L2/L4/L5 localization did not run, without weakening Gate-8.
+
+    L1 and the L3 full-population checksum are streaming and still apply; only
+    the in-memory localization layers are declined.
+    """
+    out = dict(report or {})
+    out["verification_ladder"] = {
+        "layers": {},
+        "passed": bool(out.get("passed")),
+        "assurance_level": str(out.get("assurance_level") or ""),
+        "population_proof": False,
+        "population_checksum_proof": bool(out.get("checksum_match")),
+        "skipped": True,
+        "reason": (
+            f"Population of {rows} rows exceeds VERIFICATION_LADDER_MAX_ROWS={budget}; "
+            "in-memory L2/L4/L5 localization declined before loading. "
+            "Gate-8 L1 row balance and L3 full-population checksum still apply."
+        ),
+        "localization": {},
+        "localization_summary": "",
+    }
+    return out
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -188,8 +220,10 @@ def _maybe_attach_verification_ladder(
     mappings: list[dict],
     validation_mode: str,
 ) -> dict[str, Any]:
-    """Property 5 — run L1–L5 when source+dest populations can be loaded."""
+    """Property 5 — run L1–L5 when source+dest populations fit the row budget."""
     from services.verification_ladder import (
+        MAX_LADDER_ROWS,
+        PopulationTooLarge,
         attach_ladder_to_reconcile_report,
         read_postgres_rows,
         read_sqlite_rows,
@@ -201,6 +235,17 @@ def _maybe_attach_verification_ladder(
     dest_type = resolve_driver_type(endpoint.format)
     if dest_type not in {"sqlite", "postgresql", "redshift"}:
         return report
+
+    # L2/L4/L5 localization is in-memory. Decide from the counts we already have
+    # rather than after both populations are resident: a 10M-row destination
+    # cost ~15 GB here before run_five_layer_verification could decline it.
+    known = max(
+        _as_count(report.get("source_rows")),
+        _as_count(report.get("target_rows")),
+        len(records or []),
+    )
+    if known > MAX_LADDER_ROWS:
+        return _ladder_declined(report, known, MAX_LADDER_ROWS)
     target_cols = _mapped_targets(mappings, columns) if mappings else list(columns or [])
     if not target_cols:
         return report
@@ -244,6 +289,8 @@ def _maybe_attach_verification_ladder(
                 connection_string=str(dest_cfg.get("connection_string") or ""),
                 ssl=bool(dest_cfg.get("ssl", False)),
             )
+    except PopulationTooLarge as exc:
+        return _ladder_declined(report, exc.rows_read, exc.budget)
     except Exception as exc:
         logging.getLogger(__name__).debug("ladder dest load failed: %s", exc)
         return report
@@ -273,6 +320,8 @@ def _maybe_attach_verification_ladder(
                     connection_string=str(src_cfg.get("connection_string") or ""),
                     ssl=bool(src_cfg.get("ssl", False)),
                 )
+        except PopulationTooLarge as exc:
+            return _ladder_declined(report, exc.rows_read, exc.budget)
         except Exception as exc:
             logging.getLogger(__name__).debug("ladder source load failed: %s", exc)
 
