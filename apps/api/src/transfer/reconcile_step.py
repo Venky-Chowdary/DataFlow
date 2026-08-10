@@ -486,8 +486,14 @@ def run_reconciliation(
 
     # Request a real read-back; if the verifier is unavailable we will detect
     # the negative row count and surface a softer "writer only" result.
-    # Strict/maximum modes verify the whole target table; balanced samples 5000 rows.
-    checksum_limit = 0 if validation_mode in ("strict", "maximum") else 5000
+    # The target digest is always full-population. Balanced mode used to cap it
+    # at 5000 rows, which hashed an arbitrary 5000-row prefix and compared it
+    # against the full source digest — every balanced transfer above 5000 rows
+    # reported a checksum mismatch on data that was byte-identical. Validation
+    # mode governs fail-closed severity (`strict_checksum`), never the scope of
+    # the comparison; the digest streams through FingerprintAccumulator, which
+    # spills to disk, so full scope stays memory-bounded at any row count.
+    checksum_limit = 0
 
     from services.sync_cursor import is_overwrite_sync
 

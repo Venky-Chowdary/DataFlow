@@ -9,6 +9,7 @@ dialect helper tables remain in ``type_system`` until later C2 splits.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Final
 
 # Helpers / tables still owned by type_system (shared core). Import the module
@@ -92,6 +93,11 @@ _bind_from_type_system()
 
 
 
+# Type strings are a tiny fixed vocabulary per job while this runs once per
+# *cell* on the bind and fingerprint paths — a 10M-row load called it ~230M
+# times, and the regex work dominated the profile. Memoized on the raw string;
+# the function is pure (str in, str out) so the cache cannot change a verdict.
+@lru_cache(maxsize=8192)
 def normalize_logical_type(inferred: str | None) -> str:
     """Return a canonical logical type for parser, DB, and warehouse types."""
     raw = strip_identity_qualifier(inferred)

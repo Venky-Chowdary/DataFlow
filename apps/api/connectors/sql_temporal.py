@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 
 
@@ -28,6 +29,7 @@ def round_to_smalldatetime(value: datetime) -> datetime:
     return base
 
 
+@lru_cache(maxsize=8192)
 def sql_base_type(source_type: str) -> str:
     """Strip length/precision suffixes while preserving TZ polarity.
 

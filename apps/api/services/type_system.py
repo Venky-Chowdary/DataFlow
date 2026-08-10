@@ -18,6 +18,7 @@ ETL contract (Informatica / Airbyte / Fivetran class)
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Any, Final
 
 LOGICAL_STRING = "string"
@@ -1054,6 +1055,7 @@ def avro_logical_token_to_carrier(token: str | None) -> str | None:
     return _AVRO_LOGICAL_TOKEN_CARRIER.get(key)
 
 
+@lru_cache(maxsize=8192)
 def arrow_dtype_to_carrier(dtype: str | None) -> str | None:
     """Map Apache Arrow / PyArrow type strings to Datawrap carriers.
 
@@ -4138,6 +4140,7 @@ def is_unlimited_binary_carrier(inferred: str | None) -> bool:
     return bool(_UNBOUNDED_BINARY_RE.search(text))
 
 
+@lru_cache(maxsize=8192)
 def is_bitstring_carrier(inferred: str | None) -> bool:
     """True for PostgreSQL/MySQL BIT(n>1) / BIT VARYING / VARBIT bitstrings.
 
@@ -5321,6 +5324,7 @@ def uuid_would_collapse(source_type: str, target_type: str) -> bool:
     return tgt_l in {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}
 
 
+@lru_cache(maxsize=8192)
 def strip_collation_qualifier(inferred: str | None) -> str:
     """Remove ``COLLATE name`` / ``NONDETERMINISTIC`` suffixes for logical lookup."""
     text = (inferred or "").strip()
@@ -5959,6 +5963,7 @@ def temporal_precision_would_narrow(
             return False
     return src_p > tgt_p
 
+@lru_cache(maxsize=8192)
 def strip_identity_qualifier(inferred: str | None) -> str:
     """Remove GENERATED / AUTO_INCREMENT / COLLATE qualifiers for logical lookup."""
     text = strip_collation_qualifier(inferred)
