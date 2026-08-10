@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
+from services.runtime_estimate import append_throughput_mark
+
 #: Statuses a job never leaves on its own. Progress writes that arrive after a
 #: job reaches one of these are stale by definition and must be dropped, not
 #: applied — otherwise a late write resurrects a cancelled or failed job.
@@ -471,6 +473,7 @@ class MongoDBService:
                     "event_log": 1,
                     "message": 1,
                     "phase": 1,
+                    "throughput_marks": 1,
                 },
             )
         except Exception:
@@ -508,6 +511,16 @@ class MongoDBService:
             updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             updates["completed_at"] = datetime.now(timezone.utc)
+
+        # Throughput evidence for the cutover-window estimate. Bounded to the
+        # trailing window the estimator reads, so the job doc cannot grow.
+        if "records_processed" in kwargs and "throughput_marks" not in updates:
+            marks = append_throughput_mark(
+                (prev_doc or {}).get("throughput_marks"),
+                kwargs.get("records_processed"),
+            )
+            if marks is not None:
+                updates["throughput_marks"] = marks
 
         phase_label = kwargs.get("phase")
         message = kwargs.get("message", "")
@@ -1201,9 +1214,15 @@ class MemoryMongoDBService:
         prev_rows = int(rec.get("records_processed") or 0)
         prev_log = list(rec.get("event_log") or [])
 
+        prev_marks = rec.get("throughput_marks")
+
         rec.update(kwargs)
         rec["status"] = status
         rec["updated_at"] = datetime.now(timezone.utc)
+        if "records_processed" in kwargs and "throughput_marks" not in kwargs:
+            marks = append_throughput_mark(prev_marks, kwargs.get("records_processed"))
+            if marks is not None:
+                rec["throughput_marks"] = marks
         if status == "running":
             rec.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):

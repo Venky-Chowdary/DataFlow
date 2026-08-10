@@ -118,6 +118,15 @@ function formatDuration(ms: number): string {
   return `${m}m ${s % 60}s`;
 }
 
+/** Remaining-time label; hours stay readable on multi-hour cutovers. */
+function formatEta(seconds: number): string {
+  const s = Math.max(Math.ceil(seconds), 0);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.ceil(s / 60)}m`;
+  const h = Math.floor(s / 3600);
+  return `${h}h ${Math.round((s % 3600) / 60)}m`;
+}
+
 function toEpochMs(value?: string): number | null {
   if (!value) return null;
   const ms = Date.parse(value);
@@ -567,12 +576,31 @@ export function JobTheaterView({
     return `${phaseLabel} — ${processed.toLocaleString()}${total > 0 ? ` / ${total.toLocaleString()}` : ""} rows…`;
   })();
 
+  // Server estimate is measured from persisted checkpoints and survives a page
+  // reload; the browser-side rate is only a fallback for the first intervals.
+  const estimate = job.runtime_estimate;
   const eta = useMemo(() => {
+    if (!isRunning || reconciling) return null;
+    const p50 = estimate?.available ? estimate.remaining_seconds_p50 : null;
+    if (typeof p50 === "number" && p50 > 0) return formatEta(p50);
     const rps = displayRps;
-    if (!isRunning || reconciling || rps <= 0 || total <= processed) return null;
-    const secs = Math.ceil((total - processed) / rps);
-    return secs < 60 ? `${secs}s` : `${Math.ceil(secs / 60)}m`;
-  }, [isRunning, reconciling, displayRps, total, processed]);
+    if (rps <= 0 || total <= processed) return null;
+    return formatEta((total - processed) / rps);
+  }, [isRunning, reconciling, estimate, displayRps, total, processed]);
+
+  const etaDetail = useMemo(() => {
+    if (!isRunning || reconciling) return "";
+    if (!estimate) return "";
+    if (!estimate.available) return estimate.reason || "";
+    const worst = estimate.remaining_seconds_p90;
+    const rate = estimate.rows_per_second_p50;
+    const parts: string[] = [];
+    if (typeof worst === "number" && worst > 0) parts.push(`worst case ${formatEta(worst)}`);
+    if (typeof rate === "number" && rate > 0) {
+      parts.push(`measured ${Math.round(rate).toLocaleString()} rows/s over ${estimate.intervals_observed ?? 0} intervals`);
+    }
+    return parts.join(" · ");
+  }, [isRunning, reconciling, estimate]);
 
   const slowSnowflakeTip =
     destType === "snowflake"
@@ -863,12 +891,12 @@ export function JobTheaterView({
             </div>
           </article>
         )}
-        {eta && (
-          <article className="df2-theater-v3-metric">
+        {(eta || etaDetail) && (
+          <article className="df2-theater-v3-metric" title={etaDetail || undefined}>
             <DtIcon name="gate" size={16} />
             <div>
-              <strong>{eta}</strong>
-              <span>ETA</span>
+              <strong>{eta ?? "—"}</strong>
+              <span>{eta ? "ETA (p50)" : "ETA unavailable"}</span>
             </div>
           </article>
         )}

@@ -22,6 +22,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import PyMongoError
+from services.runtime_estimate import estimate_for_job_doc
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import json_default
 
@@ -490,7 +491,9 @@ async def get_transfer_job(job_id: str, request: Request):
         for key in ("created_at", "updated_at", "started_at", "completed_at"):
             if job.get(key) and hasattr(job[key], "isoformat"):
                 job[key] = job[key].isoformat()
-        return sanitize_job_for_api(job)
+        safe = sanitize_job_for_api(job)
+        safe["runtime_estimate"] = estimate_for_job_doc(job)
+        return safe
     except HTTPException:
         raise
     except Exception as e:
@@ -752,6 +755,7 @@ async def stream_transfer_job(job_id: str, request: Request):
                 if job.get(key) and hasattr(job[key], "isoformat"):
                     job[key] = job[key].isoformat()
             safe = sanitize_job_for_api(job)
+            safe["runtime_estimate"] = estimate_for_job_doc(job)
             yield f"data: {json.dumps(safe, default=json_default)}\n\n"
             if safe.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
                 break
