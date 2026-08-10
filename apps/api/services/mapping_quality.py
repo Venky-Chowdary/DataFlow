@@ -309,10 +309,34 @@ def _logical_type(type_str: str) -> str:
         return "string"
 
 
+def _is_dialect_sanctioned_carrier(
+    source_type: str, target_type: str, dest_db: str
+) -> bool:
+    """True when the destination column is exactly the carrier our DDL would create.
+
+    A cross-family pair is normally weak evidence, but ``DECIMAL(12,2) → TEXT``
+    on SQLite is the exact-digit carrier :func:`materialize_dest_ddl` itself
+    picks — re-running a migration into a table DataFlow created must not score
+    its own DDL as an incompatible-type conflict.
+    """
+    if not dest_db or not source_type or not target_type:
+        return False
+    from services.type_system import materialize_dest_ddl
+
+    try:
+        expected = str(materialize_dest_ddl(dest_db, source_type) or "").strip()
+    except Exception:
+        return False
+    if not expected:
+        return False
+    return _logical_type(expected) == _logical_type(target_type)
+
+
 def classify_mapping_confidence(
     mapping: dict,
     *,
     source_profile: dict[str, Any] | None = None,
+    destination_db_type: str = "",
 ) -> dict[str, Any]:
     """Return evidence class + calibrated axes (not a single opaque %).
 
@@ -341,7 +365,13 @@ def classify_mapping_confidence(
     sparse = len(samples) < 3
     name_exact = src_l == tgt_l or src_l.replace("_", "") == tgt_l.replace("_", "")
     type_same = src_logical == tgt_logical
-    safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS
+    safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS or (
+        _is_dialect_sanctioned_carrier(
+            str(mapping.get("source_type") or mapping.get("inferred_type") or ""),
+            str(mapping.get("target_type") or mapping.get("dest_type") or ""),
+            destination_db_type,
+        )
+    )
     structural = src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
     pattern = float(profile.get("semantic_pattern_score") or 0.0)
     null_rate = float(profile.get("null_rate") or 0.0)
@@ -538,6 +568,7 @@ def refine_mappings_with_quality(
     mappings: list[dict],
     *,
     source_schemas: list[dict] | None = None,
+    destination_db_type: str = "",
 ) -> list[dict]:
     """Apply cross-field quality scoring to each mapping."""
     src_by_name = {s["name"]: s for s in (source_schemas or [])}
@@ -557,7 +588,11 @@ def refine_mappings_with_quality(
         delta, notes = score_mapping_pair(m, source_profile=profile)
         out = dict(m)
         conf = min(0.99, max(0.0, float(m.get("confidence", 0.0)) + delta))
-        classification = classify_mapping_confidence(out, source_profile=profile)
+        classification = classify_mapping_confidence(
+            out,
+            source_profile=profile,
+            destination_db_type=destination_db_type,
+        )
         conf = apply_confidence_class(conf, classification)
         out["confidence"] = round(conf, 3)
         out["confidence_class"] = classification["confidence_class"]

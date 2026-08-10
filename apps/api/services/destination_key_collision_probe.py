@@ -64,6 +64,10 @@ class DestinationCollisionResult:
     db_type: str = ""
     key_column: str = ""
     values_probed: int = 0
+    # A resumed run re-delivers the interrupted batch on purpose. The writer
+    # applies that overlap through the destination key (ON CONFLICT / MERGE),
+    # so overlapping keys are expected evidence rather than a write abort.
+    idempotent_apply: bool = False
 
     @property
     def ran(self) -> bool:
@@ -186,6 +190,7 @@ def probe_append_key_collisions(
     contract_primary_key: str | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
     source_table: str = "",
+    resume: bool = False,
 ) -> DestinationCollisionResult | None:
     """Resolve the identity key, then probe it — ``None`` when not applicable.
 
@@ -236,13 +241,19 @@ def probe_append_key_collisions(
     ):
         return None
 
-    return probe_destination_key_collisions(
+    result = probe_destination_key_collisions(
         destination_config=destination_config,
         destination_db_type=destination_db_type,
         destination_table=destination_table,
         key_column=target_key,
         values=[row.get(source_key) for row in (sample_rows or [])],
     )
+    # Resume re-reads from the last committed checkpoint, so the overlap with
+    # rows already at rest is the interrupted batch, not a new append. The
+    # writer resolves it on the enforced key; blocking here would strand a
+    # half-loaded destination with no forward path.
+    result.idempotent_apply = bool(resume)
+    return result
 
 
 def probe_destination_key_collisions(

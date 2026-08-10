@@ -830,6 +830,7 @@ def run_file_preflight(
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
 
@@ -1277,6 +1278,7 @@ def run_file_preflight(
         contract_primary_key=contract_primary_key,
         stream_contracts=stream_contracts,
         source_table=source_table,
+        resume=resume,
     )
 
     ctx = FilePreflightContext(

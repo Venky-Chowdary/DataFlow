@@ -1684,6 +1684,32 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     if collision is not None and getattr(collision, "findings", None):
         found = list(collision.findings)
         key = getattr(collision, "key_column", "") or "identity key"
+        if getattr(collision, "idempotent_apply", False):
+            # Resume: the overlap is the interrupted batch being re-delivered and
+            # the writer resolves it on the enforced key. Blocking here leaves a
+            # half-loaded destination with no forward path.
+            return _pass(
+                GateId.G6_TARGET_DDL,
+                (
+                    f"Resume re-delivery overlaps {len(found)} existing destination "
+                    f"key(s) on {key} — applied idempotently on the enforced key "
+                    "(at-least-once read, key-resolved write)."
+                ),
+                start,
+                _scope(
+                    {
+                        "sample_collisions": found[:5],
+                        "primary_key": {"target": key},
+                        "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+                        "rule_id": "g6_target_ddl.append_key_collision_resume",
+                        "probe_status": getattr(collision, "status", ""),
+                        "values_probed": getattr(collision, "values_probed", 0),
+                        "delivery": "at_least_once_idempotent_apply",
+                    },
+                    coverage="sample",
+                    note="Destination key collision probe on resumed append batch",
+                ),
+            )
         return _block(
             GateId.G6_TARGET_DDL,
             (

@@ -759,6 +759,7 @@ def run_mapping_pipeline(
     enriched_mappings = refine_mappings_with_quality(
         enriched_mappings,
         source_schemas=source_schemas,
+        destination_db_type=destination_db_type or "",
     )
     enriched_mappings = _demote_untyped_varchar_confidence(
         enriched_mappings,

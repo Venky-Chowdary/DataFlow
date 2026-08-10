@@ -3935,6 +3935,35 @@ def _sqlite_declared_over_samples(declared: str, inferred: str) -> str:
     return inferred
 
 
+def _sqlite_text_over_numeric_samples(declared: str, inferred: str) -> str:
+    """Refuse numeric capacity invented from the contents of a TEXT column.
+
+    TEXT is the exact-digit carrier our own DDL picks for DECIMAL on SQLite
+    (REAL would round). Inferring ``DECIMAL(p,s)`` back from those digits invents
+    a precision the declaration never had, so re-running a migration into a table
+    DataFlow itself created read ``DECIMAL(12,2) → DECIMAL(8,4)`` and blocked as a
+    narrowing. Semantic inference (temporal, JSON, UUID, boolean) claims no
+    capacity and still applies.
+    """
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        normalize_logical_type,
+    )
+
+    decl = (declared or "").strip()
+    if not decl:
+        return inferred
+    try:
+        inf_logical = normalize_logical_type(inferred)
+    except Exception:
+        return inferred
+    if inf_logical in {LOGICAL_DECIMAL, LOGICAL_FLOAT, LOGICAL_INTEGER}:
+        return decl
+    return inferred
+
+
 def _introspect_sqlite(
     *,
     database: str = "",
@@ -4057,6 +4086,10 @@ def _introspect_sqlite(
                             inferred = "DECIMAL"
                         else:
                             inferred = "DOUBLE PRECISION"
+                    elif declared_base in {"TEXT", "VARCHAR", "CHAR", "CLOB", "STRING"}:
+                        inferred = _sqlite_text_over_numeric_samples(
+                            declared, _sqlite_declared_over_samples(declared, inferred)
+                        )
                     else:
                         inferred = _sqlite_declared_over_samples(declared, inferred)
 

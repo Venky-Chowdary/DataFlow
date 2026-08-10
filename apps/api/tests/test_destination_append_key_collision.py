@@ -36,6 +36,7 @@ def _run(
     sync_mode: str,
     destination_pk_columns: list[str],
     destination_table_exists: bool = True,
+    resume: bool = False,
 ) -> dict[str, Any]:
     from services.preflight_service import run_file_preflight
 
@@ -63,6 +64,7 @@ def _run(
         destination_config=_dest_cfg(db_path),
         destination_column_types={"id": "TEXT", "name": "TEXT"},
         validation_mode="strict",
+        resume=resume,
     )
     return result
 
@@ -171,3 +173,52 @@ def test_unreachable_destination_is_a_skip_not_a_pass() -> None:
     assert res.status == "error"
     assert res.findings == []
     assert res.ran is False
+
+
+def test_resumed_append_applies_the_overlap_instead_of_blocking(tmp_path: Path) -> None:
+    """Resume re-delivers the interrupted batch; the writer resolves it on the key.
+
+    Blocking here strands a half-loaded destination with no forward path — the
+    operator cannot append (keys collide) and did not ask for overwrite.
+    """
+    db_path = _seed_destination(tmp_path, [("a", "A"), ("b", "B")])
+    result = _run(
+        db_path=db_path,
+        sample_rows=[{"id": "a", "name": "A2"}, {"id": "z", "name": "Z"}],
+        sync_mode="append",
+        destination_pk_columns=["id"],
+        resume=True,
+    )
+    g6 = _gate(result, "g6_target_ddl")
+    assert g6["status"] == "pass", g6
+    assert "Resume re-delivery overlaps" in g6["message"]
+    details = g6.get("details") or {}
+    assert details.get("delivery") == "at_least_once_idempotent_apply", g6
+    assert details.get("rule_id") == "g6_target_ddl.append_key_collision_resume", g6
+
+
+def test_resume_flag_is_recorded_on_the_probe_result(tmp_path: Path) -> None:
+    """The probe still runs on resume — the overlap is evidence, not a skip."""
+    from services.destination_key_collision_probe import probe_append_key_collisions
+
+    db_path = _seed_destination(tmp_path, [("a", "A")])
+    res = probe_append_key_collisions(
+        mappings=[{"source": "id", "target": "id"}, {"source": "name", "target": "name"}],
+        source_columns=["id", "name"],
+        sample_rows=[{"id": "a", "name": "A2"}],
+        sync_mode="append",
+        dest_kind="database",
+        validation_mode="strict",
+        destination_config=_dest_cfg(db_path),
+        destination_db_type="sqlite",
+        destination_table="jobs",
+        destination_table_exists=True,
+        destination_pk_columns=["id"],
+        destination_unique_keys=None,
+        contract_primary_key="id",
+        resume=True,
+    )
+    assert res is not None
+    assert res.status == "ran"
+    assert res.findings, "overlap must stay visible as evidence"
+    assert res.idempotent_apply is True

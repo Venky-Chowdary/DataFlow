@@ -703,6 +703,47 @@ def _write_batch(
     raise ValueError(f"Streaming write not supported for destination type '{dest_type}'")
 
 
+def _destination_key_for_resume(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    mappings: list[dict],
+) -> tuple[list[str], list[str]]:
+    """Identity key a resumed append can write through, from the destination catalog.
+
+    Returns ``(source_columns, target_columns)``, empty when the destination
+    declares no primary key or the key is not covered by the mapping — an
+    unmapped key column cannot be an ON CONFLICT target, and guessing one would
+    resolve rows on the wrong identity.
+    """
+    from services.sync_cursor import map_source_to_target
+
+    if not dest_type or not dest_table:
+        return [], []
+    try:
+        _types, _nulls, keys = _introspect_table_schema_rich(
+            dest_type, dest_cfg, dest_table, [], strict_namespace=True
+        )
+    except Exception as exc:
+        logger.debug("resume destination key introspection failed: %s", exc, exc_info=exc)
+        return [], []
+    pk_targets = [str(c) for c in (keys.get("primary_key_columns") or []) if str(c or "")]
+    if not pk_targets:
+        return [], []
+    wanted = {c.lower() for c in pk_targets}
+    src_cols: list[str] = []
+    for m in mappings or []:
+        src = str(m.get("source") or "")
+        if not src:
+            continue
+        tgt = str(map_source_to_target(src, mappings) or "")
+        if tgt.lower() in wanted:
+            src_cols.append(src)
+    if len(src_cols) != len(pk_targets):
+        return [], []
+    return src_cols, pk_targets
+
+
 def stream_database_transfer(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -832,7 +873,20 @@ def _stream_database_transfer_impl(
         )
     # Parallel/chunked resume is only safe with idempotent writes.
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
+    resume_key_resolved = False
     if resuming and write_mode == "insert":
+        resume_key_resolved = True
+        if not pk_target_cols:
+            # No stream contract, but the destination itself may enforce a key.
+            # Resuming an append re-delivers the interrupted batch, so honouring
+            # that key turns an unavoidable duplicate-key abort into an
+            # idempotent apply instead of stranding a half-loaded destination.
+            pk_source_cols, pk_target_cols = _destination_key_for_resume(
+                dest_type,
+                dest_cfg,
+                resolve_dest_table(dest_type, destination, _source_name(source)),
+                mappings,
+            )
         if pk_target_cols:
             write_mode = "upsert"
         else:
@@ -1260,6 +1314,10 @@ def _stream_database_transfer_impl(
 
     written = checkpoint.rows_processed or 0
     offset = checkpoint.offset or 0
+    # A resumed pass only ever fingerprints the rows it writes, while Gate-8
+    # compares against the whole destination — the write-pass digest is not a
+    # population checksum for this run.
+    resumed_pass = bool(written or offset)
     dest_summary: dict[str, Any] = {}
     # Gate-8 append proof needs the cardinality from before the first batch. A
     # resumed run already appended rows, so its count is not a "before" and the
@@ -1471,8 +1529,19 @@ def _stream_database_transfer_impl(
     # ahead in parallel while only persisting durable offsets after a batch is
     # successfully written.
     fetch_cursor = running_cursor
-    fetch_offset = offset
+    # `fetch_offset` doubles as the source-row budget counter (`limit` /
+    # `total_rows`). A keyset resume seeks by bookmark, and that bookmark sits at
+    # or behind the committed offset, so the rows it re-reads would be charged to
+    # the budget twice and the run would stop short of the tail — silent loss the
+    # operator only sees as a reconciliation mismatch. Keyset pages terminate
+    # naturally on a short/empty page, so the budget restarts at zero instead.
+    keyset_resume = bool(use_keyset and keyset_after and offset > 0)
+    fetch_offset = 0 if keyset_resume else offset
     committed_offset = offset
+    # Keyset bookmark of the last *committed* batch. `keyset_after` belongs to
+    # the reader, which runs batches ahead of the writer; persisting it would
+    # resume past rows that were read but never written.
+    committed_keyset = checkpoint.cursor_value or ""
 
     def _fetch_next_batch(last_batch):
         """Timed wrapper — source read time is the first thing to rule out."""
@@ -1820,6 +1889,7 @@ def _stream_database_transfer_impl(
                 "coerced_null": 0,
                 "warnings": [],
                 "batch_max": None,
+                "batch_keyset": None,
                 "batch_rows": 0,
                 "reconcile_sample_rows": [],
                 "fingerprints": [],
@@ -1862,6 +1932,14 @@ def _stream_database_transfer_impl(
         if incremental and cursor_source_col:
             batch_max = max_cursor_value(
                 batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
+            )
+        batch_keyset = None
+        if use_keyset:
+            batch_keyset = max_keyset_bookmark(
+                batch.rows,
+                batch.headers,
+                keyset_order_cols
+                or ([keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])),
             )
 
         write_kwargs: dict[str, Any] = {}
@@ -1961,13 +2039,14 @@ def _stream_database_transfer_impl(
             "coerced_null": int(dest_summary.get("coerced_null_rows", 0) or 0),
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
             "batch_max": batch_max,
+            "batch_keyset": batch_keyset,
             "batch_rows": len(batch.rows),
             "reconcile_sample_rows": sample_rows,
             "fingerprints": inline_fps,
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
+        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
         written += result["batch_written"]
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
@@ -1986,6 +2065,10 @@ def _stream_database_transfer_impl(
         if result["batch_max"] is not None:
             if running_cursor is None or compare_cursor_values(result["batch_max"], running_cursor) > 0:
                 running_cursor = result["batch_max"]
+        # Results arrive in commit order, so the newest committed page carries
+        # the furthest safe keyset bookmark.
+        if result.get("batch_keyset"):
+            committed_keyset = result["batch_keyset"]
         # Absolute source-row offset for this batch (0-based start before commit).
         batch_start = int(committed_offset or 0)
         committed_offset += result["batch_rows"]
@@ -2056,7 +2139,7 @@ def _stream_database_transfer_impl(
         checkpoint.chunk_index = idx
         checkpoint.offset = committed_offset
         checkpoint.rows_processed = written
-        checkpoint.cursor_value = running_cursor or keyset_after
+        checkpoint.cursor_value = running_cursor or committed_keyset or ""
         checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
         checkpoint.es_search_after = es_search_after
         checkpoint.redis_scan_state = redis_scan_state
@@ -2166,6 +2249,11 @@ def _stream_database_transfer_impl(
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
         dest_summary["sync_mode"] = effective_sync
+        if resume_key_resolved:
+            # Honest delivery label: the read side re-delivers the interrupted
+            # batch, the write side resolves it on the identity key.
+            dest_summary["delivery_semantics"] = "at_least_once_idempotent_apply"
+            dest_summary["resume_write_mode"] = write_mode
         dest_summary["watermark"] = watermark
         try:
             from services.source_snapshot import get_source_snapshot_meta
@@ -2214,14 +2302,17 @@ def _stream_database_transfer_impl(
         "true",
         "yes",
     )
-    # Resume overwrite: write-pass only fingerprints this session's rows while
-    # Gate-8 expects the full population — force a source re-read.
+    # Resume: the write pass only fingerprints this session's rows while Gate-8
+    # compares the full destination — force a source re-read. This holds for
+    # every sync mode, not just overwrite: a resumed keyed load lands the whole
+    # population too, so a session-only digest reads as a checksum mismatch on a
+    # destination that is in fact complete.
     _expected_population = int(total_rows or 0) or int(written or 0)
     _partial_write_pass = bool(
         write_pass_fp.total > 0
         and _expected_population > 0
         and write_pass_fp.total < _expected_population
-        and is_overwrite_sync(effective_sync)
+        and (is_overwrite_sync(effective_sync) or resumed_pass)
     )
     if write_pass_fp.total > 0 and not _reread and not _partial_write_pass:
         checksum_started = time.perf_counter()

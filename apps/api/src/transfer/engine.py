@@ -1627,6 +1627,12 @@ def _auto_map(
                         validation_mode=request.validation_mode,
                         use_llm=False,
                         schema_policy=request.schema_policy,
+                        # Without the dialect the fidelity verdict is judged in a
+                        # vacuum: DECIMAL→TEXT reads as loss, when TEXT is the
+                        # exact-digit carrier our own DDL picks on SQLite. Every
+                        # existing-destination route shares this call.
+                        destination_db_type=(request.destination.format or "").lower(),
+                        destination_table_exists=dest_exists,
                         source_types_authoritative=source_types_are_authoritative(
                             request.source.kind or "",
                             request.source.format or "",
@@ -1871,6 +1877,21 @@ class UniversalTransferEngine:
                         "status": "pending",
                         "message": "Execute started (job shell)",
                     }
+                )
+            elif resume:
+                # Resume is the one sanctioned exit from a terminal status, and
+                # it belongs here rather than only in the HTTP router: every
+                # resume caller (fleet worker, scheduler retry, CLI) otherwise
+                # aborts at its first checkpoint save, which the job store
+                # rejects as a terminal-status regression — after the writer has
+                # already committed rows.
+                mongo_boot.clear_job_cancel(job_id)
+                mongo_boot.update_job_status(
+                    job_id,
+                    "running",
+                    phase="resuming",
+                    message="Resume from last committed checkpoint",
+                    allow_terminal_exit=True,
                 )
         except Exception:
             logger.debug("job shell bootstrap skipped for %s", job_id, exc_info=True)
@@ -2464,6 +2485,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    resume=resume,
                     **parity,
                 )
                 pf = apply_policy_gates(
@@ -3496,6 +3518,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    resume=resume,
                     **parity,
                 )
                 pf = apply_policy_gates(
@@ -4266,6 +4289,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    resume=resume,
                     **parity,
                 )
                 pf = apply_policy_gates(
