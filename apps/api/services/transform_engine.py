@@ -885,6 +885,28 @@ def _samples_look_temporal(source_samples: list[str] | None) -> bool:
     return checked >= 2 and (hits / checked) >= 0.8
 
 
+_YEAR_COLUMN_NAMES = frozenset({"year", "fiscalyear", "calendaryear", "yr"})
+
+
+def _is_calendar_year_number(
+    source_col: str, src_logical: str, source_samples: list[str] | None
+) -> bool:
+    """True for a column that *holds a year number*, not merely one named "Year".
+
+    The name alone is not evidence. Spreadsheet exports routinely put a real
+    instant (``2019-01-01T00:00:00``) in a column called ``Year``; forcing the
+    integer transform there makes every row fail ``Invalid integer`` at Validate
+    with no remap that can clear it, because the declared pair is already
+    TIMESTAMP → TIMESTAMP. A temporal source type or temporal-looking samples
+    therefore veto the heuristic.
+    """
+    if re.sub(r"[^a-z0-9]", "", (source_col or "").lower()) not in _YEAR_COLUMN_NAMES:
+        return False
+    if src_logical in {"datetime", "date", "timestamp", "time"}:
+        return False
+    return not _samples_look_temporal(source_samples)
+
+
 def infer_transform_for_mapping(
     source_col: str,
     target_col: str,
@@ -946,8 +968,7 @@ def infer_transform_for_mapping(
         if tgt == "datetime":
             # Calendar year number columns must stay integer (FSI "Year"), not
             # invent datetime coerce that then FAIL_JOBs on blank Excel cells.
-            _year_name = re.sub(r"[^a-z0-9]", "", (source_col or "").lower())
-            if _year_name in {"year", "fiscalyear", "calendaryear", "yr"}:
+            if _is_calendar_year_number(source_col, src, source_samples):
                 return "integer"
             # Never force a date cast on non-temporal VARCHAR (status → posted_date).
             # Let G3/G5 declare the type mismatch instead of lucky-parse corruption.
@@ -955,8 +976,7 @@ def infer_transform_for_mapping(
                 return "datetime"
             return "none"
         if tgt == "date":
-            _year_name = re.sub(r"[^a-z0-9]", "", (source_col or "").lower())
-            if _year_name in {"year", "fiscalyear", "calendaryear", "yr"}:
+            if _is_calendar_year_number(source_col, src, source_samples):
                 return "integer"
             # Narrowing a datetime into a date-only column drops the time of day.
             # Only do it when the destination genuinely cannot hold a time;
@@ -1045,17 +1065,7 @@ def infer_transform_for_mapping(
     src_col = source_col.upper()
     # Calendar year number (FSI "Year", fiscal_year) is INTEGER — never invent
     # datetime coerce for a 4-digit year field (empty cells then FAIL_JOB).
-    src_name_compact = re.sub(r"[^a-z0-9]", "", (source_col or "").lower())
-    if src_name_compact in {"year", "fiscalyear", "calendaryear", "yr"} and src in {
-        "integer",
-        "bigint",
-        "decimal",
-        "float",
-        "string",
-        "text",
-        "unknown",
-        "",
-    }:
+    if _is_calendar_year_number(source_col, src, source_samples):
         if tgt in {"datetime", "timestamp", "timestamptz", "date"}:
             return "integer"
         if not tgt or tgt in {"string", "text", "unknown", "integer", "bigint"}:
