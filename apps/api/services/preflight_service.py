@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sys
 from collections.abc import Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -44,7 +45,7 @@ from services.transform_engine import (
     set_active_date_locale,
 )
 from services.validation_plan import build_validation_plan
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, project_row_cells
 
 
 def _hydrate_risk_contract(
@@ -144,10 +145,12 @@ class FilePreflightContext(PreflightContext):
             ]
 
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
-        # Use cell_to_string so nested lists/dicts from schemaless sources become
-        # valid JSON strings instead of Python repr() artifacts.
+        # Nested lists/dicts from schemaless sources become valid JSON strings
+        # instead of Python repr() artifacts; a key the document does not carry
+        # stays the missing sentinel rather than an empty string the typed
+        # transforms would reject as a cast failure.
         scanned = self.sample_rows[:sample_size]
-        rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in scanned]
+        rows = [project_row_cells(row, headers) for row in scanned]
         self._last_dry_run_meta = {
             "sample_rows_scanned": len(scanned),
             "sample_rows_available": len(self.sample_rows),
@@ -952,15 +955,36 @@ def run_file_preflight(
                 samples_by_src.setdefault(str(k), []).append(v)
         for k in list(samples_by_src.keys()):
             samples_by_src[k] = samples_by_src[k][:32]
-        mappings, _unstamped_additive = stamp_additive_mapping_types(
-            mappings,
-            dest_db=destination_db_type or "",
-            live_dest_types=destination_column_types or {},
-            source_types=column_types or {},
-            samples_by_source=samples_by_src,
-            backfill_new_fields=bool(effective_backfill),
-            dest_table_exists=destination_table_exists,
+        # Validate must invent under the same source-engine identity Execute
+        # binds: the engine id decides code-page-safe carriers and whether a
+        # declared numeric domain may be sample-narrowed. Unbound here, Map
+        # stamped a carrier Execute would not, and the two DDL identities
+        # diverged before a single row moved.
+        from services.source_engine_scope import (
+            active_source_engine,
+            bind_source_engine,
         )
+
+        src_engine = (source_format or "").strip().lower() or (
+            (source_kind or "").strip().lower()
+            if (source_kind or "").strip().lower() not in {"database", "cloud", ""}
+            else ""
+        )
+        stamp_scope = (
+            bind_source_engine(src_engine)
+            if src_engine and not active_source_engine()
+            else nullcontext()
+        )
+        with stamp_scope:
+            mappings, _unstamped_additive = stamp_additive_mapping_types(
+                mappings,
+                dest_db=destination_db_type or "",
+                live_dest_types=destination_column_types or {},
+                source_types=column_types or {},
+                samples_by_source=samples_by_src,
+                backfill_new_fields=bool(effective_backfill),
+                dest_table_exists=destination_table_exists,
+            )
     except Exception as stamp_exc:
         # Fail-closed: stamp failure must surface as unstamped additives, not
         # clear the list and let Validate green-wash Map VARCHAR invent.

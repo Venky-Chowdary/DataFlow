@@ -13,6 +13,7 @@ import json
 import math
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation, Overflow
 from enum import Enum
@@ -298,6 +299,33 @@ def _json_default(value: Any) -> Any:
 
     # Last resort: never emit repr() artifacts such as "b'...'".
     return str(value)
+
+
+def project_row_cells(
+    row: Mapping[str, Any], headers: list[str], *, preserve_sql_null: bool = False
+) -> list[str]:
+    """Project a record onto ``headers`` — absent key ≠ empty string.
+
+    Schemaless and sparse sources (Mongo documents, DynamoDB items, NDJSON,
+    API payloads) omit keys entirely. Defaulting those to ``""`` made Validate
+    report ``Empty value cannot coerce to decimal`` for a field the document
+    simply does not carry, blocking a transfer whose write path would have
+    omitted the key (sparse upsert) or written SQL NULL (dense insert). The
+    missing sentinel keeps that distinction all the way to the writer.
+    """
+    out: list[str] = []
+    for h in headers:
+        if h not in row:
+            out.append(DF_MISSING_SENTINEL)
+            continue
+        cell = row[h]
+        # ``cell_to_string`` flattens the sentinel to "" so exports never leak
+        # it; a reader that already marked the field absent must keep it here.
+        if is_missing_sentinel(cell):
+            out.append(DF_MISSING_SENTINEL)
+            continue
+        out.append(cell_to_string(cell, preserve_sql_null=preserve_sql_null))
+    return out
 
 
 def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:

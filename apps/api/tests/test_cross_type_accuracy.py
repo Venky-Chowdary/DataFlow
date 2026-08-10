@@ -251,7 +251,9 @@ CSV_SNOWFLAKE_DDL_EXPECTED = {
     "order_id": "VARCHAR",
     "customer_email": "VARCHAR",
     "order_total": "NUMBER(38,10)",
-    "quantity": "INTEGER",
+    # Snowflake INTEGER is a synonym of NUMBER(38,0); emit the explicit form so
+    # the DDL states the width it actually gets.
+    "quantity": "NUMBER(38,0)",
     "is_gift": "BOOLEAN",
     "order_date": "DATE",
     # Bare TIMESTAMP = wall-clock NTZ (offset samples need explicit TIMESTAMPTZ).

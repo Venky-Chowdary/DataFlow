@@ -23,12 +23,9 @@ from services.decision_kernel import (
     decision_artifact_from_dict,
 )
 
-_GOLDEN = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / "proofs"
-    / "decision_artifact_v1_golden.json"
-)
+# Lives beside the tests, not under data/proofs: that directory is gitignored
+# run output, so the golden shipped only on the machine that generated it.
+_GOLDEN = Path(__file__).resolve().parent / "fixtures" / "decision_artifact_v1_golden.json"
 
 
 def _sample_artifact(**overrides):

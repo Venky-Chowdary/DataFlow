@@ -6296,17 +6296,36 @@ def integer_storage_bounds(
     return bounds
 
 
-def integer_width_would_narrow(source_type: str, target_type: str) -> bool:
-    """True when signed/unsigned integer bit width shrinks (BIGINT→INT invent)."""
+def integer_width_would_narrow(
+    source_type: str, target_type: str, *, dest_db: str = ""
+) -> bool:
+    """True when signed/unsigned integer bit width shrinks (BIGINT→INT invent).
+
+    ``integer_bit_width`` reports the ambiguous ``INT``/``INTEGER`` keyword as
+    width-unknown so create-new invent never narrows by surface spelling. That
+    ambiguity ends once the operator names the destination engine: an existing
+    PostgreSQL/MySQL/SQL Server ``INTEGER`` column is int32 and a BIGINT source
+    overflows it at row 1. ``dest_db`` therefore resolves the target keyword
+    through the runtime-fit SSOT, which reports engines whose keyword is backed
+    by a big-decimal carrier (Oracle, Snowflake) as unbounded.
+    """
     if normalize_logical_type(source_type) != LOGICAL_INTEGER:
         return False
     if normalize_logical_type(target_type) != LOGICAL_INTEGER:
         return False
     src_w = integer_bit_width(source_type)
     tgt_w = integer_bit_width(target_type)
-    if src_w is None or tgt_w is None:
+    if src_w is not None and tgt_w is not None:
+        return src_w > tgt_w
+    if src_w is None or tgt_w is not None or not dest_db:
         return False
-    return src_w > tgt_w
+    bounds = integer_storage_bounds(target_type, dest_db=dest_db)
+    if bounds is None:
+        return False
+    src_bounds = integer_storage_bounds(source_type, dest_db=dest_db)
+    if src_bounds is None:
+        return False
+    return src_bounds[0] < bounds[0] or src_bounds[1] > bounds[1]
 
 
 def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | None:
@@ -6565,6 +6584,15 @@ def unsigned_signed_polarity_invent(source_type: str, target_type: str) -> bool:
         tgt_w = integer_bit_width(target_type)
         if src_w is not None and tgt_w is not None and tgt_w >= 64 and src_w <= 33:
             return False
+        if src_w is None:
+            # ``INT UNSIGNED`` itself: the width-unknown keyword the sibling
+            # overflow check already resolves. Without this, the widest, most
+            # obviously safe unsigned widen in the product asked the operator
+            # to Accept risk on a MySQL→Postgres qty column.
+            from services.numeric_fit import unsigned_bare_int_fits_signed_target
+
+            if unsigned_bare_int_fits_signed_target(source_type, target_type):
+                return False
     return True
 
 
@@ -6629,7 +6657,7 @@ def is_precision_collapse_coercion(
         return True
     if unsigned_signed_polarity_invent(source_type, target_type):
         return True
-    if integer_width_would_narrow(source_type, target_type):
+    if integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
@@ -7090,7 +7118,7 @@ def is_lossy_coercion(
             return True
         if unsigned_signed_polarity_invent(source_type, target_type):
             return True
-        if integer_width_would_narrow(source_type, target_type):
+        if integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
@@ -7232,7 +7260,7 @@ def is_lossy_coercion(
         return True
     if unsigned_signed_polarity_invent(source_type, target_type):
         return True
-    if integer_width_would_narrow(source_type, target_type):
+    if integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
         return True

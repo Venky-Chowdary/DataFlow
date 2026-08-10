@@ -364,44 +364,24 @@ def _fetch_snowflake_column_types(
     cur: Any, schema: str, table_name: str
 ) -> dict[str, str]:
     """Live Snowflake DATA_TYPE (+ NUMBER/VARCHAR typmod) for bind overlay."""
+    from connectors.snowflake_conn import snowflake_physical_column_rows
     from services.schema_introspect import _sf_to_logical
 
-    try:
-        cur.execute(
-            """
-            SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE,
-                   CHARACTER_MAXIMUM_LENGTH, DATETIME_PRECISION
-            FROM information_schema.columns
-            WHERE UPPER(table_schema) = UPPER(%s) AND UPPER(table_name) = UPPER(%s)
-            """,
-            (schema, table_name),
+    out: dict[str, str] = {}
+    for name, data_type, _nullable, char_len, precision, scale, dt_prec in (
+        snowflake_physical_column_rows(cur, schema, table_name)
+    ):
+        ddl = _sf_to_logical(
+            str(data_type or ""),
+            character_maximum_length=char_len,
+            numeric_precision=precision,
+            numeric_scale=scale,
+            datetime_precision=dt_prec,
         )
-        out: dict[str, str] = {}
-        for (
-            name,
-            data_type,
-            precision,
-            scale,
-            char_len,
-            dt_prec,
-        ) in cur.fetchall():
-            ddl = _sf_to_logical(
-                str(data_type or ""),
-                character_maximum_length=char_len,
-                numeric_precision=precision,
-                numeric_scale=scale,
-                datetime_precision=dt_prec,
-            )
-            out[str(name)] = ddl
-            out[str(name).upper()] = ddl
-            out[str(name).lower()] = ddl
-        return out
-    except Exception:
-        logger.debug(
-            "snowflake physical column introspection failed",
-            exc_info=True,
-        )
-        return {}
+        out[str(name)] = ddl
+        out[str(name).upper()] = ddl
+        out[str(name).lower()] = ddl
+    return out
 
 
 def _overlay_snowflake_physical_bind_types(

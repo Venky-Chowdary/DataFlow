@@ -113,8 +113,16 @@ def test_e2e_snowflake_stub_write_survives_huge_decimal():
         error_policy="quarantine",
     )
     assert result.ok, result.error
-    assert result.rows_written == 3
-    # Either quarantined or fitted via wider NUMBER — never bare Overflow class dump
+    # A bare DECIMAL Map stamp materializes as NUMBER(38,10) on both sides
+    # (Map ≡ CREATE), so the two values that exceed it are quarantined with an
+    # actionable reason rather than silently truncated or written under a type
+    # the operator never approved. Ledger stays balanced: 3 = 1 + 2.
+    assert result.rows_written == 1
+    assert len(result.rejected_details) == 2
+    assert result.rows_written + len(result.rejected_details) == 3
+    for detail in result.rejected_details:
+        assert "NUMBER(38,10)" in str(detail.get("reason") or "")
+    # Never a bare Overflow class dump.
     assert "[<class" not in (result.error or "")
 
 

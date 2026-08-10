@@ -4308,12 +4308,17 @@ def sample_compare_rows(
         if ddl and typed_cast_incompatible_with_text_sink(
             transform or "", normalize_logical_type(ddl)
         ):
-            # The write path drops a typed cast into a text carrier and stores
-            # the token verbatim. Fingerprinting the source *through* that cast
-            # compares a value the destination never held: 'Y' failed the
-            # boolean cast, became the NULL sentinel, and Gate-8 reported
-            # corruption on a row that landed correctly.
-            transform = None
+            # A text carrier holds whichever of the two the write produced: the
+            # converted value when the cast succeeded ('$1,000.00' → '1000.00'),
+            # or the token verbatim when it failed ('Y' against boolean, which
+            # otherwise made Gate-8 report corruption on a row that landed
+            # correctly). Only the failing case may retire the cast.
+            try:
+                _, cast_err = apply_transform(raw, transform or "")
+            except Exception:
+                cast_err = "transform_failed"
+            if cast_err:
+                transform = None
         if eng and ddl:
             try:
                 return fingerprint_for_reconcile(

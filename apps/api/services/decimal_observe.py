@@ -234,6 +234,44 @@ def observe_numeric_samples(
     }
 
 
+# Sources whose cells arrive as untyped text: a numeric column exists only
+# because we inferred it, so the sample IS the whole declared domain.
+_UNTYPED_NUMERIC_SOURCES = frozenset(
+    {
+        "",
+        "csv",
+        "tsv",
+        "psv",
+        "txt",
+        "text",
+        "excel",
+        "xls",
+        "xlsx",
+        "google_sheets",
+        "gsheets",
+        "html",
+        "xml",
+        "yaml",
+        "yml",
+        "ini",
+        "fixed_width",
+    }
+)
+
+
+def source_declares_numeric_domain(source_db: str) -> bool:
+    """True when the source engine's cells carry their own numeric domain.
+
+    A relational ``NUMBER``/``DECIMAL`` column, or a BSON ``Decimal128``, holds
+    values far wider than any Validate sample proves. Sizing create-new from
+    those samples invents a narrow carrier the product then reports as its own
+    fidelity collapse — and would quarantine unsampled rows at write time.
+    Text-shaped sources (CSV/Excel/Sheets) have no declared domain, so sample
+    observation stays the honest carrier there.
+    """
+    return (source_db or "").strip().lower() not in _UNTYPED_NUMERIC_SOURCES
+
+
 def create_new_decimal_carrier(
     samples: list[Any] | None,
     *,

@@ -167,8 +167,12 @@ def test_build_table_clickhouse_uses_replacing_when_conflict():
         db_type="clickhouse",
         conflict_columns=["id"],
     )
+    # Compile with the real dialect: the MagicMock engine has no DDL compiler,
+    # so compiling against it returned a mock repr that matched nothing.
+    from clickhouse_sqlalchemy.drivers.http.base import ClickHouseDialect
+
     # Engine kwargs are attached as table.args / dialect_options depending on version.
-    ddl = str(sa.schema.CreateTable(table).compile(dialect=engine.dialect))
+    ddl = str(sa.schema.CreateTable(table).compile(dialect=ClickHouseDialect()))
     assert "ReplacingMergeTree" in ddl or "replacingmergetree" in ddl.lower()
 
 

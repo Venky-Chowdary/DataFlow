@@ -14,7 +14,7 @@ from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.validation_coverage import stamp_validation_coverage
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, project_row_cells
 
 # Validation mode → minimum confidence / null tolerance
 _MODE_THRESHOLDS = {
@@ -212,7 +212,7 @@ def _check_transform_dry_run(
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
 
     headers = source_columns or list(rows[0].keys())
-    sample_rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in rows[:200]]
+    sample_rows = [project_row_cells(row, headers) for row in rows[:200]]
     from services.transform_engine import dry_run_sample
 
     # Ensure each mapping carries target_type so name heuristics (e.g. "date" in

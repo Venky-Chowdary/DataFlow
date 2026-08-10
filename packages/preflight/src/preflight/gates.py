@@ -657,7 +657,13 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         document_collapse = bool(
             is_nested_document_collapse
             and is_nested_document_collapse(
-                source_col.inferred_type, target.inferred_type
+                source_col.inferred_type,
+                target.inferred_type,
+                # Without the dialect the helper fails closed, so ARRAY/MAP into
+                # the destination's own document wire (Snowflake VARIANT, MySQL
+                # JSON, PG JSONB) was reported as field-DDL loss and blocked
+                # every schemaless source that had no struct_policy set.
+                dest_db=dest_kind,
             )
         )
         field_shape_loss = bool(nested_collapse and not document_collapse)
