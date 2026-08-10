@@ -12,13 +12,15 @@ from services.brand_env import getenv_brand
 import re
 import struct
 import tempfile
+import uuid
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import time as _time
 from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Final, Iterable, Iterator
 
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
@@ -699,6 +701,89 @@ def _iter_fetchmany(cur, batch_size: int = 5000):
             yield row
 
 
+READBACK_ITERSIZE: Final[int] = 5000
+
+
+@contextmanager
+def streaming_readback_cursor(conn: Any, *, engine: str) -> Iterator[Any]:
+    """Cursor that streams a whole-table read-back instead of buffering it.
+
+    ``fetchmany`` alone does not stream: psycopg2 and PyMySQL both pull the
+    entire result set into client memory when the statement executes, so the
+    Gate-8 proof was the largest allocation of the migration — a measured
+    2.0 GB RSS to verify 10M rows, and linear from there. A PostgreSQL named
+    (server-side) cursor and a PyMySQL ``SSCursor`` hold one batch at a time
+    (39 MB for the same read), which is what lets the proof scale past the
+    table it is proving.
+
+    Engines whose drivers already stream (SQLite, DuckDB, FreeTDS, Snowflake,
+    Oracle) fall through to a plain cursor.
+    """
+    cur = None
+    try:
+        if engine in {"postgresql", "redshift", "timescaledb", "cockroachdb"}:
+            # Named cursors are WITHOUT HOLD: they need an open transaction,
+            # which an autocommit connection does not have.
+            if not getattr(conn, "autocommit", False):
+                cur = conn.cursor(name=f"df_readback_{uuid.uuid4().hex}")
+                cur.itersize = READBACK_ITERSIZE
+        elif engine == "mysql":
+            import pymysql.cursors
+
+            cur = conn.cursor(pymysql.cursors.SSCursor)
+        if cur is None:
+            cur = conn.cursor()
+        yield cur
+    finally:
+        if cur is not None:
+            # A server-side cursor dies with its transaction; a close failure
+            # here must not mask the verdict the read-back just produced.
+            with suppress(Exception):
+                cur.close()
+
+
+def dbapi_streaming_rows(
+    cur: Any, *, batch_size: int = READBACK_ITERSIZE
+) -> tuple[list[str], Iterator[Any]]:
+    """Return ``(column_names, rows)`` for an already-executed DBAPI cursor.
+
+    A psycopg2 server-side cursor has no ``description`` until the first block
+    is fetched, so the names must be read *after* priming — reading them first
+    fingerprints zero columns and yields the digest of an empty table.
+    """
+    first = cur.fetchmany(batch_size)
+    names = [d[0] for d in cur.description] if cur.description else []
+
+    def _rows() -> Iterator[Any]:
+        batch = first
+        while batch:
+            yield from batch
+            batch = cur.fetchmany(batch_size)
+
+    return names, _rows()
+
+
+def sa_streaming_result(
+    conn: Any, statement: Any, *, itersize: int = READBACK_ITERSIZE
+) -> tuple[list[str], Iterator[Any]]:
+    """Return ``(column_names, rows)`` where rows arrive a block at a time.
+
+    Drivers without server-side cursors ignore ``stream_results`` and buffer as
+    before — no engine is made worse, and those that can stream stop paying for
+    the whole table.
+    """
+    result = conn.execution_options(
+        stream_results=True, max_row_buffer=itersize
+    ).execute(statement)
+    names = [str(k) for k in result.keys()]
+
+    def _rows() -> Iterator[Any]:
+        for partition in result.partitions(itersize):
+            yield from partition
+
+    return names, _rows()
+
+
 def verify_postgres_table(
     *,
     host: str,
@@ -736,10 +821,11 @@ def verify_postgres_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            ids = [
-                str(x) for x in (written_ids or []) if x is not None and str(x) != ""
-            ][:500]
-            pk = (pk_column or "").strip()
+        ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][
+            :500
+        ]
+        pk = (pk_column or "").strip()
+        with streaming_readback_cursor(conn, engine="postgresql") as cur:
             if ids and pk:
                 pk_q = quote_sql_identifier(pk)
                 # Ids are text; an uncast bigint/uuid key aborts the read-back.
@@ -750,10 +836,10 @@ def verify_postgres_table(
                 )
             else:
                 cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
-            names = [d[0] for d in cur.description] if cur.description else []
+            names, rows = dbapi_streaming_rows(cur)
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                rows,
                 columns,
                 limit=limit,
                 dest_db_type="postgresql",
@@ -800,40 +886,41 @@ def verify_pgvector_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
+        with streaming_readback_cursor(conn, engine="postgresql") as cur:
             cur.execute(f"SELECT source_id, metadata FROM {table_ref}")  # nosec B608
-            names = (
-                [d[0] for d in cur.description]
-                if cur.description
-                else ["source_id", "metadata"]
-            )
-            rows: list[dict[str, Any]] = []
-            for raw in _iter_fetchmany(cur):
-                rec = dict(zip(names, raw))
-                source_id = rec.get("source_id", "")
-                metadata = rec.get("metadata") or {}
-                if isinstance(metadata, str):
-                    try:
-                        metadata = json.loads(metadata)
-                    except Exception:
+            names, raw_rows = dbapi_streaming_rows(cur)
+            names = names or ["source_id", "metadata"]
+
+            def _source_shaped_rows():
+                for raw in raw_rows:
+                    rec = dict(zip(names, raw))
+                    source_id = rec.get("source_id", "")
+                    metadata = rec.get("metadata") or {}
+                    if isinstance(metadata, str):
+                        try:
+                            metadata = json.loads(metadata)
+                        except Exception:
+                            metadata = {}
+                    if not isinstance(metadata, dict):
                         metadata = {}
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                # Reconstruct a source-shaped row from metadata; fall back to source_id for 'id'.
-                row: dict[str, Any] = dict(metadata)
-                if target_columns:
-                    for col in target_columns:
-                        if col not in row and col.lower() == "id" and source_id:
-                            row[col] = source_id
-                    row = {k: v for k, v in row.items() if k in target_columns}
-                elif source_id and "id" not in {c.lower() for c in row}:
-                    row["id"] = source_id
-                rows.append(row)
+                    # Reconstruct a source-shaped row from metadata; fall back
+                    # to source_id for 'id'.
+                    row: dict[str, Any] = dict(metadata)
+                    if target_columns:
+                        for col in target_columns:
+                            if col not in row and col.lower() == "id" and source_id:
+                                row[col] = source_id
+                        row = {k: v for k, v in row.items() if k in target_columns}
+                    elif source_id and "id" not in {c.lower() for c in row}:
+                        row["id"] = source_id
+                    yield row
+
+            checksum = canonical_checksum_from_iter(
+                _source_shaped_rows(),
+                columns=target_columns or None,
+                limit=limit,
+            )
         conn.close()
-        checksum = canonical_checksum_from_iter(
-            iter(rows),
-            columns=target_columns or None,
-            limit=limit,
-        )
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -1233,11 +1320,12 @@ def verify_mysql_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
+        with streaming_readback_cursor(conn, engine="mysql") as cur:
             cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
-            names = [d[0] for d in cur.description] if cur.description else []
+            names, rows = dbapi_streaming_rows(cur)
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                rows,
                 columns,
                 limit=limit,
                 dest_db_type="mysql",
@@ -1343,8 +1431,10 @@ def verify_oracle_table(
                 conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
                 or 0
             )
-            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
-            names = list(result.keys())
+            names, result = sa_streaming_result(
+                conn,
+                sa.text(f"SELECT * FROM {table_ref}"),  # nosec B608
+            )
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
                 (tuple(row) for row in result),
@@ -2061,8 +2151,10 @@ def verify_databricks_table(
                 conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
                 or 0
             )
-            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
-            names = list(result.keys())
+            names, result = sa_streaming_result(
+                conn,
+                sa.text(f"SELECT * FROM {table_ref}"),  # nosec B608
+            )
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
                 (tuple(row) for row in result),
@@ -2288,8 +2380,10 @@ def verify_generic_sql_table(
                 ).scalar()
                 or 0
             )
-            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
-            names = list(result.keys())
+            names, result = sa_streaming_result(
+                conn,
+                sa.text(f"SELECT * FROM {table_ref}"),  # nosec B608
+            )
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
                 (tuple(row) for row in result),
