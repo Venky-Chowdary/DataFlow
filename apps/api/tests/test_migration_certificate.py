@@ -268,3 +268,85 @@ def test_endpoint_is_fail_closed_for_foreign_workspaces() -> None:
     with pytest.raises(HTTPException) as missing:
         _call_certificate_endpoint(None)
     assert missing.value.status_code == 404
+
+
+def _proven_job(**overrides: Any) -> dict[str, Any]:
+    """A run whose rows reconcile — only the structure around them varies."""
+    job = _job(records_processed=10000)
+    job["reconciliation"]["target_rows"] = 10000
+    job["reconciliation"]["rejected_rows"] = 0
+    job["reconciliation"]["population_proof"] = True
+    job.update(overrides)
+    return job
+
+
+def test_absent_destination_constraints_block_the_proven_claim() -> None:
+    """Matching checksums prove rows, not the database around them."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": ["foreign_keys", "check_constraints"],
+            "aspects": {},
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    assert verdict["headline"] == "NOT PROVEN"
+    assert any("foreign key(s)" in b and "CHECK" in b for b in verdict["blockers"])
+
+
+def test_unreadable_constraint_catalog_is_unknown_not_a_violation() -> None:
+    """Unknown must never be reported as absent."""
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": False,
+            "absent": [],
+            "unreadable": ["indexes"],
+            "reason": "destination catalog unreadable",
+        }
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert not any("did not survive" in b for b in verdict["blockers"])
+
+
+def test_failed_foreign_key_carry_vetoes_the_verdict() -> None:
+    job = _proven_job()
+    job["destination_summary"] = {
+        "rejected_details": [],
+        "foreign_keys": {
+            "counts": {"carried": 2, "failed": 1},
+            "integrity_violations": 1,
+            "verdict": "referential_integrity_violated",
+        },
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    assert any("child rows" in b and "without a parent" in b for b in verdict["blockers"])
+    assert any("did not complete" in b and "1 failed" in b for b in verdict["blockers"])
+
+
+def test_foreign_key_cycle_is_named_as_a_blocker() -> None:
+    job = _proven_job()
+    job["destination_summary"] = {
+        "rejected_details": [],
+        "foreign_keys": {
+            "counts": {"carried": 2},
+            "integrity_violations": 0,
+            "cycle": ["orders", "customers"],
+        },
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert verdict["migration_proven"] is False
+    assert any("cycle" in b and "orders" in b for b in verdict["blockers"])
+
+
+def test_fully_carried_foreign_keys_do_not_block() -> None:
+    job = _proven_job()
+    job["destination_summary"] = {
+        "rejected_details": [],
+        "foreign_keys": {"counts": {"carried": 3}, "integrity_violations": 0},
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert not any("foreign key" in b.lower() for b in verdict["blockers"])

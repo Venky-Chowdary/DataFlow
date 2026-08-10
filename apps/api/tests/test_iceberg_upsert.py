@@ -309,7 +309,10 @@ def test_iceberg_sql_catalog_schema_evolution(tmp_path: Path) -> None:
     headers = batch.headers
     assert "w" in headers
     rows = {row[headers.index("id")]: row for row in batch.rows}
-    assert rows["1"][headers.index("w")] == ""
+    # Row 1 predates column w, so its value is SQL NULL — not an empty string.
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    assert rows["1"][headers.index("w")] == SQL_NULL_SENTINEL
     assert rows["2"][headers.index("w")] == "x"
 
 

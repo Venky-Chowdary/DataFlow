@@ -253,6 +253,73 @@ def _referential_blockers(physical: dict[str, Any]) -> list[str]:
     ]
 
 
+_SCHEMA_ASPECT_LABEL = {
+    "primary_key": "primary key",
+    "unique_constraints": "unique constraint(s)",
+    "foreign_keys": "foreign key(s)",
+    "indexes": "index(es)",
+    "not_null": "NOT NULL constraint(s)",
+    "defaults": "column default(s)",
+    "check_constraints": "CHECK constraint(s)",
+}
+
+
+def _schema_object_blockers(physical: dict[str, Any]) -> list[str]:
+    """Structure the source enforced and the destination demonstrably lacks.
+
+    Matching checksums prove the rows, not the database around them: a load
+    that lands every byte into a table whose foreign keys, uniqueness or CHECK
+    constraints were never created leaves the destination accepting data the
+    source would have rejected. Only *absent* aspects block — an aspect the
+    catalog could not be read for stays unknown, and unknown is reported as
+    unproven rather than as a violation.
+    """
+    schema_objects = _dict(physical.get("schema_objects"))
+    absent = [str(a) for a in schema_objects.get("absent") or []]
+    if not absent:
+        return []
+    named = ", ".join(_SCHEMA_ASPECT_LABEL.get(a, a) for a in absent)
+    return [
+        f"Source {named} did not survive the move - the destination accepts "
+        "rows the source would have rejected."
+    ]
+
+
+def _foreign_key_carry_blockers(job: dict[str, Any]) -> list[str]:
+    """A foreign key the run planned but could not add is not a green run."""
+    summary = _dict(_dict(job.get("destination_summary")).get("foreign_keys"))
+    if not summary:
+        return []
+    out: list[str] = []
+    counts = _dict(summary.get("counts"))
+    if _as_int(summary.get("integrity_violations")):
+        out.append(
+            f"{_as_int(summary.get('integrity_violations'))} foreign key(s) could not "
+            "be enforced on the migrated rows - the destination holds child rows "
+            "without a parent."
+        )
+    unresolved = {
+        status: _as_int(count)
+        for status, count in counts.items()
+        if str(status) in {"failed", "unknown", "unsupported", "planned"}
+        and _as_int(count)
+    }
+    if unresolved:
+        detail = ", ".join(f"{count} {status}" for status, count in sorted(unresolved.items()))
+        out.append(
+            f"Foreign key carry did not complete ({detail}) - the destination is "
+            "missing relationships the source enforced."
+        )
+    if summary.get("cycle"):
+        out.append(
+            "Foreign keys form a cycle ("
+            + ", ".join(str(t) for t in summary.get("cycle") or [])
+            + ") - deferred-constraint creation is not supported, so the cycle was "
+            "not recreated."
+        )
+    return out
+
+
 def _identity_blockers(physical: dict[str, Any]) -> list[str]:
     identity = _dict(physical.get("identity_watermark"))
     collisions = [str(c) for c in identity.get("collisions") or []]
@@ -271,6 +338,7 @@ def _verdict(
     ledger: dict[str, Any],
     job_status: str,
     physical_state: dict[str, Any] | None = None,
+    job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Single headline verdict, degraded by the row ledger.
 
@@ -288,6 +356,8 @@ def _verdict(
         blockers.append(str(reason))
     blockers.extend(_identity_blockers(physical_state or {}))
     blockers.extend(_referential_blockers(physical_state or {}))
+    blockers.extend(_schema_object_blockers(physical_state or {}))
+    blockers.extend(_foreign_key_carry_blockers(job or {}))
     if job_status and job_status not in ("completed", "succeeded", "success"):
         blockers.append(f"Job status is {job_status!r}, not a completed run.")
 
@@ -358,6 +428,7 @@ def build_migration_certificate(
             ledger=ledger,
             job_status=status,
             physical_state=physical,
+            job=job,
         ),
         "row_accounting": ledger,
         "reconciliation": {
