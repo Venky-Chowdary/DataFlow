@@ -9,6 +9,8 @@ about the destination they are reasoning over.
 
 from __future__ import annotations
 
+import re
+
 
 def _normalize_dest_db(db_type: str | None) -> str:
     """Canonical destination engine id for DDL / cap lookups."""
