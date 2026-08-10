@@ -152,3 +152,22 @@ def test_certificate_reports_missing_evidence_rather_than_success():
     findings = physical_state_findings({})
     assert findings["identity_watermark"]["verified"] is False
     assert findings["identity_watermark"]["reason"]
+
+
+def test_mixed_case_key_is_read_not_folded(tmp_path) -> None:
+    """A quoted mixed-case key must not fold into a name the catalog lacks.
+
+    Oracle reported 'column is not a GENERATED AS IDENTITY column' for a live
+    identity column purely because the probe upper-cased a quoted "id".
+    """
+    import sqlite3
+
+    path = str(tmp_path / "mixed.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute('CREATE TABLE "MixedId" ("Id" INTEGER PRIMARY KEY AUTOINCREMENT)')
+        conn.execute('INSERT INTO "MixedId" ("Id") VALUES (7)')
+    cfg = {"type": "sqlite", "database": path}
+
+    watermark = read_identity_watermark("sqlite", cfg, table="mixedid", column="id")
+    assert watermark.max_value == 7
+    assert watermark.available is True

@@ -345,6 +345,47 @@ def _identity_watermark_evidence(
     return evidence
 
 
+def _schema_state_evidence(
+    *,
+    source_endpoint: EndpointConfig | None,
+    db_type: str,
+    cfg: dict[str, Any],
+    schema: str,
+    table: str,
+) -> dict[str, Any]:
+    """Constraints, indexes, nullability and defaults, compared catalog to catalog.
+
+    A run can move every row and still leave the client a table with no primary
+    key, no unique constraint and no index. Both sides are read here on this
+    module's own connections, never from writer bookkeeping.
+    """
+    from .connector_capabilities import resolve_driver_type
+
+    if source_endpoint is None or source_endpoint.kind != "database" or not table:
+        return {}
+    src_cfg = resolve_connector_config(source_endpoint)
+    src_type = resolve_driver_type(
+        str(src_cfg.get("type") or source_endpoint.format or "")
+    ).lower()
+    src_table = str(source_endpoint.table or src_cfg.get("table") or "")
+    if not src_table:
+        return {}
+
+    from services.dialect_profiles import schema_from_cfg
+    from services.physical_state_diff import verify_physical_state
+
+    return verify_physical_state(
+        source_db_type=src_type,
+        source_cfg=src_cfg,
+        source_schema=str(schema_from_cfg(src_type, src_cfg) or ""),
+        source_table=src_table,
+        dest_db_type=db_type,
+        dest_cfg=cfg,
+        dest_schema=schema,
+        dest_table=table,
+    )
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -505,6 +546,25 @@ def run_reconciliation(
             "supported": True,
             "verified": False,
             "reason": f"probe failed: {exc}",
+        }
+
+    try:
+        schema_state = _schema_state_evidence(
+            source_endpoint=source_endpoint,
+            db_type=db_type,
+            cfg=cfg,
+            schema=str(schema or ""),
+            table=str(table_name or ""),
+        )
+        if schema_state:
+            physical_state["schema_objects"] = schema_state
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "physical schema comparison skipped: %s", exc, exc_info=exc
+        )
+        physical_state["schema_objects"] = {
+            "verified": False,
+            "reason": f"comparison failed: {exc}",
         }
 
     source_checksum = _compute_source_checksum(

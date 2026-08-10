@@ -204,15 +204,24 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
     application insert after cutover collides.
     """
     state = _dict(recon.get("physical_state"))
-    identity = _dict(state.get("identity_watermark"))
-    if not identity:
-        return {
-            "identity_watermark": {
-                "verified": False,
-                "reason": "no generator watermark evidence was captured for this run",
-            }
-        }
-    return {"identity_watermark": identity}
+    identity = _dict(state.get("identity_watermark")) or {
+        "verified": False,
+        "reason": "no generator watermark evidence was captured for this run",
+    }
+    schema_objects = _dict(state.get("schema_objects")) or {
+        "verified": False,
+        "reason": "constraints and indexes were not compared for this run",
+    }
+    return {
+        "identity_watermark": identity,
+        "schema_objects": {
+            "verified": bool(schema_objects.get("verified")),
+            "reason": str(schema_objects.get("reason") or ""),
+            "absent": list(schema_objects.get("absent") or []),
+            "unreadable": list(schema_objects.get("unreadable") or []),
+            "aspects": _dict(schema_objects.get("aspects")),
+        },
+    }
 
 
 def _identity_blockers(physical: dict[str, Any]) -> list[str]:
@@ -359,8 +368,10 @@ def build_migration_certificate(
             "Referential integrity across the destination population unless a "
             "population orphan scan was run.",
             "Exactly-once delivery — CDC and resume are at-least-once with upsert.",
-            "Indexes, foreign keys, defaults and triggers on the destination — of "
-            "the physical state, only identity/sequence watermarks were inspected.",
+            "Triggers, check constraints, grants and storage options on the "
+            "destination — the physical state section reports only identity "
+            "watermarks, keys, unique constraints, foreign keys, indexes, "
+            "nullability and defaults.",
             "Any claim about rows this job did not read.",
         ],
     }
@@ -455,7 +466,8 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
         lines.append(str(burn.get("note") or "Burn-down unavailable."))
     lines += ["", str(quarantine.get("remediation") or ""), ""]
 
-    identity = _dict(_dict(cert.get("physical_state")).get("identity_watermark"))
+    physical = _dict(cert.get("physical_state"))
+    identity = _dict(physical.get("identity_watermark"))
     if identity:
         lines += ["## Destination physical state", ""]
         if identity.get("supported") is False:
@@ -481,6 +493,24 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
                     f"- Identity/sequence watermark not verified — {identity.get('reason', '')}"
                 )
             lines.append("")
+
+    objects = _dict(physical.get("schema_objects"))
+    if objects:
+        aspects = _dict(objects.get("aspects"))
+        if aspects:
+            lines += ["| Schema object | State | Missing on destination |", "|---|---|---|"]
+            for aspect, detail in aspects.items():
+                info = _dict(detail)
+                missing = ", ".join(info.get("missing") or []) or "—"
+                lines.append(
+                    f"| {aspect.replace('_', ' ')} | {info.get('status', '')} | {missing} |"
+                )
+            lines.append("")
+        else:
+            lines += [
+                f"- Constraints and indexes not compared — {objects.get('reason', '')}",
+                "",
+            ]
 
     blockers = verdict.get("blockers") or []
     if blockers:

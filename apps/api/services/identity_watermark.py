@@ -26,6 +26,7 @@ import sqlalchemy as sa
 
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
 from services.dialect_profiles import fold_identifier, normalize_driver, quote_char_for
+from services.physical_state_diff import resolve_stored_name
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,9 @@ class IdentityWatermark:
     reason: str = ""
     repaired_to: int | None = None
     generator: str = ""
+    # Spelling the catalog stores, which reflection may normalize away.
+    physical_column: str = ""
+    physical_table: str = ""
 
     @property
     def collides(self) -> bool:
@@ -115,9 +119,53 @@ def _norm(db_type: str) -> str:
 
 
 def _quote_column(column: str, dialect: str) -> str:
-    """Column reference in the destination's own quoting and folding rules."""
-    quote = quote_char_for(dialect) or '"'
-    return quote_sql_identifier(fold_identifier(dialect, column), quote)
+    """Quote a column already spelled the way the catalog stores it."""
+    return quote_sql_identifier(column, quote_char_for(dialect) or '"')
+
+
+def _reflect(conn: Any, db_type: str, schema: str, table: str) -> Any:
+    """The destination table as the catalog holds it, or None when absent.
+
+    Reflection is the only source that knows whether ``ID`` is stored folded or
+    as a quoted ``id``; guessing either way costs the run its generator
+    evidence with an 'invalid identifier' error.
+    """
+    try:
+        names = sa.inspect(conn).get_table_names(schema=schema or None)
+        stored = resolve_stored_name(names, table)
+        if stored is None:
+            return None
+        return sa.Table(
+            stored, sa.MetaData(), autoload_with=conn, schema=schema or None
+        )
+    except Exception as exc:  # noqa: BLE001 — an unreadable catalog is evidence
+        logger.debug("identity watermark reflection failed for %s: %s", table, exc)
+        return None
+
+
+def _catalog_name(conn: Any, name: str) -> str:
+    """Reflection-normalized name back in the spelling the catalog stores.
+
+    Only Oracle-style dialects normalize on the way out (stored ``ID`` is
+    reflected as ``id``); everywhere else the reflected name is already the
+    stored one and re-casing it would invent an identifier.
+    """
+    if not getattr(conn.dialect, "requires_name_normalize", False):
+        return name
+    if getattr(name, "quote", False):
+        # Reflection kept the quotes: the catalog really stores this casing.
+        return str(name)
+    return str(conn.dialect.denormalize_name(name) or name)
+
+
+def _stored_column(reflected: Any, db_type: str, column: str) -> str:
+    """The reflected spelling of the key column, or the engine's default case."""
+    if reflected is None:
+        return fold_identifier(_norm(db_type), column)
+    # ``quoted_name`` instances (str subclasses) carry whether the catalog
+    # stores a case-sensitive spelling — keep them intact.
+    names = [c.name for c in reflected.columns]
+    return resolve_stored_name(names, column) or fold_identifier(_norm(db_type), column)
 
 
 def _scalar(conn: Any, sql: str, params: dict[str, Any] | None = None) -> Any:
@@ -125,9 +173,17 @@ def _scalar(conn: Any, sql: str, params: dict[str, Any] | None = None) -> Any:
     return row[0] if row else None
 
 
-def _max_value(conn: Any, table_ref: str, column: str, dialect: str) -> int | None:
-    col = _quote_column(column, dialect)
-    value = _scalar(conn, f"SELECT MAX({col}) FROM {table_ref}")  # nosec B608
+def _max_value(conn: Any, reflected: Any, column: str) -> int | None:
+    """Current key ceiling, read through the reflected table.
+
+    Going through the reflected column rather than a hand-quoted name is what
+    keeps case-sensitive catalogs honest: SQLAlchemy carries whether the stored
+    identifier needs quoting, which no amount of folding can recover.
+    """
+    col = reflected.c.get(column) if reflected is not None else None
+    if col is None:
+        return None
+    value = conn.execute(sa.select(sa.func.max(col))).scalar()
     if value is None:
         return None
     try:
@@ -224,7 +280,7 @@ def _oracle_probe(conn: Any, schema: str, table: str, column: str) -> _Probe:
             "WHERE owner = COALESCE(NULLIF(:own, ''), USER) "
             "AND table_name = :tbl AND column_name = :col"
         ),
-        {"own": owner, "tbl": table.upper(), "col": column.upper()},
+        {"own": owner, "tbl": table, "col": column},
     ).fetchone()
     if row is None or not row[0]:
         return _Probe(reason="column is not a GENERATED AS IDENTITY column")
@@ -313,12 +369,19 @@ def read_identity_watermark(
     dialect = _norm(db_type)
     engine = get_sqlalchemy_engine({**cfg, "type": db_type})
     with engine.connect() as conn:
-        probe = _probe(conn, db_type, schema, table, column)
-        table_ref = quote_table_ref(table, schema or None, dialect=dialect)
-        ceiling = _max_value(conn, table_ref, column, dialect)
+        reflected = _reflect(conn, db_type, schema, table)
+        column = _stored_column(reflected, db_type, column)
+        catalog_table = (
+            _catalog_name(conn, reflected.name) if reflected is not None else table
+        )
+        _physical_column = _catalog_name(conn, column)
+        probe = _probe(conn, db_type, schema, catalog_table, _physical_column)
+        ceiling = _max_value(conn, reflected, column)
 
     return IdentityWatermark(
         column=column,
+        physical_column=_physical_column,
+        physical_table=catalog_table,
         mechanism=probe.mechanism,
         generator=probe.generator,
         next_value=probe.next_value,
@@ -340,6 +403,7 @@ def _repair_sql(
             "seq": wm.generator,
             "last": target - 1,
         }
+    table = wm.physical_table or table
     if norm in _MYSQL_LIKE:
         ref = quote_table_ref(table, schema or None, dialect="mysql")
         return f"ALTER TABLE {ref} AUTO_INCREMENT = {int(target)}", {}
@@ -352,7 +416,7 @@ def _repair_sql(
         )
     if norm == "oracle":
         ref = quote_table_ref(table, schema or None, dialect="oracle")
-        col = _quote_column(wm.column, "oracle")
+        col = _quote_column(wm.physical_column or wm.column, "oracle")
         # START WITH LIMIT VALUE re-seeds the identity sequence from the data
         # already in the column — exactly the post-migration ceiling.
         return (
