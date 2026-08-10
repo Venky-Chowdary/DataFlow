@@ -2221,12 +2221,24 @@ class UniversalTransferEngine:
             # Prefer job.records_processed when the checkpoint blob was cleared
             # after a completed partial wave (Studio Resume / multi-batch upsert).
             prior_rows = 0
+            # An unreadable or absent job document does not mean "nothing was
+            # written" — for an append, treating unknown as zero is a duplicated
+            # load. Track which of the two we actually learned.
+            prior_rows_known = True
             if not _checkpoint_has_progress(checkpoint):
                 try:
-                    job_doc = mongo.get_job(job_id) or {}
-                    prior_rows = int(job_doc.get("records_processed") or 0)
-                except Exception:
+                    job_doc = mongo.get_job(job_id)
+                    prior_rows_known = isinstance(job_doc, dict) and bool(job_doc)
+                    prior_rows = int((job_doc or {}).get("records_processed") or 0)
+                except Exception as exc:
+                    logger.warning(
+                        "resume job=%s: committed-row count unreadable: %s",
+                        job_id,
+                        exc,
+                        exc_info=exc,
+                    )
                     prior_rows = 0
+                    prior_rows_known = False
                 if prior_rows > 0:
                     checkpoint = Checkpoint(
                         job_id=job_id,
@@ -2253,6 +2265,7 @@ class UniversalTransferEngine:
                         checkpoint_has_progress=False,
                         sync_mode=sync,
                         rows_committed=prior_rows,
+                        rows_committed_known=prior_rows_known,
                     )
                 except ExecutionContractError as exc:
                     raise ValueError(str(exc)) from exc

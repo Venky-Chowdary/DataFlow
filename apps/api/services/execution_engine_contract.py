@@ -54,6 +54,7 @@ def decide_resume(
     checkpoint_has_progress: bool,
     sync_mode: str | None,
     rows_committed: int = 0,
+    rows_committed_known: bool = True,
 ) -> dict[str, Any]:
     """Decide Resume posture without inventing durable progress.
 
@@ -61,6 +62,11 @@ def decide_resume(
     ⇒ REFUSED (would duplicate). Zero committed rows cannot duplicate — allow
     from-zero (orphan reclaim / claim-worker false resume). Upsert/overwrite
     without checkpoint ⇒ FROM_ZERO_IDEMPOTENT (convergent).
+
+    ``rows_committed_known=False`` means the control plane could not answer how
+    much this run already wrote (job document missing, metadata store down). An
+    unknown row count is not zero: for an append that difference is a duplicated
+    load, so the unknown case fails closed unless the sync mode converges.
     """
     if not resume_requested:
         return {
@@ -82,7 +88,7 @@ def decide_resume(
             "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
         }
     # Reclaim with no writes yet — restart-from-zero cannot duplicate.
-    if int(rows_committed or 0) <= 0:
+    if rows_committed_known and int(rows_committed or 0) <= 0:
         return {
             "kind": ResumeKind.FROM_ZERO_NO_WRITES.value,
             "allowed": True,
@@ -104,6 +110,19 @@ def decide_resume(
             ),
             "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
         }
+    if not rows_committed_known:
+        return {
+            "kind": ResumeKind.REFUSED.value,
+            "allowed": False,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                "No durable checkpoint, and the control plane could not confirm "
+                "how many rows this run already committed. Unknown is not zero — "
+                "restarting an append from zero could duplicate rows. Use Retry "
+                "from start once the destination is known, or re-Validate."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
     return {
         "kind": ResumeKind.REFUSED.value,
         "allowed": False,
@@ -122,6 +141,7 @@ def assert_resume_allowed(
     checkpoint_has_progress: bool,
     sync_mode: str | None,
     rows_committed: int = 0,
+    rows_committed_known: bool = True,
 ) -> dict[str, Any]:
     """Fail closed when Resume would silently duplicate."""
     decision = decide_resume(
@@ -129,6 +149,7 @@ def assert_resume_allowed(
         checkpoint_has_progress=checkpoint_has_progress,
         sync_mode=sync_mode,
         rows_committed=rows_committed,
+        rows_committed_known=rows_committed_known,
     )
     if not decision["allowed"]:
         raise ExecutionContractError(decision["reason"])

@@ -37,6 +37,8 @@ from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.destination_key_collision_probe import probe_append_key_collisions
 from services.secret_config import RedactedConfig, probe_config_from_endpoint
 from services.preflight_fk_gate import build_fk_block
+from services.coercion_gate_reconcile import reconcile_coercion_report
+from services.preflight_source_catalog import load_source_foreign_keys
 from services.destination_requirements_gate import build_mapping_contract_gates
 from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
@@ -716,75 +718,6 @@ from services.preflight_policy_gates import (  # noqa: E402
 
 
 @_with_date_locale
-def _load_source_foreign_keys(
-    *,
-    source_connector_id: str = "",
-    source_config: dict[str, Any] | None = None,
-    source_table: str = "",
-    workspace_id: str | None = None,
-) -> list[dict[str, Any]]:
-    """Introspect source-table FOREIGN KEYs when a live SQL source is available.
-
-    Returns [] when unsupported — never invents FK metadata.
-    """
-    table = (source_table or "").strip()
-    if not table:
-        return []
-    if not source_connector_id and not source_config:
-        return []
-
-    cfg: dict[str, Any] | None = None
-    db_type = ""
-    if source_connector_id:
-        from services.connector_probe import probe_cfg_from_saved
-        from services.connector_store import get_connector
-
-        conn = get_connector(source_connector_id, workspace_id=workspace_id)
-        if conn:
-            cfg = probe_cfg_from_saved(conn)
-            db_type = (conn.type or "").lower()
-    if cfg is None and source_config:
-        cfg = dict(source_config)
-        db_type = (
-            cfg.get("type") or cfg.get("db_type") or cfg.get("format") or ""
-        ).lower()
-    if not cfg or not db_type:
-        return []
-    cfg = dict(cfg)
-    cfg.setdefault("type", db_type)
-
-    # Only engines with real FK catalog readers today.
-    if db_type not in {
-        "postgresql",
-        "postgres",
-        "cockroachdb",
-        "timescaledb",
-        "supabase",
-        "mysql",
-        "mariadb",
-        "singlestore",
-    }:
-        return []
-
-    from services.schema_introspect import introspect_schema
-
-    info = introspect_schema(
-        db_type,
-        host=str(cfg.get("host") or ""),
-        port=int(cfg.get("port") or 5432),
-        database=str(cfg.get("database") or ""),
-        username=str(cfg.get("username") or ""),
-        password=str(cfg.get("password") or ""),
-        schema=str(cfg.get("schema") or "public"),
-        connection_string=str(cfg.get("connection_string") or ""),
-        ssl=bool(cfg.get("ssl", False)),
-        table=table,
-    )
-    if not info.get("ok"):
-        return []
-    return list(info.get("foreign_keys") or [])
-
-
 def run_file_preflight(
     *,
     columns: list[str],
@@ -1614,6 +1547,13 @@ def run_file_preflight(
         ],
     }
 
+    # A gate that blocks a declared conversion must show up in the report every
+    # other surface reads — otherwise Validate blocks while the panel under it
+    # says there are no blocking failures.
+    out["coercion_report"] = reconcile_coercion_report(
+        out.get("coercion_report"), out.get("gates")
+    )
+
     # Stamp Decision Kernel ValidationFindings onto Validate SSOT (coercion → findings).
     try:
         from services.decision_kernel import findings_from_coercion_report
@@ -1686,7 +1626,7 @@ def run_file_preflight(
         # Prefer source-introspected FKs for orphan probe (sample is source rows).
         probe_fks = list(destination_foreign_keys or [])
         try:
-            src_fks = _load_source_foreign_keys(
+            src_fks = load_source_foreign_keys(
                 source_connector_id=source_connector_id or "",
                 source_config=source_config,
                 source_table=source_table or "",

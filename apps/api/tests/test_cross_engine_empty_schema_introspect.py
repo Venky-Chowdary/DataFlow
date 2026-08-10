@@ -103,13 +103,28 @@ def test_mysql_cross_database_recovery():
 
 
 def test_snowflake_cross_schema_recovery():
+    # Answer by SQL shape, not by call order: the column read walks a
+    # projection ladder, so a positional script silently tests the wrong query.
+    def answer(sql, *_args):
+        upper = str(sql).upper()
+        params = _args[0] if _args else ()
+        if "FROM INFORMATION_SCHEMA.COLUMNS" in upper:
+            schema_arg = str(params[0]).upper() if params else ""
+            cur._rows = (
+                [("ID", "NUMBER", "YES"), ("TITLE", "TEXT", "YES")]
+                if schema_arg == "PUBLIC"
+                else []
+            )
+        elif "FROM INFORMATION_SCHEMA.TABLES" in upper:
+            # The requested schema holds nothing; the table lives in PUBLIC.
+            cur._rows = [("PUBLIC", "JOBS")] if "TABLE_NAME) = UPPER" in upper else []
+        else:
+            cur._rows = []
+
     cur = MagicMock()
-    cur.fetchall.side_effect = [
-        [],
-        [],
-        [("PUBLIC", "JOBS")],
-        [("ID", "NUMBER", "YES"), ("TITLE", "TEXT", "YES")],
-    ]
+    cur._rows = []
+    cur.execute.side_effect = answer
+    cur.fetchall.side_effect = lambda: list(cur._rows)
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cur
     conn.cursor.return_value.__exit__.return_value = False
