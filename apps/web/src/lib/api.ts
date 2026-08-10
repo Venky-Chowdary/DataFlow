@@ -962,6 +962,25 @@ export async function verifySignedProofPack(
   return res.json();
 }
 
+/** Client-facing Migration Certificate (Markdown) for a completed run. */
+export async function fetchMigrationCertificateMarkdown(jobId: string): Promise<string> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate?format=markdown`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Migration certificate not available"));
+  return res.text();
+}
+
+/** Signed JSON form of the certificate — the artifact /certificate/verify checks. */
+export async function fetchMigrationCertificate(
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  return requestJson(
+    [`${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate`],
+    "Migration certificate not available",
+  );
+}
+
 /** Execute signed rollback plan — DISCARD_STAGING only (never population undo). */
 export async function executeJobRollback(
   jobId: string,

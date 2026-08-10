@@ -57,6 +57,39 @@ def hmac_sha256_hex(secret: bytes, text: str) -> str:
     return hmac.new(secret, text.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def sign_body(body: dict[str, Any], *, subject: str) -> dict[str, Any]:
+    """Return ``body`` plus its content hash and HMAC over ``hash:subject``.
+
+    The subject binds a signature to the thing it describes, so a pack signed
+    for one job cannot be replayed as evidence for another.
+    """
+    content_sha256 = sha256_hex(canonical_json(body))
+    return {
+        **body,
+        "content_sha256": content_sha256,
+        "signature": {
+            "alg": "HMAC-SHA256",
+            "key_id": "platform_auth_secret",
+            "value": hmac_sha256_hex(_platform_secret(), f"{content_sha256}:{subject}"),
+        },
+    }
+
+
+def verify_body(payload: dict[str, Any], *, subject: str) -> tuple[str, list[str]]:
+    """Recompute hash + HMAC for a signed body. Returns (actual_hash, errors)."""
+    errors: list[str] = []
+    body = {k: v for k, v in payload.items() if k not in ("content_sha256", "signature")}
+    actual_hash = sha256_hex(canonical_json(body))
+    if str(payload.get("content_sha256") or "") != actual_hash:
+        errors.append("content_sha256 mismatch")
+    sig = payload.get("signature") if isinstance(payload.get("signature"), dict) else {}
+    claimed = str(sig.get("value") or "")
+    expected = hmac_sha256_hex(_platform_secret(), f"{actual_hash}:{subject}")
+    if not claimed or not hmac.compare_digest(claimed, expected):
+        errors.append("HMAC signature invalid")
+    return actual_hash, errors
+
+
 def classify_post_write_assurance(
     reconciliation: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -472,18 +505,7 @@ def build_signed_proof_pack(
         },
         "documentation": "docs/PROOF_POST_WRITE_CONTRACT.md",
     }
-    canon = canonical_json(body)
-    content_sha256 = sha256_hex(canon)
-    signature = hmac_sha256_hex(_platform_secret(), f"{content_sha256}:{job_id}")
-    return {
-        **body,
-        "content_sha256": content_sha256,
-        "signature": {
-            "alg": "HMAC-SHA256",
-            "key_id": "platform_auth_secret",
-            "value": signature,
-        },
-    }
+    return sign_body(body, subject=job_id)
 
 
 def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
@@ -491,18 +513,8 @@ def verify_signed_proof_pack(pack: dict[str, Any]) -> dict[str, Any]:
     errors: list[str] = []
     if not isinstance(pack, dict):
         return {"ok": False, "errors": ["pack must be an object"]}
-    sig = pack.get("signature") if isinstance(pack.get("signature"), dict) else {}
-    claimed_hash = str(pack.get("content_sha256") or "")
-    claimed_sig = str(sig.get("value") or "")
-    job_id = str(pack.get("job_id") or "")
-    body = {k: v for k, v in pack.items() if k not in ("content_sha256", "signature")}
-    canon = canonical_json(body)
-    actual_hash = sha256_hex(canon)
-    if not claimed_hash or claimed_hash != actual_hash:
-        errors.append("content_sha256 mismatch")
-    expected_sig = hmac_sha256_hex(_platform_secret(), f"{actual_hash}:{job_id}")
-    if not claimed_sig or not hmac.compare_digest(claimed_sig, expected_sig):
-        errors.append("HMAC signature invalid")
+    actual_hash, sig_errors = verify_body(pack, subject=str(pack.get("job_id") or ""))
+    errors.extend(sig_errors)
     assurance = pack.get("assurance") if isinstance(pack.get("assurance"), dict) else {}
     if assurance.get("migration_proven") and assurance.get("claim_level") != "full_checksum":
         errors.append("migration_proven claimed without full_checksum assurance")

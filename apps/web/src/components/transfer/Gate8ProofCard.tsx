@@ -46,8 +46,7 @@ function mismatchLabel(m: Gate8SampleMismatch): string {
   return `${row} · ${col}: ${String(m.source_value ?? "—")} → ${String(m.target_value ?? "—")}`;
 }
 
-function downloadJson(filename: string, payload: unknown) {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -57,6 +56,25 @@ function downloadJson(filename: string, payload: unknown) {
   a.click();
   a.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1500);
+}
+
+function downloadJson(filename: string, payload: unknown) {
+  downloadBlob(filename, new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+}
+
+/** Client-facing run report: rows read/written/quarantined, verdict, signature. */
+async function exportMigrationCertificate(jobId: string) {
+  try {
+    const { fetchMigrationCertificateMarkdown } = await import("../../lib/api");
+    const markdown = await fetchMigrationCertificateMarkdown(jobId);
+    downloadBlob(
+      `datawrap-migration-certificate-${jobId}.md`,
+      new Blob([markdown], { type: "text/markdown" }),
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Certificate export failed";
+    window.alert(`Could not export the Migration Certificate.\n${message}`);
+  }
 }
 
 async function exportGate8Proof(report: Gate8Reconciliation, jobId?: string) {
@@ -644,6 +662,16 @@ export function Gate8ProofCard({
           >
             {jobId ? "Export signed proof pack" : "Export proof JSON"}
           </button>
+          {jobId && !preWrite && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm"
+              onClick={() => void exportMigrationCertificate(jobId)}
+              title="Signed run report: rows read/written/quarantined by reason, reconciliation verdict"
+            >
+              Download Migration Certificate
+            </button>
+          )}
           <input
             ref={verifyInputRef}
             type="file"

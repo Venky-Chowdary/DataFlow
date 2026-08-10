@@ -18,7 +18,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
@@ -1335,6 +1335,67 @@ async def verify_transfer_proof_pack(body: ProofPackVerifyBody):
 
     result = verify_signed_proof_pack(body.pack if isinstance(body.pack, dict) else {})
     return result
+
+
+@router.get("/{job_id}/certificate")
+async def get_migration_certificate(job_id: str, request: Request, format: str = "json"):
+    """Per-run Migration Certificate: row accounting, quarantine, verdict, signature.
+
+    ``format=markdown`` returns the operator-facing page; the JSON form is the
+    signed artifact that ``/certificate/verify`` checks.
+    """
+    from services.audit_log import actor_from_request, append_audit_event
+    from services.migration_certificate import (
+        build_migration_certificate,
+        render_certificate_markdown,
+    )
+
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    actor = actor_from_request(request)
+    cert = build_migration_certificate({**job, "id": job_id}, actor=actor)
+    try:
+        append_audit_event(
+            action="migration_certificate.export",
+            resource=f"job:{job_id}",
+            actor=actor,
+            level="info",
+            details={
+                "content_sha256": cert.get("content_sha256"),
+                "verdict": (cert.get("verdict") or {}).get("headline"),
+            },
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "certificate audit failed: %s", exc, exc_info=exc
+        )
+    if format == "markdown":
+        return PlainTextResponse(
+            render_certificate_markdown(cert), media_type="text/markdown"
+        )
+    return cert
+
+
+class CertificateVerifyBody(BaseModel):
+    certificate: dict = Field(default_factory=dict)
+
+
+@router.post("/certificate/verify")
+async def verify_migration_certificate_endpoint(body: CertificateVerifyBody):
+    """Verify a Migration Certificate's hash, signature, and claim legitimacy."""
+    from services.migration_certificate import verify_migration_certificate
+
+    return verify_migration_certificate(
+        body.certificate if isinstance(body.certificate, dict) else {}
+    )
 
 
 class RollbackExecuteBody(BaseModel):
