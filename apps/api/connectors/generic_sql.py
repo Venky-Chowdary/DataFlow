@@ -1832,6 +1832,21 @@ def _reflect_table(
     return new_table
 
 
+def _fidelity_dialect(db_type: str, dialect_name: str) -> str:
+    """Canonical dialect name for the fidelity planner (never a driver name)."""
+    d = (db_type or "").strip().lower() or (dialect_name or "").strip().lower()
+    aliases = {
+        "mssql": "sqlserver",
+        "azure_sql": "sqlserver",
+        "mariadb": "mysql",
+        "postgres": "postgresql",
+        "cockroachdb": "postgresql",
+        "yugabytedb": "postgresql",
+        "oracledb": "oracle",
+    }
+    return aliases.get(d, d)
+
+
 def _build_table_for_write(
     engine: Any,
     table_name: str,
@@ -1840,6 +1855,7 @@ def _build_table_for_write(
     column_types: dict[str, str],
     db_type: str = "",
     conflict_columns: list[str] | None = None,
+    fidelity_plan: Any = None,
 ) -> sa.Table:
     """Build an explicit Table definition for CREATE/INSERT using the target schema.
 
@@ -1866,6 +1882,27 @@ def _build_table_for_write(
     if conflict_cols:
         pk_set = set(conflict_cols)
 
+    # Source semantics come from the one canonical planner, never from a second
+    # opinion invented here: a CHECK the certificate calls carried must be the
+    # CHECK this CREATE TABLE emits.
+    plan_not_null: set[str] = set()
+    plan_defaults: dict[str, str] = {}
+    plan_uniques: list[list[str]] = []
+    plan_checks: list[tuple[str, str]] = []
+    if fidelity_plan is not None:
+        plan_not_null = set(getattr(fidelity_plan, "not_null_columns", []) or [])
+        plan_defaults = dict(getattr(fidelity_plan, "column_defaults", {}) or {})
+        plan_uniques = [
+            list(u) for u in (getattr(fidelity_plan, "unique_constraints", []) or [])
+        ]
+        plan_checks = [
+            (str(n), str(p))
+            for n, p in (getattr(fidelity_plan, "check_predicates", []) or [])
+        ]
+        plan_pk = [c for c in (getattr(fidelity_plan, "primary_key", []) or [])]
+        if not pk_set and plan_pk and all(c in columns for c in plan_pk):
+            pk_set = set(plan_pk)
+
     cols = []
     for col in columns:
         logical = column_types.get(col, "string")
@@ -1874,22 +1911,35 @@ def _build_table_for_write(
         # backing sequence for dialects (e.g. DuckDB) that do not create it
         # automatically.  The PK exists purely for upsert semantics, not identity.
         autoincrement = False if is_pk else None
+        nullable = not (is_pk or col in plan_not_null)
         cols.append(
             sa.Column(
                 col,
                 _sa_type_for_logical(
-                    logical, dialect_name, db_type, nullable=not is_pk
+                    logical, dialect_name, db_type, nullable=nullable
                 ),
                 primary_key=is_pk,
-                nullable=not is_pk,
+                nullable=nullable,
                 autoincrement=autoincrement,
+                server_default=(
+                    sa.text(plan_defaults[col]) if col in plan_defaults else None
+                ),
                 quote=True,
             )
         )
 
     constraints: list[Any] = []
     if conflict_cols and not pk_set.issubset(set(columns)):
-        constraints.append(sa.UniqueConstraint(*conflict_cols, quote=True))
+        # ``quote=`` is a Column kwarg; on a constraint SQLAlchemy rejects it
+        # as an unknown dialect argument and the whole CREATE fails.
+        constraints.append(sa.UniqueConstraint(*conflict_cols))
+    for unique_cols in plan_uniques:
+        if all(c in columns for c in unique_cols) and set(unique_cols) != pk_set:
+            constraints.append(sa.UniqueConstraint(*unique_cols))
+    for check_name, predicate in plan_checks:
+        constraints.append(
+            sa.CheckConstraint(sa.text(predicate), name=check_name or None)
+        )
 
     if dialect_name == "clickhouse" and ch_engines is not None:
         # Airbyte-class: upsert identity is ORDER BY on ReplacingMergeTree, not
@@ -4614,6 +4664,55 @@ def write_mapped_rows(
                 )
 
             if create_table and not table_exists:
+                # Until now only postgresql_writer/sqlite_writer consulted the
+                # fidelity planner, so MySQL/SQL Server/Oracle create-new landed
+                # types and an upsert PK and nothing else — source NOT NULL,
+                # DEFAULT, UNIQUE and CHECK were dropped without a certificate.
+                fidelity_plan = None
+                try:
+                    from services.schema_fidelity import resolve_create_fidelity_plan
+
+                    fidelity_plan = resolve_create_fidelity_plan(
+                        source_schema_catalog=_kwargs.get("source_schema_catalog"),
+                        mappings=mappings,
+                        target_columns=target_cols,
+                        target_types=[
+                            target_column_types.get(c, "") for c in target_cols
+                        ],
+                        dest_dialect=_fidelity_dialect(dest_db, dialect_name),
+                        table_already_exists=False,
+                    )
+                    table_obj = _build_table_for_write(
+                        engine,
+                        table_name,
+                        schema_name,
+                        target_cols,
+                        target_column_types,
+                        db_type=cfg.get("type", ""),
+                        conflict_columns=conflict_columns,
+                        fidelity_plan=fidelity_plan,
+                    )
+                    _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
+                except Exception as exc:
+                    # A planner failure must not silently become a types-only
+                    # CREATE that the certificate then calls faithful.
+                    logger.warning(
+                        "%s schema fidelity plan failed; create-new carries types "
+                        "only and constraints are not certified: %s",
+                        _engine_label,
+                        exc,
+                    )
+                    fidelity_plan = None
+                    from services.schema_fidelity import empty_unsupported_report
+
+                    _kwargs["_schema_fidelity_report"] = empty_unsupported_report(
+                        source_dialect="",
+                        dest_dialect=_fidelity_dialect(dest_db, dialect_name),
+                        reason=(
+                            "Create-new fidelity planning failed; column types were "
+                            f"emitted without certified constraints ({exc})."
+                        ),
+                    ).to_dict()
                 try:
                     # Wave 63: PostgreSQL create-new closed ENUM → CREATE TYPE +
                     # column typed as df_enum_* (same SSOT as postgresql_writer).
@@ -4649,6 +4748,8 @@ def write_mapped_rows(
                         conn.execute(
                             sa.schema.CreateTable(table_obj, if_not_exists=True)
                         )
+                    for stmt in getattr(fidelity_plan, "post_create_sql", []) or []:
+                        conn.execute(sa.text(stmt))
                     conn.commit()
                 except Exception as exc:
                     # If the dialect does not support IF NOT EXISTS and the table
@@ -4984,6 +5085,7 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
 
+        fid_report = _kwargs.get("_schema_fidelity_report")
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -4995,6 +5097,7 @@ def write_mapped_rows(
                 dest_db_type=str(cfg.get("type") or "generic_sql"),
                 dest_types=target_column_types,
             ),
+            meta=({"schema_fidelity": fid_report} if isinstance(fid_report, dict) else {}),
             chunks_completed=chunks_completed or chunks,
             rejected_rows=max(
                 _rejected_row_count(

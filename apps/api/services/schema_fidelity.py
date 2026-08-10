@@ -159,6 +159,15 @@ class CreateFidelityPlan:
     dest_columns: list[str] = field(default_factory=list)
     # source_col -> dest_col remaps from collision policy
     column_renames: dict[str, str] = field(default_factory=dict)
+    # Structured mirror of the DDL above, for writers that build CREATE TABLE
+    # with a toolkit instead of string concatenation (generic_sql/SQLAlchemy).
+    # Both views must come from this one planner: a destination whose DDL is
+    # assembled elsewhere is a destination the certificate cannot vouch for.
+    primary_key: list[str] = field(default_factory=list)
+    unique_constraints: list[list[str]] = field(default_factory=list)
+    check_predicates: list[tuple[str, str]] = field(default_factory=list)
+    not_null_columns: list[str] = field(default_factory=list)
+    column_defaults: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -168,6 +177,11 @@ class CreateFidelityPlan:
             "post_create_sql": list(self.post_create_sql),
             "dest_columns": list(self.dest_columns),
             "column_renames": dict(self.column_renames),
+            "primary_key": list(self.primary_key),
+            "unique_constraints": [list(u) for u in self.unique_constraints],
+            "check_predicates": [list(c) for c in self.check_predicates],
+            "not_null_columns": list(self.not_null_columns),
+            "column_defaults": dict(self.column_defaults),
         }
 
 
@@ -477,6 +491,11 @@ def resolve_create_fidelity_plan(
         plan.column_suffixes = {}
         plan.table_constraints = []
         plan.post_create_sql = []
+        plan.primary_key = []
+        plan.unique_constraints = []
+        plan.check_predicates = []
+        plan.not_null_columns = []
+        plan.column_defaults = {}
     return plan
 
 
@@ -519,6 +538,10 @@ def plan_create_new_fidelity(
     suffixes: dict[str, list[str]] = {c: [] for c in dest_cols}
     table_constraints: list[str] = []
     post_sql: list[str] = []
+    struct_unique: list[list[str]] = []
+    struct_checks: list[tuple[str, str]] = []
+    struct_not_null: list[str] = []
+    struct_defaults: dict[str, str] = {}
 
     # Map catalog PK/unique/null/default through source→target→dest rename.
     def _dest_name_for_source(src: str) -> str | None:
@@ -582,6 +605,7 @@ def plan_create_new_fidelity(
         if not dest_col:
             continue
         suffixes.setdefault(dest_col, []).append("NOT NULL")
+        struct_not_null.append(dest_col)
         nn_carried += 1
         report.items.append(
             SchemaFidelityItem(
@@ -625,6 +649,7 @@ def plan_create_new_fidelity(
             continue
         default_sql = _normalize_default_sql(expr, dest)
         suffixes.setdefault(dest_col, []).append(f"DEFAULT {default_sql}")
+        struct_defaults[dest_col] = default_sql
         def_carried += 1
         report.items.append(
             SchemaFidelityItem(
@@ -667,6 +692,7 @@ def plan_create_new_fidelity(
             continue  # covered by PRIMARY KEY
         quoted = ", ".join(_q(c, dest) for c in dest_uk_s)
         table_constraints.append(f"UNIQUE ({quoted})")
+        struct_unique.append(list(dest_uk_s))
         uniq_carried += 1
         report.items.append(
             SchemaFidelityItem(
@@ -695,6 +721,7 @@ def plan_create_new_fidelity(
         dest=dest,
         dest_name_for_source=_dest_name_for_source,
         table_constraints=table_constraints,
+        check_predicates=struct_checks,
     )
 
     # --- Explicit unsupported / skipped for remaining aspects ---
@@ -724,6 +751,11 @@ def plan_create_new_fidelity(
         post_create_sql=post_sql,
         dest_columns=dest_cols,
         column_renames=renames,
+        primary_key=list(pk_dest) if len(pk_dest) == len(catalog.primary_key) else [],
+        unique_constraints=struct_unique,
+        check_predicates=struct_checks,
+        not_null_columns=struct_not_null,
+        column_defaults=struct_defaults,
     )
 
 
@@ -817,6 +849,7 @@ def _emit_check_aspect(
     dest: str,
     dest_name_for_source: Any,
     table_constraints: list[str],
+    check_predicates: list[tuple[str, str]] | None = None,
 ) -> bool:
     """Carry portable CHECK predicates; return True when the aspect is settled.
 
@@ -885,6 +918,8 @@ def _emit_check_aspect(
         if decision.carried:
             ddl = f"CHECK ({decision.dest_sql})"
             table_constraints.append(ddl)
+            if check_predicates is not None:
+                check_predicates.append((name, decision.dest_sql))
             report.items.append(
                 SchemaFidelityItem(
                     aspect="check",
