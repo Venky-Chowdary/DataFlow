@@ -23,6 +23,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.cdc_engine import ChangeBatch
 
@@ -30,6 +31,15 @@ from services.cdc_engine import ChangeBatch
 __all_gap__ = ("CdcLsnGapError",)
 
 logger = logging.getLogger(__name__)
+
+
+def _qualified_ref(schema: str, table: str) -> str:
+    """``[schema].[table]`` with ``]`` escaped.
+
+    ``sanitize=False`` keeps the operator's real object names verbatim — the
+    bracket escaping, not rewriting, is what makes a hostile name safe.
+    """
+    return quote_table_ref(table, schema, dialect="sqlserver", sanitize=False)
 
 
 def encode_mssql_cdc_token(
@@ -789,8 +799,8 @@ class SqlServerNativeCdc:
         if self._shared:
             yield from self._snapshot_shared()
             return
-        qualified = f"[{self.schema}].[{self.table}]"
-        pk = self.primary_key
+        qualified = _qualified_ref(self.schema, self.table)
+        pk = quote_sql_identifier(self.primary_key, "[")
         offset = int(self.snapshot_offset or 0)
         handoff = ""
         with self._conn() as conn:
@@ -803,7 +813,7 @@ class SqlServerNativeCdc:
                         f"""
                         SELECT *
                         FROM {qualified}
-                        ORDER BY [{pk}]
+                        ORDER BY {pk}
                         OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
                         """,  # nosec B608
                         (offset, self.batch_size),
@@ -861,15 +871,17 @@ class SqlServerNativeCdc:
                             self._maybe_record_capture_schema(cur, offset=handoff)
                         finally:
                             self.capture_instance = prev_cap
-                    pk = self.primary_keys.get(table_name, self.primary_key)
-                    qualified = f"[{self.schema}].[{table_name}]"
+                    pk = quote_sql_identifier(
+                        self.primary_keys.get(table_name, self.primary_key), "["
+                    )
+                    qualified = _qualified_ref(self.schema, table_name)
                     offset = 0
                     while True:
                         cur.execute(
                             f"""
                             SELECT *
                             FROM {qualified}
-                            ORDER BY [{pk}]
+                            ORDER BY {pk}
                             OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
                             """,  # nosec B608
                             (offset, self.batch_size),
@@ -913,8 +925,8 @@ class SqlServerNativeCdc:
         from connectors.sql_identifiers import require_safe_identifier
 
         pk_name = require_safe_identifier(sig.primary_key or self.primary_key, preserve_case=True)
-        pk = f"[{pk_name.replace(']', ']]')}]"
-        qualified = f"[{self.schema}].[{self.table}]"
+        pk = quote_sql_identifier(pk_name, "[")
+        qualified = _qualified_ref(self.schema, self.table)
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
         with self._conn() as conn:

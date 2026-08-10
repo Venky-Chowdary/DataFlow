@@ -15,6 +15,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
 from services.cdc_engine import ChangeBatch
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,13 @@ class SqlServerChangeTrackingCdc:
         )
 
     def _qualified(self) -> str:
-        return f"[{self.schema}].[{self.table}]"
+        # sanitize=False: the operator's real object names must survive verbatim;
+        # bracket escaping is what makes them safe.
+        return quote_table_ref(self.table, self.schema, dialect="sqlserver", sanitize=False)
+
+    def _bracket(self, column: str) -> str:
+        """A source column name is data: ``]`` in it must not end the bracket."""
+        return quote_sql_identifier(column, "[")
 
     def _current_version(self, cur) -> int:
         cur.execute("SELECT CHANGE_TRACKING_CURRENT_VERSION()")
@@ -195,7 +202,7 @@ class SqlServerChangeTrackingCdc:
                             f"""
                             SELECT *
                             FROM {qualified}
-                            ORDER BY [{pk}]
+                            ORDER BY {self._bracket(pk)}
                             OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
                             """,  # nosec B608
                             (offset, self.batch_size),
@@ -253,7 +260,7 @@ class SqlServerChangeTrackingCdc:
                         SELECT TOP ({self.batch_size})
                             CT.SYS_CHANGE_VERSION,
                             CT.SYS_CHANGE_OPERATION,
-                            CT.[{pk}] AS pk_val
+                            CT.{self._bracket(pk)} AS pk_val
                         FROM CHANGETABLE(CHANGES {qualified}, %s) AS CT
                         ORDER BY CT.SYS_CHANGE_VERSION
                         """,  # nosec B608
@@ -288,7 +295,8 @@ class SqlServerChangeTrackingCdc:
                     if keys:
                         placeholders = ",".join(["%s"] * len(keys))
                         cur.execute(
-                            f"SELECT * FROM {qualified} WHERE [{pk}] IN ({placeholders})",  # nosec B608
+                            f"SELECT * FROM {qualified} "  # nosec B608
+                            f"WHERE {self._bracket(pk)} IN ({placeholders})",
                             tuple(keys),
                         )
                         cols = [d[0] for d in (cur.description or [])]

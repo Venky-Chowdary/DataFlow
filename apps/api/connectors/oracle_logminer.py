@@ -13,6 +13,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier
 from services.cdc_cursor_gap import CdcScnGapError
 from services.cdc_engine import ChangeBatch
 
@@ -533,10 +534,10 @@ class OracleLogMinerCdc:
         )
 
     def _qualified(self, table: str | None = None) -> str:
-        tbl = (table or self.table).upper()
+        tbl = quote_sql_identifier((table or self.table).upper())
         if self.schema:
-            return f'"{self.schema}"."{tbl}"'
-        return f'"{tbl}"'
+            return f"{quote_sql_identifier(self.schema)}.{tbl}"
+        return tbl
 
     def _token_table_label(self) -> str:
         if self._shared:
@@ -575,7 +576,7 @@ class OracleLogMinerCdc:
             return
         offset = 0
         handoff = 0
-        pk = self.primary_key
+        pk = quote_sql_identifier(self.primary_key)
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("SELECT current_scn FROM v$database")
@@ -585,7 +586,7 @@ class OracleLogMinerCdc:
                     cur.execute(
                         f"""
                         SELECT * FROM (
-                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
+                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.{pk}) AS df_rn
                           FROM {self._qualified()} t
                         ) WHERE df_rn > :off AND df_rn <= :lim
                         """,  # nosec B608
@@ -634,13 +635,15 @@ class OracleLogMinerCdc:
                 row = cur.fetchone()
                 handoff = int(row[0] or 0) if row else 0
                 for table_name in self.tables:
-                    pk = self.primary_keys.get(table_name, self.primary_key)
+                    pk = quote_sql_identifier(
+                        self.primary_keys.get(table_name, self.primary_key)
+                    )
                     offset = 0
                     while True:
                         cur.execute(
                             f"""
                             SELECT * FROM (
-                              SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
+                              SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.{pk}) AS df_rn
                               FROM {self._qualified(table_name)} t
                             ) WHERE df_rn > :off AND df_rn <= :lim
                             """,  # nosec B608
@@ -689,8 +692,9 @@ class OracleLogMinerCdc:
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots."""
-        pk = (sig.primary_key or self.primary_key or "").upper()
-        if not pk:
+        pk_name = (sig.primary_key or self.primary_key or "").upper()
+        pk = quote_sql_identifier(pk_name) if pk_name else ""
+        if not pk_name:
             raise ValueError(
                 "Oracle LogMiner incremental snapshot requires primary_key — "
                 "refuse inventing default 'ID'"
@@ -703,9 +707,9 @@ class OracleLogMinerCdc:
                     cur.execute(
                         f"""
                         SELECT * FROM (
-                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
+                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.{pk}) AS df_rn
                           FROM {self._qualified()} t
-                          WHERE t."{pk}" > :last_pk
+                          WHERE t.{pk} > :last_pk
                         ) WHERE df_rn <= :lim
                         """,  # nosec B608
                         {"last_pk": last_pk, "lim": limit},
@@ -714,7 +718,7 @@ class OracleLogMinerCdc:
                     cur.execute(
                         f"""
                         SELECT * FROM (
-                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
+                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.{pk}) AS df_rn
                           FROM {self._qualified()} t
                         ) WHERE df_rn <= :lim
                         """,  # nosec B608
@@ -733,7 +737,7 @@ class OracleLogMinerCdc:
                     for i in range(len(clean_cols))
                 }
             )
-        new_last = records[-1].get(pk) if records else last_pk
+        new_last = records[-1].get(pk_name) if records else last_pk
         done = len(records) < limit
         return records, str(new_last) if new_last is not None else last_pk, done
 

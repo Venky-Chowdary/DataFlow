@@ -14,6 +14,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier
 from services.cdc_engine import ChangeBatch
 from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
 
@@ -141,9 +142,10 @@ class OracleFlashbackCdc:
         )
 
     def _qualified(self) -> str:
+        tbl = quote_sql_identifier(self.table.upper())
         if self.schema:
-            return f'"{self.schema}"."{self.table.upper()}"'
-        return f'"{self.table.upper()}"'
+            return f"{quote_sql_identifier(self.schema)}.{tbl}"
+        return tbl
 
     def is_available(self) -> bool:
         try:
@@ -178,7 +180,7 @@ class OracleFlashbackCdc:
         """Full table dump at current SCN, then hand off to flashback versions."""
         self._acquire_cdc_lease()
         qualified = self._qualified()
-        pk = self.primary_key
+        pk = quote_sql_identifier(self.primary_key)
         offset = self.snapshot_offset if self.phase == "snapshot" else 0
         handoff_scn = 0
         try:
@@ -191,7 +193,7 @@ class OracleFlashbackCdc:
                         cur.execute(
                             f"""
                             SELECT * FROM (
-                              SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
+                              SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.{pk}) AS df_rn
                               FROM {qualified} t
                             )
                             WHERE df_rn > :off AND df_rn <= :lim
