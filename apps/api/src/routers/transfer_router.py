@@ -18,7 +18,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
@@ -1346,8 +1346,9 @@ async def verify_transfer_proof_pack(body: ProofPackVerifyBody):
 async def get_migration_certificate(job_id: str, request: Request, format: str = "json"):
     """Per-run Migration Certificate: row accounting, quarantine, verdict, signature.
 
-    ``format=markdown`` returns the operator-facing page; the JSON form is the
-    signed artifact that ``/certificate/verify`` checks.
+    ``format=markdown`` returns the operator-facing page, ``format=pdf`` the
+    audit deliverable; the JSON form is the signed artifact that
+    ``/certificate/verify`` checks.
     """
     from services.audit_log import actor_from_request, append_audit_event
     from services.migration_certificate import (
@@ -1385,6 +1386,18 @@ async def get_migration_certificate(job_id: str, request: Request, format: str =
     if format == "markdown":
         return PlainTextResponse(
             render_certificate_markdown(cert), media_type="text/markdown"
+        )
+    if format == "pdf":
+        from services.certificate_pdf import render_certificate_pdf
+
+        return Response(
+            content=render_certificate_pdf(cert),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="migration-certificate-{job_id}.pdf"'
+                )
+            },
         )
     return cert
 

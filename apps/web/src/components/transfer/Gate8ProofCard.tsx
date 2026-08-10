@@ -65,12 +65,24 @@ function downloadJson(filename: string, payload: unknown) {
 /** Client-facing run report: rows read/written/quarantined, verdict, signature. */
 async function exportMigrationCertificate(jobId: string) {
   try {
-    const { fetchMigrationCertificateMarkdown } = await import("../../lib/api");
-    const markdown = await fetchMigrationCertificateMarkdown(jobId);
-    downloadBlob(
-      `datawrap-migration-certificate-${jobId}.md`,
-      new Blob([markdown], { type: "text/markdown" }),
+    const { fetchMigrationCertificatePdf, fetchMigrationCertificateMarkdown } = await import(
+      "../../lib/api"
     );
+    try {
+      downloadBlob(
+        `datawrap-migration-certificate-${jobId}.pdf`,
+        await fetchMigrationCertificatePdf(jobId),
+      );
+      return;
+    } catch {
+      // A deployment without the PDF renderer still owes the operator the
+      // evidence, so fall back to the same content as markdown.
+      const markdown = await fetchMigrationCertificateMarkdown(jobId);
+      downloadBlob(
+        `datawrap-migration-certificate-${jobId}.md`,
+        new Blob([markdown], { type: "text/markdown" }),
+      );
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : "Certificate export failed";
     window.alert(`Could not export the Migration Certificate.\n${message}`);
@@ -667,9 +679,9 @@ export function Gate8ProofCard({
               type="button"
               className="df2-btn df2-btn-sm"
               onClick={() => void exportMigrationCertificate(jobId)}
-              title="Signed run report: rows read/written/quarantined by reason, reconciliation verdict"
+              title="Signed audit PDF: rows read/written/quarantined by reason, reconciliation verdict, destination physical state"
             >
-              Download Migration Certificate
+              Download Migration Certificate (PDF)
             </button>
           )}
           <input

@@ -971,6 +971,15 @@ export async function fetchMigrationCertificateMarkdown(jobId: string): Promise<
   return res.text();
 }
 
+/** Audit deliverable: the same signed certificate, paginated and hash-stamped. */
+export async function fetchMigrationCertificatePdf(jobId: string): Promise<Blob> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate?format=pdf`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Migration certificate not available"));
+  return res.blob();
+}
+
 /** Signed JSON form of the certificate — the artifact /certificate/verify checks. */
 export async function fetchMigrationCertificate(
   jobId: string,
