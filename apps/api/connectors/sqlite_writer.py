@@ -595,6 +595,7 @@ def write_mapped_rows(
                 policy,
                 dialect_label="SQLite",
                 mappings=list(mappings or []) or None,
+                dest_db="sqlite",
             )
             if write_mode == "upsert" and conflict_cols:
                 mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
@@ -787,6 +788,7 @@ def write_mapped_rows(
                     policy,
                     dialect_label="SQLite",
                     mappings=list(mappings or []) or None,
+                    dest_db="sqlite",
                 )
                 sparse_rows = []
                 if write_mode == "upsert" and conflict_cols:

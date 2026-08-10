@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
+from services.data_profiler import UNTYPED_TEXT_LOGICALS as _UNTYPED_TEXT_LOGICALS
 from services.semantic_mapper import map_columns
 from services.transform_engine import infer_transform_for_mapping
 from services.decision_kernel import (
@@ -17,10 +18,6 @@ from services.type_system import ddl_carrier_type
 logger = logging.getLogger("datawrap.mapping")
 
 CONFIDENCE_FLOOR = 0.72
-# Carriers a schemaless/text source declares for *every* column (CSV header,
-# Parquet string, SaaS thin describe). A profiled upgrade off these is evidence,
-# not a cast the operator chose.
-_UNTYPED_TEXT_LOGICALS = frozenset({"string", "text", "varchar", "unknown"})
 # Untyped VARCHAR with no samples — refuse inflated confidence (thin SaaS / failed introspect).
 _UNTYPED_VARCHAR_CONF_CAP = 0.78
 
@@ -93,6 +90,39 @@ def _demote_untyped_varchar_confidence(
                 out["reasoning"] = f"{reason} · {note}".strip(" ·")
         refined.append(out)
     return refined
+
+
+_VALUE_REWRITING_TRANSFORMS = frozenset({"trim", "trim_id", "upper", "lower", "uuid"})
+
+
+def _passthrough_identity_transform(
+    transform: str,
+    *,
+    strategy: str,
+    create_new: bool,
+    user_override: bool,
+    src_type: str,
+    tgt_type: str,
+) -> str:
+    """Drop name-triggered value rewrites on identity create-new mappings.
+
+    ``infer_transform_for_mapping`` stamps ``trim_id`` for any target whose name
+    ends in ``id``, so copying a table into a table DataFlow itself creates
+    rewrote every ``_id`` / ``uid`` / ``userId`` value. That is a mutation the
+    operator never asked for: it marks the mapping fidelity ``mutate``, drops
+    confidence to 0.70 and blocks G4 — a create-new identity column is a
+    byte-exact copy. Type-driven transforms (decimal, date, json) are untouched;
+    an operator who wants Trim still chooses it explicitly.
+    """
+    if user_override or transform not in _VALUE_REWRITING_TRANSFORMS:
+        return transform
+    if not (create_new or strategy in {"identity_passthrough", "create_compatible_new"}):
+        return transform
+    try:
+        same_family = normalize_logical_type(src_type) == normalize_logical_type(tgt_type)
+    except Exception:
+        return transform
+    return "none" if same_family else transform
 
 
 def classify_format(source_columns: list[str], file_format: str | None = None) -> dict:
@@ -647,6 +677,14 @@ def run_mapping_pipeline(
                 tgt_type or src_type,
                 source_samples=col_samples,
                 destination_db_type=destination_db_type,
+            )
+            transform = _passthrough_identity_transform(
+                transform,
+                strategy=strategy,
+                create_new=bool(m.get("create_new")),
+                user_override=bool(m.get("user_override")),
+                src_type=src_type,
+                tgt_type=tgt_type or src_type,
             )
         # New/generic destinations: typed transforms must stamp *physical* DDL
         # for the destination (DATETIME(6)/CHAR(36)/JSONB) — never bare logical

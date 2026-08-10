@@ -3643,10 +3643,34 @@ def quarantine_unfit_json(
 
 
 def _infer_dest_db_from_dialect_label(dialect_label: str) -> str:
-    """Best-effort dest_db for bare DECIMAL/NUMERIC parse honesty."""
+    """Best-effort dest_db for bare DECIMAL/NUMERIC/INTEGER parse honesty.
+
+    Engines whose bare ``INTEGER``/``DECIMAL`` keyword is *not* the SQL-standard
+    32-bit / (38,x) carrier must be recognised here, otherwise the shared write
+    quarantine invents a bound the destination never enforces and holds out
+    perfectly writable rows (SQLite ``INTEGER`` is 8 bytes; document and object
+    sinks have no integer column at all).
+    """
     low = (dialect_label or "").strip().lower()
     if not low:
         return ""
+    for token, db in (
+        ("sqlite", "sqlite"),
+        ("mongo", "mongodb"),
+        ("dynamodb", "dynamodb"),
+        ("elasticsearch", "elasticsearch"),
+        ("opensearch", "elasticsearch"),
+        ("redis", "redis"),
+        ("kafka", "kafka"),
+        ("salesforce", "salesforce"),
+        ("hubspot", "hubspot"),
+        ("airtable", "airtable"),
+        ("notion", "notion"),
+    ):
+        if token in low:
+            return db
+    if low in {"s3", "gcs", "adls"}:
+        return low
     if "redshift" in low:
         return "redshift"
     if "postgres" in low or "cockroach" in low or "greenplum" in low:

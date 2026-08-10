@@ -55,6 +55,15 @@ _SAFE_PROMOTIONS = frozenset({
 
 _IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "cast", "auto", "passthrough"})
 
+# Typed parse guards quarantine unparseable cells; within one family they do not
+# change a parseable value.
+_PARSE_GUARD_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset({"decimal", "numeric", "number", "integer", "int", "bigint", "float", "double"}),
+    frozenset({"date", "datetime", "timestamp", "time"}),
+    frozenset({"json", "array", "struct", "map"}),
+    frozenset({"string", "text", "varchar"}),
+)
+
 
 def _is_passthrough_transform(transform: str, src_logical: str, tgt_logical: str) -> bool:
     """True when the transform does not change the value.
@@ -71,7 +80,19 @@ def _is_passthrough_transform(transform: str, src_logical: str, tgt_logical: str
     xf = (transform or "").strip().lower()
     if xf in _IDENTITY_TRANSFORMS:
         return True
-    return bool(src_logical) and xf == src_logical == tgt_logical
+    if bool(src_logical) and xf == src_logical == tgt_logical:
+        return True
+    # The guard is also a passthrough when it names the *family* both sides
+    # share: DOUBLE→DOUBLE arrives labelled ``decimal`` because the numeric
+    # parse guard is family-wide, and reading that as a custom transform
+    # demoted identical-schema columns to semantic_inference (0.78) — below the
+    # G4 floor, on a column whose fidelity verdict is ``preserve``.
+    for family in _PARSE_GUARD_FAMILIES:
+        if xf in family and src_logical in family and tgt_logical in family:
+            return True
+    return False
+
+
 _STRUCTURAL_LOGICALS = frozenset({"json", "array", "struct", "map"})
 
 _TEMPORAL_NAME_TERMS = frozenset({"date", "time", "dt", "timestamp", "created", "updated"})

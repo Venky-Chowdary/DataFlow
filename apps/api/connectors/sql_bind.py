@@ -1406,8 +1406,20 @@ def coerce_integer_wire(
                 raise ValueError(
                     f"integer out of range for {ddl_type or upper}: {n}"
                 )
-        elif upper in {"INT", "INTEGER", "INT4"}:
+        elif upper == "INT4":
             if n < -2147483648 or n > 2147483647:
+                raise ValueError(
+                    f"integer out of range for {ddl_type or upper}: {n}"
+                )
+        elif upper in {"INT", "INTEGER"}:
+            # Bare INT/INTEGER is dialect-defined (SQLite holds 8 bytes,
+            # BigQuery INT64, Snowflake/Oracle a decimal carrier). Ask the
+            # storage-bounds SSOT instead of assuming the SQL-standard int4 —
+            # a wrong bound refuses rows the destination stores natively.
+            from services.numeric_fit import integer_storage_bounds
+
+            bounds = integer_storage_bounds(upper, dest_db=eng)
+            if bounds is not None and not (bounds[0] <= n <= bounds[1]):
                 raise ValueError(
                     f"integer out of range for {ddl_type or upper}: {n}"
                 )

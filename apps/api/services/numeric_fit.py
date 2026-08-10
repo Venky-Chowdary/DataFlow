@@ -27,6 +27,21 @@ _BARE_INT_STORAGE_WIDTH: dict[str, int | None] = {
     "databricks": 32,
     "snowflake": None,
     "oracle": None,
+    # Schemaless / document / object sinks have no fixed integer column, so a
+    # bare ``INTEGER`` Map stamp must not invent a 32-bit bound and quarantine
+    # values the sink stores natively (BSON int64, JSON number, Avro long).
+    "mongodb": None,
+    "dynamodb": None,
+    "elasticsearch": None,
+    "redis": None,
+    "kafka": None,
+    "s3": None,
+    "gcs": None,
+    "adls": None,
+    "salesforce": None,
+    "hubspot": None,
+    "airtable": None,
+    "notion": None,
     "": 32,            # SQL standard INT — Postgres/MySQL/SQL Server/DuckDB/…
 }
 
@@ -168,3 +183,92 @@ def decimal_fixed_point_would_collapse_to_text(
     if normalize_logical_type(target_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False
     return not dest_lacks_fixed_point_decimal(dest_db)
+
+
+def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | None:
+    """IEEE significand bits for float carriers (53=double, 24=single, 11=half).
+
+    Property 1 — referential transparency: bare ``FLOAT`` / logical ``float``
+    (any case) returns ``None`` (width unknown) so create-new invents via
+    ``DDL_TYPES`` / ``_FLOAT_DDL`` (IEEE-64 default). Unambiguous single-
+    precision carriers are ``REAL`` / ``FLOAT4`` / ``FLOAT32`` / ``FLOAT(p≤24)``.
+    Introspect must emit those for true IEEE-32 sources (e.g. MySQL FLOAT).
+
+    ``REAL`` is the one carrier whose width is genuinely dialect-defined:
+    SQLite ``REAL`` is an 8-byte IEEE-754 double and MySQL ``REAL`` is a
+    synonym for ``DOUBLE`` (outside ``REAL_AS_FLOAT``), while PostgreSQL /
+    SQL Server ``REAL`` is ``float4``. ``dest_db`` selects that width so a
+    ``DOUBLE PRECISION → SQLite REAL`` create-new wire is not reported as an
+    IEEE narrowing it never performs. Bare FLOAT stays width-unknown.
+    """
+    from services.type_system import (
+        LOGICAL_FLOAT,
+        REAL_IS_DOUBLE_DIALECTS,
+        _normalize_dest_db,
+        normalize_logical_type,
+        strip_identity_qualifier,
+    )
+
+    dialect = _normalize_dest_db(dest_db) if dest_db else ""
+    if normalize_logical_type(inferred) != LOGICAL_FLOAT:
+        return None
+    raw = strip_identity_qualifier(inferred)
+    # Bare logical family token (any case of ``float``) — width unknown.
+    if raw.strip().lower() == LOGICAL_FLOAT:
+        return None
+    # Strip UNSIGNED so REAL UNSIGNED / FLOAT UNSIGNED keep single-width tokens.
+    upper = re.sub(
+        r"\bUNSIGNED\b",
+        "",
+        raw.upper(),
+    ).strip().replace(" ", "")
+    # IEEE half / float16 (~10 explicit + 1 implicit significand bits).
+    if upper in {"HALF", "HALFFLOAT", "FLOAT16"} or upper.startswith("HALFFLOAT"):
+        return 11
+    # ``REAL`` is IEEE-64 on SQLite and MySQL, IEEE-32 everywhere else.
+    if (upper == "REAL" or upper.startswith("REAL(")) and dialect in REAL_IS_DOUBLE_DIALECTS:
+        return 53
+    # Single-precision tokens (unambiguous).
+    if upper in {
+        "REAL",
+        "FLOAT4",
+        "FLOAT32",
+        "BINARY_FLOAT",
+    } or upper.startswith("REAL("):
+        return 24
+    # SQL FLOAT(p): p≤24 → single; p>24 → double (SQL Server / ANSI).
+    m = re.match(r"^FLOAT\((\d+)\)$", upper)
+    if m:
+        return 24 if int(m.group(1)) <= 24 else 53
+    if upper in {
+        "DOUBLE",
+        "DOUBLEPRECISION",
+        "FLOAT8",
+        "FLOAT64",
+        "BINARY_DOUBLE",
+    } or upper.startswith("DOUBLE"):
+        return 53
+    # Bare FLOAT (any case) — ambiguous; invent IEEE-64 via DDL_TYPES.
+    if upper == "FLOAT" or upper.startswith("FLOAT"):
+        return None
+    return 53
+
+
+def float_mantissa_would_narrow(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    source_db: str = "",
+) -> bool:
+    """True when DOUBLE/FLOAT64 lands on REAL/FLOAT32/HALF (silent IEEE drop).
+
+    Widths are resolved per side: the source carrier under ``source_db`` and the
+    target carrier under ``dest_db``. Borrowing the sink dialect for the source
+    would read a PostgreSQL ``REAL`` (float4) as a SQLite double.
+    """
+    src_b = float_mantissa_bits(source_type, dest_db=source_db)
+    tgt_b = float_mantissa_bits(target_type, dest_db=dest_db)
+    if src_b is None or tgt_b is None:
+        return False
+    return src_b > tgt_b

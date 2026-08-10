@@ -3908,6 +3908,33 @@ def _es_mapping_type(es_type: str) -> str:
     return "TEXT"
 
 
+def _sqlite_declared_over_samples(declared: str, inferred: str) -> str:
+    """Keep an explicit SQLite DDL token when samples blur it within its family.
+
+    A column's contract is its declaration, not its current contents. SQLite
+    records the CREATE token verbatim, so a ``TIMESTAMPTZ`` sampled as naive
+    strings must stay offset-aware — otherwise re-reading a table DataFlow
+    itself created reports a polarity change against its own DDL. Cross-family
+    inference is left alone: an untyped affinity genuinely carries no contract.
+    """
+    from services.type_system import normalize_logical_type
+
+    decl = (declared or "").strip()
+    inf = (inferred or "").strip()
+    if not decl or not inf:
+        return inferred
+    try:
+        decl_logical = normalize_logical_type(decl)
+        inf_logical = normalize_logical_type(inf)
+    except Exception:
+        return inferred
+    if decl_logical == inf_logical and decl.upper() != inf.upper():
+        # Same family, different token — the declaration carries the polarity,
+        # precision and width the samples cannot prove.
+        return decl
+    return inferred
+
+
 def _introspect_sqlite(
     *,
     database: str = "",
@@ -3994,7 +4021,16 @@ def _introspect_sqlite(
                     if declared_base in {"NUMERIC", "DECIMAL", "NUMBER"} or declared.startswith(
                         ("NUMERIC", "DECIMAL", "NUMBER")
                     ):
-                        inferred = "DECIMAL"
+                        # Keep the declared (p,s) — SQLite records the DDL token
+                        # verbatim, and dropping it to bare DECIMAL forces
+                        # downstream invent to guess a precision from samples.
+                        from services.type_system import parse_numeric_precision_scale
+
+                        p, s = parse_numeric_precision_scale(declared)
+                        if p is not None:
+                            inferred = f"DECIMAL({p},{s if s is not None else 0})"
+                        else:
+                            inferred = "DECIMAL"
                     elif declared_base in {"INTEGER", "INT", "BIGINT"}:
                         # SQLite INTEGER affinity is a signed int64 storage class
                         # (not PG/MySQL INT32). Stamping INTEGER invents INT32 on
@@ -4021,6 +4057,8 @@ def _introspect_sqlite(
                             inferred = "DECIMAL"
                         else:
                             inferred = "DOUBLE PRECISION"
+                    else:
+                        inferred = _sqlite_declared_over_samples(declared, inferred)
 
                 prow = pragma_by_name.get(name)
                 notnull = int(prow[3] or 0) if prow is not None else 0

@@ -1297,3 +1297,85 @@ re-exporting the moved names so no import site changes:
 6. `services/transfer_scheduler.py` logs to a closed stream during interpreter shutdown.
 7. Live-route matrices for Salesforce/SFTP/Snowflake still need credentials; the keyset,
    host-key, and LSN work here is proven by unit matrices, not by a live org.
+
+---
+
+## 23. Validate ≡ Execute — measured on live Mongo / Postgres / MySQL / SQLite
+
+The reported symptom was Validate 13/13 green, then Execute failing on the same job.
+That is not a Mongo→Postgres bug; every DB→DB route re-derived source and destination
+facts at Execute instead of consuming what Validate scored. A gate that greens and then
+blocks is worse than no gate, so the whole class was measured rather than the pasted pair.
+
+### 23.1 Harness
+
+Four services in Docker (Mongo 7 `:27017`, Postgres 16 `:5433`, MySQL 8 `:3307`) plus
+local SQLite and a CSV fixture. `run_matrix.py` drives the *production* engine entrypoint
+(no writer stubs) over 32 routes: 6 sources × 4 destinations × {full_refresh_append,
+full_refresh_overwrite}, then a second pass that appends into the table pass 1 created.
+Every route is classified `written` / `blocked_at_validate` / `failed_at_write` /
+`harness_error`, with an independent `SELECT COUNT(*)` read from the destination.
+
+### 23.2 Result
+
+| Run | written | blocked_at_validate | **failed_at_write** |
+|---|---|---|---|
+| Before this cycle (`matrix_run.log`) | 1/32 | 22 | **9** |
+| After shared-path fixes (`matrix_run11.log`) | 16/32 | 14 | **2** |
+| After the append collision probe (`matrix_run12.log`) | 16/32 | 16 | **0** |
+
+**`failed_at_write` is now 0.** No route reaches Execute with a blocker that Validate
+could have proven. The 16 blocks are honest refusals (mapping confidence floor, ObjectId /
+UUID domain collapse, `TIMESTAMPTZ`→MySQL narrowing, identity key required for
+key-addressed destinations, unsigned Risk Contract) — not silent passes. Raising the
+`written` count by relaxing those gates was explicitly not done.
+
+### 23.3 The defect class, and where each half was fixed
+
+| Symptom | Root cause | Fix |
+|---|---|---|
+| `_id` `VARCHAR` at Map, `OBJECTID` at Execute | profiler let stringified BSON samples demote a typed declaration | `data_profiler.merge_profiler_schema` preserves the typed declaration (`UNTYPED_TEXT_LOGICALS`) |
+| Validate scored browser-sent types | Validate never asked the live source | `source_schema_authority.live_source_column_types` + mapping restamp in `preflight_router` |
+| Execute re-derived a different shape | reader shape overrode declared types | `engine._authoritative_source_schema` merges declared over decoded |
+| Exact `id→id` blocked at G4 | name-triggered `trim_id`; same-family parse guards scored as semantic inference | `_passthrough_identity_transform`, `_PARSE_GUARD_FAMILIES` |
+| `DOUBLE PRECISION`→SQLite `REAL` called narrowing | generic `REAL` treated as float4 on every dialect | `REAL_IS_DOUBLE_DIALECTS`, independent `source_db`/`dest_db` |
+| MySQL `9000000001`→SQLite quarantined | bare `INTEGER` hard-coded to 32-bit | `sql_bind` uses `integer_storage_bounds(dest_db=…)` |
+| Healthy append reported as checksum failure | batch digest compared against whole-table digest | `checksum_scope="whole_table_not_comparable"`, `assurance_level="row_count"` |
+| PG keyed read-back "unproven" | `bigint = text` in the read-back predicate | `CAST(pk AS text) = ANY(%s)` |
+| **Append aborted on `duplicate key value violates unique constraint`** | G6 only probed duplicates *within* the batch, never against rows already at rest | `services/destination_key_collision_probe.py` + G6 block |
+
+### 23.4 Append collision probe
+
+`probe_append_key_collisions` runs only when the write can actually collide: an
+append-family sync mode, a destination table that already exists, and a **single-column**
+enforced PK/UNIQUE (a composite key tolerates a repeated first column, so treating it as
+enforced would invent a blocker). It then reads the batch key set back from the
+destination with a text-cast `IN ()` — type-agnostic across bigint/uuid/numeric/text — and
+G6 blocks with the remediation the operator can act on: switch to upsert/merge, or
+overwrite. Upsert / merge / overwrite are exempt by construction; a probe that could not
+run returns `skipped_*` / `error` and is never stamped as proof of a clean append.
+
+Validate and Execute call the identical probe: `destination_config` is threaded through
+`_execute_preflight_parity_kwargs`, so all three engine preflight sites and the Studio
+router resolve the same destination.
+
+### 23.5 Evidence
+
+```bash
+# 9/9 — collision, clean batch, no enforced key, create-new, exempt modes, composite, skip honesty
+pytest apps/api/tests/test_destination_append_key_collision.py -q -p no:randomly
+pytest apps/api/tests/test_validate_source_type_authority.py \
+       apps/api/tests/test_identity_transform_and_append_reconcile.py \
+       apps/api/tests/test_profiler_typed_declaration_preserved.py -q -p no:randomly
+```
+
+### 23.6 Still open on this axis
+
+- Decision Artifacts do not yet carry a source *and* destination schema fingerprint, so
+  Execute can still legally re-derive rather than refuse drift observed after Validate.
+- Quarantine's "Open Map / Accept risk" returns to Map and wipes approvals — the operator
+  has no forward door from a correctly-quarantined job.
+- Transfer Studio's Database field silently overrides the saved connector's path.
+- `postgresql->mysql` timezone-aware transfer stays blocked pending a policy decision.
+- Cloud/SaaS destinations (Snowflake, BigQuery, Salesforce, SFTP) are absent from this
+  matrix — no credentials. Their gate behaviour is unit-proven only.

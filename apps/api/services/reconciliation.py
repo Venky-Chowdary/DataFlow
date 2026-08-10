@@ -20,6 +20,14 @@ from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow
 from typing import Any, Callable, Iterable
 
+from services.reconcile_coverage import (
+    append_row_count_report,
+    extra_rows_note,
+    is_sample_authority,
+    is_unproven_export,
+    is_writer_ack_only,
+    row_count_scope_stamp,
+)
 from services.transform_engine import (
     _DATE_LIKE_RE,
     _parse_date,
@@ -84,6 +92,8 @@ class ReconciliationReport:
     checksum_match: bool | None = None
     population_proof: bool = False
     assurance_level: str = ""
+    # Set when the digests cover different populations (see reconcile_coverage).
+    checksum_scope: str = ""
 
     def to_dict(self) -> dict:
         return stamp_post_write_phase(asdict(self))
@@ -108,6 +118,9 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         return out
 
     passed = bool(out.get("passed"))
+    scoped = row_count_scope_stamp(out)
+    if scoped is not None:
+        return scoped
     src = str(out.get("source_checksum") or "").strip()
     tgt = str(out.get("target_checksum") or "").strip()
     msg = str(out.get("message") or "").lower()
@@ -116,18 +129,7 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
 
-    # File/object export messages use "File/object export" — substring "file export"
-    # alone never matched and falsely fell through to writer_ack / verified.
-    unproven_export = (
-        out.get("unproven") is True
-        or out.get("skipped_readback") is True
-        or "file/object export" in msg
-        or "file export" in msg
-        or "object export" in msg
-        or ("skipped" in msg and "reconciliation skipped" in msg)
-        or ("cell fidelity" in msg and "unproven" in msg)
-    )
-    if unproven_export:
+    if is_unproven_export(out, msg):
         out["phase"] = "post_write_skipped"
         out["post_write_pending"] = False
         out["preview"] = False
@@ -147,12 +149,7 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["assurance_level"] = "none"
         return out
 
-    writer_only = (
-        not tgt
-        or "verified by writer" in msg
-        or "read-back verifier not available" in msg
-        or "read-back" in msg and "unavailable" in msg
-    )
+    writer_only = is_writer_ack_only(msg, tgt)
     sample = out.get("sample_compare") if isinstance(out.get("sample_compare"), dict) else {}
     sample_ok = bool(sample.get("passed")) and int(sample.get("compared") or 0) > 0
     # GA: diverging independent digests never become sample-verified success.
@@ -167,13 +164,8 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["checksum_match"] = False
         return out
 
-    sample_authority = sample_ok and (
-        writer_only
-        or not tgt
-        or "sample-verified" in msg
-        or "sample verified" in msg
-        or "key-aligned" in msg
-        or "sample-only assurance" in msg
+    sample_authority = sample_ok and is_sample_authority(
+        msg, tgt, writer_only=writer_only
     )
     if passed and sample_authority and not (src and tgt):
         out["phase"] = "post_write_sample_verified"
@@ -616,16 +608,8 @@ def reconcile(
             and bool(sample_compare.get("passed", False))
             and compared > 0
         )
-        extra_note = ""
-        if allow_extra_rows and target_rows > expected_rows:
-            written_hint = int(expected_rows) if expected_rows else 0
-            extra_note = (
-                f" Destination has {target_rows - expected_rows} extra row(s) "
-                "(append/upsert into a non-empty table); whole-table digests are "
-                "not comparable. Use overwrite/truncate for a clean load, or "
-                "upsert with a primary key — this is not proof the "
-                f"{written_hint} written row(s) are wrong."
-            )
+        has_extra = allow_extra_rows and target_rows > expected_rows
+        extra_note = extra_rows_note(target_rows, expected_rows) if has_extra else ""
         sample_note = ""
         if sample_ok:
             sample_note = (
@@ -638,6 +622,19 @@ def reconcile(
                 "soften checksum mismatch."
             )
         mode_label = "strict" if strict_checksum else "balanced"
+        if has_extra and not strict_checksum:
+            return append_row_count_report(
+                source_rows=source_rows,
+                target_rows=target_rows,
+                expected_rows=expected_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                sample_note=sample_note,
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                sample_compare=sample_compare,
+            )
         return ReconciliationReport(
             passed=False,
             source_rows=source_rows,
@@ -742,8 +739,10 @@ def verify_postgres_table(
             pk = (pk_column or "").strip()
             if ids and pk:
                 pk_q = quote_sql_identifier(pk)
+                # Ids are text; an uncast bigint/uuid key aborts the read-back.
                 cur.execute(
-                    f"SELECT * FROM {table_ref} WHERE {pk_q} = ANY(%s)",  # nosec B608
+                    f"SELECT * FROM {table_ref} "  # nosec B608
+                    f"WHERE CAST({pk_q} AS text) = ANY(%s)",
                     (ids,),
                 )
             else:

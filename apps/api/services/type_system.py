@@ -25,6 +25,10 @@ LOGICAL_TEXT = "text"
 LOGICAL_INTEGER = "integer"
 LOGICAL_DECIMAL = "decimal"
 LOGICAL_FLOAT = "float"
+# Engines whose ``REAL`` token is an 8-byte IEEE-754 double, not float4:
+# SQLite stores every REAL as a 64-bit double, and MySQL/MariaDB treat REAL as
+# a synonym for DOUBLE unless the REAL_AS_FLOAT SQL mode is enabled.
+REAL_IS_DOUBLE_DIALECTS = frozenset({"sqlite", "mysql", "mariadb"})
 LOGICAL_BOOLEAN = "boolean"
 LOGICAL_DATE = "date"
 LOGICAL_DATETIME = "datetime"
@@ -633,7 +637,10 @@ _OBJECTID_DDL_DEFAULTS: Final[dict[str, str]] = {
     "bigquery": "STRING(24)",
     "spanner": "STRING(24)",
     "databricks": "VARCHAR(24)",
-    "sqlite": "TEXT",
+    # SQLite keeps the declared token verbatim (VARCHAR(24) → TEXT affinity),
+    # so declaring the hex width preserves ObjectId polarity the way every
+    # other SQL sink does instead of collapsing to an anonymous TEXT column.
+    "sqlite": "VARCHAR(24)",
     "oracle": "VARCHAR2(24)",
     "sqlserver": "CHAR(24)",
     "mysql": "CHAR(24)",
@@ -2277,10 +2284,16 @@ def ddl_carrier_type(inferred: str | None) -> str:
         return "INTERVAL"
     if logical == LOGICAL_GEOGRAPHY:
         return "GEOGRAPHY"
-    if logical == LOGICAL_TEXT:
-        return "TEXT"
-    if logical == LOGICAL_STRING:
-        return "VARCHAR"
+    if logical in {LOGICAL_TEXT, LOGICAL_STRING}:
+        # Keep CHAR(n)/VARCHAR(n) width and collation for the same reason
+        # DECIMAL(p,s) is kept: create-new invents from this carrier, and a
+        # bare VARCHAR makes the invent TEXT — which the coercion validator
+        # then reads back as a CHAR(36)→TEXT pad-polarity collapse against the
+        # declaration it still sees. Map, Validate and write must agree.
+        stripped = strip_identity_qualifier(raw).strip() or raw
+        if "(" in stripped or re.search(r"\bCOLLATE\b", stripped, re.I):
+            return stripped
+        return "TEXT" if logical == LOGICAL_TEXT else "VARCHAR"
     return logical.upper() if logical else "VARCHAR"
 
 
@@ -3028,6 +3041,10 @@ _TZ_AWARE_DDL: Final[dict[str, str]] = {
     "trino": "timestamp(6) with time zone",
     "presto": "timestamp with time zone",
     "iceberg": "timestamptz",
+    # SQLite stores every value as text/numeric but keeps the declared token,
+    # so TIMESTAMPTZ round-trips the offset-bearing ISO-8601 wire (the
+    # SQLAlchemy/Django convention) instead of an anonymous TEXT column.
+    "sqlite": "TIMESTAMPTZ",
 }
 _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     "postgresql": "TIMESTAMP",
@@ -3536,6 +3553,21 @@ PRECISION_COLLAPSE_PAIRS: Final[frozenset[tuple[str, str]]] = frozenset({
 })
 
 
+# Engines with exactly one timezone-aware timestamp carrier: the offset-pinned
+# and session-relative spellings resolve to the same storage, so a tz↔ltz
+# reading between two of their tokens is a spelling difference, not a rewrite.
+_SINGLE_AWARE_TIMESTAMP_DIALECTS: Final[frozenset[str]] = frozenset(
+    {
+        "postgresql",
+        "redshift",
+        "cockroachdb",
+        "greenplum",
+        "timescaledb",
+        "duckdb",
+    }
+)
+
+
 def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> str | None:
     """Return ``ltz`` / ``tz`` / ``ntz`` when DDL tokens make polarity knowable.
 
@@ -3713,9 +3745,13 @@ def is_timezone_polarity_loss(
     # Naive / NTZ → TZ-aware invents an instant (UTC stamp) — fail-closed.
     if src == "ntz" and tgt in {"tz", "ltz"}:
         return True
-    # Session-relative ↔ offset-pinned is a silent semantic rewrite.
+    # Session-relative ↔ offset-pinned is a silent semantic rewrite — except on
+    # engines that expose a single aware carrier, where ``TIMESTAMPTZ`` and
+    # ``TIMESTAMP WITH TIME ZONE`` are two spellings of the same physical type.
+    # Without this a re-run against a table DataFlow itself created reads its own
+    # information_schema spelling back as a polarity collapse.
     if {src, tgt} == {"tz", "ltz"}:
-        return True
+        return dest_db not in _SINGLE_AWARE_TIMESTAMP_DIALECTS
     return False
 
 
@@ -6251,57 +6287,11 @@ def integer_width_would_narrow(source_type: str, target_type: str) -> bool:
 
 
 def float_mantissa_bits(inferred: str | None, *, dest_db: str = "") -> int | None:
-    """IEEE significand bits for float carriers (53=double, 24=single, 11=half).
+    """Re-export — implementation in :mod:`services.numeric_fit`."""
+    from services.numeric_fit import float_mantissa_bits as _impl
 
-    Property 1 — referential transparency: bare ``FLOAT`` / logical ``float``
-    (any case) returns ``None`` (width unknown) so create-new invents via
-    ``DDL_TYPES`` / ``_FLOAT_DDL`` (IEEE-64 default). Unambiguous single-
-    precision carriers are ``REAL`` / ``FLOAT4`` / ``FLOAT32`` / ``FLOAT(p≤24)``.
-    Introspect must emit those for true IEEE-32 sources (e.g. MySQL FLOAT).
-
-    ``dest_db`` is retained for call-site compatibility; bare FLOAT no longer
-    case- or dialect-selects IEEE-32.
-    """
-    del dest_db  # unused — width is carrier-explicit, never dialect-guessed
-    if normalize_logical_type(inferred) != LOGICAL_FLOAT:
-        return None
-    raw = strip_identity_qualifier(inferred)
-    # Bare logical family token (any case of ``float``) — width unknown.
-    if raw.strip().lower() == LOGICAL_FLOAT:
-        return None
-    # Strip UNSIGNED so REAL UNSIGNED / FLOAT UNSIGNED keep single-width tokens.
-    upper = re.sub(
-        r"\bUNSIGNED\b",
-        "",
-        raw.upper(),
-    ).strip().replace(" ", "")
-    # IEEE half / float16 (~10 explicit + 1 implicit significand bits).
-    if upper in {"HALF", "HALFFLOAT", "FLOAT16"} or upper.startswith("HALFFLOAT"):
-        return 11
-    # Single-precision tokens (unambiguous).
-    if upper in {
-        "REAL",
-        "FLOAT4",
-        "FLOAT32",
-        "BINARY_FLOAT",
-    } or upper.startswith("REAL("):
-        return 24
-    # SQL FLOAT(p): p≤24 → single; p>24 → double (SQL Server / ANSI).
-    m = re.match(r"^FLOAT\((\d+)\)$", upper)
-    if m:
-        return 24 if int(m.group(1)) <= 24 else 53
-    if upper in {
-        "DOUBLE",
-        "DOUBLEPRECISION",
-        "FLOAT8",
-        "FLOAT64",
-        "BINARY_DOUBLE",
-    } or upper.startswith("DOUBLE"):
-        return 53
-    # Bare FLOAT (any case) — ambiguous; invent IEEE-64 via DDL_TYPES.
-    if upper == "FLOAT" or upper.startswith("FLOAT"):
-        return None
-    return 53
+    bits: int | None = _impl(inferred, dest_db=dest_db)
+    return bits
 
 
 def float_mantissa_would_narrow(
@@ -6309,13 +6299,15 @@ def float_mantissa_would_narrow(
     target_type: str,
     *,
     dest_db: str = "",
+    source_db: str = "",
 ) -> bool:
-    """True when DOUBLE/FLOAT64 lands on REAL/FLOAT32/HALF (silent IEEE drop)."""
-    src_b = float_mantissa_bits(source_type, dest_db=dest_db)
-    tgt_b = float_mantissa_bits(target_type, dest_db=dest_db)
-    if src_b is None or tgt_b is None:
-        return False
-    return src_b > tgt_b
+    """Re-export — implementation in :mod:`services.numeric_fit`."""
+    from services.numeric_fit import float_mantissa_would_narrow as _impl
+
+    narrows: bool = _impl(
+        source_type, target_type, dest_db=dest_db, source_db=source_db
+    )
+    return narrows
 
 
 def ddl_invent_bit_width(dest_db: str, carrier_or_logical: str | None) -> int | None:

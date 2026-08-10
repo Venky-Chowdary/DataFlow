@@ -759,6 +759,24 @@ def _normalize(name: str) -> str:
     return re.sub(r"_+", "_", s).rstrip("_")
 
 
+def _exact_name_unambiguous(
+    source: str, target: str, target_columns: list[str]
+) -> bool:
+    """True when ``target`` is the only column whose name equals ``source``.
+
+    Score gap measures how close the runner-up scored. In a table holding a
+    family of similar names (``id`` / ``big_id`` / ``uid``) the runner-up stays
+    within the review band even when the winner is a literal name equality, so
+    a gap test alone marks re-runs of a table DataFlow itself created as
+    ambiguous forever. Name equality is only genuinely ambiguous when a second
+    destination column normalizes to the same name.
+    """
+    src_norm = _normalize(source)
+    if not src_norm or _normalize(target) != src_norm:
+        return False
+    return sum(1 for t in target_columns if _normalize(t) == src_norm) == 1
+
+
 def _expand_abbrev(token: str) -> str:
     return ABBREVIATIONS.get(token, token)
 
@@ -1605,6 +1623,11 @@ def map_columns(
             requires_review = True
             score = min(float(score), 0.84)
             reason = f"{reason} · lossy type pair"
+        elif reason.startswith("Exact name match") and _exact_name_unambiguous(
+            source, target, target_columns
+        ):
+            # Unique name equality with compatible types — nothing to review.
+            requires_review = False
         elif reason.startswith("Exact") and score_gap >= 0.08:
             # Decisive Exact with compatible types — review not required.
             requires_review = False
@@ -1851,6 +1874,10 @@ def map_columns(
             requires_review = True
             best_score = min(float(best_score), 0.84)
             best_reason = f"{best_reason} · lossy type pair"
+        elif best_target and _exact_name_unambiguous(
+            source, best_target, target_columns
+        ):
+            requires_review = False
         mappings.append(
             {
                 "source": source,

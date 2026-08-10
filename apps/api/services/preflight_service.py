@@ -31,6 +31,7 @@ from services.connector_capability_registry import (
     recommended_batch_size,
 )
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+from services.destination_key_collision_probe import probe_append_key_collisions
 from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
     infer_date_locale,
@@ -74,6 +75,7 @@ class FilePreflightContext(PreflightContext):
         self,
         plan: TransferPlan,
         sample_rows: list[dict] | None = None,
+        destination_collision: Any = None,
         source_duplicate_findings: list[dict[str, Any]] | None = None,
         source_duplicate_probe_ran: bool = False,
         source_duplicate_probe_pk: str = "",
@@ -82,6 +84,7 @@ class FilePreflightContext(PreflightContext):
         source_duplicate_probe_expected: bool = False,
     ):
         super().__init__(plan=plan, sample_rows=sample_rows or [])
+        self.destination_collision = destination_collision
         self.source_duplicate_findings = source_duplicate_findings or []
         self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
         self.source_duplicate_probe_pk = str(source_duplicate_probe_pk or "")
@@ -815,6 +818,7 @@ def run_file_preflight(
     destination_pk_columns: list[str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
+    destination_config: dict[str, Any] | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
     date_locale: str = "",
     cursor_fields: list[str] | None = None,
@@ -1252,9 +1256,31 @@ def run_file_preflight(
             source_duplicate_probe_status = "error"
             source_duplicate_probe_message = f"Source uniqueness probe skipped: {exc}"[:400]
 
+    # Destination-side collision probe: an append into a table that already
+    # enforces this key is a deterministic write abort, so it must be a Validate
+    # blocker rather than a duplicate-key error after Execute starts.
+    destination_collision = probe_append_key_collisions(
+        mappings=mappings,
+        source_columns=columns,
+        sample_rows=sample_rows or [],
+        sync_mode=sync_mode,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+        destination_config=destination_config,
+        destination_db_type=destination_db_type,
+        destination_table=destination_table,
+        destination_table_exists=dest_table_exists,
+        destination_pk_columns=destination_pk_columns,
+        destination_unique_keys=destination_unique_keys,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+        source_table=source_table,
+    )
+
     ctx = FilePreflightContext(
         plan,
         sample_rows,
+        destination_collision=destination_collision,
         source_duplicate_findings=source_duplicate_findings,
         source_duplicate_probe_ran=source_duplicate_probe_ran,
         source_duplicate_probe_pk=source_duplicate_probe_pk,
@@ -2201,6 +2227,7 @@ def inspect_destination_for_preflight(
         db_type = (cfg.get("type") or dest_type or "").lower()
         out["db_type"] = db_type
         out["_saved_cfg"] = cfg
+        out["_probe_cfg"] = cfg
         if not ok:
             out["connected"] = False
             out["message"] = msg or "Destination unreachable"
@@ -2243,6 +2270,17 @@ def inspect_destination_for_preflight(
             api_key=dest_api_key or "",
             service_account=dest_service_account or "",
         )
+        out["_probe_cfg"] = {
+            "type": db_type,
+            "host": endpoint.host,
+            "port": endpoint.port,
+            "database": endpoint.database,
+            "schema": endpoint.schema,
+            "username": endpoint.username,
+            "password": endpoint.password,
+            "connection_string": endpoint.connection_string,
+            "auth_source": endpoint.auth_source,
+        }
     else:
         out["message"] = "Destination not configured"
         return out

@@ -1677,6 +1677,36 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             ),
         )
 
+    # Append into a table that already enforces this key: the write aborts on the
+    # first stored key, so the verdict belongs here, not in a duplicate-key error
+    # after Execute has started.
+    collision = getattr(ctx, "destination_collision", None)
+    if collision is not None and getattr(collision, "findings", None):
+        found = list(collision.findings)
+        key = getattr(collision, "key_column", "") or "identity key"
+        return _block(
+            GateId.G6_TARGET_DDL,
+            (
+                f"Append would duplicate {len(found)} existing destination key(s) on "
+                f"{key} — the destination enforces uniqueness, so the insert aborts. "
+                "Switch this sync to upsert/merge (key-resolved) or overwrite."
+            ),
+            start,
+            _scope(
+                {
+                    "sample_collisions": found[:5],
+                    "primary_key": {"target": key},
+                    "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+                    "rule_id": "g6_target_ddl.append_key_collision",
+                    "remediation_kind": "change_sync_mode",
+                    "probe_status": getattr(collision, "status", ""),
+                    "values_probed": getattr(collision, "values_probed", 0),
+                },
+                coverage="sample",
+                note="Destination key collision probe on append batch",
+            ),
+        )
+
     # Canonical identity key uniqueness probe for SQL destinations.
     # Append/overwrite: skip unless the destination introspected a real PK
     # (INSERT would then fail — fail closed with a clear gate).

@@ -317,6 +317,42 @@ def source_types_are_authoritative(source_kind: str, source_format: str = "") ->
         return False
 
 
+# Carriers a schemaless/text source declares for *every* column (CSV header,
+# Parquet string, thin SaaS describe). Profiling off one of these is evidence;
+# profiling *onto* one is a loss of evidence.
+UNTYPED_TEXT_LOGICALS = frozenset({"string", "text", "varchar", "unknown"})
+
+
+def _inference_would_demote_to_text(declared: str, inferred: str) -> bool:
+    """True when profiling stringified samples would erase a typed declaration.
+
+    Profiling reads ``cell_to_string`` output, so a Mongo ``ObjectId`` arrives as
+    ``"6991173f8d64fcf16f3a0805"`` and a ``Decimal128`` as ``"12.34"``. Those look
+    like text, but the declaration came from the BSON type itself — strictly
+    stronger evidence than the string that was rendered from it. Letting the
+    profile win typed ``OBJECTID`` down to ``VARCHAR`` made the engine invent a
+    ``TEXT`` destination column and then report its own invent as an
+    ``OBJECTID → TEXT`` fidelity collapse, blocking every Mongo→SQL create-new
+    route. Upgrades off an untyped carrier (``VARCHAR`` → ``DECIMAL``) and
+    same-family widening (``INTEGER`` → ``BIGINT``) are unaffected.
+    """
+    if not declared or not inferred:
+        return False
+    from services.type_system import normalize_logical_type
+
+    try:
+        declared_logical = normalize_logical_type(declared)
+        inferred_logical = normalize_logical_type(inferred)
+    except Exception:
+        return False
+    if declared_logical == inferred_logical:
+        return False
+    return (
+        declared_logical not in UNTYPED_TEXT_LOGICALS
+        and inferred_logical in UNTYPED_TEXT_LOGICALS
+    )
+
+
 def merge_profiler_schema(
     existing: dict[str, str],
     profiled: dict[str, str],
@@ -338,7 +374,8 @@ def merge_profiler_schema(
       always wins; inference only fills columns that declared nothing.
     * Otherwise (files): inference wins, except that a parameterised declared
       type keeps its precision when inference agrees on the same logical family
-      but drops the parameters.
+      but drops the parameters, and except that inference may never demote a
+      typed declaration to text (see :func:`_inference_would_demote_to_text`).
     """
     from services.type_system import normalize_logical_type
 
@@ -354,6 +391,8 @@ def merge_profiler_schema(
             if declared:
                 continue
             merged[col] = inferred
+            continue
+        if _inference_would_demote_to_text(declared, str(inferred)):
             continue
         if "(" in declared and "(" not in str(inferred):
             try:

@@ -609,6 +609,33 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     )
 
 
+def _authoritative_source_schema(
+    source: EndpointConfig, schema: dict[str, str]
+) -> dict[str, str]:
+    """Merge the source's declared types over the reader's decoded shape.
+
+    The reader names the Python value it decoded, so a MySQL ``CHAR(36)`` is
+    reported ``VARCHAR``. Mapping ran off that shape while the coercion
+    validator read the declaration, so create-new invented ``TEXT`` and the same
+    engine then blocked its own invent as a ``CHAR(36) → TEXT`` fidelity
+    collapse. Map, Validate and the writer must read one schema.
+    """
+    try:
+        from services.source_schema_authority import (
+            endpoint_source_column_types,
+            reconcile_source_types,
+        )
+
+        live = endpoint_source_column_types(source)
+        if not live:
+            return schema
+        merged, _drift = reconcile_source_types(schema, live)
+        return merged
+    except Exception as exc:
+        logger.debug("source schema authority merge failed: %s", exc, exc_info=exc)
+        return schema
+
+
 def _source_nullability_probe(source: EndpointConfig) -> dict[str, bool]:
     """Real NOT NULL facts for a database source.
 
@@ -862,6 +889,7 @@ def _execute_preflight_parity_kwargs(
         "destination_pk_columns": pk_cols,
         "destination_unique_keys": unique_keys,
         "destination_foreign_keys": foreign_keys,
+        "destination_config": dest_meta.get("_probe_cfg") or None,
         "contract_primary_key": contract_pk,
         "stream_contracts": stream_contracts,
         "privilege_probe": privilege_probe or None,
@@ -2239,6 +2267,7 @@ class UniversalTransferEngine:
                     max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0
                 ),
             )
+            schema = _authoritative_source_schema(request.source, schema)
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
             records = _apply_priority_and_limit(
@@ -3369,6 +3398,7 @@ class UniversalTransferEngine:
             columns, schema, total_rows, sample_rows = peek_stream_source(
                 request.source
             )
+            schema = _authoritative_source_schema(request.source, schema)
             if request.limit > 0:
                 total_rows = min(total_rows, request.limit)
             if total_rows == 0:
