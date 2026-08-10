@@ -1415,6 +1415,8 @@ def write_mapped_rows(
                     target_types=target_types,
                     dest_dialect="postgresql",
                     table_already_exists=pg_table_existed,
+                    dest_table=table_name,
+                    dest_schema=schema,
                 )
                 if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)
@@ -1431,6 +1433,21 @@ def write_mapped_rows(
                         sql.SQL(body),
                     )
                 )
+                from services.schema_fidelity import apply_post_create_sql
+
+                # A refused CREATE INDEX must not abort the load or leave the
+                # certificate claiming an index the destination does not have;
+                # each statement gets its own savepoint.
+                def _run_post_create(stmt: str) -> None:
+                    cursor.execute("SAVEPOINT df_post_create")
+                    try:
+                        cursor.execute(stmt)
+                    except Exception:
+                        cursor.execute("ROLLBACK TO SAVEPOINT df_post_create")
+                        raise
+                    cursor.execute("RELEASE SAVEPOINT df_post_create")
+
+                apply_post_create_sql(fidelity_plan, _run_post_create)
                 _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
             except Exception as exc:
                 logger.warning(

@@ -730,6 +730,7 @@ def _introspect_table_schema_rich(
         "collations": {},
         "physical_storage": None,
         "check_constraints_meta": None,
+        "indexes_meta": None,
         "warnings": [],
     }
 
@@ -766,6 +767,9 @@ def _introspect_table_schema_rich(
             # None when the CHECK catalog was never read — the certificate says
             # "unmeasured", never "no CHECK constraints".
             "check_constraints_meta": payload.get("check_constraints_meta"),
+            # None when the index catalog was never read — the certificate says
+            # "unmeasured", never "no secondary indexes".
+            "indexes_meta": payload.get("indexes_meta"),
             "warnings": warnings,
         }
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 logger = logging.getLogger(__name__)
 
@@ -130,6 +130,9 @@ class SourceSchemaCatalog:
     # unreadable" distinct from "table has no CHECK constraints".
     check_constraints_meta: dict[str, Any] | None = None
     indexes: list[dict[str, Any]] = field(default_factory=list)
+    # services.secondary_indexes.SourceIndexes payload: keeps "catalog
+    # unreadable" distinct from "table has no secondary indexes".
+    indexes_meta: dict[str, Any] | None = None
     views: list[str] = field(default_factory=list)
     triggers: list[str] = field(default_factory=list)
     generated_columns: list[str] = field(default_factory=list)
@@ -343,6 +346,7 @@ def build_catalog_from_introspect(
         views=list(views or keys.get("views") or []),
         triggers=list(triggers or keys.get("triggers") or []),
         indexes=list(keys.get("indexes") or []),
+        indexes_meta=_check_payload(keys.get("indexes_meta")),
         generated_columns=list(keys.get("generated_columns") or []),
         identity_columns=list(keys.get("identity_columns") or []),
         collations=dict(keys.get("collations") or {}),
@@ -418,6 +422,7 @@ def catalog_from_payload(payload: Any) -> SourceSchemaCatalog | None:
             check_constraints=list(payload.get("check_constraints") or []),
             check_constraints_meta=_check_payload(payload.get("check_constraints_meta")),
             indexes=list(payload.get("indexes") or []),
+            indexes_meta=_check_payload(payload.get("indexes_meta")),
             views=list(payload.get("views") or []),
             triggers=list(payload.get("triggers") or []),
             generated_columns=list(payload.get("generated_columns") or []),
@@ -451,6 +456,8 @@ def resolve_create_fidelity_plan(
     target_types: list[str],
     dest_dialect: str,
     table_already_exists: bool = False,
+    dest_table: str = "",
+    dest_schema: str = "",
 ) -> CreateFidelityPlan:
     """Build a create-new fidelity plan; always returns a certificate (never silent)."""
     dest = (dest_dialect or "").strip().lower()
@@ -476,6 +483,8 @@ def resolve_create_fidelity_plan(
         target_columns=list(target_columns),
         target_types=list(target_types),
         source_to_target=source_to_target_from_mappings(mappings),
+        dest_table=dest_table,
+        dest_schema=dest_schema,
     )
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.
@@ -506,6 +515,8 @@ def plan_create_new_fidelity(
     target_columns: list[str],
     target_types: list[str],
     source_to_target: dict[str, str] | None = None,
+    dest_table: str = "",
+    dest_schema: str = "",
 ) -> CreateFidelityPlan:
     """Plan CREATE TABLE fidelity for mapped columns on dest_dialect."""
     dest = (dest_dialect or "").strip().lower()
@@ -558,8 +569,9 @@ def plan_create_new_fidelity(
             return None
 
     # --- CARRY: primary key ---
-    pk_dest = [_dest_name_for_source(c) for c in catalog.primary_key]
-    pk_dest = [c for c in pk_dest if c]
+    pk_dest: list[str] = [
+        c for c in (_dest_name_for_source(x) for x in catalog.primary_key) if c
+    ]
     if catalog.primary_key and len(pk_dest) == len(catalog.primary_key):
         quoted = ", ".join(_q(c, dest) for c in pk_dest)
         table_constraints.append(f"PRIMARY KEY ({quoted})")
@@ -724,8 +736,23 @@ def plan_create_new_fidelity(
         check_predicates=struct_checks,
     )
 
+    # --- CARRY: secondary indexes (portable key/uniqueness only) ---
+    index_handled = _emit_index_aspect(
+        report,
+        catalog,
+        dest=dest,
+        dest_name_for_source=_dest_name_for_source,
+        post_create_sql=post_sql,
+        dest_table=dest_table,
+        dest_schema=dest_schema,
+        pk_columns=list(pk_dest),
+        unique_constraints=struct_unique,
+    )
+
     # --- Explicit unsupported / skipped for remaining aspects ---
-    _emit_unsupported_catalog(report, catalog, skip_check=check_handled)
+    _emit_unsupported_catalog(
+        report, catalog, skip_check=check_handled, skip_index=index_handled
+    )
 
     # Column order — carried as mapping order (honest).
     report.items.append(
@@ -757,6 +784,37 @@ def plan_create_new_fidelity(
         not_null_columns=struct_not_null,
         column_defaults=struct_defaults,
     )
+
+
+def apply_post_create_sql(
+    plan: CreateFidelityPlan | None,
+    execute: Callable[[str], Any],
+) -> list[str]:
+    """Run the plan's post-CREATE statements, downgrading what does not apply.
+
+    A CREATE INDEX can fail on data the source tolerated but the destination
+    does not (a unique index over rows a lossy type conversion collapsed). The
+    certificate must then say the index was *not* carried: a plan is a claim,
+    and only execution makes it true.
+    """
+    failures: list[str] = []
+    if plan is None:
+        return failures
+    for stmt in list(plan.post_create_sql):
+        try:
+            execute(stmt)
+        except Exception as exc:  # noqa: BLE001 — a refused DDL is evidence
+            failures.append(f"{stmt}: {exc}")
+            for item in plan.report.items:
+                if item.dest_ddl == stmt and item.status == "carried":
+                    item.status = "unsupported"
+                    item.reason = (
+                        f"Destination refused the statement ({type(exc).__name__}: "
+                        f"{exc}); the index does not exist on the destination. "
+                        f"Would have: {item.reason}"
+                    )
+                    item.dest_ddl = ""
+    return failures
 
 
 def render_create_column_defs(
@@ -946,11 +1004,174 @@ def _emit_check_aspect(
     return True
 
 
+def _emit_index_aspect(
+    report: SchemaFidelityReport,
+    catalog: SourceSchemaCatalog,
+    *,
+    dest: str,
+    dest_name_for_source: Any,
+    post_create_sql: list[str],
+    dest_table: str,
+    dest_schema: str,
+    pk_columns: list[str],
+    unique_constraints: list[list[str]],
+) -> bool:
+    """Carry portable secondary indexes; return True when the aspect is settled.
+
+    A UNIQUE index is an integrity guarantee and a filtered index scopes that
+    guarantee, so anything whose rule cannot be reproduced exactly is refused
+    rather than emitted as an approximation. Returning False leaves the legacy
+    "not carried in v1" line in charge.
+    """
+    from services.secondary_indexes import (
+        IndexColumn,
+        SourceIndex,
+        SourceIndexes,
+        plan_index_carry,
+    )
+
+    payload = catalog.indexes_meta
+    if not payload:
+        return False
+    status = str(payload.get("status") or "")
+    if status != "measured":
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="index",
+                name="*",
+                status="unknown",
+                reason=(
+                    str(payload.get("detail"))
+                    or "Source index catalog was unreadable; unmeasured, not proven absent."
+                ),
+            )
+        )
+        return True
+
+    items = tuple(
+        SourceIndex(
+            name=str(i.get("name") or ""),
+            columns=tuple(
+                IndexColumn(str(c.get("name") or ""), bool(c.get("descending")))
+                for c in (i.get("columns") or [])
+                if isinstance(c, dict)
+            ),
+            unique=bool(i.get("unique")),
+            predicate=str(i.get("predicate") or ""),
+            include_columns=tuple(str(c) for c in (i.get("include_columns") or [])),
+            expression=str(i.get("expression") or ""),
+            method=str(i.get("method") or ""),
+            constraint_backed=bool(i.get("constraint_backed")),
+        )
+        for i in (payload.get("items") or [])
+        if isinstance(i, dict)
+    )
+    if not items:
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="index",
+                name="*",
+                status="skipped",
+                reason="Source catalog read: table has no secondary indexes.",
+            )
+        )
+        return True
+
+    if not dest_table:
+        # CREATE INDEX names the table; without it the DDL cannot be emitted,
+        # and a caller that did not supply it must not read "no indexes".
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="index",
+                name="*",
+                status="unsupported",
+                reason=(
+                    f"{len(items)} source index(es) were measured but the destination "
+                    "table name was not supplied to the planner, so CREATE INDEX "
+                    "could not be emitted."
+                ),
+                source_detail=",".join(i.name for i in items)[:240],
+            )
+        )
+        return True
+
+    column_map: dict[str, str] = {}
+    for src_col in catalog.columns:
+        dest_col = dest_name_for_source(src_col)
+        if dest_col:
+            column_map[str(src_col)] = dest_col
+
+    source_dialect = str(payload.get("dialect") or catalog.dialect)
+
+    def _render_filter(predicate: str) -> tuple[str, str]:
+        from services.check_constraints import render_check_for_dialect
+
+        return render_check_for_dialect(
+            predicate,
+            source_dialect=source_dialect,
+            dest_dialect=dest,
+            column_map={k.casefold(): v for k, v in column_map.items()},
+            quote=_q,
+        )
+
+    decisions = plan_index_carry(
+        SourceIndexes(dialect=source_dialect, status="measured", items=items),
+        dest_dialect=dest,
+        dest_table=dest_table,
+        dest_schema=dest_schema,
+        column_map=column_map,
+        quote=lambda ident: _q(ident, dest),
+        pk_columns=list(pk_columns),
+        unique_constraints=[list(u) for u in unique_constraints],
+        check_renderer=_render_filter,
+    )
+    for decision in decisions:
+        name = decision.source.name or "index"
+        detail = ",".join(c.name for c in decision.source.columns)[:240]
+        if decision.carried:
+            post_create_sql.append(decision.dest_sql)
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="index",
+                    name=name,
+                    status="carried",
+                    reason=decision.reason,
+                    source_detail=detail,
+                    dest_ddl=decision.dest_sql,
+                )
+            )
+        elif decision.skipped:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="index",
+                    name=name,
+                    status="skipped",
+                    reason=decision.reason,
+                    source_detail=detail,
+                )
+            )
+        else:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="index",
+                    name=name,
+                    status="unsupported",
+                    reason=(
+                        f"{decision.reason} Destination will not have this index — "
+                        "create it manually if the rule or the read path depends on it."
+                    ),
+                    source_detail=detail,
+                )
+            )
+    return True
+
+
 def _emit_unsupported_catalog(
     report: SchemaFidelityReport,
     catalog: SourceSchemaCatalog,
     *,
     skip_check: bool = False,
+    skip_index: bool = False,
 ) -> None:
     if catalog.foreign_keys:
         for fk in catalog.foreign_keys[:20]:
@@ -1037,12 +1258,13 @@ def _emit_unsupported_catalog(
             )
         )
 
-    _aspect_list(
-        "index",
-        bool(catalog.indexes),
-        "Non-UNIQUE / partial / expression indexes are not carried in v1.",
-        "No secondary indexes listed on source catalog.",
-    )
+    if not skip_index:
+        _aspect_list(
+            "index",
+            bool(catalog.indexes),
+            "Non-UNIQUE / partial / expression indexes are not carried in v1.",
+            "No secondary indexes listed on source catalog.",
+        )
     _aspect_list(
         "view",
         bool(catalog.views),

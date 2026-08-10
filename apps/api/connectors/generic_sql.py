@@ -4681,6 +4681,8 @@ def write_mapped_rows(
                         ],
                         dest_dialect=_fidelity_dialect(dest_db, dialect_name),
                         table_already_exists=False,
+                        dest_table=table_name,
+                        dest_schema=schema_name or "",
                     )
                     table_obj = _build_table_for_write(
                         engine,
@@ -4748,8 +4750,20 @@ def write_mapped_rows(
                         conn.execute(
                             sa.schema.CreateTable(table_obj, if_not_exists=True)
                         )
-                    for stmt in getattr(fidelity_plan, "post_create_sql", []) or []:
-                        conn.execute(sa.text(stmt))
+                    if fidelity_plan is not None:
+                        from services.schema_fidelity import apply_post_create_sql
+
+                        # Executed one statement at a time: a refused CREATE
+                        # INDEX downgrades that index in the certificate rather
+                        # than failing the table or claiming an index that is
+                        # not there.
+                        def _run_post_create(stmt: str) -> None:
+                            with engine.begin() as index_conn:
+                                index_conn.execute(sa.text(stmt))
+
+                        conn.commit()
+                        apply_post_create_sql(fidelity_plan, _run_post_create)
+                        _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     conn.commit()
                 except Exception as exc:
                     # If the dialect does not support IF NOT EXISTS and the table
