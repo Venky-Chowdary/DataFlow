@@ -76,7 +76,10 @@ def mysql_type(inferred: str) -> str:
 
 
 def _fetch_mysql_column_types(
-    cursor: Any, table_name: str, identity: str = ""
+    cursor: Any,
+    table_name: str,
+    identity: str = "",
+    required_columns: list[str] | None = None,
 ) -> dict[str, str]:
     """Return physical ``COLUMN_TYPE`` for an existing table (empty if missing).
 
@@ -88,6 +91,14 @@ def _fetch_mysql_column_types(
     An empty result is never cached. Empty means "table missing or not
     readable", which is precisely the answer that goes stale the moment the
     ``CREATE TABLE IF NOT EXISTS`` above succeeds.
+
+    ``required_columns`` are the mapped targets whose absence would *refuse*
+    the write. The cache is only coherent with DDL this process ran, so an
+    operator who recreated or altered the destination between runs would be
+    told "physical DDL missing for mapped column(s) …" about a column that is
+    there — an unactionable error against a stale answer. A cached answer that
+    fails to cover them is therefore re-read from the catalog before it can
+    block anything.
     """
 
     def _load() -> dict[str, str]:
@@ -105,12 +116,25 @@ def _fetch_mysql_column_types(
         return _load()
 
     cached = reflection_cache.peek_by_identity(identity, "", table_name, "mysql_col_types")
-    if cached:
+    if cached and _covers_columns(dict(cached), required_columns):
         return dict(cached)
+    if cached:
+        reflection_cache.invalidate_by_identity(identity, "", table_name)
     fresh = _load()
     if fresh:
         reflection_cache.put_by_identity(identity, "", table_name, "mysql_col_types", fresh)
     return fresh
+
+
+def _covers_columns(physical: dict[str, str], columns: list[str] | None) -> bool:
+    """True when every requested column has a physical type (any case)."""
+    for col in columns or []:
+        name = str(col)
+        if not (
+            physical.get(name) or physical.get(name.lower()) or physical.get(name.upper())
+        ):
+            return False
+    return True
 
 
 def _apply_physical_temporal_types(
@@ -749,7 +773,9 @@ def write_mapped_rows(
             require_physical_types_for_existing_table,
         )
 
-        physical = _fetch_mysql_column_types(cursor, table_name, identity=_identity)
+        physical = _fetch_mysql_column_types(
+            cursor, table_name, identity=_identity, required_columns=list(target_cols)
+        )
         overlay_err = require_physical_types_for_existing_table(
             table_existed=table_existed,
             physical=physical,
