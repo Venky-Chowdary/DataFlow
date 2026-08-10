@@ -522,6 +522,12 @@ def run_reconciliation(
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
     coerced_null_rows = int(dest_summary.get("coerced_null_rows", 0) or 0)
     rows_skipped = int(dest_summary.get("rows_skipped", 0) or 0)
+    # A resumed pass reads and writes only the tail of the population, while the
+    # destination read-back is always full-table. Comparing the two directly
+    # reports a mismatch on data that is correct, so the resumed slice must be
+    # widened back to the whole population before anything is compared.
+    resumed_from = _as_count(dest_summary.get("resumed_from"))
+    resume_full_source_rows = _as_count(dest_summary.get("resume_full_source_rows"))
     # Coerced rows are KEPT (a cell became NULL); quarantine hold-outs are absent
     # from the destination. Skipped rows (e.g. stale CDC LSN) are not written.
     dropped_rows = max(rejected_rows - coerced_null_rows, 0)
@@ -532,7 +538,15 @@ def run_reconciliation(
         source_rows = source_row_count
     else:
         source_rows = len(records) if records else rows_written + dropped_rows + rows_skipped
+    if resume_full_source_rows:
+        source_rows = resume_full_source_rows
+    elif resumed_from:
+        source_rows += resumed_from
     expected_written = max(source_rows - dropped_rows - rows_skipped, 0)
+    # Destinations with no read-back are accounted from writer counts, so rows a
+    # previous pass already committed have to be added back or a correct resume
+    # reads as short delivery.
+    rows_written_accounted = rows_written + resumed_from
 
     if endpoint.kind != "database":
         # Object/file exports have no destination cell read-back. Writer checksum
@@ -679,18 +693,36 @@ def run_reconciliation(
             "reason": f"probe failed: {exc}",
         }
 
-    source_checksum = _compute_source_checksum(
-        records,
-        columns,
-        mapping_dicts,
-        source_schema,
-        writer_checksum,
-        target_cols=target_cols,
-        dest_db_type=db_type,
-        dest_types=dest_types,
-        validation_mode=validation_mode,
-        destination_pk_columns=[str(c) for c in pk_cols if c] or None,
-    )
+    # The writer digest of a resumed pass covers the tail it wrote, not the
+    # population. Recompute from the full source when the caller re-supplied it;
+    # otherwise leave it empty and decline the comparison further down rather
+    # than compare two different scopes.
+    source_checksum_scope_note = ""
+    if resumed_from and not (resume_full_source_rows and records):
+        source_checksum_scope_note = (
+            f"Resumed after {resumed_from:,} previously committed row(s): this pass "
+            "read only the remaining slice, so no source digest covering the whole "
+            "population is available to compare against the full-table destination "
+            "digest."
+        )
+
+    if source_checksum_scope_note:
+        source_checksum = ""
+    else:
+        source_checksum = _compute_source_checksum(
+            records,
+            columns,
+            mapping_dicts,
+            source_schema,
+            # A resumed writer digest covers the tail only; recompute from the
+            # full population the caller re-supplied.
+            "" if resumed_from else writer_checksum,
+            target_cols=target_cols,
+            dest_db_type=db_type,
+            dest_types=dest_types,
+            validation_mode=validation_mode,
+            destination_pk_columns=[str(c) for c in pk_cols if c] or None,
+        )
 
     # Mirror (inferred-delete) and SCD2 transfers already compute an active-row
     # checksum while applying history/soft deletes; use it directly so closed or
@@ -794,6 +826,46 @@ def run_reconciliation(
     )
 
     strict_checksum = validation_mode in ("strict", "maximum")
+
+    if source_checksum_scope_note and target_rows >= 0:
+        # Resumed streaming pass: the destination digest covers the whole
+        # population, the source digest could only cover the resumed tail. Prove
+        # cardinality and say plainly that population fidelity is not proven —
+        # never compare two different populations and call the difference
+        # corruption.
+        from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+        from services.reconciliation import ReconciliationReport
+
+        expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)
+        balanced = target_rows == expected_rows or (
+            allow_extra_early and target_rows >= expected_rows
+        )
+        return _finalize(
+            ReconciliationReport(
+                passed=balanced,
+                source_rows=source_rows,
+                target_rows=target_rows,
+                source_checksum="",
+                target_checksum=target_checksum,
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                checksum_scope=WHOLE_TABLE_NOT_COMPARABLE,
+                message=(
+                    (
+                        f"Row count verified after resume: {target_rows:,} row(s) on the "
+                        f"destination for {source_rows:,} source row(s). "
+                        if balanced
+                        else (
+                            f"Row count mismatch after resume: expected {expected_rows:,} "
+                            f"row(s) on the destination, found {target_rows:,}. "
+                        )
+                    )
+                    + source_checksum_scope_note
+                    + " Re-run without resume for full_checksum population proof."
+                ),
+            ).to_dict()
+        )
 
     sample_compare = None
     if sample_records and table_name and target_cols:
@@ -919,7 +991,7 @@ def run_reconciliation(
             sample_compare
             and sample_compare.get("passed")
             and int(sample_compare.get("compared") or 0) > 0
-            and rows_written == expected_written
+            and rows_written_accounted == expected_written
         ):
             return _finalize({
                 "passed": True,
@@ -932,7 +1004,7 @@ def run_reconciliation(
                     + ") — screening only, not population proof"
                 ),
                 "source_rows": source_rows,
-                "target_rows": rows_written,
+                "target_rows": rows_written_accounted,
                 "source_checksum": source_checksum,
                 "target_checksum": "",
                 "rejected_rows": rejected_rows,
@@ -957,7 +1029,7 @@ def run_reconciliation(
                 "rows_skipped": rows_skipped,
                 "sample_compare": sample_compare,
             })
-        if rows_written == expected_written:
+        if rows_written_accounted == expected_written:
             return _finalize({
                 "passed": True,
                 "message": (
@@ -967,7 +1039,7 @@ def run_reconciliation(
                     + " (read-back verifier not available for this destination)"
                 ),
                 "source_rows": source_rows,
-                "target_rows": rows_written,
+                "target_rows": rows_written_accounted,
                 "source_checksum": source_checksum,
                 "target_checksum": "",
                 "rejected_rows": rejected_rows,
@@ -977,7 +1049,7 @@ def run_reconciliation(
             })
         report = reconcile(
             source_rows=source_rows,
-            target_rows=rows_written,
+            target_rows=rows_written_accounted,
             source_checksum=source_checksum,
             target_checksum="",
             rejected_rows=rejected_rows,
@@ -989,7 +1061,7 @@ def run_reconciliation(
         return _finalize(report.to_dict())
 
     # Data loss signal: the target table holds fewer rows than we just wrote.
-    if target_rows < rows_written:
+    if target_rows < rows_written_accounted:
         report = reconcile(
             source_rows=source_rows,
             target_rows=target_rows,

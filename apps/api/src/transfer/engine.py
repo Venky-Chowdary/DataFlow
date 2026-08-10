@@ -2786,6 +2786,11 @@ class UniversalTransferEngine:
                 mappings=getattr(request, "mappings", None),
             )
 
+            # Reconciliation must weigh the destination against the whole source
+            # population, not the tail a resumed pass happens to write.
+            resume_full_records: list[dict] = []
+            resume_skipped_rows = 0
+
             if request.destination.kind == "database":
                 # Buffered path reloads the in-memory source; slice past committed
                 # rows so Resume does not re-write (or duplicate) progress. Still
@@ -2824,6 +2829,8 @@ class UniversalTransferEngine:
                                     "note": "checkpoint ahead of or equal to source size",
                                 },
                             )
+                        resume_full_records = records
+                        resume_skipped_rows = skip_n
                         records = records[skip_n:]
                         total_rows = len(records)
                         mongo.update_job_status(
@@ -3191,9 +3198,14 @@ class UniversalTransferEngine:
                         dest_summary.setdefault(
                             "primary_key_columns", list(conflict_columns)
                         )
+                if resume_skipped_rows and isinstance(dest_summary, dict):
+                    dest_summary["resumed_from"] = resume_skipped_rows
+                    dest_summary["resume_full_source_rows"] = len(resume_full_records)
                 recon = run_reconciliation(
                     endpoint=request.destination,
-                    records=records,
+                    # Full population, so the source digest and row ledger cover
+                    # what the destination actually holds after the resume.
+                    records=resume_full_records or records,
                     columns=columns,
                     rows_written=rows_written,
                     writer_checksum=dest_summary.get("checksum")
