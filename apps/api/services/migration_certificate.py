@@ -395,8 +395,8 @@ def build_migration_certificate(
         "not_proven_by_this_certificate": [
             "Per-cell fidelity for every row — only the reconciliation scope above.",
             "Referential integrity for relationships the physical state section "
-            "reports as unavailable (composite keys, missing parent tables, "
-            "failed scans) — enforced and scanned relationships are proven.",
+            "reports as unavailable (missing parent tables, failed scans) — "
+            "enforced and scanned relationships are proven.",
             "Exactly-once delivery — CDC and resume are at-least-once with upsert.",
             "Triggers, check constraints, grants and storage options on the "
             "destination — the physical state section reports only identity "

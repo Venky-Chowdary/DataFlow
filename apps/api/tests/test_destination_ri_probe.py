@@ -104,7 +104,64 @@ def test_missing_parent_table_is_unavailable_never_clean(tmp_path: Path) -> None
     assert result["unavailable_relations"] == ["parent_id->never_migrated"]
 
 
-def test_composite_fk_is_unavailable_not_silently_passed(tmp_path: Path) -> None:
+COMPOSITE_FK = [
+    {
+        "constrained_columns": ["tenant_id", "order_no"],
+        "referred_table": "orders",
+        "referred_columns": ["tenant_id", "order_no"],
+    }
+]
+
+
+def _composite_db(tmp_path: Path, *child_rows: str) -> dict[str, str]:
+    path = str(tmp_path / "composite.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE orders (tenant_id INTEGER, order_no INTEGER, "
+            "PRIMARY KEY (tenant_id, order_no))"
+        )
+        conn.execute("INSERT INTO orders VALUES (1, 100), (1, 101), (2, 100)")
+        conn.execute(
+            "CREATE TABLE child (id INTEGER PRIMARY KEY, tenant_id INTEGER, "
+            "order_no INTEGER)"
+        )
+        for row in child_rows:
+            conn.execute(f"INSERT INTO child (id, tenant_id, order_no) VALUES {row}")
+    return {"type": "sqlite", "database": path}
+
+
+def _composite_probe(cfg: dict[str, str]) -> dict[str, Any]:
+    return verify_destination_referential_integrity(
+        "sqlite", cfg, table="child", foreign_keys=COMPOSITE_FK
+    )
+
+
+def test_composite_fk_scans_the_whole_tuple_not_one_column(tmp_path: Path) -> None:
+    """(2, 101) is an orphan even though 2 and 101 each exist on their own."""
+    cfg = _composite_db(tmp_path, "(1, 1, 100)", "(2, 2, 101)")
+    result = _composite_probe(cfg)
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "scanned"
+    assert result["orphan_rows"] == 1
+    assert result["relations"][0]["examples"] == ["2+101"]
+
+
+def test_composite_fk_with_intact_tuples_is_clean(tmp_path: Path) -> None:
+    cfg = _composite_db(tmp_path, "(1, 1, 100)", "(2, 1, 101)", "(3, 2, 100)")
+    result = _composite_probe(cfg)
+    assert result["verified"] is True
+    assert result["orphan_rows"] == 0
+
+
+def test_composite_fk_partial_null_is_unconstrained_not_orphan(tmp_path: Path) -> None:
+    """MATCH SIMPLE: any NULL component means the key imposes no constraint."""
+    cfg = _composite_db(tmp_path, "(1, NULL, 999)", "(2, 9, NULL)")
+    result = _composite_probe(cfg)
+    assert result["verified"] is True
+    assert result["orphan_rows"] == 0
+
+
+def test_mismatched_column_counts_are_unavailable(tmp_path: Path) -> None:
     cfg = _db(
         tmp_path,
         "CREATE TABLE child (id INTEGER PRIMARY KEY, a INTEGER, b INTEGER)",
@@ -117,13 +174,13 @@ def test_composite_fk_is_unavailable_not_silently_passed(tmp_path: Path) -> None
             {
                 "constrained_columns": ["a", "b"],
                 "referred_table": "parent",
-                "referred_columns": ["id", "id"],
+                "referred_columns": ["id"],
             }
         ],
     )
     assert result["verified"] is False
     assert result["relations"][0]["reason"] == (
-        "composite foreign keys are not scanned"
+        "relationship has no usable column pairing"
     )
 
 

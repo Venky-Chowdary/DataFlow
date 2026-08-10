@@ -10,7 +10,10 @@ module separates, which a catalog diff alone cannot:
                or never created), so the child rows are anti-joined against
                the parent and orphans are counted for real
 
-Anything else — parent table missing, composite FK, unreadable catalog — is
+Composite keys are scanned as a tuple under SQL ``MATCH SIMPLE``: a child row
+with any NULL in the key is unconstrained and is not an orphan.
+
+Anything else — parent table missing, unreadable catalog, failed scan — is
 reported unavailable with a reason. An unproven relationship never counts as
 clean, because "no orphans found" and "no scan ran" look identical in a report
 and only one of them is true.
@@ -40,33 +43,41 @@ def _orphan_scan(
     conn: Any,
     *,
     child: Any,
-    child_column: str,
+    child_columns: list[str],
     parent: Any,
-    parent_column: str,
+    parent_columns: list[str],
 ) -> dict[str, Any]:
-    """Anti-join the child against the parent through the reflected columns."""
-    c_col = child.c.get(child_column)
-    p_col = parent.c.get(parent_column)
-    if c_col is None or p_col is None:
+    """Anti-join the child against the parent through the reflected columns.
+
+    Composite keys join on every column pair at once; MATCH SIMPLE means a key
+    with any NULL component imposes no constraint, so those rows are excluded
+    rather than counted as orphans.
+    """
+    c_cols = [child.c.get(name) for name in child_columns]
+    p_cols = [parent.c.get(name) for name in parent_columns]
+    if any(c is None for c in c_cols) or any(p is None for p in p_cols):
         return {"available": False, "reason": "join column missing from catalog"}
 
-    joined = child.outerjoin(parent, c_col == p_col)
-    where = sa.and_(c_col.is_not(None), p_col.is_(None))
+    on_clause = sa.and_(*[c == p for c, p in zip(c_cols, p_cols)])
+    joined = child.outerjoin(parent, on_clause)
+    where = sa.and_(
+        *[c.is_not(None) for c in c_cols],
+        p_cols[0].is_(None),
+    )
     count = int(
         conn.execute(sa.select(sa.func.count()).select_from(joined).where(where)).scalar()
         or 0
     )
     examples = [
-        row[0]
+        "+".join("" if v is None else str(v) for v in row)
         for row in conn.execute(
-            sa.select(c_col).select_from(joined).where(where).limit(MAX_EXAMPLES)
+            sa.select(*c_cols).select_from(joined).where(where).limit(MAX_EXAMPLES)
         ).fetchall()
-        if row and row[0] is not None
     ]
     return {
         "available": True,
         "orphan_count": count,
-        "examples": [str(v) for v in examples],
+        "examples": examples,
     }
 
 
@@ -148,11 +159,11 @@ def verify_destination_referential_integrity(
                 rel.update(status="enforced", available=True, orphan_count=0)
                 relations.append(rel)
                 continue
-            if len(child_cols) != 1 or len(parent_cols) != 1:
+            if not child_cols or len(child_cols) != len(parent_cols):
                 rel.update(
                     status="unavailable",
                     available=False,
-                    reason="composite foreign keys are not scanned",
+                    reason="relationship has no usable column pairing",
                 )
                 relations.append(rel)
                 continue
@@ -168,20 +179,24 @@ def verify_destination_referential_integrity(
             try:
                 child_tbl = _reflect(conn, meta, child_name, schema_arg)
                 parent_tbl = _reflect(conn, meta, stored_parent, schema_arg)
-                child_col = resolve_stored_name(
-                    [c.name for c in child_tbl.columns], child_cols[0]
-                )
-                parent_col = resolve_stored_name(
-                    [c.name for c in parent_tbl.columns], parent_cols[0]
-                )
-                if child_col is None or parent_col is None:
+                resolved_child = [
+                    resolve_stored_name([c.name for c in child_tbl.columns], name)
+                    for name in child_cols
+                ]
+                resolved_parent = [
+                    resolve_stored_name([c.name for c in parent_tbl.columns], name)
+                    for name in parent_cols
+                ]
+                if any(c is None for c in resolved_child) or any(
+                    p is None for p in resolved_parent
+                ):
                     raise LookupError("join column not resolvable in destination")
                 scan = _orphan_scan(
                     conn,
                     child=child_tbl,
-                    child_column=child_col,
+                    child_columns=[str(c) for c in resolved_child],
                     parent=parent_tbl,
-                    parent_column=parent_col,
+                    parent_columns=[str(p) for p in resolved_parent],
                 )
             except Exception as exc:  # noqa: BLE001 — a failed scan is evidence
                 logger.warning("destination RI scan failed: %s", exc)
