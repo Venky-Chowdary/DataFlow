@@ -14,6 +14,9 @@ from typing import Any
 
 # Target digest covers rows outside this job's write set.
 WHOLE_TABLE_NOT_COMPARABLE = "whole_table_not_comparable"
+# Target digest was re-read WHERE pk IN (written keys): per-cell proof of this
+# batch, deliberately silent about rows the job never wrote.
+WRITTEN_BATCH_KEYS = "written_batch_keys"
 
 
 def row_count_scope_stamp(out: dict[str, Any]) -> dict[str, Any] | None:

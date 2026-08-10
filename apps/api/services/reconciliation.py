@@ -22,8 +22,10 @@ from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow
 from typing import Any, Callable, Final, Iterable, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
+    WRITTEN_BATCH_KEYS,
     append_row_count_report,
     extra_rows_note,
     is_sample_authority,
@@ -544,7 +546,16 @@ def reconcile(
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
     target_rows_before: int | None = None,
+    checksum_scope: str = "",
 ) -> ReconciliationReport:
+    """Compare source and destination evidence into one Gate-8 verdict.
+
+    ``checksum_scope`` names the population the target digest covers. It is
+    :data:`WRITTEN_BATCH_KEYS` when the destination was re-read by written key,
+    which is the only comparable digest for an append into a table that already
+    held rows — the whole-table count still goes in the report, but the digest
+    must not be described as covering it.
+    """
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
     rows_skipped = max(int(rows_skipped or 0), 0)
     # Coerced rows are KEPT in the destination (a cell became NULL), so they do
@@ -670,6 +681,15 @@ def reconcile(
         )
         if rejected_rows and rejected_rows != coerced_null_rows:
             message += f"; {rejected_rows} row(s) rejected"
+    elif checksum_scope == WRITTEN_BATCH_KEYS and target_rows > expected_rows:
+        message = (
+            f"Row fidelity verified for the {expected_rows} row(s) this run wrote "
+            f"— destination digest re-read by written key. Destination holds "
+            f"{target_rows} row(s) in total; rows written by earlier runs are "
+            "outside this proof."
+        )
+        if rejected_rows:
+            message += f" {rejected_rows} row(s) rejected."
     else:
         message = f"Row fidelity verified — source and target checksums match ({target_rows} rows)"
         if rejected_rows:
@@ -688,6 +708,7 @@ def reconcile(
         checksum_match=True,
         population_proof=False,
         assurance_level="full_checksum",
+        checksum_scope=checksum_scope,
     )
 
 
@@ -784,6 +805,102 @@ def sa_streaming_result(
     return names, _rows()
 
 
+# Cap on keys fetched back per batch proof: bounded so a 10M-row append does
+# not build a 10M-term IN list, and matched by the writer's stashed id sample.
+KEYED_READBACK_ID_CAP: Final[int] = 500
+
+# Text carrier per dialect. The keys arrive from writer meta as strings; an
+# uncast bigint/uuid column aborts the read-back, and an aborted read-back is
+# not a soft failure — it is silently *no* proof at all.
+_KEYED_TEXT_CAST: Final[dict[str, str]] = {
+    "mysql": "CHAR",
+    "mariadb": "CHAR",
+    "sqlserver": "NVARCHAR(4000)",
+    "mssql": "NVARCHAR(4000)",
+    "oracle": "VARCHAR2(4000)",
+    "clickhouse": "String",
+    "databricks": "STRING",
+}
+
+_KEYED_QUOTE_CHAR: Final[dict[str, str]] = {
+    "mysql": "`",
+    "mariadb": "`",
+    "clickhouse": "`",
+    "sqlserver": "[",
+    "mssql": "[",
+}
+
+
+# Destinations whose verifier re-reads only ``written_ids``. Anything absent
+# here falls back to a whole-table digest, which an append into a populated
+# sink cannot compare — the honest verdict is row-count scope, not a mismatch.
+KEYED_READBACK_ENGINES: Final[frozenset[str]] = frozenset(
+    {
+        "sqlite",
+        "duckdb",
+        "postgresql",
+        "redshift",
+        "timescaledb",
+        "cockroachdb",
+        "mysql",
+        "mariadb",
+        "sqlserver",
+        "mssql",
+        "azure_sql",
+        "oracle",
+        "clickhouse",
+        "snowflake",
+        "databricks",
+        "generic_sql",
+        "mongodb",
+    }
+)
+
+
+def keyed_readback_scope(
+    written_ids: list[str] | None,
+    pk_column: str | None,
+    *,
+    cap: int = KEYED_READBACK_ID_CAP,
+) -> tuple[list[str], str]:
+    """Normalize ``(written_ids, pk_column)`` into a usable batch scope.
+
+    Returns ``([], "")`` when the batch cannot be keyed, which every caller
+    treats as "fingerprint the whole table" — the honest fallback.
+    """
+    ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][:cap]
+    pk = (pk_column or "").strip()
+    return (ids, pk) if ids and pk else ([], "")
+
+
+def keyed_readback_where(
+    pk: str, ids: list[str], *, dialect: str, placeholders: list[str]
+) -> str:
+    """``WHERE CAST(pk AS <text>) IN (...)`` for proving one appended batch.
+
+    Append or upsert into a non-empty table makes whole-table digests
+    incomparable — the destination legitimately holds rows this job never
+    wrote. Re-scoping the destination digest to the written keys is what turns
+    that from a row-count-only verdict back into full-population proof of the
+    batch.
+    """
+    dial = (dialect or "").strip().lower()
+    pk_q = quote_sql_identifier(pk, _KEYED_QUOTE_CHAR.get(dial, '"'))
+    cast = _KEYED_TEXT_CAST.get(dial, "VARCHAR(4000)")
+    return f"WHERE CAST({pk_q} AS {cast}) IN ({','.join(placeholders[: len(ids)])})"
+
+
+def keyed_readback_sa_clause(
+    pk: str, ids: list[str], *, dialect: str
+) -> tuple[str, dict[str, str]]:
+    """SQLAlchemy flavour of :func:`keyed_readback_where` with bound keys."""
+    params = {f"k{i}": v for i, v in enumerate(ids)}
+    where = keyed_readback_where(
+        pk, ids, dialect=dialect, placeholders=[f":{k}" for k in params]
+    )
+    return where, params
+
+
 def verify_postgres_table(
     *,
     host: str,
@@ -813,7 +930,7 @@ def verify_postgres_table(
             connection_string=connection_string,
             ssl=ssl,
         )
-        from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+        from connectors.sql_identifiers import quote_table_ref
 
         table_ref = quote_table_ref(
             table_name, schema or "public", dialect="postgresql"
@@ -821,12 +938,9 @@ def verify_postgres_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-        ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][
-            :500
-        ]
-        pk = (pk_column or "").strip()
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
         with streaming_readback_cursor(conn, engine="postgresql") as cur:
-            if ids and pk:
+            if ids:
                 pk_q = quote_sql_identifier(pk)
                 # Ids are text; an uncast bigint/uuid key aborts the read-back.
                 cur.execute(
@@ -1301,7 +1415,15 @@ def verify_mysql_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
+    """Independent MySQL/MariaDB read-back for Gate-8.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys
+    while ``count`` stays whole-table, so an append into a populated table can
+    still prove per-cell fidelity of what it wrote.
+    """
     try:
         from connectors.mysql_conn import get_connection
 
@@ -1320,8 +1442,15 @@ def verify_mysql_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
         with streaming_readback_cursor(conn, engine="mysql") as cur:
-            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+            if ids:
+                where = keyed_readback_where(
+                    pk, ids, dialect="mysql", placeholders=["%s"] * len(ids)
+                )
+                cur.execute(f"SELECT * FROM {table_ref} {where}", ids)  # nosec B608
+            else:
+                cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names, rows = dbapi_streaming_rows(cur)
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
@@ -1351,8 +1480,13 @@ def verify_sqlserver_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Independent SQL Server / Azure SQL Edge read-back for Gate-8 reconcile."""
+    """Independent SQL Server / Azure SQL Edge read-back for Gate-8 reconcile.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         import pymssql
 
@@ -1373,7 +1507,14 @@ def verify_sqlserver_table(
         try:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            if ids:
+                where = keyed_readback_where(
+                    pk, ids, dialect="sqlserver", placeholders=["%s"] * len(ids)
+                )
+                cur.execute(f"SELECT * FROM {table_ref} {where}", tuple(ids))  # nosec B608
+            else:
+                cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
@@ -1405,8 +1546,13 @@ def verify_oracle_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Independent Oracle read-back for Gate-8 (write-location ''≡NULL fingerprints)."""
+    """Independent Oracle read-back for Gate-8 (write-location ''≡NULL fingerprints).
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         import sqlalchemy as sa
 
@@ -1431,10 +1577,14 @@ def verify_oracle_table(
                 conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
                 or 0
             )
-            names, result = sa_streaming_result(
-                conn,
-                sa.text(f"SELECT * FROM {table_ref}"),  # nosec B608
-            )
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            select = sa.text(f"SELECT * FROM {table_ref}")  # nosec B608
+            if ids:
+                where, params = keyed_readback_sa_clause(pk, ids, dialect="oracle")
+                select = sa.text(
+                    f"SELECT * FROM {table_ref} {where}"  # nosec B608
+                ).bindparams(**params)
+            names, result = sa_streaming_result(conn, select)
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
                 (tuple(row) for row in result),
@@ -2124,8 +2274,13 @@ def verify_databricks_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Independent Databricks SQL warehouse read-back for Gate-8."""
+    """Independent Databricks SQL warehouse read-back for Gate-8.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         import sqlalchemy as sa
 
@@ -2151,10 +2306,14 @@ def verify_databricks_table(
                 conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
                 or 0
             )
-            names, result = sa_streaming_result(
-                conn,
-                sa.text(f"SELECT * FROM {table_ref}"),  # nosec B608
-            )
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            select = sa.text(f"SELECT * FROM {table_ref}")  # nosec B608
+            if ids:
+                where, params = keyed_readback_sa_clause(pk, ids, dialect="databricks")
+                select = sa.text(
+                    f"SELECT * FROM {table_ref} {where}"  # nosec B608
+                ).bindparams(**params)
+            names, result = sa_streaming_result(conn, select)
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
                 (tuple(row) for row in result),
@@ -2194,18 +2353,15 @@ def verify_sqlite_table(
         path = sqlite_file_path(database, connection_string, host)
         if not path:
             return -1, ""
-        from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+        from connectors.sql_identifiers import quote_table_ref
 
         table_ref = quote_table_ref(table_name, dialect="sqlite")
         conn = sqlite3.connect(str(path))
         cur = conn.cursor()
         cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
         count = cur.fetchone()[0]
-        ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][
-            :500
-        ]
-        pk = (pk_column or "").strip()
-        if ids and pk:
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
+        if ids:
             pk_q = quote_sql_identifier(pk)
             placeholders = ",".join("?" for _ in ids)
             cur.execute(
@@ -2239,8 +2395,13 @@ def verify_duckdb_table(
     table_name: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Reconcile a DuckDB target by reading the local file."""
+    """Reconcile a DuckDB target by reading the local file.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         import duckdb
 
@@ -2252,7 +2413,14 @@ def verify_duckdb_table(
         table_ref = quote_table_ref(table_name, dialect="duckdb")
         conn = duckdb.connect(str(path))
         count = conn.execute(f"SELECT COUNT(*) FROM {table_ref}").fetchone()[0]  # nosec B608
-        cur = conn.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
+        if ids:
+            where = keyed_readback_where(
+                pk, ids, dialect="duckdb", placeholders=["?"] * len(ids)
+            )
+            cur = conn.execute(f"SELECT * FROM {table_ref} {where}", ids)  # nosec B608
+        else:
+            cur = conn.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
         columns = names or target_columns or []
         checksum = canonical_checksum_from_iter(
@@ -2279,6 +2447,8 @@ def verify_clickhouse_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
     """Independent ClickHouse read-back with ``SELECT … FINAL`` (Airbyte-class).
 
@@ -2319,7 +2489,14 @@ def verify_clickhouse_table(
                 ).scalar()
                 or 0
             )
-            result = conn.execute(sa.text(f"SELECT * FROM {from_sql}"))  # nosec B608
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            select = sa.text(f"SELECT * FROM {from_sql}")  # nosec B608
+            if ids:
+                where, params = keyed_readback_sa_clause(pk, ids, dialect="clickhouse")
+                select = sa.text(
+                    f"SELECT * FROM {from_sql} {where}"  # nosec B608
+                ).bindparams(**params)
+            result = conn.execute(select)
             names = list(result.keys())
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
@@ -2344,6 +2521,8 @@ def verify_generic_sql_table(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     engine_hint: str = "",
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
     """Independent SQLAlchemy read-back for catalog ``generic_sql`` engines.
 
@@ -2380,10 +2559,14 @@ def verify_generic_sql_table(
                 ).scalar()
                 or 0
             )
-            names, result = sa_streaming_result(
-                conn,
-                sa.text(f"SELECT * FROM {table_ref}"),  # nosec B608
-            )
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            select = sa.text(f"SELECT * FROM {table_ref}")  # nosec B608
+            if ids:
+                where, params = keyed_readback_sa_clause(pk, ids, dialect=dialect)
+                select = sa.text(
+                    f"SELECT * FROM {table_ref} {where}"  # nosec B608
+                ).bindparams(**params)
+            names, result = sa_streaming_result(conn, select)
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
                 (tuple(row) for row in result),
@@ -2480,12 +2663,9 @@ def verify_mongodb_collection(
         db = client[database or "test"]
         coll = db[table_name]
         count = coll.count_documents({})
-        ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][
-            :500
-        ]
-        pk = (pk_column or "").strip()
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
         query: dict[str, Any] = {}
-        if ids and pk:
+        if ids:
             # Match string or numeric id forms (CSV upserts often land as int).
             expanded: list[Any] = []
             for raw in ids:
@@ -2667,7 +2847,13 @@ def verify_snowflake_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
+    """Independent Snowflake read-back for Gate-8.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         from connectors.snowflake_conn import (
             get_connection,
@@ -2705,7 +2891,14 @@ def verify_snowflake_table(
             qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
             cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            if ids:
+                where = keyed_readback_where(
+                    pk, ids, dialect="snowflake", placeholders=["%s"] * len(ids)
+                )
+                cur.execute(f"SELECT * FROM {qualified_name} {where}", ids)  # nosec B608
+            else:
+                cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
             columns = names or target_columns or []
             checksum = canonical_checksum_from_iter(
@@ -2863,6 +3056,8 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "generic_sql":
         # Route local file engines / Oracle / ClickHouse by URL or dest.type.
@@ -2887,6 +3082,8 @@ def verify_target(
                 table_name=table_name,
                 target_columns=target_columns,
                 limit=limit,
+                written_ids=ids,
+                pk_column=pk,
             )
         elif conn.startswith("oracle") or engine_hint.startswith("oracle"):
             count, chk = verify_oracle_table(
@@ -2901,6 +3098,8 @@ def verify_target(
                 target_columns=target_columns,
                 limit=limit,
                 dest_types=dest_types,
+                written_ids=ids,
+                pk_column=pk,
             )
         elif "clickhouse" in engine_hint or "clickhouse" in conn:
             count, chk = verify_clickhouse_table(
@@ -2916,6 +3115,8 @@ def verify_target(
                 target_columns=target_columns,
                 limit=limit,
                 dest_types=dest_types,
+                written_ids=ids,
+                pk_column=pk,
             )
         else:
             # Teradata / HANA / Vertica / Informix / Trino / Firebird / …
@@ -2928,6 +3129,8 @@ def verify_target(
                 limit=limit,
                 dest_types=dest_types,
                 engine_hint=engine_hint,
+                written_ids=ids,
+                pk_column=pk,
             )
     elif db_type == "clickhouse":
         count, chk = verify_clickhouse_table(
@@ -2943,6 +3146,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "pgvector":
         # pgvector tables store an opaque embedding; reconstruct source rows from
@@ -3020,6 +3225,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "mysql":
         count, chk = verify_mysql_table(
@@ -3034,6 +3241,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type in {"sqlserver", "mssql", "azure_sql"}:
         count, chk = verify_sqlserver_table(
@@ -3048,6 +3257,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type in {
         "oracle",
@@ -3069,6 +3280,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "bigquery":
         count, chk = verify_bigquery_table(
@@ -3160,6 +3373,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "hubspot":
         count, chk = verify_hubspot_object(
@@ -3349,6 +3564,8 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             engine_hint=db_type,
+            written_ids=ids,
+            pk_column=pk,
         )
     else:
         count, chk = -1, ""

@@ -11,7 +11,9 @@ from connectors.writer_common import (
     transform_error_policy_for_validation_mode,
 )
 from services.dest_precount import PRECOUNT_KEY
+from services.reconcile_coverage import WRITTEN_BATCH_KEYS
 from services.reconciliation import (
+    KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
     checksum_rows,
     read_target_sample,
@@ -1116,6 +1118,7 @@ def run_reconciliation(
     # the batch. Re-fingerprint destination WHERE pk IN (batch keys) while keeping
     # full-table cardinality for the operator report.
     expected_batch = max(source_rows - dropped_rows - rows_skipped, 0)
+    keyed_scope = ""
     # Upsert/append/quarantine-replay into a non-empty table: whole-table digests
     # are not comparable. Keyed fingerprint of written_ids proves the batch for
     # balanced and strict alike (strict_checksum only governs fail-closed severity
@@ -1128,8 +1131,7 @@ def run_reconciliation(
         and source_checksum
         and target_checksum
         and source_checksum != target_checksum
-        and db_type
-        in {"sqlite", "postgresql", "redshift", "generic_sql", "mongodb"}
+        and str(db_type) in KEYED_READBACK_ENGINES
     ):
         _keyed_rows, keyed_checksum = verify_target(
             db_type,
@@ -1146,6 +1148,7 @@ def run_reconciliation(
         )
         if keyed_checksum:
             target_checksum = keyed_checksum
+            keyed_scope = WRITTEN_BATCH_KEYS
 
     report = reconcile(
         source_rows=source_rows,
@@ -1159,5 +1162,6 @@ def run_reconciliation(
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
         target_rows_before=rows_before,
+        checksum_scope=keyed_scope,
     )
     return _finalize(report.to_dict())
