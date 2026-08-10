@@ -212,6 +212,10 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
         "verified": False,
         "reason": "constraints and indexes were not compared for this run",
     }
+    referential = _dict(state.get("referential_integrity")) or {
+        "verified": False,
+        "reason": "destination referential integrity was not scanned for this run",
+    }
     return {
         "identity_watermark": identity,
         "schema_objects": {
@@ -221,7 +225,31 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
             "unreadable": list(schema_objects.get("unreadable") or []),
             "aspects": _dict(schema_objects.get("aspects")),
         },
+        "referential_integrity": {
+            "verified": bool(referential.get("verified")),
+            "reason": str(referential.get("reason") or ""),
+            "orphan_rows": referential.get("orphan_rows"),
+            "orphan_relations": list(referential.get("orphan_relations") or []),
+            "unavailable_relations": list(
+                referential.get("unavailable_relations") or []
+            ),
+            "relations": list(referential.get("relations") or []),
+        },
     }
+
+
+def _referential_blockers(physical: dict[str, Any]) -> list[str]:
+    """Orphan rows are a broken database, however clean the row counts look."""
+    referential = _dict(physical.get("referential_integrity"))
+    orphans = [str(r) for r in referential.get("orphan_relations") or []]
+    if not orphans:
+        return []
+    rows = referential.get("orphan_rows")
+    counted = f"{rows} child row(s)" if isinstance(rows, int) else "child rows"
+    return [
+        f"Destination holds {counted} with no parent on {', '.join(orphans)} - "
+        "referential integrity did not survive the move."
+    ]
 
 
 def _identity_blockers(physical: dict[str, Any]) -> list[str]:
@@ -258,6 +286,7 @@ def _verdict(
     for reason in pack.get("proof_incomplete_reasons") or []:
         blockers.append(str(reason))
     blockers.extend(_identity_blockers(physical_state or {}))
+    blockers.extend(_referential_blockers(physical_state or {}))
     if job_status and job_status not in ("completed", "succeeded", "success"):
         blockers.append(f"Job status is {job_status!r}, not a completed run.")
 
@@ -365,8 +394,9 @@ def build_migration_certificate(
         },
         "not_proven_by_this_certificate": [
             "Per-cell fidelity for every row — only the reconciliation scope above.",
-            "Referential integrity across the destination population unless a "
-            "population orphan scan was run.",
+            "Referential integrity for relationships the physical state section "
+            "reports as unavailable (composite keys, missing parent tables, "
+            "failed scans) — enforced and scanned relationships are proven.",
             "Exactly-once delivery — CDC and resume are at-least-once with upsert.",
             "Triggers, check constraints, grants and storage options on the "
             "destination — the physical state section reports only identity "
@@ -511,6 +541,24 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
                 f"- Constraints and indexes not compared — {objects.get('reason', '')}",
                 "",
             ]
+
+    referential = _dict(physical.get("referential_integrity"))
+    relations = referential.get("relations") or []
+    if relations:
+        lines += ["| Relationship | Proof | Orphan rows |", "|---|---|---|"]
+        for rel in relations:
+            info = _dict(rel)
+            cols = "+".join(str(c) for c in info.get("columns") or [])
+            target = f"`{cols}` → `{info.get('referred_table', '')}`"
+            status = str(info.get("status") or "")
+            if info.get("available"):
+                count = str(info.get("orphan_count", 0))
+            else:
+                count = f"unavailable — {info.get('reason', '')}"
+            lines.append(f"| {target} | {status} | {count} |")
+        lines.append("")
+    elif referential and referential.get("reason"):
+        lines += [f"- Referential integrity: {referential.get('reason')}", ""]
 
     blockers = verdict.get("blockers") or []
     if blockers:

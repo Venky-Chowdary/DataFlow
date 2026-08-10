@@ -386,6 +386,49 @@ def _schema_state_evidence(
     )
 
 
+def _source_foreign_keys(schema_state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Relationships the source guaranteed, from its own catalog read."""
+    rendered = ((schema_state.get("source") or {}).get("foreign_keys")) or []
+    keys: list[dict[str, Any]] = []
+    for item in rendered:
+        parts = str(item).split("->")
+        if len(parts) != 3:
+            continue
+        child, parent, parent_cols = parts
+        keys.append(
+            {
+                "constrained_columns": [c for c in child.split("+") if c],
+                "referred_table": parent,
+                "referred_columns": [c for c in parent_cols.split("+") if c],
+            }
+        )
+    return keys
+
+
+def _referential_integrity_evidence(
+    *,
+    db_type: str,
+    cfg: dict[str, Any],
+    schema: str,
+    table: str,
+    schema_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Orphan proof for every source relationship the destination does not enforce."""
+    foreign_keys = _source_foreign_keys(schema_state)
+    if not foreign_keys:
+        return {}
+
+    from services.destination_ri_probe import verify_destination_referential_integrity
+
+    return verify_destination_referential_integrity(
+        db_type,
+        cfg,
+        schema=schema,
+        table=table,
+        foreign_keys=foreign_keys,
+    )
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -562,9 +605,29 @@ def run_reconciliation(
         logging.getLogger(__name__).warning(
             "physical schema comparison skipped: %s", exc, exc_info=exc
         )
+        schema_state = {}
         physical_state["schema_objects"] = {
             "verified": False,
             "reason": f"comparison failed: {exc}",
+        }
+
+    try:
+        ri_state = _referential_integrity_evidence(
+            db_type=db_type,
+            cfg=cfg,
+            schema=str(schema or ""),
+            table=str(table_name or ""),
+            schema_state=schema_state,
+        )
+        if ri_state:
+            physical_state["referential_integrity"] = ri_state
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "destination referential integrity probe skipped: %s", exc, exc_info=exc
+        )
+        physical_state["referential_integrity"] = {
+            "verified": False,
+            "reason": f"probe failed: {exc}",
         }
 
     source_checksum = _compute_source_checksum(
