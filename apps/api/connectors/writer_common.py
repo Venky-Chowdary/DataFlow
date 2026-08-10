@@ -264,6 +264,61 @@ def resolve_writer_backfill(
     )
 
 
+def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
+    """True when ``target_type`` is an approved ceiling, not a catalog echo.
+
+    Map stamps a ``target_type`` for every bound column, including the ones it
+    merely read out of the destination catalog. Treating that echo as an
+    operator decision freezes the column: a source that drifted wider then
+    quarantines every row as "would truncate on write" while the ALTER that
+    would fix it is refused as widening past the Map stamp. Only an operator
+    edit (or a stamp with no recorded catalog provenance) is a real ceiling.
+    """
+    if not mapping:
+        return False
+    if not str(mapping.get("target_type") or mapping.get("dest_type") or "").strip():
+        return False
+    if mapping.get("user_override") or mapping.get("userOverride"):
+        return True
+    origin = str(mapping.get("target_type_origin") or "").strip().lower()
+    return origin != "destination_catalog"
+
+
+def effective_dest_types_under_backfill(
+    dest_types: dict[str, str],
+    mappings: list[dict[str, Any]] | None,
+    *,
+    backfill: bool,
+) -> dict[str, str]:
+    """Resolve the carriers a backfill write will actually land against.
+
+    Under backfill the writer widens a drifted column to the source's declared
+    type before inserting, so any consumer that judges the same rows against
+    the pre-drift Map stamp (Gate-8 fingerprints most of all) reaches a
+    different verdict than the write: the digest is taken over quarantined or
+    truncated cells the destination never saw, and reconciliation reports a
+    checksum mismatch on a load that landed correctly.
+    """
+    if not backfill or not mappings:
+        return dict(dest_types or {})
+    from connectors.schema_drift import is_wider_type
+
+    out = dict(dest_types or {})
+    for mapping in mappings:
+        tgt = str(mapping.get("target") or "").strip()
+        if not tgt or tgt not in out:
+            continue
+        if stamp_is_operator_ceiling(mapping):
+            continue
+        source_type = str(mapping.get("source_type") or "").strip()
+        current = str(out.get(tgt) or "").strip()
+        if not source_type or not current:
+            continue
+        if is_wider_type(current, source_type):
+            out[tgt] = source_type
+    return out
+
+
 def desired_types_honoring_map_stamps(
     *,
     target_cols: list[str],
@@ -309,7 +364,7 @@ def desired_types_honoring_map_stamps(
         if explicit_columns is not None:
             is_explicit = col in explicit_columns
         else:
-            is_explicit = bool(str(mapping.get("target_type") or "").strip())
+            is_explicit = stamp_is_operator_ceiling(mapping)
         if is_explicit:
             if candidate and is_wider_type(ceiling, candidate):
                 refusals.append(

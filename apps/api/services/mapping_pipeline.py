@@ -633,6 +633,14 @@ def run_mapping_pipeline(
         src_type = schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
         src_type = ddl_carrier_type(str(src_type))
         tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
+        # Provenance, not just a value: a stamp read out of the destination
+        # catalog records what exists today, while an operator stamp records an
+        # approved ceiling. Writers must be able to tell them apart — otherwise
+        # today's narrow carrier freezes the column and every drifted row
+        # quarantines under backfill instead of widening the destination.
+        catalog_stamp = bool(tgt_type) and not (
+            m.get("user_override") or m.get("userOverride")
+        )
         strategy = str(m.get("assignment_strategy") or "")
         # Partial Studio: never invent dest types from source — Map/Validate must
         # stay pending until live schema loads (false-green preserve cliff).
@@ -767,6 +775,11 @@ def run_mapping_pipeline(
                 "transform": transform,
                 "source_type": src_type,
                 "target_type": tgt_type or "",
+                **(
+                    {"target_type_origin": "destination_catalog"}
+                    if catalog_stamp
+                    else {}
+                ),
                 "reasoning": reasoning,
                 "agent": "MappingReasonerAgent",
                 "format_class": classification["format"],

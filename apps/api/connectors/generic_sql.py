@@ -136,6 +136,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     split_dense_sparse_rows,
+    stamp_is_operator_ceiling,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -3937,7 +3938,10 @@ def write_mapped_rows(
         # never a second materialize(source) invent authority.
         if explicit:
             derived = materialize_dest_ddl(dest_db, explicit) if dest_db else str(explicit)
-            explicit_stamps.add(col)
+            # A stamp that only echoes the destination catalog is not an
+            # operator ceiling; under backfill it may widen to the source.
+            if stamp_is_operator_ceiling(mapping) or not backfill_new_fields:
+                explicit_stamps.add(col)
         elif dest_db:
             from services.decision_kernel import InventContext, invent_dest_type
 
@@ -3983,8 +3987,14 @@ def write_mapped_rows(
     if not studio_err:
         ceiling_types = [target_column_types[col] for col in target_cols]
         candidate_by_col: dict[str, str] = {}
+        # Backfill is the operator's standing approval for additive drift, so a
+        # live carrier the source has outgrown may widen to the source's own
+        # declared type. Without this the probed live DDL froze the column and
+        # every drifted row quarantined as "would truncate on write" while the
+        # ALTER that fixes it never ran. An explicit Map stamp still ceilings.
+        widenable_live = live_locked if not backfill_new_fields else set()
         for i, col in enumerate(target_cols):
-            if col in explicit_stamps or col in live_locked:
+            if col in explicit_stamps or col in widenable_live:
                 continue
             mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
             mapping_source = mapping.get("source_type")
@@ -4004,14 +4014,14 @@ def write_mapped_rows(
             mappings=mappings,
             candidate_by_col=candidate_by_col,
             preserve_case=True,
-            explicit_columns=explicit_stamps | live_locked,
+            explicit_columns=explicit_stamps | widenable_live,
         )
         if alter_refusals:
             logger.info(
                 "generic_sql Map≡ALTER refusals (stamp ceiling): %s", alter_refusals
             )
         for i, col in enumerate(target_cols):
-            if col in live_locked:
+            if col in widenable_live:
                 continue
             new_typ = desired_list[i]
             old_typ = target_column_types[col]
@@ -4266,6 +4276,19 @@ def write_mapped_rows(
                     or physical.get(str(c).upper())
                 )
                 if hit and str(hit).strip():
+                    planned = str(target_column_types.get(c) or "").strip()
+                    # Drift widen is applied by ALTER before the insert, so a
+                    # column the source outgrew must be judged against the
+                    # carrier it is about to have. Overlaying today's narrow
+                    # physical type here quarantined every drifted row and the
+                    # ALTER never ran. A failed ALTER still aborts the write.
+                    if (
+                        backfill_new_fields
+                        and planned
+                        and c not in explicit_stamps
+                        and is_wider_type(str(hit).strip(), planned, dest_db=dest_db)
+                    ):
+                        continue
                     covered_cols.append(c)
                     covered_physical[c] = str(hit).strip()
             live_partial = (

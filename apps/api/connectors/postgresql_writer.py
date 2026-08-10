@@ -1575,14 +1575,19 @@ def write_mapped_rows(
                 mapping = active_by_tgt.get(col) or {}
                 source = mapping.get("source") or ""
                 source_samples = batch_samples.get(source, []) if batch_samples else []
-                if source_samples:
+                # Declared source DDL wins over sample inference: inferring from
+                # a batch drops the parameters that decide drift (VARCHAR(40)
+                # became a bare VARCHAR, which reads as "already fits" against a
+                # live VARCHAR(10) and suppressed the widen the rows needed).
+                declared = str(
+                    column_types.get(source) or mapping.get("source_type") or ""
+                ).strip()
+                if declared:
+                    source_type = declared
+                elif source_samples:
                     source_type = infer_type(source_samples, field_name=source)
                 else:
-                    source_type = (
-                        column_types.get(source)
-                        or mapping.get("source_type")
-                        or ""
-                    )
+                    source_type = ""
                 # Unknown source DDL: do not invent VARCHAR widen candidate —
                 # keep Map/current ceiling (desired_types falls back to cur_type).
                 if not str(source_type or "").strip():

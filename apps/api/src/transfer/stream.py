@@ -1270,10 +1270,16 @@ def _stream_database_transfer_impl(
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True
     )
-    # Write-path dest_types for Gate-8 fingerprint remap parity.
-    fingerprint_dest_types = {
-        target_cols[i]: logical_types[i] for i in range(len(target_cols))
-    }
+    # Write-path dest_types for Gate-8 fingerprint remap parity — including the
+    # drift widen the backfill write applies, so the digest is taken against the
+    # carrier the rows actually land in.
+    from connectors.writer_common import effective_dest_types_under_backfill
+
+    fingerprint_dest_types = effective_dest_types_under_backfill(
+        {target_cols[i]: logical_types[i] for i in range(len(target_cols))},
+        list(mappings or []),
+        backfill=bool(backfill_new_fields),
+    )
 
     total_rows = probe.total_rows
     if total_rows is not None and limit > 0:
