@@ -886,6 +886,29 @@ def summarize_reject_findings(
     return " — " + "; ".join(seen)
 
 
+def _distinct_reject_rows(details: list[dict[str, Any]]) -> int:
+    """Count the distinct rows a finding list touches.
+
+    Writers key findings by whatever identifies a record on that sink, so ``row``
+    also arrives as a document id or a vector id. An ``int()`` on those raised
+    inside the refusal builder and turned a clean fail-closed refusal into an
+    unhandled ValueError; a non-numeric id still identifies one row.
+    """
+    rows: set[object] = set()
+    for detail in details:
+        raw = detail.get("row")
+        if raw is None or raw == "":
+            continue
+        try:
+            numeric = int(raw)
+        except (TypeError, ValueError):
+            rows.add(str(raw))
+            continue
+        if numeric > 0:
+            rows.add(numeric)
+    return len(rows)
+
+
 def reject_on_strict_policy(
     policy: str | None,
     rejected_details: list[dict[str, Any]] | None,
@@ -935,7 +958,7 @@ def reject_on_strict_policy(
         # Details are per-cell findings; counting them as "rows" invented 28k
         # rejects on a 2k-row Excel load (operator panic / wrong Resume hint).
         cell_n = int(n or len(details))
-        row_n = len({int(d.get("row") or 0) for d in details if int(d.get("row") or 0) > 0})
+        row_n = _distinct_reject_rows(details)
         return (
             f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
             f"Migration Risk Contract abort policy blocks partial write{scope_note}"
@@ -950,9 +973,7 @@ def reject_on_strict_policy(
     if transform_error_policy(policy) == "fail":
         if details:
             cell_n = len(details)
-            row_n = len(
-                {int(d.get("row") or 0) for d in details if int(d.get("row") or 0) > 0}
-            )
+            row_n = _distinct_reject_rows(details)
             return (
                 f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
                 "strict error policy blocks partial write"

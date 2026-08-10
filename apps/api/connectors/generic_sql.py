@@ -4132,7 +4132,10 @@ def write_mapped_rows(
             require_physical_types_for_existing_table,
         )
 
-        inspector = sa.inspect(engine)
+        # Same entry point the create/exists branch below uses — two spellings
+        # of the inspector answered differently under a patched module.
+        inspector = inspect(engine)
+        existence_known = True
         try:
             table_existed = bool(
                 inspector.has_table(table_name, schema=schema_name)
@@ -4140,6 +4143,7 @@ def write_mapped_rows(
         except Exception:
             # Unknown existence: if create is disabled the table must already
             # exist — fail-closed on empty physical rather than Map VARCHAR invent.
+            existence_known = False
             table_existed = not create_table
         existing_cols = []
         cols_probe_failed = False
@@ -4152,6 +4156,26 @@ def write_mapped_rows(
                 existing_cols = []
                 cols_probe_failed = True
                 # Keep table_existed True so require_physical fail-closes.
+        if table_existed and not existence_known and not create_table:
+            # Fail closed, but do not report an unread catalog as a read one:
+            # "empty for an existing table" names a grant problem on a table
+            # nobody has seen. The operator's action is the existence probe.
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"{_engine_label} could not determine whether "
+                    f"{table_name!r} exists and create_table is disabled — "
+                    "refuse Map VARCHAR bind (empty→NULL invent risk). "
+                    "Re-check grants / information_schema and retry."
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
         if table_existed and cols_probe_failed:
             return WriteResult(
                 ok=False,

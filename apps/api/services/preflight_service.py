@@ -31,6 +31,7 @@ from services.connector_capability_registry import (
     classify_payload,
     recommended_batch_size,
 )
+from services.data_profiler import source_types_are_authoritative
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.destination_key_collision_probe import probe_append_key_collisions
 from services.secret_config import RedactedConfig, probe_config_from_endpoint
@@ -892,7 +893,16 @@ def run_file_preflight(
     # If the caller did not supply rich source types, infer them from the sample
     # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
     # being treated as all-VARCHAR against a typed warehouse target.
-    if sample_rows and columns:
+    # A relational source that genuinely declares TEXT for every column is not
+    # a schemaless source: re-inferring it turned a SQLite ``id TEXT`` holding
+    # "0".."49" into INTEGER here while Execute kept TEXT, so Validate approved a
+    # DDL Execute refused to materialize — and had they agreed, leading zeros
+    # would have been dropped on the destination.
+    if (
+        sample_rows
+        and columns
+        and not source_types_are_authoritative(source_kind, source_format)
+    ):
         generic_types = {"", "varchar", "text", "string"}
         if not column_types or all(
             (column_types.get(c) or "").lower() in generic_types for c in columns

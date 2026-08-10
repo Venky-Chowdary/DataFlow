@@ -124,7 +124,17 @@ def test_postgres_writer_reconnects_and_skips_ledged_chunk(monkeypatch):
     def fake_rows_written(_cur, *, dialect, schema, job_id, batch_key, chunk_idx):  # noqa: ARG001
         return ledger.get((job_id, batch_key, chunk_idx))
 
-    def fake_mark(_cur, *, dialect, schema, job_id, batch_key, chunk_idx, rows_written):  # noqa: ARG001
+    def fake_mark(  # noqa: ARG001
+        _cur,
+        *,
+        dialect,
+        schema,
+        job_id,
+        batch_key,
+        chunk_idx,
+        rows_written,
+        **_row_span,
+    ):
         # Simulate server-side commit of ledger+rows even when client sees a drop.
         ledger[(job_id, batch_key, chunk_idx)] = rows_written
 
