@@ -1711,18 +1711,33 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                         "probe_status": getattr(collision, "status", ""),
                         "values_probed": getattr(collision, "values_probed", 0),
                         "delivery": "at_least_once_idempotent_apply",
+                        "delta_scope": getattr(collision, "delta_scope", {}) or {},
                     },
                     coverage="sample",
                     note="Destination key collision probe on resumed append batch",
                 ),
             )
-        return _block(
-            GateId.G6_TARGET_DDL,
-            (
+        delta_scope = getattr(collision, "delta_scope", {}) or {}
+        if delta_scope:
+            # The collision is inside the delta this cursor will re-read, so the
+            # operator needs to know the key returns with a newer cursor value —
+            # an append cannot store it twice.
+            cause = (
+                f"The rows after watermark {delta_scope.get('watermark')} on "
+                f"{delta_scope.get('cursor_column')} carry {len(found)} key(s) the "
+                f"destination already stores on {key}, so an append aborts. "
+                "Switch this sync to upsert/merge (key-resolved), which is how an "
+                "updated row is meant to land."
+            )
+        else:
+            cause = (
                 f"Append would duplicate {len(found)} existing destination key(s) on "
                 f"{key} — the destination enforces uniqueness, so the insert aborts. "
                 "Switch this sync to upsert/merge (key-resolved) or overwrite."
-            ),
+            )
+        return _block(
+            GateId.G6_TARGET_DDL,
+            cause,
             start,
             _scope(
                 {
@@ -1733,6 +1748,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     "remediation_kind": "change_sync_mode",
                     "probe_status": getattr(collision, "status", ""),
                     "values_probed": getattr(collision, "values_probed", 0),
+                    "delta_scope": delta_scope,
                 },
                 coverage="sample",
                 note="Destination key collision probe on append batch",

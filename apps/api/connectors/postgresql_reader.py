@@ -265,6 +265,7 @@ def read_table_cursor_batch(
     """
     from psycopg2 import sql
 
+    from services.keyset_pagination import split_cursor_bookmark
     from services.source_snapshot import get_source_snapshot_conn
 
     schema = schema or "public"
@@ -308,11 +309,9 @@ def read_table_cursor_batch(
                         sql.Identifier(cursor_column),
                         sql.Identifier(pk),
                     )
-                    # cursor_after may be "value|pk" composite or bare cursor.
-                    if "|" in str(cursor_after):
-                        cur_val, pk_val = str(cursor_after).split("|", 1)
-                    else:
-                        cur_val, pk_val = cursor_after, ""
+                    cur_val, pk_val = split_cursor_bookmark(
+                        cursor_after, has_tiebreak=True
+                    )
                     cur.execute(query, (cur_val, pk_val, limit))
                 else:
                     query = sql.SQL("{} WHERE {} > %s ORDER BY {} LIMIT %s").format(
@@ -320,7 +319,8 @@ def read_table_cursor_batch(
                         sql.Identifier(cursor_column),
                         sql.Identifier(cursor_column),
                     )
-                    cur.execute(query, (cursor_after, limit))
+                    cur_val, _ = split_cursor_bookmark(cursor_after, has_tiebreak=False)
+                    cur.execute(query, (cur_val, limit))
             else:
                 pk = (cursor_primary_key or "").strip()
                 if pk and pk != cursor_column:

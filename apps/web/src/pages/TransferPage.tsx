@@ -134,6 +134,7 @@ import {
   streamContractsNeedReview,
   type StreamFieldContract,
 } from "../lib/streamContracts";
+import { evaluateCursorSemantics } from "../lib/cursorSemantics";
 import type { TransferPageProps } from "./transfer/TransferPageProps";
 import {
   ACCEPTED_UPLOAD_EXTENSIONS,
@@ -273,6 +274,10 @@ export function TransferPage({
   const [embeddingCacheStats, setEmbeddingCacheStats] = useState<EmbeddingCacheStats | null>(null);
   const [embeddingCacheBusy, setEmbeddingCacheBusy] = useState(false);
   const [cursorField, setCursorField] = useState("");
+  // What the cursor column means in the source. Only ever set by the operator:
+  // a column name cannot establish whether the source moves the value when a
+  // row changes, and assuming it silently loses updates and backdated inserts.
+  const [cursorSemantics, setCursorSemantics] = useState("");
   const [primaryKeyField, setPrimaryKeyField] = useState("");
   const [priorityColumn, setPriorityColumn] = useState("");
   const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">("desc");
@@ -737,6 +742,8 @@ export function TransferPage({
     };
   }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns]);
 
+  // A name-matched column is a starting point for the operator, never a claim
+  // about the column's behaviour — the declaration beside it carries that.
   const cursorCandidate = findColumn(currentSourceColumns, [
     /^updated_at$/i,
     /^modified_at$/i,
@@ -830,6 +837,7 @@ export function TransferPage({
     requiresPrimaryKey,
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
+    defaultCursorSemantics: cursorSemantics,
     streamFields,
     snapshotMode: syncMode === "cdc" ? snapshotMode : undefined,
     streamMappings: isMultiStreamSource
@@ -847,7 +855,10 @@ export function TransferPage({
     requiresPrimaryKey,
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
+    defaultCursorSemantics: cursorSemantics,
     streamFields,
+    syncMode,
+    validationMode,
   });
   const syncModeLabel =
     routeSyncModes.find((m) => m.id === syncMode)?.label
@@ -2070,9 +2081,25 @@ export function TransferPage({
       return true;
     }
     if (streamNeedsReview) {
+      // One cause, one action: name the single thing to change rather than
+      // listing everything the contract could be missing.
+      const semanticsVerdict = evaluateCursorSemantics({
+        syncMode,
+        cursorField,
+        declared: cursorSemantics,
+        validationMode,
+      });
+      const action =
+        requiresCursor && !cursorField
+          ? "Select a cursor field."
+          : semanticsVerdict.status === "block"
+            ? `${semanticsVerdict.reason} ${semanticsVerdict.primaryAction}.`
+            : requiresPrimaryKey && !primaryKeyField
+              ? "Select a primary key."
+              : "Open Advanced settings to complete the stream contract.";
       toast({
         title: "Stream contract needs review",
-        message: `${requiresCursor && !cursorField ? "Select a cursor field. " : ""}${requiresPrimaryKey && !primaryKeyField ? "Select a primary key." : ""}`.trim(),
+        message: action,
         tone: "warning",
       });
       setStep(STEP_DESTINATION);
@@ -6160,6 +6187,7 @@ export function TransferPage({
         streamFields={streamFields}
         defaultCursor={cursorField}
         defaultPrimaryKey={primaryKeyField}
+        defaultCursorSemantics={cursorSemantics}
         sourceColumns={currentSourceColumns}
         sourceSchema={currentSourceSchema}
         sourceColumnsByStream={sourceColumnsByStream}
@@ -6249,10 +6277,27 @@ export function TransferPage({
             [stream]: {
               cursorField: value,
               primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+              // A new column is a new question: the previous column's declared
+              // meaning says nothing about this one.
+              cursorSemantics: "",
             },
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
             setCursorField(value);
+            setCursorSemantics("");
+          }
+        }}
+        onStreamCursorSemanticsChange={(stream, value) => {
+          setStreamFields((prev) => ({
+            ...prev,
+            [stream]: {
+              cursorField: prev[stream]?.cursorField ?? cursorField,
+              primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+              cursorSemantics: value,
+            },
+          }));
+          if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
+            setCursorSemantics(value);
           }
         }}
         onStreamPrimaryKeyChange={(stream, value) => {
@@ -6261,6 +6306,7 @@ export function TransferPage({
             [stream]: {
               cursorField: prev[stream]?.cursorField ?? cursorField,
               primaryKeyField: value,
+              cursorSemantics: prev[stream]?.cursorSemantics ?? cursorSemantics,
             },
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {

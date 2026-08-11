@@ -53,6 +53,9 @@ APPEND_ONLY_SYNC_MODES = frozenset(
 
 MAX_PROBE_VALUES = 500
 
+# Watermarks persisted before the canonical separator existed used a pipe.
+_LEGACY_SEP = "|"
+
 
 @dataclass
 class DestinationCollisionResult:
@@ -68,6 +71,9 @@ class DestinationCollisionResult:
     # applies that overlap through the destination key (ON CONFLICT / MERGE),
     # so overlapping keys are expected evidence rather than a write abort.
     idempotent_apply: bool = False
+    # An incremental run reads past its watermark, so only that delta can
+    # collide. Recorded so an operator can see which rows were actually probed.
+    delta_scope: dict[str, Any] = field(default_factory=dict)
 
     @property
     def ran(self) -> bool:
@@ -209,6 +215,48 @@ def _mongo_existing_keys(
         client.close()
 
 
+def rows_a_cursor_read_will_deliver(
+    sample_rows: list[dict[str, Any]] | None,
+    *,
+    cursor_column: str,
+    watermark: str | None,
+    tiebreak_column: str = "",
+) -> list[dict[str, Any]]:
+    """Narrow a whole-table sample to the rows an incremental read will return.
+
+    Mirrors the reader's seek predicate exactly — ``(cursor, pk) > (wm, wm_pk)``
+    when the watermark carries a tie-break, ``cursor > wm`` otherwise — so a
+    pre-write check judges the batch that will be written rather than the table
+    it is drawn from. A row whose cursor value is missing is kept: an unreadable
+    value must not quietly shrink the batch a checker is looking at.
+    """
+    from services.keyset_pagination import KEYSET_SEP, encode_keyset_bookmark
+    from services.sync_cursor import compare_cursor_values
+
+    rows = list(sample_rows or [])
+    if not cursor_column or not watermark:
+        return rows
+    composite = KEYSET_SEP in str(watermark) or _LEGACY_SEP in str(watermark)
+    use_tiebreak = bool(composite and tiebreak_column)
+    delta: list[dict[str, Any]] = []
+    for row in rows:
+        if cursor_column not in row:
+            return rows
+        cell = row.get(cursor_column)
+        if cell is None or str(cell) == "":
+            delta.append(row)
+            continue
+        if use_tiebreak:
+            candidate = encode_keyset_bookmark(
+                [str(cell), str(row.get(tiebreak_column, ""))]
+            )
+        else:
+            candidate = str(cell)
+        if compare_cursor_values(candidate, str(watermark)) > 0:
+            delta.append(row)
+    return delta
+
+
 def probe_append_key_collisions(
     *,
     mappings: list[dict[str, Any]] | None,
@@ -227,6 +275,9 @@ def probe_append_key_collisions(
     stream_contracts: list[dict[str, Any]] | None = None,
     source_table: str = "",
     resume: bool = False,
+    incremental_cursor_column: str = "",
+    incremental_watermark: str | None = None,
+    incremental_tiebreak_column: str = "",
 ) -> DestinationCollisionResult | None:
     """Resolve the identity key, then probe it — ``None`` when not applicable.
 
@@ -277,13 +328,30 @@ def probe_append_key_collisions(
     ):
         return None
 
+    # Probe the rows this run will read, not the whole table. An incremental
+    # append past a watermark cannot collide with keys it will never re-read,
+    # and probing them refused every run after the first.
+    batch_rows = rows_a_cursor_read_will_deliver(
+        sample_rows,
+        cursor_column=incremental_cursor_column,
+        watermark=incremental_watermark,
+        tiebreak_column=incremental_tiebreak_column,
+    )
     result = probe_destination_key_collisions(
         destination_config=destination_config,
         destination_db_type=destination_db_type,
         destination_table=destination_table,
         key_column=target_key,
-        values=[row.get(source_key) for row in (sample_rows or [])],
+        values=[row.get(source_key) for row in batch_rows],
     )
+    if incremental_cursor_column and incremental_watermark:
+        result.delta_scope = {
+            "cursor_column": incremental_cursor_column,
+            "watermark": str(incremental_watermark),
+            "tiebreak_column": incremental_tiebreak_column,
+            "sample_rows": len(sample_rows or []),
+            "delta_rows": len(batch_rows),
+        }
     # Resume re-reads from the last committed checkpoint, so the overlap with
     # rows already at rest is the interrupted batch, not a new append. The
     # writer resolves it on the enforced key; blocking here would strand a

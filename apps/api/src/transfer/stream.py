@@ -832,15 +832,14 @@ def _stream_database_transfer_impl(
     dest_cfg = resolve_connector_config(destination)
 
     from services.sync_cursor import (
-        build_cursor_key,
         compare_cursor_values,
-        get_watermark,
         is_overwrite_sync,
         map_source_to_target,
         max_cursor_value,
         requires_incremental,
         requires_upsert,
         resolve_effective_sync_mode,
+        resolve_incremental_read_scope,
         resolve_sync_contract,
         set_watermark,
     )
@@ -908,17 +907,21 @@ def _stream_database_transfer_impl(
     watermark = None
     cursor_key = ""
     if incremental and cursor_source_col:
-        dest_table_key = resolve_dest_table(dest_type, destination, _source_name(source))
-        cursor_key = build_cursor_key(
+        # One resolver for the whole product: Validate's gates read this route's
+        # watermark through the same call, so what they judge is what this run
+        # will read.
+        scope = resolve_incremental_read_scope(
+            sync_mode=effective_sync,
+            stream_contracts=stream_contracts,
             source_type=src_type,
             source_database=source.database or src_cfg.get("database", ""),
             source_object=_source_name(source),
             dest_type=dest_type,
             dest_database=destination.database or dest_cfg.get("database", ""),
-            dest_object=dest_table_key,
-            stream_name=contract.name if contract else "stream",
+            dest_object=resolve_dest_table(dest_type, destination, _source_name(source)),
         )
-        watermark = get_watermark(cursor_key)
+        cursor_key = scope.cursor_key
+        watermark = scope.watermark
 
     if src_type not in _STREAMING_TYPES:
         raise ValueError(f"Streaming source '{src_type}' not supported")
@@ -1049,13 +1052,33 @@ def _stream_database_transfer_impl(
     except Exception:
         _pool_baseline = None
         _schema_baseline = None
+
+    def _cursor_read_args(cursor_after: str | None) -> dict[str, Any]:
+        """The cursor arguments every read of this run must agree on.
+
+        A watermark is composite when a tie-break primary key is in play, and
+        only a read that also names that column can decode it. Reads that left
+        ``cursor_primary_key`` out bound the whole composite against the cursor
+        column instead, so every run after the first died on the sizing probe.
+        """
+        if not incremental or not cursor_source_col:
+            return {}
+        return {
+            "cursor_column": cursor_source_col,
+            "cursor_after": cursor_after,
+            "cursor_type": (
+                normalize_inferred(schema.get(cursor_source_col, "string")).upper()
+                if schema
+                else None
+            ),
+            "cursor_primary_key": cursor_pk_source or None,
+        }
+
     _sample_started = time.perf_counter()
     sample_probe, _ = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
-            cursor_column=cursor_source_col if incremental else "",
-            cursor_after=watermark if incremental else None,
-            cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
+            **_cursor_read_args(watermark),
         )
     )
     phase_profile.add(
@@ -1142,9 +1165,7 @@ def _stream_database_transfer_impl(
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
-            cursor_column=cursor_source_col if incremental else "",
-            cursor_after=watermark if incremental else None,
-            cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
+            **_cursor_read_args(watermark),
         )
     )
     # This page is not thrown away — it becomes the first written batch.
@@ -1642,11 +1663,8 @@ def _stream_database_transfer_impl(
                     fetch_offset,
                     batch_limit,
                     database=src_db,
-                    cursor_column=cursor_source_col,
-                    cursor_after=fetch_cursor,
-                    cursor_type=column_types.get(cursor_source_col, "VARCHAR"),
                     known_total_rows=total_rows,
-                    cursor_primary_key=cursor_pk_source or None,
+                    **_cursor_read_args(fetch_cursor),
                 )
             )
             return batch

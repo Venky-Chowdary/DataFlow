@@ -1,8 +1,12 @@
 /** Per-stream cursor / primary-key overrides for multi-stream Advanced settings. */
 
+import { cursorContractNeedsReview } from "./cursorSemantics";
+
 export interface StreamFieldContract {
   cursorField: string;
   primaryKeyField: string;
+  /** Declared meaning of the cursor column — never inferred from its name. */
+  cursorSemantics?: string;
 }
 
 export interface BuildStreamContractsInput {
@@ -16,6 +20,7 @@ export interface BuildStreamContractsInput {
   /** Shared defaults (single-stream or seed for new streams). */
   defaultCursor: string;
   defaultPrimaryKey: string;
+  defaultCursorSemantics?: string;
   /** Per-stream overrides; missing keys fall back to defaults. */
   streamFields: Record<string, StreamFieldContract>;
   /** Debezium-compatible snapshot mode (CDC only). */
@@ -27,11 +32,13 @@ export function resolveStreamFields(
   streamFields: Record<string, StreamFieldContract>,
   defaultCursor: string,
   defaultPrimaryKey: string,
+  defaultCursorSemantics = "",
 ): StreamFieldContract {
   const override = streamFields[name];
   return {
     cursorField: override?.cursorField ?? defaultCursor,
     primaryKeyField: override?.primaryKeyField ?? defaultPrimaryKey,
+    cursorSemantics: override?.cursorSemantics ?? defaultCursorSemantics,
   };
 }
 
@@ -45,6 +52,7 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
       input.streamFields,
       input.defaultCursor,
       input.defaultPrimaryKey,
+      input.defaultCursorSemantics || "",
     );
     const maps = input.streamMappings?.[name];
     return {
@@ -52,6 +60,7 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
       selected: true,
       sync_mode: input.syncMode,
       cursor_field: input.requiresCursor ? fields.cursorField : "",
+      cursor_semantics: input.requiresCursor ? fields.cursorSemantics || "" : "",
       primary_key: fields.primaryKeyField || "",
       schema_policy: input.schemaPolicy,
       field_count: input.fieldCount,
@@ -83,7 +92,11 @@ export function streamContractsNeedReview(input: {
   requiresPrimaryKey: boolean;
   defaultCursor: string;
   defaultPrimaryKey: string;
+  defaultCursorSemantics?: string;
   streamFields: Record<string, StreamFieldContract>;
+  /** Sync mode and validation mode decide whether a declaration is required. */
+  syncMode?: string;
+  validationMode?: string;
 }): boolean {
   const anyColumns =
     input.sourceColumns.length > 0
@@ -99,8 +112,23 @@ export function streamContractsNeedReview(input: {
       input.streamFields,
       input.defaultCursor,
       input.defaultPrimaryKey,
+      input.defaultCursorSemantics || "",
     );
     if (input.requiresCursor && (!fields.cursorField || !cols.includes(fields.cursorField))) {
+      return true;
+    }
+    // A cursor that exists is not a cursor that is safe: what it means decides
+    // whether the read can lose rows, and the engine refuses an undeclared one.
+    if (
+      input.requiresCursor
+      && input.syncMode
+      && cursorContractNeedsReview({
+        syncMode: input.syncMode,
+        cursorField: fields.cursorField,
+        declared: fields.cursorSemantics || "",
+        validationMode: input.validationMode,
+      })
+    ) {
       return true;
     }
     if (

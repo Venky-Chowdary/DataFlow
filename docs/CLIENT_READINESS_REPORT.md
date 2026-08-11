@@ -229,10 +229,19 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
 6. **SQL Server partition functions/schemes, Oracle partitioned tables and
    PostgreSQL CLUSTER ordering are not carried** — refused honestly rather than
    invented.
-7. **Transfer Studio has no cursor-column field**, so an incremental append is
-   configured through the API/contract rather than the UI.
-8. **The UI has not been audited** at the migration-assurance bar.
+7. **An incremental cursor's meaning must be declared by the operator.** The
+   product refuses to infer it from a column name, so an incremental /
+   deduped / CDC run whose cursor carries no declaration is blocked at Validate
+   rather than run with an unproven read. `business_date` is refused outright:
+   a backdated insert stays behind the watermark permanently. Studio's stream
+   table now carries the declaration beside the cursor and shows the engine's
+   verdict; `cursor_semantics_live_results.json` records 18/18 on
+   PostgreSQL→PostgreSQL and PostgreSQL→MySQL. Other connector families are not
+   yet in that matrix.
+8. **The rest of the UI has not been audited** at the migration-assurance bar
+   — only the cursor / stream contract surface has been.
    Jobs/Schedules are audited for retry, overlap, cancellation and cadence only;
+   see below for the transform limits.
    Transforms are audited for load correctness only — a transform failure is
    surfaced but is not replayable per row, and it does not veto the landed
    transfer's own proof. Incremental transforms are refused on Oracle, which has
@@ -259,9 +268,15 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
   - schedules + jobs selection — 187 passed, 3 skipped (includes the new
     `tests/test_retry_duplicate_guard.py`, 22 cases)
   - sparse-document + type-contract + tracked-execute selection — 1144 passed, 7 skipped
-- Frontend: `npm run build` exit 0.
-- **Full backend suite: 13244 passed, 0 failed, 1515 skipped** (single run,
-  23m21s, after the transform alignment wave; the 13233 before it were a sharded
+- Frontend: 351 tests passed, `tsc --noEmit` and `npm run build` exit 0.
+- Cursor semantics live matrix: 18 cases, 0 not-ok
+  (`/home/ubuntu/repro/cursor_semantics_live_results.json`) covering composite
+  bookmark round-trips, an empty incremental poll reconciling as a no-op,
+  refusal of an undeclared and of a calendar-date cursor, and acceptance of
+  declared insert-only and modification-timestamp cursors, on
+  PostgreSQL→PostgreSQL and PostgreSQL→MySQL.
+- **Full backend suite: 13270 passed, 0 failed, 1515 skipped** (single run,
+  25m26s, after the cursor-semantics wave; 13244 before it, 23m21s; the 13233 before it were a sharded
   run, `/home/ubuntu/repro/shards5/summary.txt`). The 55 failures carried by the base
   branch are now closed; none were closed by weakening an assertion. The three
   classes they fell into:
@@ -291,7 +306,7 @@ credentials.
 |---|---|---|---|
 | 3 | ~~Jobs + Schedules retry / overlap / cancellation / missed windows~~ — done, `schedule_live_results.json`; remaining: backfill + multi-instance Mongo failover | 1 | — |
 | 4 | ~~Pipelines + Transforms audit~~ — done, `transform_live_results.json`; remaining: transform row ledger/quarantine and warehouse dialects | 1 | credentials for warehouse dialects |
-| 5 | UI/UX audit against the engine: one primary action per root cause, cursor field in Transfer Studio, no claim the engine does not support | 1–2 | — |
+| 5 | UI/UX audit against the engine: one primary action per root cause, no claim the engine does not support. Cursor contract done (cursor + declared meaning + verdict in Studio, `cursor_semantics_live_results.json` 18/18); remaining: the other panels | 1 | — |
 | 6 | Warehouse certification (Snowflake, BigQuery, S3) | 1–2 | credentials |
 | 7 | SaaS certification starting with Salesforce | 1–2 | integration user / Connected App |
 | 8 | FK cycles via deferred constraints, plus trigger/view reporting in the certificate | 1 | — |

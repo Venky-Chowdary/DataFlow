@@ -172,6 +172,8 @@ def read_collection_cursor_batch(
     """
     from bson.objectid import ObjectId
 
+    from services.keyset_pagination import split_cursor_bookmark
+
     client = _mongo_client(_connection_string(cfg))
     coll = client[database][collection]
     query: dict[str, Any] = {}
@@ -199,8 +201,10 @@ def read_collection_cursor_batch(
         return casted
 
     if cursor_after is not None and cursor_after != "":
-        if use_composite and "|" in str(cursor_after):
-            cur_raw, pk_raw = str(cursor_after).split("|", 1)
+        cur_raw, pk_raw = split_cursor_bookmark(
+            cursor_after, has_tiebreak=use_composite
+        )
+        if use_composite and pk_raw != "":
             casted = _as_mongo_cursor(cur_raw)
             pk_casted = _as_mongo_cursor(pk_raw, as_id=(pk == "_id"))
             query["$or"] = [
@@ -209,7 +213,7 @@ def read_collection_cursor_batch(
             ]
             sort_spec = [(cursor_column, 1), (pk, 1)]
         else:
-            casted = _as_mongo_cursor(str(cursor_after))
+            casted = _as_mongo_cursor(cur_raw)
             query[cursor_column] = {"$gt": casted}
             if use_composite:
                 sort_spec = [(cursor_column, 1), (pk, 1)]

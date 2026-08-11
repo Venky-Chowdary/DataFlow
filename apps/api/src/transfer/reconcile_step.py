@@ -1094,6 +1094,41 @@ def run_reconciliation(
     if sync_mode.lower() in {"full_refresh_mirror", "mirror", "scd2"}:
         allow_extra = False
 
+    # An incremental poll that reads nothing has nothing to reconcile: no batch
+    # was written, so there is no batch digest to compare, and the whole-table
+    # digest of a sink that already held rows never equals an empty source
+    # digest. Comparing them failed every quiet poll of every scheduled
+    # incremental sync — a red run for the normal outcome, which buries the runs
+    # that are actually broken. The proof of a no-op is that the destination did
+    # not move.
+    if (
+        allow_extra
+        and source_rows == 0
+        and int(rows_written or 0) == 0
+        and dropped_rows == 0
+        and (rows_before is None or target_rows == rows_before)
+    ):
+        unchanged = (
+            f"destination unchanged at {target_rows:,} row(s)"
+            if rows_before is not None
+            else f"destination holds {target_rows:,} row(s); pre-write count unknown"
+        )
+        return _finalize({
+            "passed": True,
+            "message": (
+                "No new source rows since the last watermark — nothing written, "
+                f"{unchanged}."
+            ),
+            "source_rows": 0,
+            "target_rows": target_rows,
+            "source_checksum": source_checksum,
+            "target_checksum": target_checksum,
+            "rejected_rows": rejected_rows,
+            "coerced_null_rows": coerced_null_rows,
+            "rows_skipped": rows_skipped,
+            "assurance_level": "no_op_destination_unchanged",
+        })
+
     # Streaming append/upsert soft-pass of extra dest rows without a stashed
     # sample cannot claim key-aligned proof (Airbyte/Fivetran honesty bar).
     is_streaming = bool(dest_summary.get("streaming"))

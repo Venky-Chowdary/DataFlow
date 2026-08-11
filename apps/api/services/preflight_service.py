@@ -40,6 +40,10 @@ from services.preflight_fk_gate import build_fk_block
 from services.coercion_gate_reconcile import reconcile_coercion_report
 from services.preflight_source_catalog import load_source_foreign_keys
 from services.destination_requirements_gate import build_mapping_contract_gates
+from services.preflight_cursor_gate import (
+    build_sync_contract_gate,
+    resolve_read_scope as _resolve_read_scope,
+)
 from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
     infer_date_locale,
@@ -400,39 +404,6 @@ def confidence_threshold_for_mode(validation_mode: str | None) -> float:
         )
 
 
-# Destinations that honor SCD2 / mirror streaming paths (must match Studio gating).
-_SQL_HISTORY_SYNC_DESTS = frozenset({
-    "postgresql",
-    "mysql",
-    "sqlite",
-    "snowflake",
-    "bigquery",
-    "redshift",
-    "generic_sql",
-    "sqlserver",
-    "mssql",
-    "oracle",
-    "duckdb",
-})
-
-# Sources that can drive CDC (log / change-stream) in production.
-_CDC_CAPABLE_SOURCES = frozenset({
-    "postgresql",
-    "mysql",
-    "sqlserver",
-    "mssql",
-    "oracle",
-    "mongodb",
-    "azure_sql_database",
-    "microsoft_sql_server",
-    "amazon_rds_sql_server",
-    "amazon_rds_postgresql",
-    "amazon_rds_mysql",
-    "amazon_aurora_postgresql",
-    "amazon_aurora_mysql",
-})
-
-
 def run_transfer_policy_gates(
     *,
     sync_mode: str = "full_refresh_overwrite",
@@ -454,110 +425,20 @@ def run_transfer_policy_gates(
     dest = (dest_type or "").strip().lower()
     src = (source_type or "").strip().lower()
     kind = (source_kind or "file").strip().lower()
-    multi_stream = len(contracts) > 1
-    requires_cursor = sync in {"incremental_append", "incremental_deduped", "cdc"}
-    requires_primary_key = sync in {
-        "upsert",
-        "incremental_deduped",
-        "cdc",
-        "scd2",
-        "mirror",
-    }
-
-    missing_cursor = [
-        c.get("name") or c.get("stream") or "stream"
-        for c in contracts
-        if requires_cursor and not (c.get("cursor_field") or c.get("cursor"))
-    ]
-    missing_primary_key = [
-        c.get("name") or c.get("stream") or "stream"
-        for c in contracts
-        if requires_primary_key and not (c.get("primary_key") or c.get("primary_keys"))
-    ]
-
-    # Live column check — typo'd cursor/PK names must fail at Validate, not mid-run.
-    source_col_set = {
-        str(c).strip().lower() for c in (source_columns or []) if str(c).strip()
-    }
-    unknown_cursor: list[str] = []
-    unknown_pk: list[str] = []
-    if source_col_set:
-        for c in contracts:
-            stream = c.get("name") or c.get("stream") or "stream"
-            if requires_cursor:
-                cursor = str(c.get("cursor_field") or c.get("cursor") or "").strip()
-                if cursor and cursor.lower() not in source_col_set:
-                    unknown_cursor.append(f"{stream}.{cursor}")
-            if requires_primary_key:
-                raw_pk = c.get("primary_key") or c.get("primary_keys") or []
-                pk_fields = [raw_pk] if isinstance(raw_pk, str) else list(raw_pk or [])
-                for pk in pk_fields:
-                    name = str(pk).strip()
-                    if name and name.lower() not in source_col_set:
-                        unknown_pk.append(f"{stream}.{name}")
-
     gates: list[dict[str, Any]] = []
-    sync_issues: list[str] = []
-    if sync in {"scd2", "mirror"}:
-        if multi_stream:
-            sync_issues.append(
-                f"{sync.upper()} is not supported for multi-stream transfers"
-            )
-        elif not dest:
-            sync_issues.append(
-                f"{sync.upper()} requires a SQL table destination"
-            )
-        elif dest not in _SQL_HISTORY_SYNC_DESTS:
-            sync_issues.append(
-                f"{sync.upper()} requires a SQL table destination (not '{dest}')"
-            )
-    if sync == "cdc":
-        if kind in {"file", "cloud"}:
-            sync_issues.append("CDC requires a database source (not file/cloud)")
-        elif src and src not in _CDC_CAPABLE_SOURCES:
-            sync_issues.append(
-                f"CDC is not supported for source type '{src}'"
-            )
-    if missing_cursor:
-        sync_issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
-    if missing_primary_key:
-        sync_issues.append(
-            f"Missing primary key for {', '.join(missing_primary_key[:5])}"
+    gates.append(
+        build_sync_contract_gate(
+            contracts,
+            sync=sync,
+            validation=validation,
+            dest=dest,
+            src=src,
+            kind=kind,
+            source_columns=source_columns,
+            pass_status=GateStatus.PASS.value,
+            block_status=GateStatus.BLOCK.value,
         )
-    if unknown_cursor:
-        sync_issues.append(
-            f"Cursor field not in source schema: {', '.join(unknown_cursor[:5])}"
-        )
-    if unknown_pk:
-        sync_issues.append(
-            f"Primary key not in source schema: {', '.join(unknown_pk[:5])}"
-        )
-
-    if sync_issues:
-        gates.append(
-            {
-                "id": "g9_sync_contract",
-                "status": GateStatus.BLOCK.value,
-                "message": "Sync mode contract incomplete",
-                "duration_ms": 0,
-                "details": {"issues": sync_issues, "sync_mode": sync},
-            }
-        )
-    else:
-        gates.append(
-            {
-                "id": "g9_sync_contract",
-                "status": GateStatus.PASS.value,
-                "message": f"Sync contract valid for {sync.replace('_', ' ')}",
-                "duration_ms": 0,
-                "details": {
-                    "sync_mode": sync,
-                    "streams": len(contracts),
-                    "requires_cursor": requires_cursor,
-                    "requires_primary_key": requires_primary_key,
-                },
-            }
-        )
+    )
 
     schema_issues: list[str] = []
     allowed_schema = {
@@ -1234,6 +1115,19 @@ def run_file_preflight(
     # Destination-side collision probe: an append into a table that already
     # enforces this key is a deterministic write abort, so it must be a Validate
     # blocker rather than a duplicate-key error after Execute starts.
+    # The rows this run will read. An incremental append past a watermark only
+    # writes the delta, so the collision probe must judge the delta — probing
+    # the whole table refused every run after the first, on every engine.
+    read_scope = _resolve_read_scope(
+        sync_mode=sync_mode,
+        stream_contracts=stream_contracts,
+        source_format=source_format,
+        source_config=source_config,
+        source_table=source_table,
+        destination_db_type=destination_db_type,
+        destination_config=destination_config,
+        destination_table=destination_table,
+    )
     destination_collision = probe_append_key_collisions(
         mappings=mappings,
         source_columns=columns,
@@ -1251,6 +1145,9 @@ def run_file_preflight(
         stream_contracts=stream_contracts,
         source_table=source_table,
         resume=resume,
+        incremental_cursor_column=read_scope.cursor_column,
+        incremental_watermark=read_scope.watermark,
+        incremental_tiebreak_column=read_scope.primary_key,
     )
 
     ctx = FilePreflightContext(
