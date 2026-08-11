@@ -169,6 +169,7 @@ from services.checkpoint_service import (
     Checkpoint,
     CheckpointService,
 )
+from src.transfer.resume_state import resolve_resume_checkpoint
 
 logger = logging.getLogger("dataflow.transfer")
 
@@ -323,6 +324,7 @@ def _enforce_ddl_identity(
     dest_db: str,
     approved_ddl_identity_hash: str = "",
     skip_preflight: bool = False,
+    preflight_mappings: list | None = None,
 ) -> str | None:
     """Module 12 / GA — fail closed when Map→DDL fingerprint drifts after Validate.
 
@@ -337,15 +339,26 @@ def _enforce_ddl_identity(
     UI Validate→Execute (``skip_preflight=False``) still requires a stamped hash
     from preflight proof or ``approved_ddl_identity_hash``. When a hash is
     present, drift vs current mappings is always refused.
+
+    A fingerprint is only meaningful against the mapping set it was taken over.
+    The operator's hash (from Validate) is checked against the operator contract
+    rows; Execute's *own* preflight hash is checked against the rows that
+    preflight ran on. Crossing them refused every UI job whose destination
+    catalog spells a bound column differently from the Map stamp.
     """
     has_maps = bool(mappings)
-    approved = ""
-    if pf:
-        approved = ((pf.get("proof_bundle") or {}).get("ddl_identity") or {}).get(
-            "ddl_identity_hash"
-        ) or ""
-    if not approved:
-        approved = (approved_ddl_identity_hash or "").strip()
+    operator_approved = (approved_ddl_identity_hash or "").strip()
+    approved = operator_approved
+    approved_columns: list[dict] = []
+    checked = mappings
+    if not approved and pf:
+        stamp = (pf.get("proof_bundle") or {}).get("ddl_identity") or {}
+        approved = stamp.get("ddl_identity_hash") or ""
+        approved_columns = [
+            c for c in (stamp.get("columns") or []) if isinstance(c, dict)
+        ]
+        if preflight_mappings is not None:
+            checked = preflight_mappings
 
     if not approved:
         if has_maps and skip_preflight:
@@ -366,7 +379,12 @@ def _enforce_ddl_identity(
     try:
         from services.decision_kernel import DdlIdentityError, assert_ddl_identity
 
-        assert_ddl_identity(str(approved), mappings, dest_db=dest_db or "")
+        assert_ddl_identity(
+            str(approved),
+            checked,
+            dest_db=dest_db or "",
+            approved_columns=approved_columns,
+        )
     except DdlIdentityError as exc:
         return str(exc)
     except Exception as exc:  # pragma: no cover — never invent soft-pass on check crash
@@ -380,6 +398,27 @@ def _request_decision_artifact_payload(request) -> dict | None:
     if isinstance(raw, dict) and raw:
         return raw
     return None
+
+
+def _operator_contract_maps(request, mappings: list) -> list:
+    """Mappings an operator-stamped artifact/fingerprint was hashed over.
+
+    Validate hashes the Map rows the operator approved (``request.mappings``).
+    Execute re-derives its own set (``_auto_map`` → enrich → auto-propagate →
+    additive stamps), so hashing the derived set compared a stamp against
+    facts the operator never saw: an untouched Map came back as "Decision
+    Artifact DDL identity diverged from current Map". Whenever the caller
+    supplies a stamp, it must be checked against the contract it was taken
+    over; only an unstamped run falls back to the derived set.
+    """
+    supplied = bool(
+        str(getattr(request, "approved_ddl_identity_hash", "") or "").strip()
+        or str(getattr(request, "approved_decision_artifact_hash", "") or "").strip()
+        or _request_decision_artifact_payload(request)
+    )
+    if not supplied:
+        return mappings
+    return list(getattr(request, "mappings", None) or []) or mappings
 
 
 def _enforce_decision_artifact(
@@ -609,6 +648,60 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
     )
 
 
+def _authoritative_source_schema(
+    source: EndpointConfig,
+    schema: dict[str, str],
+    columns: list[str] | None = None,
+) -> dict[str, str]:
+    """Merge the source's declared types over the reader's decoded shape.
+
+    The reader names the Python value it decoded, so a MySQL ``CHAR(36)`` is
+    reported ``VARCHAR``. Mapping ran off that shape while the coercion
+    validator read the declaration, so create-new invented ``TEXT`` and the same
+    engine then blocked its own invent as a ``CHAR(36) → TEXT`` fidelity
+    collapse. Map, Validate and the writer must read one schema.
+    """
+    try:
+        from services.source_schema_authority import (
+            endpoint_source_column_types,
+            reconcile_source_types,
+        )
+
+        live = endpoint_source_column_types(source)
+        if not live:
+            return _rekey_to_read_columns(schema, columns)
+        merged, _drift = reconcile_source_types(schema, live)
+        return _rekey_to_read_columns(merged, columns)
+    except Exception as exc:
+        logger.debug("source schema authority merge failed: %s", exc, exc_info=exc)
+        return schema
+
+
+def _rekey_to_read_columns(
+    schema: dict[str, str], columns: list[str] | None
+) -> dict[str, str]:
+    """Re-key declared types onto the spelling the reader gave the rows.
+
+    Oracle/DB2/Snowflake introspection reports the folded catalog name
+    (``AMOUNT``) while the same read hands rows back as ``amount``. Every
+    consumer keyed on the row's own column name then missed the declaration and
+    fell back to a sampled guess — ``NUMBER(12,2)`` money was scored as
+    ``DECIMAL(8,4)``. Only an unambiguous single fold match is renamed.
+    """
+    if not schema or not columns:
+        return schema
+    out = dict(schema)
+    for col in columns:
+        name = str(col)
+        if name in out:
+            continue
+        folded = name.casefold()
+        hits = [k for k in out if str(k).casefold() == folded]
+        if len(hits) == 1:
+            out[name] = out.pop(hits[0])
+    return out
+
+
 def _source_nullability_probe(source: EndpointConfig) -> dict[str, bool]:
     """Real NOT NULL facts for a database source.
 
@@ -707,9 +800,16 @@ def _destination_schema_probe(
         # stale shape. Append/upsert keep live nullability for G3 contracts.
         if is_overwrite_sync(sync_mode):
             extra["schema_nullability"] = {}
+            extra["schema_defaults"] = {}
+            extra["identity_columns"] = []
+            extra["generated_columns"] = []
             destination.extra = extra
             return {}, exists
         extra["schema_nullability"] = nullability
+        # Who fills a required column when the mapping does not (G14).
+        extra["schema_defaults"] = dict(info.get("schema_defaults") or {})
+        extra["identity_columns"] = list(info.get("identity_columns") or [])
+        extra["generated_columns"] = list(info.get("generated_columns") or [])
         destination.extra = extra
         return schema, exists
     except Exception as exc:
@@ -724,11 +824,24 @@ def _destination_schema_probe(
             "schema_probe_error": str(exc)[:500],
             "schema_probe_message": str(exc)[:500],
             "schema_nullability": {},
+            "schema_defaults": {},
+            "identity_columns": [],
+            "generated_columns": [],
             "primary_key_columns": [],
             "unique_keys": [],
             "foreign_keys": [],
         }
         return {}, None
+
+
+def _destination_filler_metadata(extra: dict[str, Any] | None) -> dict[str, Any]:
+    """Catalog facts about who fills a destination column when no mapping does (G14)."""
+    meta = dict(extra or {})
+    return {
+        "destination_column_defaults": dict(meta.get("schema_defaults") or {}),
+        "destination_identity_columns": list(meta.get("identity_columns") or []),
+        "destination_generated_columns": list(meta.get("generated_columns") or []),
+    }
 
 
 def _preflight_sample_rows(records: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
@@ -862,6 +975,7 @@ def _execute_preflight_parity_kwargs(
         "destination_pk_columns": pk_cols,
         "destination_unique_keys": unique_keys,
         "destination_foreign_keys": foreign_keys,
+        "destination_config": dest_meta.get("_probe_cfg") or None,
         "contract_primary_key": contract_pk,
         "stream_contracts": stream_contracts,
         "privilege_probe": privilege_probe or None,
@@ -1077,213 +1191,14 @@ def _apply_post_load_transforms(request: Any, dest_summary: dict[str, Any]) -> N
         }
 
 
-def _persist_checkpoint_quarantine_delta(
-    job_id: str,
-    checkpoint: dict[str, Any] | None,
-    *,
-    request: Any = None,
-    last_persisted: list[int],
-) -> None:
-    """Persist new rejected rows from a buffered checkpoint before continuing.
+# Quarantine durability + rollback plan attachment live in ``job_quarantine``;
+# re-exported for the historical ``engine`` import surface.
+from .job_quarantine import (  # noqa: E402,F401 — re-export
+    _attach_job_rollback_plan,
+    _persist_checkpoint_quarantine_delta,
+    _persist_job_quarantine,
+)
 
-    Stream path already fail-closes per batch. Buffered writers must not wait
-    until terminal status — crash mid-write must not lose quarantine durability.
-    ``last_persisted`` is a single-element list holding the count already written.
-    """
-    details = list((checkpoint or {}).get("rejected_details") or [])
-    if not details:
-        return
-    prev = int(last_persisted[0] or 0)
-    if len(details) <= prev:
-        return
-    new_details = details[prev:]
-    try:
-        from services.quarantine_dlq import persist_rejected_rows
-
-        persist_rejected_rows(
-            job_id=job_id,
-            rejected_details=new_details,
-            workspace_id=str(getattr(request, "workspace_id", "") or "")
-            if request
-            else "",
-            source="buffered_checkpoint",
-            connector=str(
-                getattr(getattr(request, "destination", None), "format", "")
-                or getattr(getattr(request, "destination", None), "kind", "")
-                or ""
-            )
-            if request
-            else "",
-        )
-        last_persisted[0] = len(details)
-        if isinstance(checkpoint, dict):
-            checkpoint["quarantine_dlq_persisted_count"] = len(details)
-    except Exception as exc:
-        raise RuntimeError(
-            "Quarantine DLQ persist failed at buffered checkpoint — refuse to "
-            f"continue (rows cannot disappear): {exc}"
-        ) from exc
-
-
-def _persist_job_quarantine(
-    job_id: str,
-    dest_summary: dict[str, Any],
-    request: Any = None,
-    *,
-    already_persisted: list[int] | None = None,
-) -> None:
-    """Durable DLQ write for rejected rows — fail closed if control-plane persist fails.
-
-    Writes control-plane JSONL/Mongo **and** (when supported) a destination
-    ``{table}_df_quarantine`` table so operators can query/promote with SQL.
-
-    Module 5: never complete as success/quarantine-ok when rejected rows exist
-    but control-plane DLQ is not durable (replay would find nothing).
-
-    When checkpoint/stream already persisted a prefix of ``rejected_details``,
-    only the delta is appended to the control-plane DLQ (no duplicate rows).
-    Destination quarantine table is still written once here (not mid-stream).
-    """
-    details = list(dest_summary.get("rejected_details") or [])
-    if not details:
-        dest_summary["quarantine_durable"] = True
-        return
-    from services.quarantine_dlq import (
-        is_contract_skip_detail,
-        persist_rejected_rows,
-        replay_quarantine_details,
-    )
-
-    skip_n = sum(1 for d in details if is_contract_skip_detail(d))
-    replay_all = replay_quarantine_details(details)
-    dest_summary["rows_skipped_contract"] = skip_n
-    dest_summary["rows_quarantined_replay"] = len(replay_all)
-    dest_summary["rejected_details_total"] = len(details)
-    dest_summary["rejected_details_truncated"] = len(details) > 2000
-    already = int(
-        (already_persisted[0] if already_persisted else None)
-        or dest_summary.get("quarantine_dlq_persisted_count")
-        or 0
-    )
-    already = max(0, min(already, len(details)))
-    delta = details[already:]
-    if not replay_all:
-        # SKIP_ROW / audit-skip only — persist skip_audit (not replay), then ok.
-        try:
-            if delta:
-                persist_rejected_rows(
-                    job_id=job_id,
-                    rejected_details=delta,
-                    workspace_id=str(getattr(request, "workspace_id", "") or "")
-                    if request
-                    else "",
-                    source="universal_engine",
-                    connector=str(
-                        getattr(getattr(request, "destination", None), "format", "")
-                        or getattr(getattr(request, "destination", None), "kind", "")
-                        or ""
-                    )
-                    if request
-                    else "",
-                )
-            dest_summary["quarantine_durable"] = True
-            dest_summary["quarantine_dlq_persisted_count"] = len(details)
-            if already_persisted is not None:
-                already_persisted[0] = len(details)
-        except Exception as exc:
-            dest_summary["quarantine_skip_audit_error"] = str(exc)[:300]
-            # Replay not required for skip-only; still surface audit loss.
-            dest_summary["quarantine_durable"] = True
-            dest_summary["quarantine_dlq_persisted_count"] = already
-        return
-    try:
-        if delta:
-            persist_rejected_rows(
-                job_id=job_id,
-                rejected_details=delta,
-                workspace_id=str(getattr(request, "workspace_id", "") or "")
-                if request
-                else "",
-                source="universal_engine",
-                connector=str(
-                    getattr(getattr(request, "destination", None), "format", "")
-                    or getattr(getattr(request, "destination", None), "kind", "")
-                    or ""
-                )
-                if request
-                else "",
-            )
-        dest_summary["quarantine_dlq_persisted_count"] = len(details)
-        if already_persisted is not None:
-            already_persisted[0] = len(details)
-    except Exception as exc:
-        dest_summary["quarantine_dlq_error"] = str(exc)[:300]
-        dest_summary["quarantine_durable"] = False
-    else:
-        dest_summary["quarantine_durable"] = True
-
-    # Destination-side DLQ table (SQL sinks). Failures are surfaced — never silent.
-    # Control-plane durability remains the fail-closed authority for Module 5.
-    # Skip when a prior finalize already wrote the dest quarantine for this job.
-    # SKIP_ROW audit skips are excluded — not replay holdouts.
-    if (
-        request is not None
-        and getattr(request, "destination", None) is not None
-        and not dest_summary.get("dest_quarantine_rows")
-        and replay_all
-    ):
-        try:
-            from services.dest_quarantine import write_dest_quarantine
-
-            dest_result = write_dest_quarantine(
-                request.destination,
-                replay_all,
-                job_id=job_id,
-            )
-            dest_summary["dest_quarantine"] = dest_result
-            if dest_result.get("ok") and not dest_result.get("skipped"):
-                dest_summary["dest_quarantine_table"] = dest_result.get("table")
-                dest_summary["dest_quarantine_rows"] = dest_result.get("rows_written")
-        except Exception as exc:
-            dest_summary["dest_quarantine_error"] = str(exc)[:300]
-            dest_summary.setdefault(
-                "dest_quarantine", {"ok": False, "error": str(exc)[:300]}
-            )
-
-    from services.quarantine_dlq import assert_quarantine_durable_or_raise
-
-    assert_quarantine_durable_or_raise(dest_summary)
-
-
-def _attach_job_rollback_plan(
-    job_id: str, dest_summary: dict[str, Any], request: Any = None
-) -> None:
-    """Module 6: stamp signed rollback plan onto destination_summary."""
-    try:
-        from services.migration_rollback import attach_rollback_plan
-
-        dest = getattr(request, "destination", None) if request is not None else None
-        attach_rollback_plan(
-            dest_summary,
-            job_id=job_id,
-            sync_mode=str(getattr(request, "sync_mode", "") or "") if request else "",
-            destination_table=str(
-                dest_summary.get("table")
-                or dest_summary.get("collection")
-                or getattr(dest, "table", "")
-                or getattr(dest, "collection", "")
-                or ""
-            ),
-            dest_type=str(
-                getattr(dest, "format", "") or getattr(dest, "kind", "") or ""
-            ),
-        )
-    except Exception as rb_exc:
-        logger.warning(
-            "rollback plan attach failed (plan stamp only): %s",
-            rb_exc,
-            exc_info=rb_exc,
-        )
 
 
 _CDC_JOB_FIELDS = (
@@ -1657,6 +1572,8 @@ def _auto_map(
             # Property 2: auto-derived identity maps must satisfy create-new
             # gates — stamp CREATE authority so Kernel invents target_type
             # instead of blocking with "lack Map target_type under partial Studio".
+            from services.column_case import column_type_or_none
+
             mappings = default_mappings(columns)
             for m in mappings:
                 if not isinstance(m, dict):
@@ -1665,7 +1582,13 @@ def _auto_map(
                 m.setdefault("assignment_strategy", "create_compatible_new")
                 src_name = str(m.get("source") or "")
                 if src_name and not str(m.get("source_type") or "").strip():
-                    m["source_type"] = schema.get(src_name, "TEXT")
+                    # Leave blank rather than stamping "TEXT" for a column the
+                    # introspected schema does not describe: a wrong declared
+                    # source type outranks sample evidence at invent and lands
+                    # the whole table as text.
+                    declared = column_type_or_none(schema, src_name)
+                    if declared:
+                        m["source_type"] = declared
         else:
             target_schema, dest_exists = _destination_schema_probe(
                 request.destination,
@@ -1711,6 +1634,7 @@ def _auto_map(
                         use_llm=False,
                         schema_policy=request.schema_policy,
                         destination_db_type=(request.destination.format or "").lower(),
+                        source_db_type=(request.source.format or "").lower(),
                         destination_table_exists=dest_exists,
                         source_types_authoritative=source_types_are_authoritative(
                             request.source.kind or "",
@@ -1798,6 +1722,13 @@ def _auto_map(
                         validation_mode=request.validation_mode,
                         use_llm=False,
                         schema_policy=request.schema_policy,
+                        # Without the dialect the fidelity verdict is judged in a
+                        # vacuum: DECIMAL→TEXT reads as loss, when TEXT is the
+                        # exact-digit carrier our own DDL picks on SQLite. Every
+                        # existing-destination route shares this call.
+                        destination_db_type=(request.destination.format or "").lower(),
+                        source_db_type=(request.source.format or "").lower(),
+                        destination_table_exists=dest_exists,
                         source_types_authoritative=source_types_are_authoritative(
                             request.source.kind or "",
                             request.source.format or "",
@@ -1999,7 +1930,16 @@ class UniversalTransferEngine:
             rollback_uncommitted_auto_creates,
         )
 
-        with bind_auto_create_job(job_id):
+        from services.source_engine_scope import bind_source_engine
+
+        # Resolve first: a connector_id reference carries the engine id that
+        # create-new invention needs, and an inline format may be empty.
+        self._resolve_saved_connectors(request)
+        # Create-new invention needs the source engine to keep Unicode polarity
+        # (PostgreSQL VARCHAR → SQL Server NVARCHAR, not code-page VARCHAR).
+        with bind_auto_create_job(job_id), bind_source_engine(
+            request.source.format or ""
+        ):
             result = self._execute_tracked_inner(request, job_id, resume=resume)
         try:
             written = int(
@@ -2042,6 +1982,21 @@ class UniversalTransferEngine:
                         "status": "pending",
                         "message": "Execute started (job shell)",
                     }
+                )
+            elif resume:
+                # Resume is the one sanctioned exit from a terminal status, and
+                # it belongs here rather than only in the HTTP router: every
+                # resume caller (fleet worker, scheduler retry, CLI) otherwise
+                # aborts at its first checkpoint save, which the job store
+                # rejects as a terminal-status regression — after the writer has
+                # already committed rows.
+                mongo_boot.clear_job_cancel(job_id)
+                mongo_boot.update_job_status(
+                    job_id,
+                    "running",
+                    phase="resuming",
+                    message="Resume from last committed checkpoint",
+                    allow_terminal_exit=True,
                 )
         except Exception:
             logger.debug("job shell bootstrap skipped for %s", job_id, exc_info=True)
@@ -2257,57 +2212,18 @@ class UniversalTransferEngine:
     ) -> TransferResult:
         mongo = get_mongodb_service()
         checkpoint_service = CheckpointService(mongo)
-        checkpoint = None
         if resume:
-            try:
-                checkpoint = checkpoint_service.load(job_id)
-            except Exception as exc:
-                logger.warning("resume checkpoint load failed: %s", exc, exc_info=exc)
-                checkpoint = None
-            # Prefer job.records_processed when the checkpoint blob was cleared
-            # after a completed partial wave (Studio Resume / multi-batch upsert).
-            prior_rows = 0
-            if not _checkpoint_has_progress(checkpoint):
-                try:
-                    job_doc = mongo.get_job(job_id) or {}
-                    prior_rows = int(job_doc.get("records_processed") or 0)
-                except Exception:
-                    prior_rows = 0
-                if prior_rows > 0:
-                    checkpoint = Checkpoint(
-                        job_id=job_id,
-                        rows_processed=prior_rows,
-                        offset=prior_rows,
-                    )
-            if not _checkpoint_has_progress(checkpoint):
-                # Module 14 — insert/append resume-from-zero silently duplicates.
-                # Idempotent modes may restart from zero when control-plane lost
-                # the checkpoint. Contract SSOT owns the refuse/allow decision.
-                contract = resolve_sync_contract(request.stream_contracts)
-                sync = resolve_effective_sync_mode(
+            contract = resolve_sync_contract(request.stream_contracts)
+            checkpoint = resolve_resume_checkpoint(
+                job_id=job_id,
+                mongo=mongo,
+                checkpoint_service=checkpoint_service,
+                has_progress=_checkpoint_has_progress,
+                sync_mode=resolve_effective_sync_mode(
                     request.sync_mode,
                     contract.sync_mode if contract else None,
-                )
-                from services.execution_engine_contract import (
-                    ExecutionContractError,
-                    assert_resume_allowed,
-                )
-
-                try:
-                    decision = assert_resume_allowed(
-                        resume_requested=True,
-                        checkpoint_has_progress=False,
-                        sync_mode=sync,
-                        rows_committed=prior_rows,
-                    )
-                except ExecutionContractError as exc:
-                    raise ValueError(str(exc)) from exc
-                logger.warning(
-                    "resume job=%s without durable checkpoint — %s",
-                    job_id,
-                    decision.get("reason"),
-                )
-                checkpoint = Checkpoint(job_id=job_id)
+                ),
+            )
         else:
             checkpoint = Checkpoint(job_id=job_id)
 
@@ -2438,6 +2354,7 @@ class UniversalTransferEngine:
                     max_attempts=3, base_delay_seconds=0.5, max_delay_seconds=5.0
                 ),
             )
+            schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
             records = _apply_priority_and_limit(
@@ -2615,6 +2532,7 @@ class UniversalTransferEngine:
                     destination_column_nullability=(
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
+                    **_destination_filler_metadata(request.destination.extra),
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -2634,6 +2552,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    resume=resume,
                     **parity,
                 )
                 pf = apply_policy_gates(
@@ -2679,15 +2598,12 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            identity_maps = mappings
+            # A stamped hash/artifact is always checked against the operator
+            # Map contract it was taken over — never against post-enrich stamps.
+            identity_maps = _operator_contract_maps(request, mappings)
             approved_hash = str(
                 getattr(request, "approved_ddl_identity_hash", "") or ""
             )
-            # skip_preflight + stamped hash: identity is over the operator Map
-            # contract (request.mappings), not post-enrich stamps — Validate path
-            # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
-            if pf is None and approved_hash:
-                identity_maps = list(request.mappings or []) or mappings
             dest_db_fmt = str(getattr(request.destination, "format", None) or "")
             ddl_err = _enforce_ddl_identity(
                 pf,
@@ -2695,6 +2611,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
+                preflight_mappings=mappings,
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -2888,6 +2805,11 @@ class UniversalTransferEngine:
                 mappings=getattr(request, "mappings", None),
             )
 
+            # Reconciliation must weigh the destination against the whole source
+            # population, not the tail a resumed pass happens to write.
+            resume_full_records: list[dict] = []
+            resume_skipped_rows = 0
+
             if request.destination.kind == "database":
                 # Buffered path reloads the in-memory source; slice past committed
                 # rows so Resume does not re-write (or duplicate) progress. Still
@@ -2926,6 +2848,8 @@ class UniversalTransferEngine:
                                     "note": "checkpoint ahead of or equal to source size",
                                 },
                             )
+                        resume_full_records = records
+                        resume_skipped_rows = skip_n
                         records = records[skip_n:]
                         total_rows = len(records)
                         mongo.update_job_status(
@@ -3293,9 +3217,14 @@ class UniversalTransferEngine:
                         dest_summary.setdefault(
                             "primary_key_columns", list(conflict_columns)
                         )
+                if resume_skipped_rows and isinstance(dest_summary, dict):
+                    dest_summary["resumed_from"] = resume_skipped_rows
+                    dest_summary["resume_full_source_rows"] = len(resume_full_records)
                 recon = run_reconciliation(
                     endpoint=request.destination,
-                    records=records,
+                    # Full population, so the source digest and row ledger cover
+                    # what the destination actually holds after the resume.
+                    records=resume_full_records or records,
                     columns=columns,
                     rows_written=rows_written,
                     writer_checksum=dest_summary.get("checksum")
@@ -3568,6 +3497,7 @@ class UniversalTransferEngine:
             columns, schema, total_rows, sample_rows = peek_stream_source(
                 request.source
             )
+            schema = _authoritative_source_schema(request.source, schema, columns)
             if request.limit > 0:
                 total_rows = min(total_rows, request.limit)
             if total_rows == 0:
@@ -3646,6 +3576,7 @@ class UniversalTransferEngine:
                     destination_column_nullability=(
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
+                    **_destination_filler_metadata(request.destination.extra),
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -3665,6 +3596,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    resume=resume,
                     **parity,
                 )
                 pf = apply_policy_gates(
@@ -3710,15 +3642,12 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            identity_maps = mappings
+            # A stamped hash/artifact is always checked against the operator
+            # Map contract it was taken over — never against post-enrich stamps.
+            identity_maps = _operator_contract_maps(request, mappings)
             approved_hash = str(
                 getattr(request, "approved_ddl_identity_hash", "") or ""
             )
-            # skip_preflight + stamped hash: identity is over the operator Map
-            # contract (request.mappings), not post-enrich stamps — Validate path
-            # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
-            if pf is None and approved_hash:
-                identity_maps = list(request.mappings or []) or mappings
             dest_db_fmt = str(getattr(request.destination, "format", None) or "")
             ddl_err = _enforce_ddl_identity(
                 pf,
@@ -3726,6 +3655,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
+                preflight_mappings=mappings,
             )
             if ddl_err:
                 mongo.update_job_status(
@@ -4416,6 +4346,7 @@ class UniversalTransferEngine:
                     destination_column_nullability=(
                         (request.destination.extra or {}).get("schema_nullability") or {}
                     ),
+                    **_destination_filler_metadata(request.destination.extra),
                     destination_db_type=dst_fmt.lower(),
                     validation_mode=request.validation_mode,
                     source_table=(
@@ -4435,6 +4366,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    resume=resume,
                     **parity,
                 )
                 pf = apply_policy_gates(
@@ -4480,15 +4412,12 @@ class UniversalTransferEngine:
                         job_id=job_id,
                     )
 
-            identity_maps = mappings
+            # A stamped hash/artifact is always checked against the operator
+            # Map contract it was taken over — never against post-enrich stamps.
+            identity_maps = _operator_contract_maps(request, mappings)
             approved_hash = str(
                 getattr(request, "approved_ddl_identity_hash", "") or ""
             )
-            # skip_preflight + stamped hash: identity is over the operator Map
-            # contract (request.mappings), not post-enrich stamps — Validate path
-            # still uses enriched ``mappings`` when ``pf`` carries the fingerprint.
-            if pf is None and approved_hash:
-                identity_maps = list(request.mappings or []) or mappings
             dest_db_fmt = str(getattr(request.destination, "format", None) or "")
             ddl_err = _enforce_ddl_identity(
                 pf,
@@ -4496,6 +4425,7 @@ class UniversalTransferEngine:
                 dest_db=dest_db_fmt,
                 approved_ddl_identity_hash=approved_hash,
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
+                preflight_mappings=mappings,
             )
             if ddl_err:
                 mongo.update_job_status(

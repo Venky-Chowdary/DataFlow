@@ -199,5 +199,8 @@ def test_materialize_bare_logical_float_is_double_on_mysql():
     assert materialize_dest_ddl("mysql", "float") == ddl_type("mysql", LOGICAL_FLOAT)
     assert materialize_dest_ddl("mysql", "float") == DDL_TYPES["mysql"][LOGICAL_FLOAT]
     assert materialize_dest_ddl("mysql", "float").upper() == "DOUBLE"
-    # Explicit FLOAT32 carrier stays width-preserving on MySQL.
-    assert materialize_dest_ddl("mysql", "FLOAT") == "FLOAT"
+    # The single-precision carrier is spelled FLOAT32 (MySQL introspect emits
+    # it): a bare FLOAT stamp is ambiguous across engines — IEEE-64 on
+    # PostgreSQL/SQL Server/Snowflake — so it must not narrow to MySQL FLOAT.
+    assert materialize_dest_ddl("mysql", "FLOAT32") == "FLOAT"
+    assert materialize_dest_ddl("mysql", "FLOAT").upper() == "DOUBLE"

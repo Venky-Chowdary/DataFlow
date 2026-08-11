@@ -175,6 +175,8 @@ def read_table_cursor_batch(
     Optional ``cursor_primary_key`` enables lexicographic ``(cursor, pk)`` so
     rows sharing a timestamp watermark are not skipped forever.
     """
+    from services.keyset_pagination import split_cursor_bookmark
+
     del port
     account = normalize_account(host)
     schema = _snowflake_schema(schema)
@@ -206,10 +208,9 @@ def read_table_cursor_batch(
             )
             if cursor_after:
                 if pk_q:
-                    if "|" in str(cursor_after):
-                        cur_val, pk_val = str(cursor_after).split("|", 1)
-                    else:
-                        cur_val, pk_val = cursor_after, ""
+                    cur_val, pk_val = split_cursor_bookmark(
+                        cursor_after, has_tiebreak=True
+                    )
                     cur.execute(
                         f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                         f"WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
@@ -217,10 +218,11 @@ def read_table_cursor_batch(
                         (cur_val, pk_val, limit),
                     )
                 else:
+                    bare, _ = split_cursor_bookmark(cursor_after, has_tiebreak=False)
                     cur.execute(
                         f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                         f"WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s",
-                        (cursor_after, limit),
+                        (bare, limit),
                     )
             else:
                 if pk_q:

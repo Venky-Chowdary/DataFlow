@@ -10,7 +10,10 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
+from services.dest_precount import PRECOUNT_KEY
+from services.reconcile_coverage import WRITTEN_BATCH_KEYS
 from services.reconciliation import (
+    KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
     checksum_rows,
     read_target_sample,
@@ -95,10 +98,19 @@ def _compute_source_checksum(
 
 
 def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
-    """Return the ordered list of target column names used for reconciliation."""
+    """Return the ordered list of target column names used for reconciliation.
+
+    Declared omissions are excluded: they have no destination carrier, and
+    falling back to their source name asked the destination for a column that
+    was never created, which failed the read-back and reported Gate-8 as
+    unavailable on a write that had actually landed.
+    """
+    from services.mapping_constraints import write_mappings
+
     targets = list(dict.fromkeys(
         str(m.get("target") or m.get("source") or "")
-        for m in mappings if m.get("target") or m.get("source")
+        for m in write_mappings(mappings)
+        if m.get("target") or m.get("source")
     ))
     return targets or columns
 
@@ -176,6 +188,38 @@ def _source_key_values(
     return values
 
 
+def _as_count(value: Any) -> int:
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ladder_declined(report: dict[str, Any], rows: int, budget: int) -> dict[str, Any]:
+    """Record why L2/L4/L5 localization did not run, without weakening Gate-8.
+
+    L1 and the L3 full-population checksum are streaming and still apply; only
+    the in-memory localization layers are declined.
+    """
+    out = dict(report or {})
+    out["verification_ladder"] = {
+        "layers": {},
+        "passed": bool(out.get("passed")),
+        "assurance_level": str(out.get("assurance_level") or ""),
+        "population_proof": False,
+        "population_checksum_proof": bool(out.get("checksum_match")),
+        "skipped": True,
+        "reason": (
+            f"Population of {rows} rows exceeds VERIFICATION_LADDER_MAX_ROWS={budget}; "
+            "in-memory L2/L4/L5 localization declined before loading. "
+            "Gate-8 L1 row balance and L3 full-population checksum still apply."
+        ),
+        "localization": {},
+        "localization_summary": "",
+    }
+    return out
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -187,8 +231,10 @@ def _maybe_attach_verification_ladder(
     mappings: list[dict],
     validation_mode: str,
 ) -> dict[str, Any]:
-    """Property 5 — run L1–L5 when source+dest populations can be loaded."""
+    """Property 5 — run L1–L5 when source+dest populations fit the row budget."""
     from services.verification_ladder import (
+        MAX_LADDER_ROWS,
+        PopulationTooLarge,
         attach_ladder_to_reconcile_report,
         read_postgres_rows,
         read_sqlite_rows,
@@ -200,6 +246,17 @@ def _maybe_attach_verification_ladder(
     dest_type = resolve_driver_type(endpoint.format)
     if dest_type not in {"sqlite", "postgresql", "redshift"}:
         return report
+
+    # L2/L4/L5 localization is in-memory. Decide from the counts we already have
+    # rather than after both populations are resident: a 10M-row destination
+    # cost ~15 GB here before run_five_layer_verification could decline it.
+    known = max(
+        _as_count(report.get("source_rows")),
+        _as_count(report.get("target_rows")),
+        len(records or []),
+    )
+    if known > MAX_LADDER_ROWS:
+        return _ladder_declined(report, known, MAX_LADDER_ROWS)
     target_cols = _mapped_targets(mappings, columns) if mappings else list(columns or [])
     if not target_cols:
         return report
@@ -243,6 +300,8 @@ def _maybe_attach_verification_ladder(
                 connection_string=str(dest_cfg.get("connection_string") or ""),
                 ssl=bool(dest_cfg.get("ssl", False)),
             )
+    except PopulationTooLarge as exc:
+        return _ladder_declined(report, exc.rows_read, exc.budget)
     except Exception as exc:
         logging.getLogger(__name__).debug("ladder dest load failed: %s", exc)
         return report
@@ -272,6 +331,8 @@ def _maybe_attach_verification_ladder(
                     connection_string=str(src_cfg.get("connection_string") or ""),
                     ssl=bool(src_cfg.get("ssl", False)),
                 )
+        except PopulationTooLarge as exc:
+            return _ladder_declined(report, exc.rows_read, exc.budget)
         except Exception as exc:
             logging.getLogger(__name__).debug("ladder source load failed: %s", exc)
 
@@ -303,6 +364,131 @@ def _maybe_attach_verification_ladder(
     return attach_ladder_to_reconcile_report(report, ladder)
 
 
+def _identity_watermark_evidence(
+    *,
+    db_type: str,
+    cfg: dict[str, Any],
+    schema: str,
+    table: str,
+    pk_cols: list[str],
+) -> dict[str, Any]:
+    """Generator state for the destination keys after the write.
+
+    Row checksums cannot see this: a migration that carries explicit key values
+    leaves Postgres and Oracle generators at their pre-migration value, so the
+    first application insert after cutover collides on the primary key. Repair
+    is forward-only and opt-out via ``identity_watermark_repair``.
+    """
+    from services.identity_watermark import (
+        identity_watermark_supported,
+        verify_identity_watermark,
+    )
+
+    if not (table and pk_cols):
+        return {}
+    if not identity_watermark_supported(db_type):
+        return {
+            "supported": False,
+            "verified": False,
+            "reason": f"generator state is not readable on '{db_type}'",
+        }
+    repair = cfg.get("identity_watermark_repair")
+    evidence = verify_identity_watermark(
+        db_type,
+        cfg,
+        schema=schema or "",
+        table=str(table),
+        columns=pk_cols,
+        repair=True if repair is None else bool(repair),
+    )
+    evidence["supported"] = True
+    return evidence
+
+
+def _schema_state_evidence(
+    *,
+    source_endpoint: EndpointConfig | None,
+    db_type: str,
+    cfg: dict[str, Any],
+    schema: str,
+    table: str,
+) -> dict[str, Any]:
+    """Constraints, indexes, nullability and defaults, compared catalog to catalog.
+
+    A run can move every row and still leave the client a table with no primary
+    key, no unique constraint and no index. Both sides are read here on this
+    module's own connections, never from writer bookkeeping.
+    """
+    from .connector_capabilities import resolve_driver_type
+
+    if source_endpoint is None or source_endpoint.kind != "database" or not table:
+        return {}
+    src_cfg = resolve_connector_config(source_endpoint)
+    src_type = resolve_driver_type(
+        str(src_cfg.get("type") or source_endpoint.format or "")
+    ).lower()
+    src_table = str(source_endpoint.table or src_cfg.get("table") or "")
+    if not src_table:
+        return {}
+
+    from services.dialect_profiles import schema_from_cfg
+    from services.physical_state_diff import verify_physical_state
+
+    return verify_physical_state(
+        source_db_type=src_type,
+        source_cfg=src_cfg,
+        source_schema=str(schema_from_cfg(src_type, src_cfg) or ""),
+        source_table=src_table,
+        dest_db_type=db_type,
+        dest_cfg=cfg,
+        dest_schema=schema,
+        dest_table=table,
+    )
+
+
+def _source_foreign_keys(schema_state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Relationships the source guaranteed, from its own catalog read."""
+    rendered = ((schema_state.get("source") or {}).get("foreign_keys")) or []
+    keys: list[dict[str, Any]] = []
+    for item in rendered:
+        parts = str(item).split("->")
+        if len(parts) != 3:
+            continue
+        child, parent, parent_cols = parts
+        keys.append(
+            {
+                "constrained_columns": [c for c in child.split("+") if c],
+                "referred_table": parent,
+                "referred_columns": [c for c in parent_cols.split("+") if c],
+            }
+        )
+    return keys
+
+
+def _referential_integrity_evidence(
+    *,
+    db_type: str,
+    cfg: dict[str, Any],
+    schema: str,
+    table: str,
+    schema_state: dict[str, Any],
+) -> dict[str, Any]:
+    """Orphan proof for every source relationship the destination does not enforce."""
+    foreign_keys = _source_foreign_keys(schema_state)
+    if not foreign_keys:
+        return {}
+
+    from services.destination_ri_probe import verify_destination_referential_integrity
+
+    return verify_destination_referential_integrity(
+        db_type,
+        cfg,
+        schema=schema,
+        table=table,
+        foreign_keys=foreign_keys,
+    )
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -317,6 +503,8 @@ def run_reconciliation(
     source_endpoint: EndpointConfig | None = None,
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
+    # Destination facts a row checksum cannot prove (generator watermarks today).
+    physical_state: dict[str, Any] = {}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
         # Property 3 — carry source snapshot id onto the reconcile report /
@@ -338,11 +526,19 @@ def run_reconciliation(
             logging.getLogger(__name__).warning(
                 "verification ladder skipped: %s", exc, exc_info=exc
             )
+        if physical_state:
+            stamped["physical_state"] = dict(physical_state)
         return stamped
 
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
     coerced_null_rows = int(dest_summary.get("coerced_null_rows", 0) or 0)
     rows_skipped = int(dest_summary.get("rows_skipped", 0) or 0)
+    # A resumed pass reads and writes only the tail of the population, while the
+    # destination read-back is always full-table. Comparing the two directly
+    # reports a mismatch on data that is correct, so the resumed slice must be
+    # widened back to the whole population before anything is compared.
+    resumed_from = _as_count(dest_summary.get("resumed_from"))
+    resume_full_source_rows = _as_count(dest_summary.get("resume_full_source_rows"))
     # Coerced rows are KEPT (a cell became NULL); quarantine hold-outs are absent
     # from the destination. Skipped rows (e.g. stale CDC LSN) are not written.
     dropped_rows = max(rejected_rows - coerced_null_rows, 0)
@@ -353,7 +549,15 @@ def run_reconciliation(
         source_rows = source_row_count
     else:
         source_rows = len(records) if records else rows_written + dropped_rows + rows_skipped
+    if resume_full_source_rows:
+        source_rows = resume_full_source_rows
+    elif resumed_from:
+        source_rows += resumed_from
     expected_written = max(source_rows - dropped_rows - rows_skipped, 0)
+    # Destinations with no read-back are accounted from writer counts, so rows a
+    # previous pass already committed have to be added back or a correct resume
+    # reads as short delivery.
+    rows_written_accounted = rows_written + resumed_from
 
     if endpoint.kind != "database":
         # Object/file exports have no destination cell read-back. Writer checksum
@@ -441,18 +645,95 @@ def run_reconciliation(
             logging.getLogger(__name__).debug(
                 "Gate-8 identity resolve skipped: %s", exc, exc_info=exc
             )
-    source_checksum = _compute_source_checksum(
-        records,
-        columns,
-        mapping_dicts,
-        source_schema,
-        writer_checksum,
-        target_cols=target_cols,
-        dest_db_type=db_type,
-        dest_types=dest_types,
-        validation_mode=validation_mode,
-        destination_pk_columns=[str(c) for c in pk_cols if c] or None,
-    )
+    try:
+        identity_state = _identity_watermark_evidence(
+            db_type=db_type,
+            cfg=cfg,
+            schema=str(schema or ""),
+            table=str(table_name or ""),
+            pk_cols=[str(c) for c in pk_cols if c],
+        )
+        if identity_state:
+            physical_state["identity_watermark"] = identity_state
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "identity watermark verification skipped: %s", exc, exc_info=exc
+        )
+        physical_state["identity_watermark"] = {
+            "supported": True,
+            "verified": False,
+            "reason": f"probe failed: {exc}",
+        }
+
+    try:
+        schema_state = _schema_state_evidence(
+            source_endpoint=source_endpoint,
+            db_type=db_type,
+            cfg=cfg,
+            schema=str(schema or ""),
+            table=str(table_name or ""),
+        )
+        if schema_state:
+            physical_state["schema_objects"] = schema_state
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "physical schema comparison skipped: %s", exc, exc_info=exc
+        )
+        schema_state = {}
+        physical_state["schema_objects"] = {
+            "verified": False,
+            "reason": f"comparison failed: {exc}",
+        }
+
+    try:
+        ri_state = _referential_integrity_evidence(
+            db_type=db_type,
+            cfg=cfg,
+            schema=str(schema or ""),
+            table=str(table_name or ""),
+            schema_state=schema_state,
+        )
+        if ri_state:
+            physical_state["referential_integrity"] = ri_state
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "destination referential integrity probe skipped: %s", exc, exc_info=exc
+        )
+        physical_state["referential_integrity"] = {
+            "verified": False,
+            "reason": f"probe failed: {exc}",
+        }
+
+    # The writer digest of a resumed pass covers the tail it wrote, not the
+    # population. Recompute from the full source when the caller re-supplied it;
+    # otherwise leave it empty and decline the comparison further down rather
+    # than compare two different scopes.
+    source_checksum_scope_note = ""
+    if resumed_from and not (resume_full_source_rows and records):
+        source_checksum_scope_note = (
+            f"Resumed after {resumed_from:,} previously committed row(s): this pass "
+            "read only the remaining slice, so no source digest covering the whole "
+            "population is available to compare against the full-table destination "
+            "digest."
+        )
+
+    if source_checksum_scope_note:
+        source_checksum = ""
+    else:
+        source_checksum = _compute_source_checksum(
+            records,
+            columns,
+            mapping_dicts,
+            source_schema,
+            # A resumed writer digest covers the tail only; recompute from the
+            # full population the caller re-supplied.
+            "" if resumed_from else writer_checksum,
+            target_cols=target_cols,
+            dest_db_type=db_type,
+            dest_types=dest_types,
+            validation_mode=validation_mode,
+            destination_pk_columns=[str(c) for c in pk_cols if c] or None,
+        )
 
     # Mirror (inferred-delete) and SCD2 transfers already compute an active-row
     # checksum while applying history/soft deletes; use it directly so closed or
@@ -485,8 +766,14 @@ def run_reconciliation(
 
     # Request a real read-back; if the verifier is unavailable we will detect
     # the negative row count and surface a softer "writer only" result.
-    # Strict/maximum modes verify the whole target table; balanced samples 5000 rows.
-    checksum_limit = 0 if validation_mode in ("strict", "maximum") else 5000
+    # The target digest is always full-population. Balanced mode used to cap it
+    # at 5000 rows, which hashed an arbitrary 5000-row prefix and compared it
+    # against the full source digest — every balanced transfer above 5000 rows
+    # reported a checksum mismatch on data that was byte-identical. Validation
+    # mode governs fail-closed severity (`strict_checksum`), never the scope of
+    # the comparison; the digest streams through FingerprintAccumulator, which
+    # spills to disk, so full scope stays memory-bounded at any row count.
+    checksum_limit = 0
 
     from services.sync_cursor import is_overwrite_sync
 
@@ -499,6 +786,10 @@ def run_reconciliation(
         not is_overwrite_sync(sync_mode_early)
         and sync_mode_early.lower() not in {"full_refresh_mirror", "mirror", "scd2"}
     )
+    # Pre-write destination cardinality, stamped by the write adapter. Without
+    # it an append into a non-empty table has no cardinality proof at all.
+    raw_before = dest_summary.get(PRECOUNT_KEY)
+    rows_before = int(raw_before) if isinstance(raw_before, int) else None
     written_ids = [
         str(x)
         for x in (dest_summary.get("written_ids") or [])
@@ -546,6 +837,46 @@ def run_reconciliation(
     )
 
     strict_checksum = validation_mode in ("strict", "maximum")
+
+    if source_checksum_scope_note and target_rows >= 0:
+        # Resumed streaming pass: the destination digest covers the whole
+        # population, the source digest could only cover the resumed tail. Prove
+        # cardinality and say plainly that population fidelity is not proven —
+        # never compare two different populations and call the difference
+        # corruption.
+        from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+        from services.reconciliation import ReconciliationReport
+
+        expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)
+        balanced = target_rows == expected_rows or (
+            allow_extra_early and target_rows >= expected_rows
+        )
+        return _finalize(
+            ReconciliationReport(
+                passed=balanced,
+                source_rows=source_rows,
+                target_rows=target_rows,
+                source_checksum="",
+                target_checksum=target_checksum,
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                checksum_scope=WHOLE_TABLE_NOT_COMPARABLE,
+                message=(
+                    (
+                        f"Row count verified after resume: {target_rows:,} row(s) on the "
+                        f"destination for {source_rows:,} source row(s). "
+                        if balanced
+                        else (
+                            f"Row count mismatch after resume: expected {expected_rows:,} "
+                            f"row(s) on the destination, found {target_rows:,}. "
+                        )
+                    )
+                    + source_checksum_scope_note
+                    + " Re-run without resume for full_checksum population proof."
+                ),
+            ).to_dict()
+        )
 
     sample_compare = None
     if sample_records and table_name and target_cols:
@@ -671,7 +1002,7 @@ def run_reconciliation(
             sample_compare
             and sample_compare.get("passed")
             and int(sample_compare.get("compared") or 0) > 0
-            and rows_written == expected_written
+            and rows_written_accounted == expected_written
         ):
             return _finalize({
                 "passed": True,
@@ -684,7 +1015,7 @@ def run_reconciliation(
                     + ") — screening only, not population proof"
                 ),
                 "source_rows": source_rows,
-                "target_rows": rows_written,
+                "target_rows": rows_written_accounted,
                 "source_checksum": source_checksum,
                 "target_checksum": "",
                 "rejected_rows": rejected_rows,
@@ -709,7 +1040,7 @@ def run_reconciliation(
                 "rows_skipped": rows_skipped,
                 "sample_compare": sample_compare,
             })
-        if rows_written == expected_written:
+        if rows_written_accounted == expected_written:
             return _finalize({
                 "passed": True,
                 "message": (
@@ -719,7 +1050,7 @@ def run_reconciliation(
                     + " (read-back verifier not available for this destination)"
                 ),
                 "source_rows": source_rows,
-                "target_rows": rows_written,
+                "target_rows": rows_written_accounted,
                 "source_checksum": source_checksum,
                 "target_checksum": "",
                 "rejected_rows": rejected_rows,
@@ -729,7 +1060,7 @@ def run_reconciliation(
             })
         report = reconcile(
             source_rows=source_rows,
-            target_rows=rows_written,
+            target_rows=rows_written_accounted,
             source_checksum=source_checksum,
             target_checksum="",
             rejected_rows=rejected_rows,
@@ -741,7 +1072,7 @@ def run_reconciliation(
         return _finalize(report.to_dict())
 
     # Data loss signal: the target table holds fewer rows than we just wrote.
-    if target_rows < rows_written:
+    if target_rows < rows_written_accounted:
         report = reconcile(
             source_rows=source_rows,
             target_rows=target_rows,
@@ -762,6 +1093,41 @@ def run_reconciliation(
     allow_extra = not is_overwrite_sync(sync_mode)
     if sync_mode.lower() in {"full_refresh_mirror", "mirror", "scd2"}:
         allow_extra = False
+
+    # An incremental poll that reads nothing has nothing to reconcile: no batch
+    # was written, so there is no batch digest to compare, and the whole-table
+    # digest of a sink that already held rows never equals an empty source
+    # digest. Comparing them failed every quiet poll of every scheduled
+    # incremental sync — a red run for the normal outcome, which buries the runs
+    # that are actually broken. The proof of a no-op is that the destination did
+    # not move.
+    if (
+        allow_extra
+        and source_rows == 0
+        and int(rows_written or 0) == 0
+        and dropped_rows == 0
+        and (rows_before is None or target_rows == rows_before)
+    ):
+        unchanged = (
+            f"destination unchanged at {target_rows:,} row(s)"
+            if rows_before is not None
+            else f"destination holds {target_rows:,} row(s); pre-write count unknown"
+        )
+        return _finalize({
+            "passed": True,
+            "message": (
+                "No new source rows since the last watermark — nothing written, "
+                f"{unchanged}."
+            ),
+            "source_rows": 0,
+            "target_rows": target_rows,
+            "source_checksum": source_checksum,
+            "target_checksum": target_checksum,
+            "rejected_rows": rejected_rows,
+            "coerced_null_rows": coerced_null_rows,
+            "rows_skipped": rows_skipped,
+            "assurance_level": "no_op_destination_unchanged",
+        })
 
     # Streaming append/upsert soft-pass of extra dest rows without a stashed
     # sample cannot claim key-aligned proof (Airbyte/Fivetran honesty bar).
@@ -796,6 +1162,7 @@ def run_reconciliation(
     # the batch. Re-fingerprint destination WHERE pk IN (batch keys) while keeping
     # full-table cardinality for the operator report.
     expected_batch = max(source_rows - dropped_rows - rows_skipped, 0)
+    keyed_scope = ""
     # Upsert/append/quarantine-replay into a non-empty table: whole-table digests
     # are not comparable. Keyed fingerprint of written_ids proves the batch for
     # balanced and strict alike (strict_checksum only governs fail-closed severity
@@ -808,8 +1175,7 @@ def run_reconciliation(
         and source_checksum
         and target_checksum
         and source_checksum != target_checksum
-        and db_type
-        in {"sqlite", "postgresql", "redshift", "generic_sql", "mongodb"}
+        and str(db_type) in KEYED_READBACK_ENGINES
     ):
         _keyed_rows, keyed_checksum = verify_target(
             db_type,
@@ -826,6 +1192,7 @@ def run_reconciliation(
         )
         if keyed_checksum:
             target_checksum = keyed_checksum
+            keyed_scope = WRITTEN_BATCH_KEYS
 
     report = reconcile(
         source_rows=source_rows,
@@ -838,5 +1205,7 @@ def run_reconciliation(
         sample_compare=sample_compare,
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
+        target_rows_before=rows_before,
+        checksum_scope=keyed_scope,
     )
     return _finalize(report.to_dict())

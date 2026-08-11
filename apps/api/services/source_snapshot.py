@@ -193,6 +193,16 @@ def end_postgresql_snapshot(conn: Any | None, *, commit: bool = True) -> None:
             logger.warning("end_postgresql_snapshot close: %s", exc, exc_info=exc)
 
 
+#: Journal modes this module switched to WAL, restored when the snapshot ends.
+_SQLITE_PRIOR_JOURNAL_MODE: dict[int, str] = {}
+
+#: PRAGMA takes a bare keyword, so the restore value is checked against SQLite's
+#: fixed vocabulary rather than interpolated from whatever the file reported.
+_SQLITE_JOURNAL_MODES = frozenset(
+    {"delete", "truncate", "persist", "memory", "wal", "off"}
+)
+
+
 def begin_sqlite_snapshot(
     *,
     database: str = "",
@@ -213,6 +223,26 @@ def begin_sqlite_snapshot(
         raise ValueError("SQLite path is required for source snapshot")
     conn = sqlite3.connect(path, timeout=30)
     conn.isolation_level = None  # manual txn control
+    # A rollback-journal reader holds SHARED for the whole transaction, so the
+    # writer cannot take EXCLUSIVE at commit: a same-file source→destination job
+    # (mirror/SCD2 into a table beside the source) waited out the busy timeout
+    # and failed with "database is locked". WAL is SQLite's own answer to one
+    # writer alongside snapshot readers; the previous mode is restored on close.
+    prior_mode = ""
+    wal_enabled = False
+    try:
+        row = conn.execute("PRAGMA journal_mode").fetchone()
+        prior_mode = str(row[0]) if row else ""
+        if prior_mode.lower() != "wal":
+            row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            wal_enabled = bool(row) and str(row[0]).lower() == "wal"
+        else:
+            wal_enabled = True
+    except Exception as exc:
+        # Keep the snapshot; a concurrent same-file write will still block.
+        logger.warning("sqlite snapshot WAL enable failed: %s", exc, exc_info=exc)
+    if wal_enabled and prior_mode and prior_mode.lower() != "wal":
+        _SQLITE_PRIOR_JOURNAL_MODE[id(conn)] = prior_mode
     conn.execute("BEGIN")
     meta = {
         "engine": "sqlite",
@@ -221,6 +251,8 @@ def begin_sqlite_snapshot(
         "snapshot_lsn": "",
         "export_snapshot": "",
         "path": str(path),
+        "journal_mode": "wal" if wal_enabled else (prior_mode.lower() or "unknown"),
+        "prior_journal_mode": prior_mode.lower(),
         "note": (
             "All full-refresh source pages share this SQLite transaction snapshot."
         ),
@@ -231,6 +263,9 @@ def begin_sqlite_snapshot(
 def end_sqlite_snapshot(conn: Any | None, *, commit: bool = True) -> None:
     if conn is None:
         return
+    prior_mode = _SQLITE_PRIOR_JOURNAL_MODE.pop(id(conn), "")
+    if prior_mode.lower() not in _SQLITE_JOURNAL_MODES:
+        prior_mode = ""
     try:
         conn.execute("COMMIT" if commit else "ROLLBACK")
     except Exception as exc:
@@ -240,6 +275,18 @@ def end_sqlite_snapshot(conn: Any | None, *, commit: bool = True) -> None:
         except Exception as exc2:
             logger.warning("end_sqlite_snapshot rollback failed: %s", exc2, exc_info=exc2)
     finally:
+        if prior_mode:
+            # Best effort: leave the operator's database in the journal mode we
+            # found it in. A still-open reader keeps WAL, which is safe.
+            try:
+                conn.execute(f"PRAGMA journal_mode={prior_mode}")
+            except Exception as exc:
+                logger.warning(
+                    "end_sqlite_snapshot journal_mode restore to %s failed: %s",
+                    prior_mode,
+                    exc,
+                    exc_info=exc,
+                )
         try:
             conn.close()
         except Exception as exc:

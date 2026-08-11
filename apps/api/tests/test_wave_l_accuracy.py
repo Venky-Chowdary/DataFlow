@@ -29,17 +29,29 @@ def test_kafka_writer_resolves_logical_types_for_registry():
 
 
 def test_composite_cursor_compare_and_max():
+    """Composite bookmarks are written and compared in one canonical encoding.
+
+    Legacy pipe-joined bookmarks still compare, so a watermark persisted by an
+    earlier release keeps working after upgrade.
+    """
+    from services.keyset_pagination import KEYSET_SEP
     from services.sync_cursor import compare_cursor_values, max_cursor_value
 
     assert compare_cursor_values("2020-01-01|a", "2020-01-01|b") < 0
     assert compare_cursor_values("2020-01-02|a", "2020-01-01|z") > 0
+    assert (
+        compare_cursor_values(
+            f"2020-01-01{KEYSET_SEP}a", f"2020-01-01{KEYSET_SEP}b"
+        )
+        < 0
+    )
     best = max_cursor_value(
         [["2020-01-01", "b"], ["2020-01-01", "a"], ["2019-12-31", "z"]],
         ["updated_at", "id"],
         "updated_at",
         "id",
     )
-    assert best == "2020-01-01|b"
+    assert best == f"2020-01-01{KEYSET_SEP}b"
 
 
 def test_redis_scan_buffers_overflow_keys():

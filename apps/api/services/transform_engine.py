@@ -623,6 +623,12 @@ def _parse_integer(value: str) -> int | None:
 _STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
 
+#: Every token the write path can actually coerce to a boolean. A column typed
+#: BOOLEAN off ``Y``/``N`` samples is rejected here on every row ("Invalid
+#: boolean: 'Y'"), so any caller routing values through the boolean transform
+#: must first check the destination can hold the outcome.
+CANONICAL_BOOLEAN_TOKENS: frozenset[str] = _STRICT_BOOL_TRUE | _STRICT_BOOL_FALSE
+
 
 def _parse_boolean(value: str) -> bool | None:
     text = value.strip().lower()
@@ -632,6 +638,44 @@ def _parse_boolean(value: str) -> bool | None:
         return True
     if text in _STRICT_BOOL_FALSE:
         return False
+    return None
+
+
+def canonical_boolean_as_number(value: str) -> int | None:
+    """Canonical boolean wire → 1/0 for a numeric target, else ``None``.
+
+    Boolean-carrying sources (SQL Server ``BIT``, PostgreSQL ``BOOLEAN``, MySQL
+    ``TINYINT(1)``) serialize to ``"true"``/``"false"``, and engines without a
+    boolean type (Oracle before 23ai, DB2, most warehouses) receive them as
+    ``NUMBER(1)``/``SMALLINT``. That mapping is total and lossless, so refusing
+    it as ``Invalid integer`` blocked every boolean column on those routes. Only
+    the strict canonical wire converts — informal ``yes``/``on`` still refuses.
+    """
+    text = value.strip().lower()
+    if text in {"true", "t"}:
+        return 1
+    if text in {"false", "f"}:
+        return 0
+    return None
+
+
+def boolean_carrier_numeric_value(
+    value: object, precision: int | None, scale: int | None
+) -> int | None:
+    """1/0 when a boolean lands on an engine's boolean carrier, else ``None``.
+
+    Engines without a native boolean (Oracle, DB2) carry one as ``NUMBER(1)``,
+    so a ``BIT``/``BOOLEAN`` source arriving as ``"true"`` is in range there —
+    quarantining it as "decimal does not fit DECIMAL(1,0)" held out every
+    boolean column on those routes. Anything wider than a single integer digit
+    is a real numeric column and keeps refusing boolean wire.
+    """
+    if precision is None or int(precision) > 1 or int(scale or 0) != 0:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str):
+        return canonical_boolean_as_number(value)
     return None
 
 
@@ -885,6 +929,28 @@ def _samples_look_temporal(source_samples: list[str] | None) -> bool:
     return checked >= 2 and (hits / checked) >= 0.8
 
 
+_YEAR_COLUMN_NAMES = frozenset({"year", "fiscalyear", "calendaryear", "yr"})
+
+
+def _is_calendar_year_number(
+    source_col: str, src_logical: str, source_samples: list[str] | None
+) -> bool:
+    """True for a column that *holds a year number*, not merely one named "Year".
+
+    The name alone is not evidence. Spreadsheet exports routinely put a real
+    instant (``2019-01-01T00:00:00``) in a column called ``Year``; forcing the
+    integer transform there makes every row fail ``Invalid integer`` at Validate
+    with no remap that can clear it, because the declared pair is already
+    TIMESTAMP → TIMESTAMP. A temporal source type or temporal-looking samples
+    therefore veto the heuristic.
+    """
+    if re.sub(r"[^a-z0-9]", "", (source_col or "").lower()) not in _YEAR_COLUMN_NAMES:
+        return False
+    if src_logical in {"datetime", "date", "timestamp", "time"}:
+        return False
+    return not _samples_look_temporal(source_samples)
+
+
 def infer_transform_for_mapping(
     source_col: str,
     target_col: str,
@@ -946,8 +1012,7 @@ def infer_transform_for_mapping(
         if tgt == "datetime":
             # Calendar year number columns must stay integer (FSI "Year"), not
             # invent datetime coerce that then FAIL_JOBs on blank Excel cells.
-            _year_name = re.sub(r"[^a-z0-9]", "", (source_col or "").lower())
-            if _year_name in {"year", "fiscalyear", "calendaryear", "yr"}:
+            if _is_calendar_year_number(source_col, src, source_samples):
                 return "integer"
             # Never force a date cast on non-temporal VARCHAR (status → posted_date).
             # Let G3/G5 declare the type mismatch instead of lucky-parse corruption.
@@ -955,8 +1020,7 @@ def infer_transform_for_mapping(
                 return "datetime"
             return "none"
         if tgt == "date":
-            _year_name = re.sub(r"[^a-z0-9]", "", (source_col or "").lower())
-            if _year_name in {"year", "fiscalyear", "calendaryear", "yr"}:
+            if _is_calendar_year_number(source_col, src, source_samples):
                 return "integer"
             # Narrowing a datetime into a date-only column drops the time of day.
             # Only do it when the destination genuinely cannot hold a time;
@@ -1045,17 +1109,7 @@ def infer_transform_for_mapping(
     src_col = source_col.upper()
     # Calendar year number (FSI "Year", fiscal_year) is INTEGER — never invent
     # datetime coerce for a 4-digit year field (empty cells then FAIL_JOB).
-    src_name_compact = re.sub(r"[^a-z0-9]", "", (source_col or "").lower())
-    if src_name_compact in {"year", "fiscalyear", "calendaryear", "yr"} and src in {
-        "integer",
-        "bigint",
-        "decimal",
-        "float",
-        "string",
-        "text",
-        "unknown",
-        "",
-    }:
+    if _is_calendar_year_number(source_col, src, source_samples):
         if tgt in {"datetime", "timestamp", "timestamptz", "date"}:
             return "integer"
         if not tgt or tgt in {"string", "text", "unknown", "integer", "bigint"}:
@@ -1154,12 +1208,18 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
                 return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
 
     if transform == "decimal":
+        bool_as_number = canonical_boolean_as_number(text)
+        if bool_as_number is not None:
+            return Decimal(bool_as_number), None
         parsed = _parse_decimal(text)
         if parsed is None:
             return None, f"Invalid decimal: {text!r}"
         return parsed, None
 
     if transform == "integer":
+        bool_as_number = canonical_boolean_as_number(text)
+        if bool_as_number is not None:
+            return bool_as_number, None
         parsed_int = _parse_integer(text)
         if parsed_int is None:
             return None, f"Invalid integer: {text!r}"
@@ -1339,7 +1399,13 @@ def dry_run_sample(
     errors: list[str] = []
     source_idx = {h: i for i, h in enumerate(headers)}
 
+    from services.mapping_constraints import write_mappings
     from services.transform_resolver import resolve_transform
+
+    # A declared omission has no destination carrier, so there is no write-path
+    # transform to dry-run. Probing it reported the omission itself as a cast
+    # failure — the honest operator action was punished with a data error.
+    mappings = write_mappings(mappings)
 
     dest_types = {
         str(m.get("target")): str(m.get("target_type"))
@@ -1397,7 +1463,11 @@ def preview_quarantine_cells(
     coerce_count = 0
     ok_count = 0
 
+    from services.mapping_constraints import write_mappings
     from services.transform_resolver import resolve_transform
+
+    # Omitted columns are never written, so they have no cell to quarantine.
+    mappings = write_mappings(mappings)
 
     for m in mappings:
         src = m.get("source") or ""

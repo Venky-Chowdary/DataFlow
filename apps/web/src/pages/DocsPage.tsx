@@ -400,8 +400,8 @@ function TrustPillars() {
   const pillars = [
     {
       icon: "shield",
-      title: "Zero data loss",
-      desc: "Every field is tracked from source to target. Rejected rows are quarantined, not silently dropped.",
+      title: "No silent data loss",
+      desc: "Every field is tracked from source to target. Rejected rows are quarantined and surfaced, never dropped quietly — a run that cannot account for a row fails instead of reporting green.",
     },
     {
       icon: "key",

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -302,26 +301,24 @@ def test_should_retry_logic():
     assert runner._should_retry("completed_with_quarantine", attempt=0, max_retries=2) is False
 
 
-def test_finalize_run_retries_on_failure(temp_store, monkeypatch):
+def test_finalize_run_parks_a_durable_retry_on_failure(temp_store, monkeypatch):
     sched = _make(store, max_retries=1, retry_backoff_seconds=0)
-    monkeypatch.setattr(runner, "_job_doc", lambda jid: {"status": "failed", "error": "boom"})
-
-    dispatched = {}
-    fired = threading.Event()
-
-    def fake_dispatch(schedule_id, attempt=0):
-        dispatched["attempt"] = attempt
-        fired.set()
-        return "job-retry"
-
-    monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {"status": "failed", "error": "boom", "records_processed": 0},
+    )
 
     runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
-    assert fired.wait(2.0), "retry was not dispatched"
-    assert dispatched["attempt"] == 1
-    # An intermediate retry entry is recorded.
+
+    # The retry is store state, not an in-process timer, so it survives the
+    # restart that a rolling deploy performs between the two attempts.
     reloaded = store.get_schedule(sched.id)
+    assert reloaded.retry_attempt == 1
+    assert reloaded.retry_at is not None
+    assert reloaded.running is False
     assert any(r.get("retry_scheduled") for r in reloaded.run_history)
+    assert sched.id in {s.id for s in store.due_schedules()}
 
 
 def test_finalize_run_records_terminal_failure_without_retry(temp_store, monkeypatch):

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import math
-import pickle  # nosec B403
 import re
 import sys
 from collections import Counter
@@ -14,10 +13,20 @@ from pathlib import Path
 _model_cache = None
 
 
+def ml_baseline_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "packages"
+        / "ml"
+        / "models"
+        / "baseline.json"
+    )
+
+
 def ml_baseline_status() -> dict:
     """Operator-facing status for Map UI / Pilot — never silent about ML availability."""
     model = _load_ml_baseline()
-    path = Path(__file__).resolve().parents[3] / "packages" / "ml" / "models" / "baseline.pkl"
+    path = ml_baseline_path()
     return {
         "available": model is not None,
         "path": str(path),
@@ -32,28 +41,27 @@ def ml_baseline_status() -> dict:
 
 
 def _load_ml_baseline():
+    """Load the optional automap boost from a JSON vocabulary artifact.
+
+    Never a pickle: the boost is optional, so it must not be able to execute
+    code inside the transfer engine. A missing or malformed artifact degrades
+    to lexical + semantic + Hungarian mapping, it never fails a transfer.
+    """
     global _model_cache
     if _model_cache is not None:
         return _model_cache if _model_cache is not False else None
 
-    # Try to load the ML baseline model if it exists
     try:
-        model_path = Path(__file__).resolve().parents[3] / "packages" / "ml" / "models" / "baseline.pkl"
-        if model_path.exists():
-            # Adjust path so that baseline class can be loaded
-            pkg_path = str(Path(__file__).resolve().parents[3] / "packages")
-            if pkg_path not in sys.path:
-                sys.path.append(pkg_path)
-            # Ensure the picklable class is importable under a stable module path.
-            try:
-                import ml.baseline  # noqa: F401
-            except Exception:
-                pass
-            with model_path.open("rb") as f:
-                _model_cache = pickle.load(f)  # nosec B301
-                return _model_cache
+        from services.ml_baseline import load_baseline
+
+        model = load_baseline(ml_baseline_path())
+        if model is None:
+            _model_cache = False
+            return None
+        _model_cache = model
+        return _model_cache
     except Exception as exc:
-        # Cache negative result so a broken pickle does not spam every map_columns call.
+        # Cache negative result so a broken artifact does not spam every map_columns call.
         _model_cache = False
         logging.getLogger(__name__).warning(
             "ML baseline unavailable (%s); using lexical/semantic mapper only",
@@ -751,6 +759,24 @@ def _normalize(name: str) -> str:
     return re.sub(r"_+", "_", s).rstrip("_")
 
 
+def _exact_name_unambiguous(
+    source: str, target: str, target_columns: list[str]
+) -> bool:
+    """True when ``target`` is the only column whose name equals ``source``.
+
+    Score gap measures how close the runner-up scored. In a table holding a
+    family of similar names (``id`` / ``big_id`` / ``uid``) the runner-up stays
+    within the review band even when the winner is a literal name equality, so
+    a gap test alone marks re-runs of a table DataFlow itself created as
+    ambiguous forever. Name equality is only genuinely ambiguous when a second
+    destination column normalizes to the same name.
+    """
+    src_norm = _normalize(source)
+    if not src_norm or _normalize(target) != src_norm:
+        return False
+    return sum(1 for t in target_columns if _normalize(t) == src_norm) == 1
+
+
 def _expand_abbrev(token: str) -> str:
     return ABBREVIATIONS.get(token, token)
 
@@ -1095,11 +1121,24 @@ def _sample_consistency_boost(samples: list[str] | None, source_type: str, targe
     """Boost score when sample values parse cleanly for target logical type."""
     if not samples or len(samples) < 2:
         return 0.0
+    from services.decision_kernel import (
+        normalize_logical_type,
+        typed_cast_incompatible_with_text_sink,
+    )
     from services.transform_engine import apply_transform, infer_transform_for_mapping
 
     transform = infer_transform_for_mapping(
         "col", "col", source_type, target_type, source_samples=samples,
     )
+    if typed_cast_incompatible_with_text_sink(
+        transform, normalize_logical_type(target_type)
+    ):
+        # A text carrier stores the token verbatim, so scoring the samples
+        # through a typed cast measures a coercion the write never performs.
+        # Y/N inferred BOOLEAN parsed 0/2 here and demoted an exact-name match
+        # onto an existing TEXT column below the floor — Map then invented a
+        # BOOLEAN `<col>_text` beside the operator's own column.
+        return 0.0
     ok = 0
     checked = 0
     for raw in samples[:8]:
@@ -1597,6 +1636,11 @@ def map_columns(
             requires_review = True
             score = min(float(score), 0.84)
             reason = f"{reason} · lossy type pair"
+        elif reason.startswith("Exact name match") and _exact_name_unambiguous(
+            source, target, target_columns
+        ):
+            # Unique name equality with compatible types — nothing to review.
+            requires_review = False
         elif reason.startswith("Exact") and score_gap >= 0.08:
             # Decisive Exact with compatible types — review not required.
             requires_review = False
@@ -1843,6 +1887,10 @@ def map_columns(
             requires_review = True
             best_score = min(float(best_score), 0.84)
             best_reason = f"{best_reason} · lossy type pair"
+        elif best_target and _exact_name_unambiguous(
+            source, best_target, target_columns
+        ):
+            requires_review = False
         mappings.append(
             {
                 "source": source,
@@ -1879,8 +1927,10 @@ def _apply_create_new_risk_stamps(
     destination_db_type: str = "",
     *,
     source_samples: dict[str, list] | None = None,
+    dest_table_exists: bool | None = None,
 ) -> list[dict]:
     """Stamp create-new type risks without importing mapping_pipeline (cycle-safe)."""
+    from services.mapping_proof import mapping_fidelity
     from services.decimal_observe import (
         ieee_float_create_new_risk,
         observe_numeric_samples,
@@ -1935,6 +1985,24 @@ def _apply_create_new_risk_stamps(
             tgt = stamped or src
         if tgt and tgt != stamped:
             row["target_type"] = tgt
+            # The projected carrier just became the destination's physical DDL
+            # (``TIMESTAMPTZ`` → SQL Server ``DATETIMEOFFSET``). Any verdict
+            # stamped against the old spelling compared a source-dialect token
+            # to a foreign dialect, so it read offset-pinned → session-relative
+            # as a collapse. The calibration below reads ``fidelity``, so a
+            # stale verdict caps a lossless create-new under the G4 floor and
+            # demands a Risk Contract. Re-derive on the type that will run.
+            verdict = mapping_fidelity(
+                row,
+                destination_db_type=db,
+                dest_table_exists=dest_table_exists,
+            )
+            row["fidelity"] = verdict["verdict"]
+            row["fidelity_reason"] = verdict["reason"]
+            row["type_narrowing"] = verdict["type_narrowing"]
+            row["conversion_class"] = verdict.get("conversion_class")
+            row["invents_capacity"] = verdict.get("invents_capacity")
+            row["requires_risk_contract"] = verdict.get("requires_risk_contract")
         risks = assess_create_new_type_risk(
             src, tgt, destination_db_type=db, samples=col_samples
         )

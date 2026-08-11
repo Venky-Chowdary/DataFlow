@@ -10,6 +10,7 @@ OR/AND expansion produced by :func:`keyset_successor_predicate`.
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
 # Unit separator — stable for composite bookmarks (CDC + transfer).
@@ -66,6 +67,11 @@ def decode_keyset_bookmark(bookmark: str, *, expected_parts: int) -> list[str]:
         raise ValueError("expected_parts must be >= 1")
     raw = "" if bookmark is None else str(bookmark)
     if expected_parts == 1:
+        if KEYSET_SEP in raw:
+            raise ValueError(
+                "composite keyset bookmark arity mismatch: expected 1 part, "
+                f"got {raw.count(KEYSET_SEP) + 1}"
+            )
         return [raw]
     if KEYSET_SEP in raw:
         parts = raw.split(KEYSET_SEP)
@@ -83,12 +89,57 @@ def decode_keyset_bookmark(bookmark: str, *, expected_parts: int) -> list[str]:
     return parts
 
 
+def split_cursor_bookmark(
+    bookmark: str | None,
+    *,
+    has_tiebreak: bool,
+) -> tuple[str, str]:
+    """Split an incremental watermark into ``(cursor_value, tiebreak_value)``.
+
+    A composite watermark is only readable by a seek that orders on both the
+    cursor column and its tie-break column. Handed to a single-column seek it
+    would be bound whole against the cursor column's type, so the engine either
+    rejects the statement or compares against a value no row can hold — the poll
+    returns nothing and the sync silently stops advancing. Refuse instead.
+    """
+    raw = "" if bookmark is None else str(bookmark)
+    if not has_tiebreak:
+        if KEYSET_SEP in raw:
+            raise ValueError(
+                "composite watermark requires the tie-break column it was "
+                "written with; single-column cursor read cannot use it"
+            )
+        return raw, ""
+    parts = raw.split(KEYSET_SEP, 1)
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    if _LEGACY_PIPE_SEP in raw:
+        left, right = raw.split(_LEGACY_PIPE_SEP, 1)
+        return left, right
+    return raw, ""
+
+
+def _column_order_keys(values: list[str]) -> list[Any]:
+    """Sort keys that order ``values`` the way the source database orders them.
+
+    The seek predicate casts the bookmark back to the column type, so the page
+    maximum must be chosen in the column's own ordering. Picking it as text made
+    ``'99'`` the maximum of an integer page ending at ``200``: the next page
+    seeked from 99, re-read rows already transferred, and — because re-read rows
+    are charged against the same row budget — the scan ran out before the tail.
+    """
+    try:
+        return [Decimal(v) for v in values]
+    except (ArithmeticError, InvalidOperation, ValueError):
+        return list(values)
+
+
 def max_keyset_bookmark(
     rows: list[list[Any]],
     headers: list[str],
     key_columns: Sequence[str],
 ) -> str | None:
-    """Maximum lexicographic bookmark for ``key_columns`` over a page of rows."""
+    """Maximum bookmark for ``key_columns`` over a page, in column order."""
     cols = [c for c in key_columns if c]
     if not cols or not rows:
         return None
@@ -97,7 +148,7 @@ def max_keyset_bookmark(
     except ValueError:
         return None
 
-    best_parts: list[str] | None = None
+    candidates: list[list[str]] = []
     for row in rows:
         parts: list[str] = []
         skip = False
@@ -108,11 +159,19 @@ def max_keyset_bookmark(
             parts.append(str(row[i]))
         if skip:
             continue
-        if best_parts is None or parts > best_parts:
-            best_parts = parts
-    if best_parts is None:
+        candidates.append(parts)
+    if not candidates:
         return None
-    return encode_keyset_bookmark(best_parts)
+
+    ordered_columns = [
+        _column_order_keys([parts[pos] for parts in candidates])
+        for pos in range(len(cols))
+    ]
+    best = max(
+        range(len(candidates)),
+        key=lambda r: tuple(col[r] for col in ordered_columns),
+    )
+    return encode_keyset_bookmark(candidates[best])
 
 
 def sqlalchemy_keyset_clause(
@@ -147,5 +206,8 @@ KEYSET_CAPABLE_SOURCES = frozenset(
         "generic_sql",
         "sqlserver",
         "oracle",
+        # Salesforce SOQL caps OFFSET at 2000 rows — Id seek is the only way to
+        # page a large SObject, so keyset is mandatory rather than an optimization.
+        "salesforce",
     }
 )

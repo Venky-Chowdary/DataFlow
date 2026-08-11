@@ -18,7 +18,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
@@ -220,6 +220,9 @@ class ExecuteTransferRequest(BaseModel):
     # Phase C11 — pin Validate Decision Artifact (64-hex content_hash).
     approved_decision_artifact_hash: str = ""
     decision_artifact: dict = Field(default_factory=dict)
+    # Map→DDL fingerprint the operator saw pass at Validate. Without it Execute
+    # can only re-check its own derived stamps against themselves.
+    approved_ddl_identity_hash: str = ""
 
 
 class MapColumnsRequest(BaseModel):
@@ -240,6 +243,10 @@ class MapColumnsRequest(BaseModel):
     # "database"/"warehouse" means source_schema came from introspected DDL, so
     # sample inference must not re-guess DECIMAL(12,2) down to a bare DECIMAL.
     source_kind: str = ""
+    # Source engine id ("postgresql", "oracle", "csv"…). Text encoding polarity
+    # is a property of the source engine: a Unicode-only source must not be
+    # stamped onto a code-page destination carrier.
+    source_db_type: str = ""
     # Module 13 — prior operator mappings (user_override / risk contracts) must
     # survive re-map; engine alternatives attach as engine_suggestion only.
     prior_mappings: list[dict] = Field(default_factory=list)
@@ -402,6 +409,7 @@ async def map_columns_route(body: MapColumnsRequest):
             source_samples=body.source_samples or None,
             validation_mode=body.validation_mode,
             destination_db_type=body.destination_db_type or "",
+            source_db_type=(body.source_db_type or body.file_format or "").lower(),
             schema_policy=body.schema_policy or "manual_review",
             sync_mode=body.sync_mode or "",
             destination_table_exists=body.destination_table_exists,
@@ -696,6 +704,7 @@ async def execute_transfer_json(
         approved_decision_artifact_hash=str(
             body.approved_decision_artifact_hash or ""
         ).strip(),
+        approved_ddl_identity_hash=str(body.approved_ddl_identity_hash or "").strip(),
         decision_artifact=dict(body.decision_artifact or {}),
     )
     from services.batch_progress import effective_backfill_new_fields
@@ -883,6 +892,7 @@ async def run_universal_transfer(
     acknowledgment_actor: str = Form(""),
     acknowledgment_reason: str = Form(""),
     approved_decision_artifact_hash: str = Form(""),
+    approved_ddl_identity_hash: str = Form(""),
     decision_artifact_json: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
@@ -1019,6 +1029,7 @@ async def run_universal_transfer(
         acknowledgment_actor=(acknowledgment_actor or "").strip() or _actor_email(request),
         acknowledgment_reason=(acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=(approved_decision_artifact_hash or "").strip(),
+        approved_ddl_identity_hash=(approved_ddl_identity_hash or "").strip(),
     )
     if decision_artifact_json.strip():
         try:
@@ -1335,6 +1346,80 @@ async def verify_transfer_proof_pack(body: ProofPackVerifyBody):
 
     result = verify_signed_proof_pack(body.pack if isinstance(body.pack, dict) else {})
     return result
+
+
+@router.get("/{job_id}/certificate")
+async def get_migration_certificate(job_id: str, request: Request, format: str = "json"):
+    """Per-run Migration Certificate: row accounting, quarantine, verdict, signature.
+
+    ``format=markdown`` returns the operator-facing page, ``format=pdf`` the
+    audit deliverable; the JSON form is the signed artifact that
+    ``/certificate/verify`` checks.
+    """
+    from services.audit_log import actor_from_request, append_audit_event
+    from services.migration_certificate import (
+        build_migration_certificate,
+        render_certificate_markdown,
+    )
+
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    actor = actor_from_request(request)
+    cert = build_migration_certificate({**job, "id": job_id}, actor=actor)
+    try:
+        append_audit_event(
+            action="migration_certificate.export",
+            resource=f"job:{job_id}",
+            actor=actor,
+            level="info",
+            details={
+                "content_sha256": cert.get("content_sha256"),
+                "verdict": (cert.get("verdict") or {}).get("headline"),
+            },
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "certificate audit failed: %s", exc, exc_info=exc
+        )
+    if format == "markdown":
+        return PlainTextResponse(
+            render_certificate_markdown(cert), media_type="text/markdown"
+        )
+    if format == "pdf":
+        from services.certificate_pdf import render_certificate_pdf
+
+        return Response(
+            content=render_certificate_pdf(cert),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="migration-certificate-{job_id}.pdf"'
+                )
+            },
+        )
+    return cert
+
+
+class CertificateVerifyBody(BaseModel):
+    certificate: dict = Field(default_factory=dict)
+
+
+@router.post("/certificate/verify")
+async def verify_migration_certificate_endpoint(body: CertificateVerifyBody):
+    """Verify a Migration Certificate's hash, signature, and claim legitimacy."""
+    from services.migration_certificate import verify_migration_certificate
+
+    return verify_migration_certificate(
+        body.certificate if isinstance(body.certificate, dict) else {}
+    )
 
 
 class RollbackExecuteBody(BaseModel):

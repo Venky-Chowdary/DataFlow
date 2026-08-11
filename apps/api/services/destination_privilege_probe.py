@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
@@ -102,6 +102,10 @@ class PrivilegeProbeResult:
     detail: str
     engine: str = ""
     method: str = ""
+    # Independently measured capabilities behind the two verdicts. Each entry
+    # is True / False / None, where None means *not measured* — an unmeasured
+    # capability is never reported as absent.
+    signals: dict[str, bool | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -148,8 +152,10 @@ def _finalize(
     method: str,
     write_action: str = "INSERT",
     create_action: str = "CREATE",
+    signals: dict[str, bool | None] | None = None,
 ) -> PrivilegeProbeResult:
     """Map measured flags into ok/denied with operator-facing detail."""
+    signals = dict(signals or {})
     target = f"{schema}.{table}" if schema and table else (table or schema or "destination")
     if table_exists is True and table and not can_write:
         update_suffix = "/UPDATE" if need_update and write_action == "INSERT" else ""
@@ -160,6 +166,7 @@ def _finalize(
             detail=f"User can connect but lacks {write_action}{update_suffix} on {target}",
             engine=engine,
             method=method,
+            signals=signals,
         )
     if table_exists is False and not can_create:
         return PrivilegeProbeResult(
@@ -169,6 +176,7 @@ def _finalize(
             detail=f"User can connect but lacks {create_action} on '{schema or target}'",
             engine=engine,
             method=method,
+            signals=signals,
         )
     return PrivilegeProbeResult(
         can_write=can_write,
@@ -180,6 +188,7 @@ def _finalize(
         ),
         engine=engine,
         method=method,
+        signals=signals,
     )
 
 
@@ -421,38 +430,98 @@ def _probe_postgres_family(
         connection_string=connection_string,
         ssl=True,
     )
+    # Each capability is measured on its own. ``None`` stays None when a
+    # capability could not be measured, so an unmeasured one is never reported
+    # as absent — in particular a table this role cannot see in the catalog is
+    # not evidence that the table does not exist.
+    signals: dict[str, bool | None] = {
+        "schema_usage": None,
+        "schema_create": None,
+        "table_visible_in_catalog": None,
+        "table_insert_grant": None,
+        "table_update_grant": None,
+        "table_owner": None,
+    }
     try:
         with conn.cursor() as cur:
+            # ``has_*_privilege`` parses its name argument as an SQL identifier,
+            # so an unquoted "s.MixedCase" is folded to lower case and raises
+            # undefined_table. format('%I.%I') quotes what the operator named.
             cur.execute(
-                "SELECT has_schema_privilege(current_user, %s, 'CREATE')",
-                (schema,),
+                "SELECT has_schema_privilege(current_user, format('%%I', %s::text), 'USAGE'),"
+                "       has_schema_privilege(current_user, format('%%I', %s::text), 'CREATE')",
+                (schema, schema),
             )
-            can_create = bool(cur.fetchone()[0])
+            usage_row = cur.fetchone()
+            signals["schema_usage"] = bool(usage_row[0])
+            can_create = bool(usage_row[1])
+            signals["schema_create"] = can_create
 
             can_insert = False
-            can_update = False
+            can_update = True
             if table_exists and table:
-                cur.execute(
-                    "SELECT has_table_privilege(current_user, %s, 'INSERT')",
-                    (f"{schema}.{table}",),
-                )
-                can_insert = bool(cur.fetchone()[0])
-                if need_update:
+                try:
                     cur.execute(
-                        "SELECT has_table_privilege(current_user, %s, 'UPDATE')",
-                        (f"{schema}.{table}",),
+                        "SELECT to_regclass(format('%%I.%%I', %s::text, %s::text)) IS NOT NULL",
+                        (schema, table),
                     )
-                    can_update = bool(cur.fetchone()[0])
-                else:
-                    can_update = True
-            elif not table_exists:
-                can_insert = can_create
-                can_update = True
+                    visible = bool(cur.fetchone()[0])
+                except Exception as exc:
+                    # e.g. "permission denied for schema": the catalog lookup
+                    # itself is blocked, so visibility is unmeasured — not False.
+                    logger.debug("Catalog visibility lookup blocked: %s", exc)
+                    return PrivilegeProbeResult(
+                        can_write=None,
+                        can_create_table=can_create,
+                        status="unavailable",
+                        detail=(
+                            f"Catalog lookup for {schema}.{table} was refused for "
+                            f"'{username or 'current_user'}' ({str(exc).strip()}). "
+                            "Object existence and write access are both unmeasured; "
+                            "this is not proof the object is absent."
+                        ),
+                        engine=engine,
+                        method="to_regclass/has_schema_privilege",
+                        signals=signals,
+                    )
+                signals["table_visible_in_catalog"] = visible
+                if not visible:
+                    # Not resolvable *for this role*: could be absent, could be
+                    # invisible without USAGE. Refuse to guess either way.
+                    return PrivilegeProbeResult(
+                        can_write=None,
+                        can_create_table=can_create,
+                        status="unavailable",
+                        detail=(
+                            f"{schema}.{table} is not resolvable in the catalog as "
+                            f"'{username or 'current_user'}'. This is not proof the "
+                            "object is absent — schema USAGE is "
+                            f"{'granted' if signals['schema_usage'] else 'missing'}. "
+                            "Grant catalog visibility before trusting a write verdict."
+                        ),
+                        engine=engine,
+                        method="to_regclass/has_schema_privilege",
+                        signals=signals,
+                    )
+                cur.execute(
+                    "SELECT has_table_privilege(current_user, format('%%I.%%I', %s::text, %s::text), 'INSERT'),"
+                    "       has_table_privilege(current_user, format('%%I.%%I', %s::text, %s::text), 'UPDATE'),"
+                    "       pg_get_userbyid(c.relowner) = current_user"
+                    "  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = %s AND c.relname = %s",
+                    (schema, table, schema, table, schema, table),
+                )
+                row = cur.fetchone() or (False, False, None)
+                can_insert = bool(row[0])
+                signals["table_insert_grant"] = can_insert
+                signals["table_update_grant"] = bool(row[1])
+                signals["table_owner"] = None if row[2] is None else bool(row[2])
+                can_update = bool(row[1]) if need_update else True
             else:
+                # Create-new: the schema's CREATE privilege is the write gate.
                 can_insert = can_create
-                can_update = True
 
-        can_write = bool(can_insert and (can_update if need_update else True))
+        can_write = bool(can_insert and can_update)
         return _finalize(
             engine=engine,
             can_write=can_write,
@@ -461,7 +530,8 @@ def _probe_postgres_family(
             table=table,
             schema=schema,
             need_update=need_update,
-            method="has_table_privilege/has_schema_privilege",
+            method="has_table_privilege/has_schema_privilege/pg_class owner",
+            signals=signals,
         )
     finally:
         try:
@@ -908,9 +978,21 @@ def _probe_sqlserver(
             else:
                 update_perm = True
 
+        # CREATE TABLE is a *database*-scoped permission in SQL Server:
+        # HAS_PERMS_BY_NAME(schema, 'SCHEMA', 'CREATE TABLE') returns NULL for
+        # every principal, including sysadmin, so probing it at schema scope
+        # denies writes to accounts that can plainly create tables. Creating a
+        # table needs CREATE TABLE on the database *and* ALTER on the schema
+        # that will own it.
         create_perm = bool(
             conn.execute(
-                sa.text("SELECT HAS_PERMS_BY_NAME(:sch, 'SCHEMA', 'CREATE TABLE')"),
+                sa.text(
+                    "SELECT CASE WHEN IS_SRVROLEMEMBER('sysadmin') = 1 "
+                    "OR IS_MEMBER('db_owner') = 1 THEN 1 "
+                    "WHEN HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CREATE TABLE') = 1 "
+                    "AND HAS_PERMS_BY_NAME(:sch, 'SCHEMA', 'ALTER') = 1 THEN 1 "
+                    "ELSE 0 END"
+                ),
                 {"sch": schema},
             ).scalar()
         )
@@ -1012,11 +1094,18 @@ def _probe_oracle(
                     ).fetchall()
                 }
 
+        # ALL_TAB_PRIVS lists *granted* privileges only — an owner never appears
+        # there, so a schema owner writing to its own table read as "denied".
+        session_user = str(
+            conn.execute(sa.text("SELECT USER FROM dual")).scalar() or ""
+        ).upper()
+
         can_write, can_create = evaluate_oracle_privileges(
             session_privs=session_privs,
             tab_privs=tab_privs,
             table_exists=bool(exists),
             need_update=need_update,
+            is_owner=bool(session_user) and session_user == owner,
         )
         return _finalize(
             engine="oracle",
@@ -1036,19 +1125,27 @@ def evaluate_oracle_privileges(
     tab_privs: set[str],
     table_exists: bool,
     need_update: bool = False,
+    is_owner: bool = False,
 ) -> tuple[bool, bool]:
-    """Evaluate Oracle privilege sets → (can_write, can_create). Public for tests."""
+    """Evaluate Oracle privilege sets → (can_write, can_create). Public for tests.
+
+    ``is_owner`` is the session user owning the target schema: Oracle grants an
+    owner implicit full DML on its own objects and never records it in
+    ALL_TAB_PRIVS, so it must be treated as INSERT/UPDATE.
+    """
     sp = {p.upper() for p in session_privs}
     tp = {p.upper() for p in tab_privs}
 
     can_create = bool(sp & {"CREATE TABLE", "CREATE ANY TABLE"} or "DBA" in sp)
     can_insert = bool(
-        tp & {"INSERT", "ALL"}
+        is_owner
+        or tp & {"INSERT", "ALL"}
         or sp & {"INSERT ANY TABLE"}
         or "DBA" in sp
     )
     can_update = bool(
-        tp & {"UPDATE", "ALL"}
+        is_owner
+        or tp & {"UPDATE", "ALL"}
         or sp & {"UPDATE ANY TABLE"}
         or "DBA" in sp
     )

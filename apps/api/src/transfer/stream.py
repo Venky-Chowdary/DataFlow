@@ -9,6 +9,7 @@ import re
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
@@ -30,6 +31,7 @@ from connectors.writer_common import (  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
+from services.dest_precount import PRECOUNT_KEY, precount_table
 from services.engine_pool import release_engine
 from services.resilience import (  # noqa: E402, F401
     ResilientBatcher,
@@ -133,418 +135,10 @@ def _source_name(source: EndpointConfig) -> str:
     return source.table or source.collection or ""
 
 
-def _read_batch_impl(
-    src_type: str,
-    cfg: dict[str, Any],
-    table: str,
-    columns: list[str] | None,
-    offset: int,
-    limit: int,
-    database: str = "",
-    dynamodb_cursor: dict | None = None,
-    dynamodb_total: int | None = None,
-    *,
-    cursor_column: str = "",
-    cursor_after: str | None = None,
-    cursor_type: str | None = None,
-    known_total_rows: int | None = None,
-    es_search_after: list | None = None,
-    redis_scan_state=None,
-    kafka_cursor: dict | None = None,
-    cursor_primary_key: str | None = None,
-    cursor_key_columns: list[str] | None = None,
-):
-    # Phase F2 — N-col composite keyset (≥3) on SQLAlchemy dialects goes through
-    # generic_sql so PG/MySQL/Snowflake share the portable OR/AND builder.
-    _key_cols = [c for c in (cursor_key_columns or []) if c]
-    if (
-        cursor_column
-        and len(_key_cols) >= 3
-        and src_type
-        in ("postgresql", "redshift", "mysql", "snowflake", "sqlite", "generic_sql")
-    ):
-        from connectors.generic_sql import read_table_cursor_batch as _gs_cursor
+# Per-source read dispatch lives in ``batch_readers``; kept importable here for
+# the historical ``stream._read_batch_impl`` surface.
+from .batch_readers import _read_batch_impl  # noqa: E402
 
-        return _gs_cursor(
-            host=cfg.get("host", ""),
-            port=int(cfg.get("port") or 5432),
-            database=cfg.get("database", "") or database,
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=cfg.get("schema", "public"),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=bool(cfg.get("ssl", False)),
-            table=table,
-            cursor_column=cursor_column,
-            cursor_after=cursor_after,
-            type=src_type if src_type != "redshift" else "postgresql",
-            columns=columns,
-            limit=limit,
-            cursor_primary_key=cursor_primary_key,
-            cursor_key_columns=_key_cols,
-        )
-
-    if src_type == "postgresql" or src_type == "redshift":
-        from connectors.postgresql_reader import (
-            read_table_batch,
-            read_table_cursor_batch,
-        )
-
-        pg_port = int(cfg.get("port") or (5439 if src_type == "redshift" else 5432))
-        if cursor_column:
-            return read_table_cursor_batch(
-                host=cfg["host"],
-                port=pg_port,
-                database=cfg["database"],
-                username=cfg.get("username", ""),
-                password=cfg.get("password", ""),
-                schema=cfg.get("schema", "public"),
-                connection_string=cfg.get("connection_string", ""),
-                ssl=cfg.get("ssl", False),
-                table=table,
-                cursor_column=cursor_column,
-                cursor_after=cursor_after,
-                columns=columns,
-                limit=limit,
-                cursor_primary_key=cursor_primary_key,
-            )
-        return read_table_batch(
-            host=cfg["host"],
-            port=pg_port,
-            database=cfg["database"],
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=cfg.get("schema", "public"),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=cfg.get("ssl", False),
-            table=table,
-            columns=columns,
-            offset=offset,
-            limit=limit,
-            known_total_rows=known_total_rows,
-        )
-    if src_type == "mysql":
-        from connectors.mysql_reader import read_table_batch, read_table_cursor_batch
-
-        if cursor_column:
-            return read_table_cursor_batch(
-                host=cfg["host"],
-                port=int(cfg.get("port") or 3306),
-                database=cfg["database"],
-                username=cfg.get("username", ""),
-                password=cfg.get("password", ""),
-                schema=cfg.get("schema", ""),
-                connection_string=cfg.get("connection_string", ""),
-                ssl=cfg.get("ssl", False),
-                table=table,
-                cursor_column=cursor_column,
-                cursor_after=cursor_after,
-                columns=columns,
-                limit=limit,
-                cursor_primary_key=cursor_primary_key,
-            )
-        return read_table_batch(
-            host=cfg["host"],
-            port=int(cfg.get("port") or 3306),
-            database=cfg["database"],
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=cfg.get("schema", ""),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=cfg.get("ssl", False),
-            table=table,
-            columns=columns,
-            offset=offset,
-            limit=limit,
-            known_total_rows=known_total_rows,
-        )
-    if src_type == "mongodb":
-        from connectors.mongodb_reader import (
-            read_collection_batch,
-            read_collection_cursor_batch,
-        )
-
-        if cursor_column:
-            return read_collection_cursor_batch(
-                cfg=cfg,
-                database=database or cfg.get("database", "test"),
-                collection=table,
-                cursor_column=cursor_column,
-                cursor_after=cursor_after,
-                cursor_type=cursor_type,
-                columns=columns,
-                limit=limit,
-                known_total_rows=known_total_rows,
-                cursor_primary_key=cursor_primary_key,
-            )
-        return read_collection_batch(
-            cfg=cfg,
-            database=database or cfg.get("database", "test"),
-            collection=table,
-            columns=columns,
-            offset=offset,
-            limit=limit,
-            known_total_rows=known_total_rows,
-        )
-    if src_type == "snowflake":
-        from connectors.snowflake_reader import (
-            read_table_batch,
-            read_table_cursor_batch,
-        )
-
-        if cursor_column:
-            return read_table_cursor_batch(
-                host=cfg["host"],
-                port=int(cfg.get("port") or 443),
-                database=cfg["database"],
-                username=cfg.get("username", ""),
-                password=cfg.get("password", ""),
-                schema=cfg.get("schema", "PUBLIC"),
-                connection_string=cfg.get("connection_string", ""),
-                warehouse=cfg.get("warehouse", ""),
-                role=cfg.get("role", ""),
-                table=table,
-                cursor_column=cursor_column,
-                cursor_after=cursor_after,
-                columns=columns,
-                limit=limit,
-                cursor_primary_key=cursor_primary_key,
-            )
-        return read_table_batch(
-            host=cfg["host"],
-            port=int(cfg.get("port") or 443),
-            database=cfg["database"],
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=cfg.get("schema", "PUBLIC"),
-            connection_string=cfg.get("connection_string", ""),
-            warehouse=cfg.get("warehouse", ""),
-            role=cfg.get("role", ""),
-            table=table,
-            columns=columns,
-            offset=offset,
-            limit=limit,
-            known_total_rows=known_total_rows,
-        )
-    if src_type == "bigquery":
-        from connectors.bigquery_reader import read_table_batch, read_table_cursor_batch
-
-        if cursor_column:
-            return read_table_cursor_batch(
-                host=cfg["host"],
-                port=int(cfg.get("port") or 443),
-                database=cfg["database"],
-                username=cfg.get("username", ""),
-                password=cfg.get("password", ""),
-                schema=cfg.get("schema", "dataflow"),
-                connection_string=cfg.get("connection_string", ""),
-                ssl=cfg.get("ssl", False),
-                warehouse=cfg.get("warehouse", ""),
-                table=table,
-                cursor_column=cursor_column,
-                cursor_after=cursor_after,
-                columns=columns,
-                limit=limit,
-                service_account=cfg.get("service_account", ""),
-                cursor_primary_key=cursor_primary_key,
-            )
-        return read_table_batch(
-            host=cfg["host"],
-            port=int(cfg.get("port") or 443),
-            database=cfg["database"],
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=cfg.get("schema", "dataflow"),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=cfg.get("ssl", False),
-            warehouse=cfg.get("warehouse", ""),
-            table=table,
-            columns=columns,
-            offset=offset,
-            limit=limit,
-            known_total_rows=known_total_rows,
-            service_account=cfg.get("service_account", ""),
-        )
-    if src_type == "gcs":
-        from connectors.gcs_reader import read_object
-
-        return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
-    if src_type == "s3":
-        from connectors.s3_reader import read_object
-
-        return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
-    if src_type == "adls":
-        from connectors.adls_reader import read_object
-
-        return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
-    if src_type == "dynamodb":
-        from connectors.dynamodb_reader import read_table_batch
-
-        batch, _next = read_table_batch(
-            cfg=cfg,
-            table=table,
-            columns=columns,
-            offset=offset,
-            limit=limit,
-            exclusive_start_key=dynamodb_cursor,
-            total_rows=dynamodb_total,
-        )
-        return batch, _next
-    if src_type == "elasticsearch":
-        from connectors.elasticsearch_reader import read_index_batch
-
-        return read_index_batch(
-            cfg=cfg, index=table, columns=columns, limit=limit,
-            known_total_rows=known_total_rows, search_after=es_search_after,
-        )
-    if src_type == "redis":
-        from connectors.redis_reader import read_keys_batch
-
-        pattern = table or "*"
-        if pattern != "*" and "*" not in pattern and "?" not in pattern:
-            pattern = f"{pattern}:*"
-        return read_keys_batch(
-            cfg=cfg, pattern=pattern, limit=limit,
-            known_total_rows=known_total_rows, scan_state=redis_scan_state,
-        )
-    if src_type == "kafka":
-        from connectors.kafka_reader import read_topic_batch
-
-        return read_topic_batch(
-            cfg=cfg,
-            topic=table,
-            columns=columns,
-            offset=offset,
-            limit=limit,
-            known_total_rows=known_total_rows,
-            kafka_cursor=kafka_cursor,
-        )
-    if src_type == "sqlite":
-        if cursor_column or cursor_key_columns:
-            from connectors.generic_sql import read_table_cursor_batch as _gs_cursor
-
-            return _gs_cursor(
-                host=cfg.get("host", ""),
-                port=0,
-                database=cfg.get("database", "") or database,
-                username=cfg.get("username", ""),
-                password=cfg.get("password", ""),
-                schema=cfg.get("schema", ""),
-                connection_string=cfg.get("connection_string", ""),
-                ssl=False,
-                table=table,
-                cursor_column=cursor_column
-                or (cursor_key_columns[0] if cursor_key_columns else ""),
-                cursor_after=cursor_after,
-                type="sqlite",
-                columns=columns,
-                limit=limit,
-                cursor_primary_key=cursor_primary_key,
-                cursor_key_columns=cursor_key_columns,
-            )
-        from connectors.sqlite_reader import read_table_batch
-
-        return read_table_batch(
-            host=cfg["host"],
-            port=0,
-            database=cfg["database"],
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=cfg.get("schema", ""),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=False,
-            table=table,
-            limit=limit,
-            offset=offset,
-            known_total_rows=known_total_rows,
-        )
-    if resolve_driver_type(src_type) == "generic_sql":
-        from connectors.generic_sql import read_table_batch, read_table_cursor_batch
-
-        type_name = cfg.get("type", "") or src_type
-        if cursor_column or cursor_key_columns:
-            return read_table_cursor_batch(
-                host=cfg["host"],
-                port=cfg["port"],
-                database=cfg["database"],
-                username=cfg.get("username", ""),
-                password=cfg.get("password", ""),
-                schema=cfg.get("schema", ""),
-                connection_string=cfg.get("connection_string", ""),
-                ssl=False,
-                type=type_name,
-                table=table,
-                cursor_column=cursor_column
-                or (cursor_key_columns[0] if cursor_key_columns else ""),
-                cursor_after=cursor_after,
-                columns=columns,
-                limit=limit,
-                cursor_primary_key=cursor_primary_key,
-                cursor_key_columns=cursor_key_columns,
-            )
-        return read_table_batch(
-            host=cfg["host"],
-            port=cfg["port"],
-            database=cfg["database"],
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=cfg.get("schema", ""),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=False,
-            type=type_name,
-            table=table,
-            columns=columns,
-            offset=offset,
-            limit=limit,
-            known_total_rows=known_total_rows,
-        )
-    if src_type in ("sqlserver", "oracle"):
-        # Phase F2 — keyset when cursor columns are provided; else OFFSET via registry.
-        if cursor_column or cursor_key_columns:
-            if src_type == "sqlserver":
-                from connectors.sqlserver_reader import read_table_cursor_batch
-            else:
-                from connectors.oracle_reader import read_table_cursor_batch
-
-            return read_table_cursor_batch(
-                host=cfg.get("host", ""),
-                port=int(cfg.get("port") or (1433 if src_type == "sqlserver" else 1521)),
-                database=cfg.get("database", ""),
-                username=cfg.get("username", ""),
-                password=cfg.get("password", ""),
-                schema=cfg.get("schema", "dbo" if src_type == "sqlserver" else ""),
-                connection_string=cfg.get("connection_string", ""),
-                ssl=bool(cfg.get("ssl", False)),
-                table=table,
-                cursor_column=cursor_column or (cursor_key_columns[0] if cursor_key_columns else ""),
-                cursor_after=cursor_after,
-                columns=columns,
-                limit=limit,
-                cursor_primary_key=cursor_primary_key,
-                cursor_key_columns=cursor_key_columns,
-                type=src_type,
-            )
-        from .connector_dispatch import read_via_registry
-
-        return read_via_registry(
-            src_type,
-            cfg=cfg,
-            table=table,
-            limit=limit,
-            offset=offset,
-            columns=columns,
-        )
-    if src_type in ("salesforce", "hubspot"):
-        from .connector_dispatch import read_via_registry
-
-        return read_via_registry(src_type, cfg=cfg, table=table, limit=limit, offset=offset)
-    if src_type == "iceberg":
-        from .connector_dispatch import read_via_registry
-
-        return read_via_registry(
-            "iceberg", cfg=cfg, table=table, limit=limit, offset=offset, columns=columns
-        )
-    raise ValueError(f"Streaming read not supported for source type '{src_type}'")
 
 
 def _read_batch(*args, **kwargs):
@@ -1110,6 +704,47 @@ def _write_batch(
     raise ValueError(f"Streaming write not supported for destination type '{dest_type}'")
 
 
+def _destination_key_for_resume(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    mappings: list[dict],
+) -> tuple[list[str], list[str]]:
+    """Identity key a resumed append can write through, from the destination catalog.
+
+    Returns ``(source_columns, target_columns)``, empty when the destination
+    declares no primary key or the key is not covered by the mapping — an
+    unmapped key column cannot be an ON CONFLICT target, and guessing one would
+    resolve rows on the wrong identity.
+    """
+    from services.sync_cursor import map_source_to_target
+
+    if not dest_type or not dest_table:
+        return [], []
+    try:
+        _types, _nulls, keys = _introspect_table_schema_rich(
+            dest_type, dest_cfg, dest_table, [], strict_namespace=True
+        )
+    except Exception as exc:
+        logger.debug("resume destination key introspection failed: %s", exc, exc_info=exc)
+        return [], []
+    pk_targets = [str(c) for c in (keys.get("primary_key_columns") or []) if str(c or "")]
+    if not pk_targets:
+        return [], []
+    wanted = {c.lower() for c in pk_targets}
+    src_cols: list[str] = []
+    for m in mappings or []:
+        src = str(m.get("source") or "")
+        if not src:
+            continue
+        tgt = str(map_source_to_target(src, mappings) or "")
+        if tgt.lower() in wanted:
+            src_cols.append(src)
+    if len(src_cols) != len(pk_targets):
+        return [], []
+    return src_cols, pk_targets
+
+
 def stream_database_transfer(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -1197,15 +832,14 @@ def _stream_database_transfer_impl(
     dest_cfg = resolve_connector_config(destination)
 
     from services.sync_cursor import (
-        build_cursor_key,
         compare_cursor_values,
-        get_watermark,
         is_overwrite_sync,
         map_source_to_target,
         max_cursor_value,
         requires_incremental,
         requires_upsert,
         resolve_effective_sync_mode,
+        resolve_incremental_read_scope,
         resolve_sync_contract,
         set_watermark,
     )
@@ -1239,7 +873,20 @@ def _stream_database_transfer_impl(
         )
     # Parallel/chunked resume is only safe with idempotent writes.
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
+    resume_key_resolved = False
     if resuming and write_mode == "insert":
+        resume_key_resolved = True
+        if not pk_target_cols:
+            # No stream contract, but the destination itself may enforce a key.
+            # Resuming an append re-delivers the interrupted batch, so honouring
+            # that key turns an unavoidable duplicate-key abort into an
+            # idempotent apply instead of stranding a half-loaded destination.
+            pk_source_cols, pk_target_cols = _destination_key_for_resume(
+                dest_type,
+                dest_cfg,
+                resolve_dest_table(dest_type, destination, _source_name(source)),
+                mappings,
+            )
         if pk_target_cols:
             write_mode = "upsert"
         else:
@@ -1260,17 +907,21 @@ def _stream_database_transfer_impl(
     watermark = None
     cursor_key = ""
     if incremental and cursor_source_col:
-        dest_table_key = resolve_dest_table(dest_type, destination, _source_name(source))
-        cursor_key = build_cursor_key(
+        # One resolver for the whole product: Validate's gates read this route's
+        # watermark through the same call, so what they judge is what this run
+        # will read.
+        scope = resolve_incremental_read_scope(
+            sync_mode=effective_sync,
+            stream_contracts=stream_contracts,
             source_type=src_type,
             source_database=source.database or src_cfg.get("database", ""),
             source_object=_source_name(source),
             dest_type=dest_type,
             dest_database=destination.database or dest_cfg.get("database", ""),
-            dest_object=dest_table_key,
-            stream_name=contract.name if contract else "stream",
+            dest_object=resolve_dest_table(dest_type, destination, _source_name(source)),
         )
-        watermark = get_watermark(cursor_key)
+        cursor_key = scope.cursor_key
+        watermark = scope.watermark
 
     if src_type not in _STREAMING_TYPES:
         raise ValueError(f"Streaming source '{src_type}' not supported")
@@ -1401,13 +1052,33 @@ def _stream_database_transfer_impl(
     except Exception:
         _pool_baseline = None
         _schema_baseline = None
+
+    def _cursor_read_args(cursor_after: str | None) -> dict[str, Any]:
+        """The cursor arguments every read of this run must agree on.
+
+        A watermark is composite when a tie-break primary key is in play, and
+        only a read that also names that column can decode it. Reads that left
+        ``cursor_primary_key`` out bound the whole composite against the cursor
+        column instead, so every run after the first died on the sizing probe.
+        """
+        if not incremental or not cursor_source_col:
+            return {}
+        return {
+            "cursor_column": cursor_source_col,
+            "cursor_after": cursor_after,
+            "cursor_type": (
+                normalize_inferred(schema.get(cursor_source_col, "string")).upper()
+                if schema
+                else None
+            ),
+            "cursor_primary_key": cursor_pk_source or None,
+        }
+
     _sample_started = time.perf_counter()
     sample_probe, _ = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
-            cursor_column=cursor_source_col if incremental else "",
-            cursor_after=watermark if incremental else None,
-            cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
+            **_cursor_read_args(watermark),
         )
     )
     phase_profile.add(
@@ -1494,9 +1165,7 @@ def _stream_database_transfer_impl(
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
-            cursor_column=cursor_source_col if incremental else "",
-            cursor_after=watermark if incremental else None,
-            cursor_type=normalize_inferred(schema.get(cursor_source_col, "string")).upper() if schema and incremental else None,
+            **_cursor_read_args(watermark),
         )
     )
     # This page is not thrown away — it becomes the first written batch.
@@ -1622,10 +1291,16 @@ def _stream_database_transfer_impl(
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True
     )
-    # Write-path dest_types for Gate-8 fingerprint remap parity.
-    fingerprint_dest_types = {
-        target_cols[i]: logical_types[i] for i in range(len(target_cols))
-    }
+    # Write-path dest_types for Gate-8 fingerprint remap parity — including the
+    # drift widen the backfill write applies, so the digest is taken against the
+    # carrier the rows actually land in.
+    from connectors.writer_common import effective_dest_types_under_backfill
+
+    fingerprint_dest_types = effective_dest_types_under_backfill(
+        {target_cols[i]: logical_types[i] for i in range(len(target_cols))},
+        list(mappings or []),
+        backfill=bool(backfill_new_fields),
+    )
 
     total_rows = probe.total_rows
     if total_rows is not None and limit > 0:
@@ -1667,7 +1342,18 @@ def _stream_database_transfer_impl(
 
     written = checkpoint.rows_processed or 0
     offset = checkpoint.offset or 0
+    # A resumed pass only ever fingerprints the rows it writes, while Gate-8
+    # compares against the whole destination — the write-pass digest is not a
+    # population checksum for this run.
+    resumed_pass = bool(written or offset)
     dest_summary: dict[str, Any] = {}
+    # Gate-8 append proof needs the cardinality from before the first batch. A
+    # resumed run already appended rows, so its count is not a "before" and the
+    # delta stays unproven rather than being reported wrong.
+    if not (written or offset):
+        rows_before = precount_table(dest_type, dest_cfg, dest_table)
+        if rows_before is not None:
+            dest_summary[PRECOUNT_KEY] = int(rows_before)
     last_checksum = ""
     # Phase F1 — accumulate fingerprints during the write pass (avoids double source I/O).
     write_pass_fp = FingerprintAccumulator()
@@ -1871,8 +1557,19 @@ def _stream_database_transfer_impl(
     # ahead in parallel while only persisting durable offsets after a batch is
     # successfully written.
     fetch_cursor = running_cursor
-    fetch_offset = offset
+    # `fetch_offset` doubles as the source-row budget counter (`limit` /
+    # `total_rows`). A keyset resume seeks by bookmark, and that bookmark sits at
+    # or behind the committed offset, so the rows it re-reads would be charged to
+    # the budget twice and the run would stop short of the tail — silent loss the
+    # operator only sees as a reconciliation mismatch. Keyset pages terminate
+    # naturally on a short/empty page, so the budget restarts at zero instead.
+    keyset_resume = bool(use_keyset and keyset_after and offset > 0)
+    fetch_offset = 0 if keyset_resume else offset
     committed_offset = offset
+    # Keyset bookmark of the last *committed* batch. `keyset_after` belongs to
+    # the reader, which runs batches ahead of the writer; persisting it would
+    # resume past rows that were read but never written.
+    committed_keyset = checkpoint.cursor_value or ""
 
     def _fetch_next_batch(last_batch):
         """Timed wrapper — source read time is the first thing to rule out."""
@@ -1966,11 +1663,8 @@ def _stream_database_transfer_impl(
                     fetch_offset,
                     batch_limit,
                     database=src_db,
-                    cursor_column=cursor_source_col,
-                    cursor_after=fetch_cursor,
-                    cursor_type=column_types.get(cursor_source_col, "VARCHAR"),
                     known_total_rows=total_rows,
-                    cursor_primary_key=cursor_pk_source or None,
+                    **_cursor_read_args(fetch_cursor),
                 )
             )
             return batch
@@ -2220,6 +1914,7 @@ def _stream_database_transfer_impl(
                 "coerced_null": 0,
                 "warnings": [],
                 "batch_max": None,
+                "batch_keyset": None,
                 "batch_rows": 0,
                 "reconcile_sample_rows": [],
                 "fingerprints": [],
@@ -2262,6 +1957,14 @@ def _stream_database_transfer_impl(
         if incremental and cursor_source_col:
             batch_max = max_cursor_value(
                 batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
+            )
+        batch_keyset = None
+        if use_keyset:
+            batch_keyset = max_keyset_bookmark(
+                batch.rows,
+                batch.headers,
+                keyset_order_cols
+                or ([keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])),
             )
 
         write_kwargs: dict[str, Any] = {}
@@ -2361,13 +2064,14 @@ def _stream_database_transfer_impl(
             "coerced_null": int(dest_summary.get("coerced_null_rows", 0) or 0),
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
             "batch_max": batch_max,
+            "batch_keyset": batch_keyset,
             "batch_rows": len(batch.rows),
             "reconcile_sample_rows": sample_rows,
             "fingerprints": inline_fps,
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
+        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
         written += result["batch_written"]
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
@@ -2386,6 +2090,10 @@ def _stream_database_transfer_impl(
         if result["batch_max"] is not None:
             if running_cursor is None or compare_cursor_values(result["batch_max"], running_cursor) > 0:
                 running_cursor = result["batch_max"]
+        # Results arrive in commit order, so the newest committed page carries
+        # the furthest safe keyset bookmark.
+        if result.get("batch_keyset"):
+            committed_keyset = result["batch_keyset"]
         # Absolute source-row offset for this batch (0-based start before commit).
         batch_start = int(committed_offset or 0)
         committed_offset += result["batch_rows"]
@@ -2456,7 +2164,7 @@ def _stream_database_transfer_impl(
         checkpoint.chunk_index = idx
         checkpoint.offset = committed_offset
         checkpoint.rows_processed = written
-        checkpoint.cursor_value = running_cursor or keyset_after
+        checkpoint.cursor_value = running_cursor or committed_keyset or ""
         checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
         checkpoint.es_search_after = es_search_after
         checkpoint.redis_scan_state = redis_scan_state
@@ -2566,6 +2274,11 @@ def _stream_database_transfer_impl(
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
         dest_summary["sync_mode"] = effective_sync
+        if resume_key_resolved:
+            # Honest delivery label: the read side re-delivers the interrupted
+            # batch, the write side resolves it on the identity key.
+            dest_summary["delivery_semantics"] = "at_least_once_idempotent_apply"
+            dest_summary["resume_write_mode"] = write_mode
         dest_summary["watermark"] = watermark
         try:
             from services.source_snapshot import get_source_snapshot_meta
@@ -2614,14 +2327,17 @@ def _stream_database_transfer_impl(
         "true",
         "yes",
     )
-    # Resume overwrite: write-pass only fingerprints this session's rows while
-    # Gate-8 expects the full population — force a source re-read.
+    # Resume: the write pass only fingerprints this session's rows while Gate-8
+    # compares the full destination — force a source re-read. This holds for
+    # every sync mode, not just overwrite: a resumed keyed load lands the whole
+    # population too, so a session-only digest reads as a checksum mismatch on a
+    # destination that is in fact complete.
     _expected_population = int(total_rows or 0) or int(written or 0)
     _partial_write_pass = bool(
         write_pass_fp.total > 0
         and _expected_population > 0
         and write_pass_fp.total < _expected_population
-        and is_overwrite_sync(effective_sync)
+        and (is_overwrite_sync(effective_sync) or resumed_pass)
     )
     if write_pass_fp.total > 0 and not _reread and not _partial_write_pass:
         checksum_started = time.perf_counter()
@@ -2847,7 +2563,117 @@ def _stream_database_transfer_impl(
             }
     except Exception as exc:
         logger.debug("source_snapshot stamp skipped: %s", exc)
+    # Single-table jobs carry references too: the parent is already on the
+    # destination instead of arriving in this run, so without this the child
+    # landed with its foreign keys silently dropped and the run still went green.
+    fk_context = _foreign_key_context(source, [table])
+    if fk_context.source_keys:
+        fk_context.column_maps[table] = {
+            str(m.get("source") or ""): str(m.get("target") or "")
+            for m in (mappings or [])
+            if m.get("source") and m.get("target")
+        }
+        fk_summary = _carry_foreign_keys_after_load(
+            destination, fk_context, {table: dest_table}
+        )
+        if fk_summary is not None:
+            dest_summary["foreign_keys"] = fk_summary
+            for decision in fk_summary.get("decisions") or []:
+                if decision.get("status") in {"carried", "unsupported"} and decision.get(
+                    "dest_ddl"
+                ):
+                    ddl_log.append(
+                        f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}"
+                    )
     return written, ddl_log, dest_summary, columns
+
+
+@dataclass
+class _ForeignKeyContext:
+    """Measured source references for the tables of one multi-stream job."""
+
+    source_keys: dict[str, Any] = field(default_factory=dict)
+    order: list[str] = field(default_factory=list)
+    cycle: list[str] = field(default_factory=list)
+    column_maps: dict[str, dict[str, str]] = field(default_factory=dict)
+
+
+def _foreign_key_context(
+    source: EndpointConfig, tables: list[str]
+) -> _ForeignKeyContext:
+    """Measure source foreign keys and derive a parents-first load order.
+
+    A failure here never blocks the transfer: the keys are then reported as
+    unmeasured (``unknown``) rather than absent, and the streams keep the
+    operator's declared order.
+    """
+    context = _ForeignKeyContext()
+    names = [t for t in tables if t]
+    # A single table still declares references: its parents simply live on the
+    # destination already rather than in this job, so the keys are measured and
+    # planned against the destination catalog. Ordering is the only part that
+    # needs more than one stream.
+    if source.kind != "database" or not names:
+        return context
+    try:
+        from services.foreign_key_orchestration import (
+            dependency_order,
+            measure_source_foreign_keys,
+        )
+
+        src_type = resolve_driver_type(source.format)
+        src_cfg = resolve_connector_config(source)
+        context.source_keys = measure_source_foreign_keys(src_type, src_cfg, names)
+        if len(names) > 1:
+            context.order, context.cycle = dependency_order(names, context.source_keys)
+    except Exception as exc:
+        logger.debug("foreign key ordering skipped: %s", exc, exc_info=exc)
+    return context
+
+
+def _carry_foreign_keys_after_load(
+    destination: EndpointConfig,
+    context: _ForeignKeyContext,
+    table_map: dict[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Add the planned constraints once every table has landed, then re-read."""
+    if not context.source_keys or destination.kind != "database":
+        return None
+    try:
+        from services.foreign_key_orchestration import carry_foreign_keys, summarize
+
+        dest_type = resolve_driver_type(destination.format)
+        dest_cfg = resolve_connector_config(destination)
+        dest_schema = str(dest_cfg.get("schema") or "")
+        # Multi-stream lands each source table under its own name; a rename
+        # would arrive through the contract and change only this map.
+        table_map = dict(table_map or {}) or {t: t for t in context.source_keys}
+        summary = summarize(
+            carry_foreign_keys(
+                dest_dialect=dest_type,
+                dest_cfg=dest_cfg,
+                dest_schema=dest_schema,
+                source_keys=context.source_keys,
+                table_map=table_map,
+                column_maps=context.column_maps,
+                dest_columns={
+                    t: list(cols.values()) for t, cols in context.column_maps.items()
+                },
+            )
+        )
+        if context.cycle:
+            summary["cycle"] = list(context.cycle)
+        return summary
+    except Exception as exc:
+        logger.warning("foreign key carry failed: %s", exc, exc_info=exc)
+        return {
+            "decisions": [],
+            "counts": {"unknown": len(context.source_keys)},
+            "integrity_violations": 0,
+            "carried": 0,
+            "verdict": "unknown",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
@@ -2938,11 +2764,31 @@ def run_non_cdc_multi_stream_sequential(
             skip_preflight=skip_preflight,
         )
 
+    # Foreign keys are the one aspect a single-table create cannot carry: the
+    # parent must exist first. Measure the source references, load parents
+    # before children, and add the constraints once every table has landed —
+    # the ALTER then validates the rows we just wrote.
+    fk_context = _foreign_key_context(source, [c.name or "" for c in selected_list])
+    if fk_context.order:
+        by_name = {(c.name or ""): c for c in selected_list}
+        selected_list = [by_name[n] for n in fk_context.order if n in by_name] + [
+            c for c in selected_list if (c.name or "") not in set(fk_context.order)
+        ]
+
     total_rows = 0
     ddl_log: list[str] = [
         f"MULTI-STREAM sequential ({len(selected_list)} streams, sync={sync_mode}; "
         "each stream has its own watermark; at-least-once)"
     ]
+    if fk_context.order:
+        ddl_log.append(
+            "FK dependency order: " + " -> ".join(fk_context.order)
+            + (
+                f" (cycle, no valid order: {', '.join(fk_context.cycle)})"
+                if fk_context.cycle
+                else ""
+            )
+        )
     headers: list[str] = list(schema.keys()) if schema else []
     stream_health: list[dict[str, Any]] = []
     last_summary: dict[str, Any] = {}
@@ -2988,6 +2834,15 @@ def run_non_cdc_multi_stream_sequential(
             use_mappings = (
                 stream_maps if isinstance(stream_maps, list) and stream_maps else mappings
             )
+            # The FK planner translates key columns through this map; without it
+            # a reference would be emitted against a destination column name
+            # that the load never wrote.
+            context_map = {
+                str(m.get("source") or ""): str(m.get("target") or m.get("source") or "")
+                for m in use_mappings
+                if isinstance(m, dict) and m.get("source")
+            }
+            fk_context.column_maps[stream_name] = context_map
 
             # Per-stream overwrite: drop remapped dest (outer engine skip when N>1).
             if should_drop_destination_for_sync(
@@ -3065,6 +2920,14 @@ def run_non_cdc_multi_stream_sequential(
     last_summary["streams"] = stream_health
     last_summary["multi_stream"] = True
     last_summary["multi_stream_mode"] = "sequential"
+    fk_summary = _carry_foreign_keys_after_load(destination, fk_context)
+    if fk_summary is not None:
+        last_summary["foreign_keys"] = fk_summary
+        for decision in fk_summary.get("decisions") or []:
+            if decision.get("status") in {"carried", "unsupported"} and decision.get(
+                "dest_ddl"
+            ):
+                ddl_log.append(f"{decision['status'].upper()} FK: {decision['dest_ddl']}")
     return total_rows, ddl_log, last_summary, headers
 
 

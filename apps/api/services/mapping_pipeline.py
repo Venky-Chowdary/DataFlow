@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 
+from services.data_profiler import UNTYPED_TEXT_LOGICALS as _UNTYPED_TEXT_LOGICALS
 from services.semantic_mapper import map_columns
 from services.transform_engine import infer_transform_for_mapping
 from services.decision_kernel import (
@@ -39,14 +40,26 @@ _TYPED_TRANSFORM_TARGET_TYPE: dict[str, str] = {
 
 
 def _canonicalize_schema_rows(schemas: list[dict] | None) -> list[dict] | None:
-    """Prefer native_type / parametric carriers over collapsed VARCHAR labels."""
+    """Prefer native_type / parametric carriers over collapsed VARCHAR labels.
+
+    Also drops NULL wire sentinels from the sample evidence: an all-NULL
+    ``DECIMAL(7,3)`` column arrived carrying ``__DF_SQL_NULL__`` strings, which
+    read as non-numeric text and made Map invent a lossy ``<col>_text``
+    LONGTEXT destination instead of honouring the declared numeric type.
+    """
+    from services.value_serializer import evidence_samples
+
     if not schemas:
         return schemas
     out: list[dict] = []
     for s in schemas:
         raw = s.get("native_type") or s.get("inferred_type") or "VARCHAR"
         carrier = ddl_carrier_type(str(raw))
-        out.append({**s, "inferred_type": carrier})
+        out.append({
+            **s,
+            "inferred_type": carrier,
+            "samples": evidence_samples(s.get("samples")),
+        })
     return out
 
 
@@ -54,6 +67,7 @@ def _stamp_create_new_type_risks(
     mappings: list[dict],
     *,
     destination_db_type: str = "",
+    dest_table_exists: bool | None = None,
 ) -> list[dict]:
     """Annotate create-new mappings with cross-dialect precision/width risk.
 
@@ -62,16 +76,28 @@ def _stamp_create_new_type_risks(
     """
     from services.semantic_mapper import _apply_create_new_risk_stamps
 
-    return _apply_create_new_risk_stamps(mappings, destination_db_type)
+    return _apply_create_new_risk_stamps(
+        mappings, destination_db_type, dest_table_exists=dest_table_exists
+    )
 
 
 def _demote_untyped_varchar_confidence(
     mappings: list[dict],
     *,
     source_schemas: list[dict] | None,
+    source_types_authoritative: bool = False,
 ) -> list[dict]:
-    """Cap confidence when Map only has bare VARCHAR and zero samples."""
+    """Cap confidence when Map only has bare VARCHAR and zero samples.
+
+    A catalog-declared type is evidence in its own right: an all-NULL
+    ``TEXT`` column matched by name onto a text destination column was capped
+    to 0.78 and blocked Execute at the confidence floor, while the identical
+    column on a create-new route mapped at 0.95. The cap is for sources whose
+    VARCHAR is a placeholder (thin SaaS / failed introspect), so it only
+    applies when the declared type is unproven or the target is not text.
+    """
     by_name = {s["name"]: s for s in (source_schemas or [])}
+    text_logicals = {"string", "text", "varchar", "unknown"}
     refined: list[dict] = []
     for m in mappings:
         out = dict(m)
@@ -79,7 +105,12 @@ def _demote_untyped_varchar_confidence(
         src_type = str(out.get("source_type") or src.get("inferred_type") or "VARCHAR")
         samples = src.get("samples") or []
         logical = normalize_logical_type(src_type)
-        if logical in {"string", "text", "varchar", "unknown"} and not samples:
+        target_logical = normalize_logical_type(str(out.get("target_type") or ""))
+        catalog_typed = source_types_authoritative and logical != "unknown"
+        if catalog_typed and target_logical in text_logicals:
+            refined.append(out)
+            continue
+        if logical in text_logicals and not samples:
             conf = min(float(out.get("confidence") or 0), _UNTYPED_VARCHAR_CONF_CAP)
             out["confidence"] = round(conf, 3)
             out["requires_review"] = True
@@ -89,6 +120,39 @@ def _demote_untyped_varchar_confidence(
                 out["reasoning"] = f"{reason} · {note}".strip(" ·")
         refined.append(out)
     return refined
+
+
+_VALUE_REWRITING_TRANSFORMS = frozenset({"trim", "trim_id", "upper", "lower", "uuid"})
+
+
+def _passthrough_identity_transform(
+    transform: str,
+    *,
+    strategy: str,
+    create_new: bool,
+    user_override: bool,
+    src_type: str,
+    tgt_type: str,
+) -> str:
+    """Drop name-triggered value rewrites on identity create-new mappings.
+
+    ``infer_transform_for_mapping`` stamps ``trim_id`` for any target whose name
+    ends in ``id``, so copying a table into a table DataFlow itself creates
+    rewrote every ``_id`` / ``uid`` / ``userId`` value. That is a mutation the
+    operator never asked for: it marks the mapping fidelity ``mutate``, drops
+    confidence to 0.70 and blocks G4 — a create-new identity column is a
+    byte-exact copy. Type-driven transforms (decimal, date, json) are untouched;
+    an operator who wants Trim still chooses it explicitly.
+    """
+    if user_override or transform not in _VALUE_REWRITING_TRANSFORMS:
+        return transform
+    if not (create_new or strategy in {"identity_passthrough", "create_compatible_new"}):
+        return transform
+    try:
+        same_family = normalize_logical_type(src_type) == normalize_logical_type(tgt_type)
+    except Exception:
+        return transform
+    return "none" if same_family else transform
 
 
 def classify_format(source_columns: list[str], file_format: str | None = None) -> dict:
@@ -392,6 +456,7 @@ def run_mapping_pipeline(
     source_samples: dict[str, list[str]] | None = None,
     validation_mode: str = "strict",
     destination_db_type: str = "",
+    source_db_type: str = "",
     schema_policy: str = "manual_review",
     sync_mode: str = "",
     destination_table_exists: bool | None = None,
@@ -421,8 +486,18 @@ def run_mapping_pipeline(
     if target_schemas is None and target_columns:
         target_schemas = [{"name": c, "inferred_type": "VARCHAR", "samples": []} for c in target_columns]
 
+    # Carriers that actually exist in the destination. Identity targets derived
+    # below for a create-new table are proposals, not live columns, and must
+    # never grant bind-existing authority to the Decision Kernel.
+    introspected_target_schemas: list[dict] | None = target_schemas
+
     if source_samples and source_columns:
         from services.data_profiler import merge_profiler_schema, profile_dataset
+        from services.value_serializer import evidence_samples
+
+        source_samples = {
+            col: evidence_samples(vals) for col, vals in source_samples.items()
+        }
 
         max_len = max((len(v) for v in source_samples.values()), default=0)
         profile_rows: list[dict] = []
@@ -443,6 +518,20 @@ def run_mapping_pipeline(
             # profile_dataset returns columns as name→profile dict — attach for
             # Map strip (null%/min/max/observed DECIMAL scale), not type invent only.
             col_profiles = profiled.get("columns") or {}
+            # One source-type SSOT: when profiling upgrades an untyped text
+            # carrier (CSV/Parquet strings) to a proven numeric/temporal type,
+            # the fidelity verdict must judge that same type. Otherwise Map
+            # invents NUMBER from the profile and then calls its own invent a
+            # lossy VARCHAR→NUMBER cast, blocking every file→warehouse route.
+            for name, upgraded in merged_schema.items():
+                declared = declared_source_types.get(name, "")
+                if not upgraded or not declared:
+                    continue
+                if normalize_logical_type(declared) in _UNTYPED_TEXT_LOGICALS and (
+                    normalize_logical_type(upgraded)
+                    != normalize_logical_type(declared)
+                ):
+                    declared_source_types[name] = str(upgraded)
             source_schemas = [
                 {
                     **s,
@@ -480,6 +569,7 @@ def run_mapping_pipeline(
         and destination_table_exists is False
     ):
         target_columns = [m["target"] for m in base_mappings]
+        introspected_target_schemas = None
         target_schemas = [
             {
                 "name": m["target"],
@@ -543,6 +633,14 @@ def run_mapping_pipeline(
         src_type = schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
         src_type = ddl_carrier_type(str(src_type))
         tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
+        # Provenance, not just a value: a stamp read out of the destination
+        # catalog records what exists today, while an operator stamp records an
+        # approved ceiling. Writers must be able to tell them apart — otherwise
+        # today's narrow carrier freezes the column and every drifted row
+        # quarantines under backfill instead of widening the destination.
+        catalog_stamp = bool(tgt_type) and not (
+            m.get("user_override") or m.get("userOverride")
+        )
         strategy = str(m.get("assignment_strategy") or "")
         # Partial Studio: never invent dest types from source — Map/Validate must
         # stay pending until live schema loads (false-green preserve cliff).
@@ -560,7 +658,10 @@ def run_mapping_pipeline(
             if "unsigned" in src_l and ("bigint" in src_l or normalize_logical_type(src_type) == "decimal"):
                 # Still sample-observe when possible — bare DECIMAL → (38,15) cliff.
                 tgt_type = create_new_mapping_target_type(
-                    "DECIMAL", destination_db_type or "", samples=col_samples
+                    "DECIMAL",
+                    destination_db_type or "",
+                    samples=col_samples,
+                    source_db=source_db_type,
                 ) if destination_db_type or col_samples else "DECIMAL"
             elif "unsigned" in src_l:
                 # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
@@ -573,7 +674,10 @@ def run_mapping_pipeline(
                 # Intentional create-new / ADD COLUMN — Decision Kernel invent.
                 # Distinct from pending_dest_schema (Studio names-only refuse).
                 tgt_type = create_new_mapping_target_type(
-                    src_type, destination_db_type, samples=col_samples
+                    src_type,
+                    destination_db_type,
+                    samples=col_samples,
+                    source_db=source_db_type,
                 )
             elif destination_db_type and destination_table_exists is True:
                 # Existing table, column missing from Studio, not create-new —
@@ -582,7 +686,10 @@ def run_mapping_pipeline(
                 tgt_type = ""
             elif destination_db_type:
                 tgt_type = create_new_mapping_target_type(
-                    src_type, destination_db_type, samples=col_samples
+                    src_type,
+                    destination_db_type,
+                    samples=col_samples,
+                    source_db=source_db_type,
                 )
             else:
                 # No dest dialect — still stamp observed DECIMAL(p,s) for Map honesty.
@@ -608,6 +715,7 @@ def run_mapping_pipeline(
                         src_type or tgt_type,
                         destination_db_type or "",
                         samples=col_samples,
+                        source_db=source_db_type,
                     )
                     if upgraded:
                         tgt_type = upgraded
@@ -623,6 +731,14 @@ def run_mapping_pipeline(
                 tgt_type or src_type,
                 source_samples=col_samples,
                 destination_db_type=destination_db_type,
+            )
+            transform = _passthrough_identity_transform(
+                transform,
+                strategy=strategy,
+                create_new=bool(m.get("create_new")),
+                user_override=bool(m.get("user_override")),
+                src_type=src_type,
+                tgt_type=tgt_type or src_type,
             )
         # New/generic destinations: typed transforms must stamp *physical* DDL
         # for the destination (DATETIME(6)/CHAR(36)/JSONB) — never bare logical
@@ -647,7 +763,9 @@ def run_mapping_pipeline(
                         == normalize_logical_type(typed_target)
                         else typed_target
                     )
-                    tgt_type = create_new_mapping_target_type(seed, destination_db_type)
+                    tgt_type = create_new_mapping_target_type(
+                        seed, destination_db_type, source_db=source_db_type
+                    )
                 else:
                     tgt_type = typed_target
 
@@ -657,6 +775,11 @@ def run_mapping_pipeline(
                 "transform": transform,
                 "source_type": src_type,
                 "target_type": tgt_type or "",
+                **(
+                    {"target_type_origin": "destination_catalog"}
+                    if catalog_stamp
+                    else {}
+                ),
                 "reasoning": reasoning,
                 "agent": "MappingReasonerAgent",
                 "format_class": classification["format"],
@@ -697,10 +820,12 @@ def run_mapping_pipeline(
     enriched_mappings = refine_mappings_with_quality(
         enriched_mappings,
         source_schemas=source_schemas,
+        destination_db_type=destination_db_type or "",
     )
     enriched_mappings = _demote_untyped_varchar_confidence(
         enriched_mappings,
         source_schemas=source_schemas,
+        source_types_authoritative=source_types_authoritative,
     )
     quality_issues = detect_cross_field_issues(enriched_mappings, source_schemas=source_schemas)
 
@@ -765,9 +890,14 @@ def run_mapping_pipeline(
         destination_db_type=destination_db_type or "",
         dest_table_exists=destination_table_exists,
     )
+    # Snapshot before the risk/Kernel stamps: both may replace a projected
+    # carrier with the destination's physical DDL, which invalidates the verdict
+    # just computed.
+    pre_stamp_targets = [str(m.get("target_type") or "") for m in enriched_mappings]
     enriched_mappings = _stamp_create_new_type_risks(
         enriched_mappings,
         destination_db_type=destination_db_type or "",
+        dest_table_exists=destination_table_exists,
     )
     # Additive create-new gaps: Kernel stamp before pending honesty pass.
     try:
@@ -780,7 +910,7 @@ def run_mapping_pipeline(
         }
         live_types = {
             str(s.get("name") or ""): str(s.get("inferred_type") or "")
-            for s in (target_schemas or [])
+            for s in (introspected_target_schemas or [])
             if s.get("name") and str(s.get("inferred_type") or "").strip()
         }
         enriched_mappings, _ = stamp_additive_mapping_types(
@@ -790,7 +920,25 @@ def run_mapping_pipeline(
             source_types=declared_source_types,
             samples_by_source=samples_by_src,
             backfill_new_fields=False,
+            dest_table_exists=destination_table_exists,
         )
+        # These stamps replace projected carriers with the destination's own
+        # physical DDL (identity ``TIMESTAMPTZ`` → SQL Server ``DATETIMEOFFSET``).
+        # A verdict stamped against the pre-stamp spelling compares a source
+        # dialect token to a foreign dialect and reads offset-pinned → session
+        # relative as a collapse, so the mapping kept ``lossy_cast`` and Execute
+        # demanded a Risk Contract for a lossless write. Recompute on the final
+        # types — the verdict must always describe the type path that will run.
+        if [str(m.get("target_type") or "") for m in enriched_mappings] != (
+            pre_stamp_targets
+        ):
+            enriched_mappings = stamp_mapping_fidelity(
+                enriched_mappings,
+                source_types=declared_source_types,
+                target_types=declared_target_types,
+                destination_db_type=destination_db_type or "",
+                dest_table_exists=destination_table_exists,
+            )
     except Exception as stamp_exc:
         # Fail-closed honesty: leave create-new target_type blank so Map/Validate
         # cannot invent preserve@0.99 after Kernel stamp failed.

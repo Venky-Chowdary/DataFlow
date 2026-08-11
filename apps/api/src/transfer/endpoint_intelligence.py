@@ -746,6 +746,15 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             out["columns"] = list(schema_map.keys())
             out["schema"] = schema_map
             out["schema_nullability"] = schema_nulls
+            # Who fills a NOT NULL column when no mapping does — G14 refuses to
+            # call a required column safe without this.
+            out["schema_defaults"] = dict((schema_keys or {}).get("defaults") or {})
+            out["identity_columns"] = list(
+                (schema_keys or {}).get("identity_columns") or []
+            )
+            out["generated_columns"] = list(
+                (schema_keys or {}).get("generated_columns") or []
+            )
             out["primary_key_columns"] = list(
                 (schema_keys or {}).get("primary_key_columns") or []
             )

@@ -82,10 +82,12 @@ def test_pre_ingestion_staging_strict_blocks_promote(tmp_path: Path):
 
     dest_path = tmp_path / "stg_strict.db"
     conn = f"sqlite:///{dest_path}"
-    # Seed primary so we can prove it was not overwritten.
+    # Seed primary so we can prove it was not overwritten. ``age`` is declared
+    # INTEGER so 'bad' is a real destination-type failure — a TEXT carrier holds
+    # every value and would give the operator nothing to block on.
     with sqlite3.connect(dest_path) as db:
-        db.execute("CREATE TABLE users (id TEXT, age TEXT)")
-        db.execute("INSERT INTO users VALUES ('seed', '1')")
+        db.execute("CREATE TABLE users (id TEXT, age INTEGER)")
+        db.execute("INSERT INTO users VALUES ('seed', 1)")
         db.commit()
 
     csv = b"id,age\n1,30\n2,bad\n"

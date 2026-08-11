@@ -20,13 +20,27 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, Final
 
 from connectors.base import ReadBatch
+from connectors.merge_dialects import (  # noqa: F401  (re-exported for callers)
+    _db2_merge_upsert,
+    _duckdb_merge_upsert,
+    _hana_merge_upsert,
+    _informix_merge_upsert,
+    _netezza_merge_upsert,
+    _sybase_merge_upsert,
+    _teradata_merge_on,
+    _teradata_merge_upsert,
+    _trino_merge_upsert,
+    _trino_qualified_table,
+    _vertica_merge_upsert,
+)
 from connectors.schema_drift import (
     _build_widen_ddl,
     add_missing_columns,
     is_wider_type,
+    raise_widen_refusal,
 )
 from connectors.sql_temporal import (
     coerce_sql_temporal,
@@ -41,12 +55,13 @@ from connectors.write_resilience import (
     sqlalchemy_chunk_rows_written,
 )
 from services import reflection_cache
-from services.engine_pool import release_engine
 from services.decision_kernel import (
     ddl_type,
     materialize_dest_ddl,
     normalize_logical_type,
 )
+from services.engine_pool import release_engine
+from services.identity_carry import identity_seed_step
 from services.type_system import parse_numeric_precision_scale
 from services.value_serializer import cell_to_string, json_default
 
@@ -55,7 +70,7 @@ logger = logging.getLogger(__name__)
 try:
     import sqlalchemy as sa
     from sqlalchemy import create_engine, inspect
-    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.dialects import mssql, oracle, postgresql
     from sqlalchemy.exc import NoSuchModuleError
 
     SQLALCHEMY_AVAILABLE = True
@@ -87,6 +102,8 @@ try:
 
 except (ImportError, AttributeError):  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
+    mssql = None  # type: ignore[assignment]
+    oracle = None  # type: ignore[assignment]
     ch_engines = None
     ChDateTime64 = None
     ChNullable = None
@@ -100,8 +117,9 @@ from connectors.writer_common import (
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
     build_mapped_rows_with_details,
-    flush_normalized_child_batches,
     compare_lsn,
+    flush_normalized_child_batches,
+    materialize_missing_as_null_for_dense_write,
     quarantine_currency_markers_into_numeric,
     quarantine_unfit_binaries,
     quarantine_unfit_bitstrings,
@@ -114,12 +132,12 @@ from connectors.writer_common import (
     quarantine_unfit_temporals,
     quarantine_unfit_years,
     quote_sql_identifier,
+    reject_on_strict_policy,
     resolve_conflict_targets,
     resolve_target_columns,
     row_checksum,
-    materialize_missing_as_null_for_dense_write,
-    reject_on_strict_policy,
     split_dense_sparse_rows,
+    stamp_is_operator_ceiling,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -503,13 +521,29 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         if not query:
             query = None
 
+    database = cfg.get("database") or None
+    if drivername.startswith("oracle"):
+        # ``oracle+oracledb://u:p@host:port/NAME`` builds a *SID* DSN, and SIDs
+        # are legacy: every pluggable database, RAC service and Autonomous
+        # instance is reached by service name, so the connect fails with
+        # ORA-12505 / DPY-6003 on anything newer than a bare single instance.
+        # Honour an explicit ``sid`` when the operator sets one; otherwise the
+        # database name is a service name.
+        sid = str(cfg.get("sid") or "").strip()
+        service = str(cfg.get("service_name") or "").strip() or (database or "")
+        if sid:
+            database = sid
+        elif service:
+            database = None
+            query = {**(query or {}), "service_name": service}
+
     return sa.URL.create(
         drivername,
         username=cfg.get("username") or None,
         password=cfg.get("password") or None,
         host=cfg.get("host") or "localhost",
         port=port if port else None,
-        database=cfg.get("database") or None,
+        database=database,
         query=query,
     )
 
@@ -749,9 +783,6 @@ def _logical_type_from_sa(col_type: Any) -> str:
     if "tinyint" in repr_ and getattr(col_type, "display_width", 0) == 1:
         return "boolean"
 
-    if isinstance(col_type, (sa.Integer, sa.BigInteger, sa.SmallInteger)):
-        return "integer"
-
     # IEEE floats must stay FLOAT — never collapse into DECIMAL/NUMBER.
     if isinstance(col_type, (sa.Float, sa.Double, sa.REAL)):
         return "float"
@@ -761,6 +792,10 @@ def _logical_type_from_sa(col_type: Any) -> str:
     ) and "decimal" not in repr_ and "numeric" not in repr_ and "number" not in repr_:
         return "float"
 
+    # Fixed-point before integer: ``oracle.NUMBER`` subclasses *both* Numeric and
+    # Integer, so an Integer-first check read NUMBER(12,2) money as ``integer``
+    # and dropped the scale — every Oracle source column came back integral and
+    # the create-new target then collapsed to TEXT.
     if isinstance(col_type, (sa.Numeric,)):
         from services.type_system import (
             zero_scale_fits_signed_bigint,
@@ -778,7 +813,13 @@ def _logical_type_from_sa(col_type: Any) -> str:
             return f"DECIMAL({int(precision)},{int(scale)})"
         if precision is not None:
             return f"DECIMAL({int(precision)})"
+        if isinstance(col_type, (sa.Integer,)):
+            # Unconstrained NUMBER — integral wire, no declared scale to keep.
+            return "integer"
         return "decimal"
+
+    if isinstance(col_type, (sa.Integer, sa.BigInteger, sa.SmallInteger)):
+        return "integer"
 
     if isinstance(col_type, (sa.DateTime,)):
         # Preserve TIMESTAMPTZ vs NTZ — collapsing both to "datetime" loses TZ polarity
@@ -939,6 +980,135 @@ class _DuckDBJSON(sa.JSON):
         return lambda value: value
 
 
+#: Dialects whose catalogs fold unquoted identifiers to a single case.
+_FOLDING_DIALECTS: Final = {"oracle", "snowflake", "db2", "ibm_db_sa"}
+
+_ORACLE_WIRES: Final = {"oracle", "oracledb", "oracle_autonomous", "oracle_adw", "oracle_atp"}
+
+
+_MSSQL_WIRES: Final = {"sqlserver", "mssql", "azure_sql", "synapse", "azure_synapse"}
+
+
+def _resolve_physical_table_ident(
+    engine: Any, table: str, schema: str | None
+) -> tuple[str, str | None]:
+    """Physical spelling of a destination on case-folding engines.
+
+    Oracle/Snowflake/DB2 fold unquoted identifiers to upper case, but every
+    CREATE here is emitted quoted, so a lower-case name typed in Studio landed a
+    lower-case-quoted table that read-back (which folds, like every other client)
+    could not see: ``ORA-00942`` on a table the write had just reported written.
+    An existing table keeps its own spelling; only a table that does not exist
+    yet is created under the folded name the catalog will hand back.
+    """
+    dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "").lower()
+    if dialect not in _FOLDING_DIALECTS:
+        return table, schema
+    from services.dialect_profiles import fold_identifier
+    from services.sql_object_identity import resolve_object_identity
+
+    folded = fold_identifier(dialect, table)
+    folded_schema = fold_identifier(dialect, schema) if schema else schema
+    if folded == table and folded_schema == schema:
+        return table, schema
+    # ``has_table`` folds like every other client, so a quoted lower-case table
+    # read as absent and the write created a second, folded one beside it.
+    ident = resolve_object_identity(engine, table, schema)
+    if not ident.resolved:
+        # Catalog unreadable: keep the operator's spelling rather than guess.
+        return table, schema
+    if ident.exists:
+        return ident.table, ident.schema
+    return folded, folded_schema
+
+
+def _resolve_physical_column_idents(
+    engine: Any, table: str, schema: str | None, columns: list[str]
+) -> dict[str, str]:
+    """Stored spelling of each destination column on case-folding engines.
+
+    Every statement here quotes its identifiers, so on Oracle/Snowflake/DB2 a
+    mapped ``label`` is asked for as ``"label"`` — a *different* column from the
+    ``LABEL`` an ordinary ``CREATE TABLE`` produced. Appending into a table the
+    client created therefore failed with ORA-00904 on a column that is plainly
+    there, and drift widening emitted ``MODIFY ("name" CLOB)`` against ``NAME``.
+
+    Only columns whose stored spelling actually differs are returned; a column
+    the catalog does not have is left alone so ADD COLUMN still creates it.
+    """
+    dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "").lower()
+    if dialect not in _FOLDING_DIALECTS or not columns:
+        return {}
+    stored = _stored_column_spellings(engine, engine, table, schema)
+    if not stored:
+        return {}
+    from services.dialect_profiles import fold_identifier
+
+    # A column drift is about to add must follow the convention of the table it
+    # joins: adding a quoted lower-case column beside folded ones leaves a
+    # column the client's own SELECT cannot see.
+    folded_table = all(name == name.upper() for name in stored.values())
+    renames: dict[str, str] = {}
+    for col in columns:
+        hit = stored.get(str(col).casefold())
+        if hit is None and folded_table:
+            hit = fold_identifier(dialect, col)
+        if hit and hit != col:
+            renames[col] = hit
+    return renames
+
+
+def _stored_column_spellings(
+    engine: Any, bind: Any, table: str, schema: str | None
+) -> dict[str, str]:
+    """``{folded name: spelling the catalog stores}`` for one table.
+
+    Reflection hands back *normalised* names (Oracle's ``LABEL`` arrives as
+    ``label``), so comparing or quoting them directly addresses a column that
+    does not exist. ``denormalize_name`` is the dialect's own inverse and keeps
+    a deliberately quoted lower-case column quoted.
+    """
+    try:
+        cols = inspect(bind).get_columns(table, schema=schema)
+    except Exception as exc:  # noqa: BLE001 — unreadable catalog: keep Map names
+        logger.debug("column spelling probe failed for %s: %s", table, exc)
+        return {}
+    denormalize = getattr(
+        getattr(engine, "dialect", None), "denormalize_name", lambda n: n
+    )
+    out: dict[str, str] = {}
+    for col in cols:
+        name = col.get("name")
+        if not name:
+            continue
+        out[str(name).casefold()] = str(denormalize(name) or name)
+    return out
+
+
+def _is_oracle_wire(dialect_name: str, db_type: str) -> bool:
+    """True when DDL compiles through the Oracle dialect."""
+    if oracle is None:
+        return False
+    return (dialect_name or "").lower() == "oracle" or (db_type or "").lower() in _ORACLE_WIRES
+
+
+def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
+    """Naive-datetime carrier that keeps sub-second precision, else ``None``.
+
+    ``sa.DateTime()`` compiles to Oracle ``DATE`` (whole seconds, no fraction)
+    and SQL Server ``DATETIME`` (rounded to 1/300 s), so a PostgreSQL
+    microsecond stamp lands altered and a row checksum can only match by luck.
+    ``None`` means the dialect's own default already carries fractions.
+    """
+    if _is_oracle_wire(dialect_name, db_type):
+        return oracle.TIMESTAMP()
+    if mssql is not None and (
+        (dialect_name or "").lower() == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
+    ):
+        return mssql.DATETIME2()
+    return None
+
+
 def _sa_type_for_logical(
     logical: str,
     dialect_name: str,
@@ -1000,6 +1170,15 @@ def _sa_type_for_logical(
             return _maybe_nullable(sa.DateTime())
         if db_type == "trino" and TrinoTimestamp is not None:
             return TrinoTimestamp(precision=3, timezone=True)
+        if _is_oracle_wire(dialect_name, db_type):
+            # sa.DateTime(timezone=True) compiles to Oracle DATE — second
+            # granularity with no zone at all, so a live postgresql->oracle run
+            # created DATE for TIMESTAMPTZ and reconciled green only because the
+            # fixture held whole-second UTC values.
+            local = "local time zone" in raw_lower or "_ltz" in raw_lower
+            return _maybe_nullable(
+                oracle.TIMESTAMP(timezone=not local, local_timezone=local)
+            )
         return sa.DateTime(timezone=True)
     if (
         "timestamp_ntz" in raw_lower
@@ -1007,7 +1186,8 @@ def _sa_type_for_logical(
         or "datetime_ntz" in raw_lower
         or " without time zone" in raw_lower
     ):
-        return _maybe_nullable(sa.DateTime())
+        sub_second = _sub_second_naive_wire(dialect_name, db_type)
+        return _maybe_nullable(sub_second if sub_second is not None else sa.DateTime())
 
     if t == LOGICAL_INTEGER:
         # Width SSOT = decision_kernel integer_width_carrier / ddl_type.
@@ -1019,6 +1199,17 @@ def _sa_type_for_logical(
         int_u = raw.upper().split("(", 1)[0].strip().replace(" ", "")
         carrier = integer_width_carrier(raw) or ""
         width = integer_bit_width(carrier) if carrier else None
+        if int_u in {"INT", "INTEGER"} and db_type:
+            # The bare keyword is ambiguous across engines, so the carrier
+            # widens it to 64-bit. Once the destination engine is named that
+            # ambiguity is gone: SQL Server / PostgreSQL / MySQL INT is int32,
+            # and binding it as BIGINT re-widens a column the operator declared
+            # 32-bit. Oracle/Snowflake report unbounded and keep the widen.
+            from services.numeric_fit import integer_storage_bounds
+
+            bounds = integer_storage_bounds(int_u, dest_db=db_type)
+            if bounds and bounds[1] == 2147483647:
+                return _maybe_nullable(sa.Integer())
         if int_u in {
             "BIGINT",
             "INT64",
@@ -1133,6 +1324,9 @@ def _sa_type_for_logical(
             return TrinoTimestamp(precision=3, timezone=False)
         if db_type == "presto":
             return sa.TIMESTAMP()
+        sub_second = _sub_second_naive_wire(dialect_name, db_type)
+        if sub_second is not None:
+            return _maybe_nullable(sub_second)
         # Map≡CREATE: LOGICAL_DATETIME without TZ markers is NTZ wall-clock on
         # Oracle/DuckDB/PG/SQL Server. Databricks TIMESTAMP is session-TZ aware
         # (TIMESTAMP_NTZ already returned naive above) — never invent the wrong
@@ -1213,7 +1407,40 @@ def _sa_type_for_logical(
     # Specialty carriers that normalize to STRING (HIERARCHYID, SQL_VARIANT, XML,
     # ROWVERSION, …) — DialectNativeType / typed wire via ddl_type; never invent
     # bare Text that rematerializes as Map VARCHAR over live specialty DDL.
-    from services.type_system import specialty_carrier_base
+    from services.type_system import (
+        is_fixed_char_carrier,
+        is_national_string_carrier,
+        specialty_carrier_base,
+        string_carrier_length,
+    )
+
+    # Unicode polarity and declared width survive to DDL. Collapsing every string
+    # carrier to sa.Text() made SQL Server CREATE a code-page VARCHAR(MAX) for an
+    # invented NVARCHAR(64), and a live postgresql->mssql read-back came back with
+    # ``中`` rewritten to ``?``. sa.Unicode/UnicodeText are the dialect-neutral
+    # national wires (NVARCHAR on SQL Server, NVARCHAR2 on Oracle, VARCHAR on
+    # engines that are Unicode-only anyway).
+    if is_national_string_carrier(raw):
+        width = string_carrier_length(raw)
+        if width is not None:
+            if is_fixed_char_carrier(raw):
+                return _maybe_nullable(sa.NCHAR(width))
+            return _maybe_nullable(sa.Unicode(width))
+        if dialect_name == "mssql" or db_type in {"sqlserver", "mssql", "azure_sql"}:
+            # sa.UnicodeText compiles to deprecated NTEXT; NVARCHAR(max) is the
+            # only supported SQL Server Unicode LOB wire.
+            return _maybe_nullable(sa.Unicode())
+        return _maybe_nullable(sa.UnicodeText())
+
+    # Declared width survives to DDL for the non-national carriers too: every
+    # bounded VARCHAR(n)/CHAR(n) used to land as sa.Text(), so a live
+    # postgresql->oracle CREATE turned VARCHAR(64) into CLOB — unindexable, and
+    # the destination no longer enforces the source's length contract.
+    width = string_carrier_length(raw)
+    if width is not None:
+        if is_fixed_char_carrier(raw):
+            return _maybe_nullable(sa.CHAR(width))
+        return _maybe_nullable(sa.String(width))
 
     spec = specialty_carrier_base(raw)
     if spec:
@@ -1266,6 +1493,12 @@ def _sa_type_for_logical(
         if _DialectNativeType is None:
             return _maybe_nullable(sa.Text())
         return _maybe_nullable(_DialectNativeType(native))
+    if mssql is not None and (
+        dialect_name == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
+    ):
+        # sa.Text() compiles to SQL Server TEXT, deprecated since 2005 and
+        # unusable with most string predicates. VARCHAR(max) is the wire.
+        return _maybe_nullable(mssql.VARCHAR(None))
     return _maybe_nullable(sa.Text())
 
 
@@ -1627,16 +1860,37 @@ def _reflect_table(
     from services.reflection_cache import get_or_load
 
     def _reflect() -> sa.Table:
-        metadata = sa.MetaData()
         # Quote identifiers for safety with reserved words and case-sensitive engines.
-        return sa.Table(
-            table,
-            metadata,
-            schema=schema,
-            quote=True,
-            quote_schema=True,
-            autoload_with=engine,
-        )
+        try:
+            return sa.Table(
+                table,
+                sa.MetaData(),
+                schema=schema,
+                quote=True,
+                quote_schema=True,
+                autoload_with=engine,
+            )
+        except sa.exc.NoSuchTableError:
+            # Oracle/DB2/Snowflake fold unquoted identifiers to upper case and
+            # SQLAlchemy expects the *normalised* (lower-case) spelling; forcing
+            # quote=True looks for a literal name, misses, and the caller
+            # degrades to an untyped ``SELECT *`` that loses every column type
+            # (an Oracle NUMBER(12,2) then scored off sampled values instead).
+            attempts: list[tuple[str, str | None]] = [(table, schema)]
+            if str(getattr(engine.dialect, "name", "")).lower() in _FOLDING_DIALECTS:
+                # Only folding dialects may retry a case-changed name: on
+                # PostgreSQL "Foo" and "foo" are different tables and guessing
+                # would read the wrong one.
+                attempts.append((table.lower(), (schema or "").lower() or None))
+            last: Exception | None = None
+            for name, sch in attempts:
+                try:
+                    return sa.Table(
+                        name, sa.MetaData(), schema=sch, autoload_with=engine
+                    )
+                except sa.exc.NoSuchTableError as retry_exc:
+                    last = retry_exc
+            raise last if last is not None else sa.exc.NoSuchTableError(table)
 
     table_obj = get_or_load(engine, schema, table, "reflect", _reflect)
     if columns is None:
@@ -1657,6 +1911,29 @@ def _reflect_table(
     return new_table
 
 
+def _fidelity_dialect(db_type: str, dialect_name: str) -> str:
+    """Canonical dialect name for the fidelity planner (never a driver name)."""
+    d = (db_type or "").strip().lower() or (dialect_name or "").strip().lower()
+    aliases = {
+        "mssql": "sqlserver",
+        "azure_sql": "sqlserver",
+        "mariadb": "mysql",
+        "postgres": "postgresql",
+        "cockroachdb": "postgresql",
+        "yugabytedb": "postgresql",
+        "oracledb": "oracle",
+    }
+    return aliases.get(d, d)
+
+
+def _with_placement_suffix(ddl: str, suffix: str) -> str:
+    """Append the planned PARTITION BY / TABLESPACE clause to a compiled CREATE."""
+    clause = suffix.strip()
+    if not clause:
+        return ddl
+    return f"{ddl.rstrip().rstrip(';')} {clause}"
+
+
 def _build_table_for_write(
     engine: Any,
     table_name: str,
@@ -1665,6 +1942,7 @@ def _build_table_for_write(
     column_types: dict[str, str],
     db_type: str = "",
     conflict_columns: list[str] | None = None,
+    fidelity_plan: Any = None,
 ) -> sa.Table:
     """Build an explicit Table definition for CREATE/INSERT using the target schema.
 
@@ -1691,6 +1969,61 @@ def _build_table_for_write(
     if conflict_cols:
         pk_set = set(conflict_cols)
 
+    # Source semantics come from the one canonical planner, never from a second
+    # opinion invented here: a CHECK the certificate calls carried must be the
+    # CHECK this CREATE TABLE emits.
+    plan_not_null: set[str] = set()
+    plan_defaults: dict[str, str] = {}
+    plan_uniques: list[list[str]] = []
+    plan_checks: list[tuple[str, str]] = []
+    if fidelity_plan is not None:
+        plan_not_null = set(getattr(fidelity_plan, "not_null_columns", []) or [])
+        plan_defaults = dict(getattr(fidelity_plan, "column_defaults", {}) or {})
+        plan_uniques = [
+            list(u) for u in (getattr(fidelity_plan, "unique_constraints", []) or [])
+        ]
+        plan_checks = [
+            (str(n), str(p))
+            for n, p in (getattr(fidelity_plan, "check_predicates", []) or [])
+        ]
+        # Resolve the plan's names against the columns actually being created.
+        # An exact-match-only lookup silently dropped the PRIMARY KEY when the
+        # two spellings differed only by case, and the certificate still said
+        # "carried" — a mismatch must resolve or be visible, never vanish.
+        by_fold = {str(c).casefold(): c for c in columns}
+        plan_pk = [
+            by_fold[str(c).casefold()]
+            for c in (getattr(fidelity_plan, "primary_key", []) or [])
+            if str(c).casefold() in by_fold
+        ]
+        plan_not_null = {
+            by_fold[c.casefold()] for c in plan_not_null if c.casefold() in by_fold
+        }
+        plan_defaults = {
+            by_fold[c.casefold()]: v
+            for c, v in plan_defaults.items()
+            if c.casefold() in by_fold
+        }
+        plan_uniques = [
+            [by_fold[c.casefold()] for c in u if c.casefold() in by_fold]
+            for u in plan_uniques
+        ]
+        if not pk_set and plan_pk and len(plan_pk) == len(
+            getattr(fidelity_plan, "primary_key", []) or []
+        ):
+            pk_set = set(plan_pk)
+
+    # dest column -> the generator clause the planner decided, which carries the
+    # source's own seed and increment.
+    plan_identity: dict[str, str] = {}
+    if fidelity_plan is not None:
+        by_fold_ident = {str(c).casefold(): c for c in columns}
+        plan_identity = {
+            by_fold_ident[str(c).casefold()]: str(clause or "")
+            for c, clause in (getattr(fidelity_plan, "identity_columns", {}) or {}).items()
+            if str(c).casefold() in by_fold_ident
+        }
+
     cols = []
     for col in columns:
         logical = column_types.get(col, "string")
@@ -1699,22 +2032,54 @@ def _build_table_for_write(
         # backing sequence for dialects (e.g. DuckDB) that do not create it
         # automatically.  The PK exists purely for upsert semantics, not identity.
         autoincrement = False if is_pk else None
+        nullable = not (is_pk or col in plan_not_null)
+        # A key generator the source declared. MySQL spells it AUTO_INCREMENT,
+        # which SQLAlchemy renders from ``autoincrement``; every other engine
+        # here takes the standard IDENTITY construct. ``always=False`` is
+        # deliberate — the load writes the source's own key values, and the
+        # certificate reports the relaxation.
+        identity_arg: list[Any] = []
+        if col in plan_identity:
+            nullable = False
+            if dialect_name in {"mysql", "mariadb"}:
+                autoincrement = True
+            else:
+                # SQLAlchemy rejects an explicit autoincrement=False beside an
+                # Identity object; the Identity is the generator here.
+                autoincrement = None
+                seed, step = identity_seed_step(plan_identity[col])
+                identity_arg.append(
+                    sa.Identity(always=False, start=seed, increment=step)
+                )
         cols.append(
             sa.Column(
                 col,
                 _sa_type_for_logical(
-                    logical, dialect_name, db_type, nullable=not is_pk
+                    logical, dialect_name, db_type, nullable=nullable
                 ),
+                *identity_arg,
                 primary_key=is_pk,
-                nullable=not is_pk,
+                nullable=nullable,
                 autoincrement=autoincrement,
+                server_default=(
+                    sa.text(plan_defaults[col]) if col in plan_defaults else None
+                ),
                 quote=True,
             )
         )
 
     constraints: list[Any] = []
     if conflict_cols and not pk_set.issubset(set(columns)):
-        constraints.append(sa.UniqueConstraint(*conflict_cols, quote=True))
+        # ``quote=`` is a Column kwarg; on a constraint SQLAlchemy rejects it
+        # as an unknown dialect argument and the whole CREATE fails.
+        constraints.append(sa.UniqueConstraint(*conflict_cols))
+    for unique_cols in plan_uniques:
+        if all(c in columns for c in unique_cols) and set(unique_cols) != pk_set:
+            constraints.append(sa.UniqueConstraint(*unique_cols))
+    for check_name, predicate in plan_checks:
+        constraints.append(
+            sa.CheckConstraint(sa.text(predicate), name=check_name or None)
+        )
 
     if dialect_name == "clickhouse" and ch_engines is not None:
         # Airbyte-class: upsert identity is ORDER BY on ReplacingMergeTree, not
@@ -1845,11 +2210,22 @@ def _widen_existing_columns_sa(
         logger.debug("Could not reflect columns for widen: %s", exc, exc_info=exc)
         return []
 
+    from connectors.schema_drift import existing_column_index
+
+    catalog_names = existing_column_index(
+        dialect_name, (c["name"] for c in existing_cols)
+    )
     log: list[str] = []
     for col in target_cols:
         if col in skip_cols:
             continue
-        existing = next((c for c in existing_cols if c["name"] == col), None)
+        # Reflection normalises Oracle's ``LABEL`` to ``label``; an exact match
+        # skipped the widen and the row it was needed for was truncated or
+        # refused with no ALTER ever attempted.
+        catalog_name = catalog_names.get(col) or catalog_names.get(col.casefold())
+        existing = next(
+            (c for c in existing_cols if c["name"] == catalog_name), None
+        )
         if not existing:
             continue
         existing_type = str(existing["type"].compile(dialect=engine.dialect))
@@ -1900,6 +2276,7 @@ def _widen_existing_columns_sa(
             logger.warning(
                 "Widen failed for %s.%s: %s", table_name, col, exc, exc_info=exc
             )
+            raise_widen_refusal(col, existing_type, desired_type, exc)
             raise
     return log
 
@@ -1943,6 +2320,7 @@ def _sample_raw_table(
     dialect: str = "ansi",
 ) -> tuple[list[str], list[Any]]:
     from connectors.sql_identifiers import quote_table_ref
+    from services.dialect_profiles import uses_fetch_first_pagination
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
     dialect_l = (dialect or "ansi").lower()
@@ -1954,6 +2332,9 @@ def _sample_raw_table(
         "azure_sql_database",
     }:
         stmt = f"SELECT TOP 200 * FROM {qualified}"  # nosec B608
+    elif uses_fetch_first_pagination(dialect):
+        # Oracle/DB2 reject LIMIT; FETCH FIRST needs no ORDER BY for a sample.
+        stmt = f"SELECT * FROM {qualified} FETCH FIRST 200 ROWS ONLY"  # nosec B608
     else:
         stmt = f"SELECT * FROM {qualified} LIMIT 200"  # nosec B608
     result = conn.execute(sa.text(stmt))
@@ -2167,6 +2548,10 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
     engine = _engine(cfg)
     try:
         schema = schema or _schema_name(cfg)
+        # A folding engine holding a lower-case-quoted table must be dropped
+        # under that spelling: dropping the folded name is a no-op, and a
+        # full_refresh would then append onto rows it reported as cleared.
+        table, schema = _resolve_physical_table_ident(engine, table, schema)
         qualified = _qualified_table_ref(cfg, table, schema)
         with engine.connect() as conn:
             conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
@@ -2278,6 +2663,36 @@ def fetch_pk_lsn_map(
         release_engine(engine)
 
 
+_ORACLE_TSTZ_READ_FORMAT: Final = 'YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'
+
+
+def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
+    """Select list that keeps an Oracle TIMESTAMP WITH TIME ZONE offset.
+
+    python-oracledb hands back a *naive* ``datetime`` for TIMESTAMP WITH
+    [LOCAL] TIME ZONE — a ``08:31+05:30`` row arrives as bare ``08:31`` and the
+    instant is silently rewritten. Rendering those columns server side with
+    ``TO_CHAR`` keeps the offset on the wire; every other dialect and column is
+    projected unchanged.
+    """
+    if not _is_oracle_wire(_dialect_key(cfg), str(cfg.get("type") or "")):
+        return list(cols)
+    out: list[Any] = []
+    for col in cols:
+        col_type = getattr(col, "type", None)
+        tz_carrier = bool(
+            getattr(col_type, "timezone", False)
+            or getattr(col_type, "local_timezone", False)
+        )
+        if tz_carrier and isinstance(col_type, sa.DateTime):
+            out.append(
+                sa.func.to_char(col, _ORACLE_TSTZ_READ_FORMAT).label(col.name)
+            )
+        else:
+            out.append(col)
+    return out
+
+
 def _read_table_raw(
     conn: Any,
     table: str,
@@ -2289,41 +2704,37 @@ def _read_table_raw(
 ) -> tuple[list[str], list[list[Any]]]:
     """Fallback read for engines whose SQLAlchemy reflection is incomplete."""
     from connectors.sql_identifiers import quote_table_ref
-    from services.dialect_profiles import quote_char_for
+    from services.dialect_profiles import (
+        denormalize_result_key,
+        page_clause,
+        quote_char_for,
+        zero_row_probe_sql,
+    )
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
     base = f"SELECT * FROM {qualified}"  # nosec B608
-    dialect_l = (dialect or "ansi").lower()
-    is_mssql = dialect_l in {
-        "mssql",
-        "sqlserver",
-        "microsoft_sql_server",
-        "azure_sql_database",
-        "synapse_analytics",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-        "google_cloud_sql_sql_server",
-        "amazon_rds_sql_server",
-    }
     # Discover columns so we can ORDER BY the first one — bare LIMIT/OFFSET is
     # non-deterministic and silently duplicates/skips rows across pages.
-    probe_sql = f"SELECT TOP 0 * FROM {qualified}" if is_mssql else f"{base} LIMIT 0"  # nosec B608
-    probe = conn.execute(sa.text(probe_sql))
+    probe = conn.execute(sa.text(zero_row_probe_sql(dialect, qualified)))
     headers = list(probe.keys())
     if not headers:
         return [], []
     q = quote_char_for(dialect) or '"'
-    if q == "[":
-        order_col = f"[{str(headers[0]).replace(']', ']]')}]"
+    # Oracle/DB2/Snowflake store case-insensitive names folded upper and the
+    # driver hands them back lowercased; quoting that literal yields ORA-00904.
+    # Restore the physical spelling before quoting.
+    order_header = _orderable_header(dialect, headers, probe)
+    if order_header is None:
+        # Oracle refuses ORDER BY on a LOB (ORA-22848); an all-CLOB table would
+        # otherwise be unreadable instead of merely unsorted.
+        order_col = "ROWID"
     else:
-        order_col = quote_sql_identifier(headers[0], q)
-    if is_mssql:
-        sql = (
-            f"{base} ORDER BY {order_col} "
-            f"OFFSET {int(offset)} ROWS FETCH NEXT {int(limit)} ROWS ONLY"
-        )
-    else:
-        sql = f"{base} ORDER BY {order_col} LIMIT {int(limit)} OFFSET {int(offset)}"
+        order_name = denormalize_result_key(dialect, str(order_header))
+        if q == "[":
+            order_col = f"[{order_name.replace(']', ']]')}]"
+        else:
+            order_col = quote_sql_identifier(order_name, q)
+    sql = f"{base} ORDER BY {order_col} {page_clause(dialect, offset, limit)}"  # nosec B608
     result = conn.execute(sa.text(sql))
     headers = list(result.keys())
     rows = [
@@ -2331,6 +2742,37 @@ def _read_table_raw(
         for row in result.fetchall()
     ]
     return headers, rows
+
+
+#: Driver type names that cannot appear in an ORDER BY on Oracle/DB2.
+_UNORDERABLE_TYPE_TOKENS: Final = ("CLOB", "NCLOB", "BLOB", "LONG", "XMLTYPE")
+
+
+def _orderable_header(dialect: str, headers: list[str], probe: Any) -> str | None:
+    """First column usable as a deterministic page order, or ``None``.
+
+    LOB columns are not sortable on Oracle/DB2, so paging a table whose first
+    column is a CLOB raised ORA-22848 and the whole read failed. Prefer the
+    first non-LOB column; callers fall back to a pseudo-column when every
+    column is a LOB.
+    """
+    if not headers:
+        return None
+    if (dialect or "").lower() not in {"oracle", "db2", "ibm_db_sa"}:
+        return headers[0]
+    description = getattr(getattr(probe, "cursor", None), "description", None)
+    if not description:
+        return headers[0]
+    for idx, header in enumerate(headers):
+        if idx >= len(description):
+            # No type evidence for this column: keep the ordinary first-column
+            # order rather than silently switching the page order to a
+            # pseudo-column.
+            return header
+        type_name = str(getattr(description[idx][1], "name", description[idx][1]))
+        if not any(tok in type_name.upper() for tok in _UNORDERABLE_TYPE_TOKENS):
+            return header
+    return None
 
 
 def _count_table_raw(
@@ -2402,7 +2844,7 @@ def read_table_batch(
                 else:
                     columns = selected_cols = list(table_obj.c)
 
-                stmt = sa.select(*selected_cols)
+                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
                 # Stable order from page 0 — unordered OFFSET pages skip/duplicate under concurrent writes.
                 pk_cols = (
                     [c for c in table_obj.primary_key.columns]
@@ -2528,7 +2970,7 @@ def read_table_cursor_batch(
                 )
 
             key_cols = [table_obj.c[n] for n in key_names]
-            stmt = sa.select(*selected_cols)
+            stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
             if cursor_after:
                 stmt = stmt.where(
                     sqlalchemy_keyset_clause(sa, key_cols, str(cursor_after))
@@ -2917,90 +3359,6 @@ def _oracle_merge_upsert(
                 conn.execute(sa.text(f"DROP TABLE {stage_ref}"))
 
 
-def _duckdb_quote(ident: str) -> str:
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _duckdb_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_duckdb_quote(table_obj.schema))
-    parts.append(_duckdb_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _duckdb_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native DuckDB MERGE INTO with NULL-safe ON (no PK required).
-
-    DuckDB supports MERGE without a unique index — preferred over delete+insert
-    for concurrent readers. Still at-least-once. Caller falls back on error.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
-    stage = f"df_mrg_{suffix}"
-    stage_q = _duckdb_quote(stage)
-    target = _duckdb_qualified_table(table_obj)
-    col_sql = ", ".join(_duckdb_quote(c) for c in target_cols)
-    conn.execute(
-        sa.text(
-            f"CREATE TEMP TABLE {stage_q} AS "
-            f"SELECT {col_sql} FROM {target} WHERE 1=0"  # nosec B608
-        )
-    )
-    try:
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage_q} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
-
-        on_sql = null_safe_merge_on(
-            conflict_cols,
-            left_alias="t",
-            right_alias="s",
-            quote_column=_duckdb_quote,
-        )
-        insert_cols = ", ".join(_duckdb_quote(c) for c in target_cols)
-        insert_vals = ", ".join(f"s.{_duckdb_quote(c)}" for c in target_cols)
-        if update_cols:
-            set_sql = ", ".join(
-                f"{_duckdb_quote(c)} = s.{_duckdb_quote(c)}" for c in update_cols
-            )
-            # DuckDB UPDATE SET uses bare column names on the target side.
-            merge_sql = (
-                f"MERGE INTO {target} t "
-                f"USING {stage_q} s "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} t "
-                f"USING {stage_q} s "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.execute(sa.text(f"DROP TABLE IF EXISTS {stage_q}"))
-
-
 def _clickhouse_replacing_upsert(
     conn: Any,
     table_obj: sa.Table,
@@ -3035,605 +3393,6 @@ def clickhouse_final_table_sql(table_ref: str) -> str:
     if re.search(r"\bFINAL\b", ref, flags=re.IGNORECASE):
         return ref
     return f"{ref} FINAL"
-
-
-def _db2_quote(ident: str) -> str:
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _db2_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_db2_quote(table_obj.schema))
-    parts.append(_db2_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _db2_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native DB2 ``MERGE INTO`` with NULL-safe ON via session temp stage.
-
-    Matches IBM / Fivetran-class LUW upsert: DECLARE GLOBAL TEMPORARY TABLE →
-    INSERT stage → MERGE. Falls back to delete+insert when DECLARE/MERGE fails.
-    Still at-least-once — not exactly-once.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
-    # SESSION. prefix is required for DGTT identity on LUW.
-    stage = f"SESSION.DF_MRG_{suffix}"
-    target = _db2_qualified_table(table_obj)
-    col_sql = ", ".join(_db2_quote(c) for c in target_cols)
-    try:
-        conn.execute(
-            sa.text(
-                f"DECLARE GLOBAL TEMPORARY TABLE {stage} AS "
-                f"(SELECT {col_sql} FROM {target} WHERE 1=0) "
-                f"WITH REPLACE ON COMMIT PRESERVE ROWS NOT LOGGED"  # nosec B608
-            )
-        )
-    except (sa.exc.SQLAlchemyError, OSError, ValueError):
-        # Some DB2 z/OS / privilege profiles reject DGTT — let caller fall back.
-        raise
-
-    try:
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
-
-        on_sql = null_safe_merge_on(
-            conflict_cols,
-            left_alias="t",
-            right_alias="s",
-            quote_column=_db2_quote,
-        )
-        insert_cols = ", ".join(_db2_quote(c) for c in target_cols)
-        insert_vals = ", ".join(f"s.{_db2_quote(c)}" for c in target_cols)
-        if update_cols:
-            set_sql = ", ".join(
-                f"t.{_db2_quote(c)} = s.{_db2_quote(c)}" for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
-
-
-def _teradata_quote(ident: str) -> str:
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _teradata_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_teradata_quote(table_obj.schema))
-    parts.append(_teradata_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _teradata_merge_on(conflict_cols: list[str]) -> str:
-    """Teradata MERGE ON must be PI equality — cannot equate explicitly with NULL.
-
-    Docs: match_condition cannot equate with NULL and must hash to a single AMP
-    on the primary index. Do **not** use null_safe OR-IS-NULL form here.
-    """
-    return " AND ".join(
-        f"t.{_teradata_quote(c)} = s.{_teradata_quote(c)}" for c in conflict_cols
-    )
-
-
-def _teradata_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native Teradata ``MERGE INTO`` via VOLATILE stage (Fivetran/Vantage class).
-
-    ON uses PI equality only (Teradata forbids NULL equate in MERGE ON).
-    Conflict/PI columns are never UPDATEd. Still at-least-once.
-    """
-    if not rows:
-        return 0
-    # Never attempt to UPDATE primary-index columns (Teradata rejects it).
-    safe_update = [c for c in update_cols if c not in conflict_cols]
-    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
-    stage = _teradata_quote(f"DF_MRG_{suffix}")
-    target = _teradata_qualified_table(table_obj)
-    col_sql = ", ".join(_teradata_quote(c) for c in target_cols)
-    pi_sql = ", ".join(_teradata_quote(c) for c in conflict_cols)
-    conn.execute(
-        sa.text(
-            f"CREATE MULTISET VOLATILE TABLE {stage} AS "
-            f"(SELECT {col_sql} FROM {target} WHERE 1=0) "
-            f"WITH DATA PRIMARY INDEX ({pi_sql}) "
-            f"ON COMMIT PRESERVE ROWS"  # nosec B608
-        )
-    )
-    try:
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
-
-        on_sql = _teradata_merge_on(conflict_cols)
-        insert_cols = ", ".join(_teradata_quote(c) for c in target_cols)
-        insert_vals = ", ".join(f"s.{_teradata_quote(c)}" for c in target_cols)
-        if safe_update:
-            set_sql = ", ".join(
-                f"{_teradata_quote(c)} = s.{_teradata_quote(c)}" for c in safe_update
-            )
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON {on_sql} "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON {on_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
-
-
-def _trino_quote(ident: str) -> str:
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _trino_qualified_table(table_obj: sa.Table) -> str:
-    parts: list[str] = []
-    if table_obj.schema:
-        # Trino may embed catalog.schema in Table.schema (e.g. "hive.default").
-        for part in str(table_obj.schema).split("."):
-            if part:
-                parts.append(_trino_quote(part))
-    parts.append(_trino_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _trino_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-    *,
-    chunk_size: int = 50,
-) -> int:
-    """Native Trino/Presto/Athena ``MERGE INTO`` with NULL-safe ON (Iceberg MoR).
-
-    Stages via ``VALUES`` chunks — Trino connector MERGE and Athena engine v3
-    Iceberg ``MERGE INTO`` (AWS Big Data Blog / Athena MERGE docs). Falls back
-    to delete+insert for Trino/Presto; Athena callers must use append-only
-    fallback (see ``_upsert_batch``). Still at-least-once.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    target = _trino_qualified_table(table_obj)
-    on_sql = null_safe_merge_on(
-        conflict_cols,
-        left_alias="t",
-        right_alias="s",
-        quote_column=_trino_quote,
-    )
-    insert_cols = ", ".join(_trino_quote(c) for c in target_cols)
-    insert_vals = ", ".join(f"s.{_trino_quote(c)}" for c in target_cols)
-    set_sql = ""
-    if update_cols:
-        set_sql = ", ".join(
-            f"{_trino_quote(c)} = s.{_trino_quote(c)}" for c in update_cols
-        )
-    alias_list = ", ".join(_trino_quote(c) for c in target_cols)
-    written = 0
-    size = max(1, int(chunk_size))
-    for i in range(0, len(rows), size):
-        chunk = rows[i : i + size]
-        value_rows: list[str] = []
-        params: dict[str, Any] = {}
-        for ridx, row in enumerate(chunk):
-            placeholders = []
-            for col in target_cols:
-                key = f"r{ridx}_{col}"
-                params[key] = row.get(col)
-                placeholders.append(f":{key}")
-            value_rows.append(f"({', '.join(placeholders)})")
-        values_sql = ", ".join(value_rows)
-        if set_sql:
-            merge_sql = (
-                f"MERGE INTO {target} t "
-                f"USING (VALUES {values_sql}) AS s ({alias_list}) "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} t "
-                f"USING (VALUES {values_sql}) AS s ({alias_list}) "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql), params)  # nosec B608
-        written += len(chunk)
-    return written
-
-
-def _hana_quote(ident: str) -> str:
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _hana_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_hana_quote(table_obj.schema))
-    parts.append(_hana_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _hana_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native SAP HANA ``MERGE INTO`` with NULL-safe ON via local temp stage.
-
-    HANA also offers ``UPSERT … WITH PRIMARY KEY`` for single-row PK paths;
-    MERGE is the composite-key / CDC-class algorithm (Airbyte/Fivetran HANA
-    destinations). Still at-least-once.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
-    # HANA local temporary tables are session-scoped and named with #.
-    stage = f"#DF_MRG_{suffix}"
-    target = _hana_qualified_table(table_obj)
-    col_sql = ", ".join(_hana_quote(c) for c in target_cols)
-    conn.execute(
-        sa.text(
-            f"CREATE LOCAL TEMPORARY COLUMN TABLE {stage} AS "
-            f"(SELECT {col_sql} FROM {target} WHERE 1=0)"  # nosec B608
-        )
-    )
-    try:
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
-
-        on_sql = null_safe_merge_on(
-            conflict_cols,
-            left_alias="t",
-            right_alias="s",
-            quote_column=_hana_quote,
-        )
-        insert_cols = ", ".join(_hana_quote(c) for c in target_cols)
-        insert_vals = ", ".join(f"s.{_hana_quote(c)}" for c in target_cols)
-        if update_cols:
-            set_sql = ", ".join(
-                f"t.{_hana_quote(c)} = s.{_hana_quote(c)}" for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
-
-
-def _vertica_quote(ident: str) -> str:
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _vertica_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_vertica_quote(table_obj.schema))
-    parts.append(_vertica_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _vertica_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native Vertica ``MERGE INTO`` with NULL-safe ON via local temp stage.
-
-    Vertica docs: one MERGE upserts matched + unmatched in a single transaction
-    (Fivetran Vertica / enterprise warehouse pattern). Still at-least-once.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
-    stage = _vertica_quote(f"df_mrg_{suffix}")
-    target = _vertica_qualified_table(table_obj)
-    col_sql = ", ".join(_vertica_quote(c) for c in target_cols)
-    conn.execute(
-        sa.text(
-            f"CREATE LOCAL TEMPORARY TABLE {stage} ON COMMIT PRESERVE ROWS AS "
-            f"SELECT {col_sql} FROM {target} WHERE FALSE"  # nosec B608
-        )
-    )
-    try:
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
-
-        on_sql = null_safe_merge_on(
-            conflict_cols,
-            left_alias="t",
-            right_alias="s",
-            quote_column=_vertica_quote,
-        )
-        insert_cols = ", ".join(_vertica_quote(c) for c in target_cols)
-        insert_vals = ", ".join(f"s.{_vertica_quote(c)}" for c in target_cols)
-        if update_cols:
-            set_sql = ", ".join(
-                f"{_vertica_quote(c)} = s.{_vertica_quote(c)}" for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
-
-
-def _netezza_quote(ident: str) -> str:
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _netezza_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_netezza_quote(table_obj.schema))
-    parts.append(_netezza_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _netezza_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native Netezza / IBM NPS ``MERGE INTO`` with NULL-safe ON (7.2.1+).
-
-    Stages via ``CREATE TEMP TABLE … AS SELECT … LIMIT 0`` then MERGE —
-    IBM Performance Server / Fivetran Netezza class. Still at-least-once.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
-    stage = _netezza_quote(f"df_mrg_{suffix}")
-    target = _netezza_qualified_table(table_obj)
-    col_sql = ", ".join(_netezza_quote(c) for c in target_cols)
-    conn.execute(
-        sa.text(
-            f"CREATE TEMP TABLE {stage} AS "
-            f"SELECT {col_sql} FROM {target} LIMIT 0"  # nosec B608
-        )
-    )
-    try:
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
-
-        on_sql = null_safe_merge_on(
-            conflict_cols,
-            left_alias="t",
-            right_alias="s",
-            quote_column=_netezza_quote,
-        )
-        insert_cols = ", ".join(_netezza_quote(c) for c in target_cols)
-        insert_vals = ", ".join(f"s.{_netezza_quote(c)}" for c in target_cols)
-        if update_cols:
-            set_sql = ", ".join(
-                f"{_netezza_quote(c)} = s.{_netezza_quote(c)}" for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
-
-
-def _informix_quote(ident: str) -> str:
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _informix_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_informix_quote(table_obj.schema))
-    parts.append(_informix_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _informix_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native Informix ``MERGE INTO`` with NULL-safe ON via TEMP stage.
-
-    IBM/HCL docs: TEMP ``WITH NO LOG`` + MERGE join (Fivetran Informix class).
-    Still at-least-once — not exactly-once.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
-    stage = _informix_quote(f"df_mrg_{suffix}")
-    target = _informix_qualified_table(table_obj)
-    col_sql = ", ".join(_informix_quote(c) for c in target_cols)
-    conn.execute(
-        sa.text(
-            f"CREATE TEMP TABLE {stage} AS "
-            f"SELECT {col_sql} FROM {target} WHERE 1=0 "
-            f"WITH NO LOG"  # nosec B608
-        )
-    )
-    try:
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
-
-        on_sql = null_safe_merge_on(
-            conflict_cols,
-            left_alias="t",
-            right_alias="s",
-            quote_column=_informix_quote,
-        )
-        insert_cols = ", ".join(_informix_quote(c) for c in target_cols)
-        insert_vals = ", ".join(f"s.{_informix_quote(c)}" for c in target_cols)
-        if update_cols:
-            set_sql = ", ".join(
-                f"t.{_informix_quote(c)} = s.{_informix_quote(c)}" for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
 
 
 def _firebird_quote(ident: str) -> str:
@@ -3702,87 +3461,6 @@ def _firebird_merge_upsert(
             )
         conn.execute(sa.text(merge_sql), params)  # nosec B608
     return len(rows)
-
-
-def _sybase_bracket(ident: str) -> str:
-    return "[" + str(ident).replace("]", "]]") + "]"
-
-
-def _sybase_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_sybase_bracket(table_obj.schema))
-    parts.append(_sybase_bracket(table_obj.name))
-    return ".".join(parts)
-
-
-def _sybase_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native SAP ASE / Sybase ``MERGE`` (15.7+) with NULL-safe ON.
-
-    Stages via ``SELECT … INTO #temp WHERE 1=0`` then MERGE — SAP Infocenter
-    ASE MERGE class (same family as SQL Server, without HOLDLOCK). Still
-    at-least-once.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    stage = f"#df_mrg_{abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000}"
-    target = _sybase_qualified_table(table_obj)
-    col_sql = ", ".join(_sybase_bracket(c) for c in target_cols)
-    conn.execute(
-        sa.text(
-            f"SELECT {col_sql} INTO {stage} FROM {target} WHERE 1=0"  # nosec B608
-        )
-    )
-    try:
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
-
-        on_sql = null_safe_merge_on(
-            conflict_cols,
-            left_alias="t",
-            right_alias="s",
-            quote_column=_sybase_bracket,
-        )
-        insert_cols = ", ".join(_sybase_bracket(c) for c in target_cols)
-        insert_vals = ", ".join(f"s.{_sybase_bracket(c)}" for c in target_cols)
-        if update_cols:
-            set_sql = ", ".join(
-                f"t.{_sybase_bracket(c)} = s.{_sybase_bracket(c)}" for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING {stage} AS s "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
 
 
 def _upsert_batch(
@@ -4246,6 +3924,9 @@ def write_mapped_rows(
     )
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
+    table_name, schema_name = _resolve_physical_table_ident(
+        engine, table_name, schema_name
+    )
 
     # SQL Server writes must fail closed on ANSI_WARNINGS — engine connect soft-applies
     # for introspect; re-assert require=True on the write connection.
@@ -4287,6 +3968,20 @@ def write_mapped_rows(
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True
     )
+    # Bind every downstream statement to the spelling the destination stores,
+    # before mapped rows, types and the Table object are keyed by these names.
+    _stored_names = _resolve_physical_column_idents(
+        engine, table_name, schema_name, list(target_cols)
+    )
+    if _stored_names:
+        target_cols = [_stored_names.get(c, c) for c in target_cols]
+        mappings = [
+            ({**m, "target": _stored_names[str(m.get("target"))]}
+             if str(m.get("target")) in _stored_names else m)
+            for m in (mappings or [])
+        ]
+        if conflict_columns:
+            conflict_columns = [_stored_names.get(c, c) for c in conflict_columns]
     if conflict_columns:
         try:
             from connectors.writer_common import resolve_conflict_targets
@@ -4304,8 +3999,8 @@ def write_mapped_rows(
                 chunks_completed=0,
                 error=str(exc),
             )
-    from services.type_system import is_generated_always_column
     from services.mapping_constraints import write_mappings
+    from services.type_system import is_generated_always_column
 
     # Omit GENERATED ALWAYS from INSERT projection by target column — never
     # index-zip mappings[i] (omits/reorder mis-stamp invents wrong DDL).
@@ -4373,7 +4068,10 @@ def write_mapped_rows(
         # never a second materialize(source) invent authority.
         if explicit:
             derived = materialize_dest_ddl(dest_db, explicit) if dest_db else str(explicit)
-            explicit_stamps.add(col)
+            # A stamp that only echoes the destination catalog is not an
+            # operator ceiling; under backfill it may widen to the source.
+            if stamp_is_operator_ceiling(mapping) or not backfill_new_fields:
+                explicit_stamps.add(col)
         elif dest_db:
             from services.decision_kernel import InventContext, invent_dest_type
 
@@ -4419,8 +4117,14 @@ def write_mapped_rows(
     if not studio_err:
         ceiling_types = [target_column_types[col] for col in target_cols]
         candidate_by_col: dict[str, str] = {}
+        # Backfill is the operator's standing approval for additive drift, so a
+        # live carrier the source has outgrown may widen to the source's own
+        # declared type. Without this the probed live DDL froze the column and
+        # every drifted row quarantined as "would truncate on write" while the
+        # ALTER that fixes it never ran. An explicit Map stamp still ceilings.
+        widenable_live = live_locked if not backfill_new_fields else set()
         for i, col in enumerate(target_cols):
-            if col in explicit_stamps or col in live_locked:
+            if col in explicit_stamps or col in widenable_live:
                 continue
             mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
             mapping_source = mapping.get("source_type")
@@ -4440,14 +4144,14 @@ def write_mapped_rows(
             mappings=mappings,
             candidate_by_col=candidate_by_col,
             preserve_case=True,
-            explicit_columns=explicit_stamps | live_locked,
+            explicit_columns=explicit_stamps | widenable_live,
         )
         if alter_refusals:
             logger.info(
                 "generic_sql Map≡ALTER refusals (stamp ceiling): %s", alter_refusals
             )
         for i, col in enumerate(target_cols):
-            if col in live_locked:
+            if col in widenable_live:
                 continue
             new_typ = desired_list[i]
             old_typ = target_column_types[col]
@@ -4568,7 +4272,10 @@ def write_mapped_rows(
             require_physical_types_for_existing_table,
         )
 
-        inspector = sa.inspect(engine)
+        # Same entry point the create/exists branch below uses — two spellings
+        # of the inspector answered differently under a patched module.
+        inspector = inspect(engine)
+        existence_known = True
         try:
             table_existed = bool(
                 inspector.has_table(table_name, schema=schema_name)
@@ -4576,6 +4283,7 @@ def write_mapped_rows(
         except Exception:
             # Unknown existence: if create is disabled the table must already
             # exist — fail-closed on empty physical rather than Map VARCHAR invent.
+            existence_known = False
             table_existed = not create_table
         existing_cols = []
         cols_probe_failed = False
@@ -4588,6 +4296,26 @@ def write_mapped_rows(
                 existing_cols = []
                 cols_probe_failed = True
                 # Keep table_existed True so require_physical fail-closes.
+        if table_existed and not existence_known and not create_table:
+            # Fail closed, but do not report an unread catalog as a read one:
+            # "empty for an existing table" names a grant problem on a table
+            # nobody has seen. The operator's action is the existence probe.
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"{_engine_label} could not determine whether "
+                    f"{table_name!r} exists and create_table is disabled — "
+                    "refuse Map VARCHAR bind (empty→NULL invent risk). "
+                    "Re-check grants / information_schema and retry."
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
         if table_existed and cols_probe_failed:
             return WriteResult(
                 ok=False,
@@ -4678,6 +4406,19 @@ def write_mapped_rows(
                     or physical.get(str(c).upper())
                 )
                 if hit and str(hit).strip():
+                    planned = str(target_column_types.get(c) or "").strip()
+                    # Drift widen is applied by ALTER before the insert, so a
+                    # column the source outgrew must be judged against the
+                    # carrier it is about to have. Overlaying today's narrow
+                    # physical type here quarantined every drifted row and the
+                    # ALTER never ran. A failed ALTER still aborts the write.
+                    if (
+                        backfill_new_fields
+                        and planned
+                        and c not in explicit_stamps
+                        and is_wider_type(str(hit).strip(), planned, dest_db=dest_db)
+                    ):
+                        continue
                     covered_cols.append(c)
                     covered_physical[c] = str(hit).strip()
             live_partial = (
@@ -5095,6 +4836,7 @@ def write_mapped_rows(
     written = 0
     chunks_completed = 0
     rows_skipped = 0
+    identity_session: Any = None
     try:
         with engine.connect() as conn:
             db_type = (cfg.get("type") or "").lower()
@@ -5134,6 +4876,65 @@ def write_mapped_rows(
                 )
 
             if create_table and not table_exists:
+                # Until now only postgresql_writer/sqlite_writer consulted the
+                # fidelity planner, so MySQL/SQL Server/Oracle create-new landed
+                # types and an upsert PK and nothing else — source NOT NULL,
+                # DEFAULT, UNIQUE and CHECK were dropped without a certificate.
+                fidelity_plan = None
+                placement_suffix = ""
+                try:
+                    from services.physical_placement_ddl import (
+                        list_destination_tablespaces,
+                    )
+                    from services.schema_fidelity import resolve_create_fidelity_plan
+
+                    fidelity_plan = resolve_create_fidelity_plan(
+                        source_schema_catalog=_kwargs.get("source_schema_catalog"),
+                        mappings=mappings,
+                        target_columns=target_cols,
+                        target_types=[
+                            target_column_types.get(c, "") for c in target_cols
+                        ],
+                        dest_dialect=_fidelity_dialect(dest_db, dialect_name),
+                        table_already_exists=False,
+                        dest_table=table_name,
+                        dest_schema=schema_name or "",
+                        dest_tablespaces=list_destination_tablespaces(
+                            _fidelity_dialect(dest_db, dialect_name), conn
+                        ),
+                    )
+                    placement_suffix = fidelity_plan.create_suffix
+                    table_obj = _build_table_for_write(
+                        engine,
+                        table_name,
+                        schema_name,
+                        target_cols,
+                        target_column_types,
+                        db_type=cfg.get("type", ""),
+                        conflict_columns=conflict_columns,
+                        fidelity_plan=fidelity_plan,
+                    )
+                    _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
+                except Exception as exc:
+                    # A planner failure must not silently become a types-only
+                    # CREATE that the certificate then calls faithful.
+                    logger.warning(
+                        "%s schema fidelity plan failed; create-new carries types "
+                        "only and constraints are not certified: %s",
+                        _engine_label,
+                        exc,
+                    )
+                    fidelity_plan = None
+                    from services.schema_fidelity import empty_unsupported_report
+
+                    _kwargs["_schema_fidelity_report"] = empty_unsupported_report(
+                        source_dialect="",
+                        dest_dialect=_fidelity_dialect(dest_db, dialect_name),
+                        reason=(
+                            "Create-new fidelity planning failed; column types were "
+                            f"emitted without certified constraints ({exc})."
+                        ),
+                    ).to_dict()
                 try:
                     # Wave 63: PostgreSQL create-new closed ENUM → CREATE TYPE +
                     # column typed as df_enum_* (same SSOT as postgresql_writer).
@@ -5164,11 +4965,72 @@ def write_mapped_rows(
                     ):
                         # T-SQL has no CREATE TABLE IF NOT EXISTS. Existence was
                         # already probed via inspector — emit plain CREATE TABLE.
-                        conn.execute(sa.schema.CreateTable(table_obj))
-                    else:
                         conn.execute(
-                            sa.schema.CreateTable(table_obj, if_not_exists=True)
+                            sa.text(
+                                _with_placement_suffix(
+                                    str(
+                                        sa.schema.CreateTable(table_obj).compile(
+                                            dialect=engine.dialect
+                                        )
+                                    ),
+                                    placement_suffix,
+                                )
+                            )
                         )
+                    else:
+                        create = sa.schema.CreateTable(
+                            table_obj, if_not_exists=True
+                        )
+                        if placement_suffix:
+                            # Placement lives inside CREATE: no engine can
+                            # partition or relocate a table after the fact.
+                            conn.execute(
+                                sa.text(
+                                    _with_placement_suffix(
+                                        str(create.compile(dialect=engine.dialect)),
+                                        placement_suffix,
+                                    )
+                                )
+                            )
+                        else:
+                            conn.execute(create)
+                    if fidelity_plan is not None:
+                        from services.schema_fidelity import apply_post_create_sql
+
+                        # Executed one statement at a time: a refused CREATE
+                        # INDEX downgrades that index in the certificate rather
+                        # than failing the table or claiming an index that is
+                        # not there.
+                        def _run_post_create(stmt: str) -> None:
+                            with engine.begin() as index_conn:
+                                index_conn.execute(sa.text(stmt))
+
+                        conn.commit()
+                        apply_post_create_sql(fidelity_plan, _run_post_create)
+                        from services.schema_fidelity import (
+                            certify_placement_on_destination,
+                        )
+
+                        certify_placement_on_destination(
+                            fidelity_plan,
+                            dialect=_fidelity_dialect(dest_db, dialect_name),
+                            cursor=conn,
+                            schema=schema_name or (cfg.get("database") or ""),
+                            table=table_name,
+                        )
+                        from services.identity_carry import sqlalchemy_fetchall
+                        from services.schema_fidelity import (
+                            certify_identity_on_destination,
+                        )
+
+                        certify_identity_on_destination(
+                            fidelity_plan,
+                            dialect=_fidelity_dialect(dest_db, dialect_name),
+                            schema=schema_name or (cfg.get("database") or ""),
+                            table=table_name,
+                            fetchall=sqlalchemy_fetchall(conn),
+                        )
+                        _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     conn.commit()
                 except Exception as exc:
                     # If the dialect does not support IF NOT EXISTS and the table
@@ -5219,6 +5081,18 @@ def write_mapped_rows(
                 # Drift backfill may have added or widened columns; anything
                 # reflected before this point describes the old shape.
                 reflection_cache.invalidate_table(engine, schema_name, table_name)
+
+            # The rows carry the source's own key values; on SQL Server an
+            # IDENTITY column rejects them unless the session says so.
+            from connectors.writer_common import begin_identity_insert
+
+            identity_session = begin_identity_insert(
+                conn,
+                dialect_name=dialect_name,
+                schema=schema_name or "",
+                table=table_name,
+                target_cols=list(target_cols),
+            )
 
             if sparse_converted and write_mode == "upsert" and conflict_columns:
                 from connectors.writer_common import row_has_missing_sentinel
@@ -5430,6 +5304,10 @@ def write_mapped_rows(
                 if on_checkpoint:
                     on_checkpoint(chunks_completed, chunks, written)
 
+            if identity_session is not None:
+                identity_session.close()
+                identity_session = None
+
         if ledger_chunks_skipped:
             transform_errors.append(
                 f"Skipped {ledger_chunks_skipped} chunk(s) already committed by a "
@@ -5504,6 +5382,7 @@ def write_mapped_rows(
                 warnings=transform_errors,
             )
 
+        fid_report = _kwargs.get("_schema_fidelity_report")
         return WriteResult(
             ok=True,
             rows_written=written,
@@ -5515,6 +5394,7 @@ def write_mapped_rows(
                 dest_db_type=str(cfg.get("type") or "generic_sql"),
                 dest_types=target_column_types,
             ),
+            meta=({"schema_fidelity": fid_report} if isinstance(fid_report, dict) else {}),
             chunks_completed=chunks_completed or chunks,
             rejected_rows=max(
                 _rejected_row_count(
@@ -5551,4 +5431,9 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
     finally:
+        # A pooled connection left with IDENTITY_INSERT ON fails the *next*
+        # table's load with an error naming the wrong table, so the release is
+        # owed on every exit — success, early return, or exception.
+        if identity_session is not None:
+            identity_session.close()
         release_engine(engine)

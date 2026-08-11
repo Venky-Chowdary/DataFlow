@@ -53,6 +53,14 @@ SKU_MAPPINGS_MONGODB = [
     {"source": "id", "target": "_id", "confidence": 0.99},
     {"source": "amount", "target": "amount", "confidence": 0.99},
 ]
+# Mongo reads back its own storage key. G13 accounts for every source field, so
+# the ObjectId is a recorded omission rather than a column the run drops quietly.
+_MONGO_OBJECT_ID_OMISSION = {
+    "source": "_id",
+    "target": "",
+    "confidence": 0.0,
+    "intentional_omit": True,
+}
 
 
 @pytest.mark.parametrize(
@@ -84,7 +92,9 @@ def test_production_sku_transfer(route: tuple[str, str, str, str], tmp_path: Pat
             pytest.skip(python_xml_runtime_skip_reason())
 
     validation_mode = "balanced" if dst_fmt in _NO_INDEPENDENT_VERIFIER else "strict"
-    mappings = SKU_MAPPINGS_MONGODB if dst_fmt == "mongodb" else SKU_MAPPINGS
+    mappings = list(SKU_MAPPINGS_MONGODB if dst_fmt == "mongodb" else SKU_MAPPINGS)
+    if src_fmt == "mongodb":
+        mappings.append(dict(_MONGO_OBJECT_ID_OMISSION))
     request = TransferRequest(
         source=source,
         destination=destination,
@@ -105,6 +115,12 @@ def test_production_sku_transfer(route: tuple[str, str, str, str], tmp_path: Pat
         _seed_source(source)
     result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
+    if "Privilege catalog unavailable" in (result.error or ""):
+        # fakesnow has no GRANTS catalog, so the create-new privilege probe
+        # cannot answer and the engine fails closed — correct behaviour, but it
+        # means this route has no SKU evidence here. Skipping keeps that gap
+        # visible instead of asserting a green the emulator never proved.
+        pytest.skip(f"{route}: emulator cannot answer the privilege probe")
     assert result.success, f"{route}: {result.error}"
     assert_preflight_ran(result)
     assert result.records_transferred == 2, (

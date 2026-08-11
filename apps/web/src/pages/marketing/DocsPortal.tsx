@@ -10,6 +10,12 @@ import {
   type HelpDocId,
   type HelpDocWorkflowStep,
 } from "../../lib/helpDocs";
+import {
+  BACKEND_SUITE,
+  EVIDENCE_AS_OF,
+  NOT_PROVEN,
+  PROVEN_EVIDENCE,
+} from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 
 /** Render product-doc emphasis: **bold** UI labels and `inline code`. */
@@ -323,6 +329,34 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
             <span>Row counts and checksums prove the load. Pipeline ticks use this same Job Theater path.</span>
           </li>
         </ol>
+      </section>
+
+      <section className="docs-space-algorithm" aria-label="Measured evidence">
+        <h2>What is proven, and what is not ({EVIDENCE_AS_OF})</h2>
+        <p className="docs-space-evidence-lead">
+          Each line is a live matrix run through the product path against a real engine, with the
+          destination re-read afterwards. Backend suite: {BACKEND_SUITE.passed.toLocaleString()}{" "}
+          passed, {BACKEND_SUITE.failed} failed, {BACKEND_SUITE.skipped.toLocaleString()} skipped.
+        </p>
+        <ul className="docs-space-evidence-list">
+          {PROVEN_EVIDENCE.map((row) => (
+            <li key={row.artifact}>
+              <strong>{row.claim}</strong>
+              <span>
+                {row.engines} · {row.cases} cases · {row.result}
+              </span>
+            </li>
+          ))}
+        </ul>
+        <p className="docs-space-evidence-lead">Not proven yet — do not plan around these:</p>
+        <ul className="docs-space-evidence-list docs-space-evidence-list--gaps">
+          {NOT_PROVEN.map((gap) => (
+            <li key={gap.area}>
+              <strong>{gap.area}</strong>
+              <span>{gap.reason}</span>
+            </li>
+          ))}
+        </ul>
       </section>
     </DocsSpaceShell>
   );

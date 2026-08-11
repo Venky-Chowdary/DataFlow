@@ -122,6 +122,89 @@ def resolve_or_fold_snowflake_table(cur: Any, schema: str, table: str) -> str:
     return snowflake_fold_identifier((table or "").strip())
 
 
+_SF_COLUMN_PROJECTIONS: tuple[str, ...] = (
+    (
+        "column_name, data_type, is_nullable, character_maximum_length, "
+        "numeric_precision, numeric_scale, datetime_precision"
+    ),
+    (
+        "column_name, data_type, is_nullable, character_maximum_length, "
+        "numeric_precision, numeric_scale"
+    ),
+    "column_name, data_type, is_nullable",
+)
+
+
+def snowflake_physical_column_rows(
+    cur: Any, schema: str, table: str
+) -> list[tuple[Any, ...]]:
+    """Physical column metadata as ``(name, type, nullable, len, p, s, dt_p)``.
+
+    Single introspection SSOT for the Snowflake reader, the writer bind overlay
+    and destination schema discovery, because they must never disagree about
+    what the destination physically holds.
+
+    Catalogs differ in which optional INFORMATION_SCHEMA columns they expose
+    (a role without full projection rights, a Snowflake-compatible engine
+    without ``DATETIME_PRECISION``). One missing optional column used to fail
+    the whole SELECT, so a table whose DDL was perfectly readable reported *no
+    physical metadata* and the writer fail-closed on every row. Degrade the
+    projection instead, then fall back to ``DESC TABLE`` — which returns the
+    fully qualified type text (``NUMBER(38,10)``, ``TIMESTAMP_NTZ(9)``). Every
+    rung reads the catalog; nothing here infers a type from data.
+    """
+    for projection in _SF_COLUMN_PROJECTIONS:
+        try:
+            cur.execute(
+                f"SELECT {projection} FROM information_schema.columns "
+                "WHERE UPPER(table_schema) = UPPER(%s) "
+                "AND UPPER(table_name) = UPPER(%s) ORDER BY ordinal_position",
+                (schema, table),
+            )
+            rows = [tuple(r) for r in (cur.fetchall() or [])]
+        except Exception as exc:
+            logger.debug(
+                "snowflake information_schema projection failed (%s): %s",
+                projection.split(",")[-1].strip(),
+                exc,
+                exc_info=exc,
+            )
+            continue
+        if rows:
+            return [r + (None,) * (7 - len(r)) for r in rows]
+    return _snowflake_desc_column_rows(cur, schema, table)
+
+
+def _snowflake_desc_column_rows(
+    cur: Any, schema: str, table: str
+) -> list[tuple[Any, ...]]:
+    """``DESC TABLE`` rows shaped like the INFORMATION_SCHEMA projection."""
+    try:
+        cur.execute(f"DESC TABLE {snowflake_qualified_table(schema, table)}")
+        rows = list(cur.fetchall() or [])
+    except Exception as exc:
+        logger.debug("snowflake DESC TABLE failed: %s", exc, exc_info=exc)
+        return []
+    out: list[tuple[Any, ...]] = []
+    for row in rows:
+        if len(row) < 2:
+            continue
+        kind = str(row[2]).upper() if len(row) > 2 and row[2] is not None else "COLUMN"
+        if kind != "COLUMN":
+            continue
+        name = str(row[0] or "")
+        ddl = str(row[1] or "").strip()
+        if not name or not ddl:
+            continue
+        nullable = "YES"
+        if len(row) > 3 and row[3] is not None:
+            nullable = "YES" if str(row[3]).upper().startswith("Y") else "NO"
+        # DESC carries the width inside the type text, so the typmod columns
+        # stay None rather than being invented as zero.
+        out.append((name, ddl, nullable, None, None, None, None))
+    return out
+
+
 def snowflake_qualified_table(schema: str, table: str) -> str:
     """Quote schema.table using the exact stored/folded names (no second fold)."""
     from connectors.sql_identifiers import (

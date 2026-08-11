@@ -10,6 +10,14 @@ import { MarketingIllustration } from "../../components/marketing/MarketingIllus
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import { isHelpDocRoute } from "../../lib/helpDocs";
+import {
+  BACKEND_SUITE,
+  EVIDENCE_AS_OF,
+  NOT_PROVEN,
+  PROVEN_EVIDENCE,
+  TRANSFER_READY_DRIVERS,
+  type UnprovenRow,
+} from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
 import {
@@ -43,15 +51,25 @@ function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
   );
 }
 
+/**
+ * Control posture, not certificates. No third-party audit has been completed,
+ * so the footnote ships with the badges and cannot be dropped by a caller.
+ */
 function ComplianceBadges({ items }: { items: string[] }) {
   return (
-    <div className="lp-mkt-compliance-badges" aria-label="Compliance posture">
-      {items.map((item) => (
-        <span key={item} className="lp-mkt-compliance-badge">
-          <DtIcon name="shield" size={14} />
-          {item}
-        </span>
-      ))}
+    <div className="lp-mkt-compliance">
+      <div className="lp-mkt-compliance-badges" aria-label="Security controls">
+        {items.map((item) => (
+          <span key={item} className="lp-mkt-compliance-badge">
+            <DtIcon name="shield" size={14} />
+            {item}
+          </span>
+        ))}
+      </div>
+      <p className="lp-mkt-compliance-note">
+        Controls implemented and documented. No SOC 2 or ISO 27001 audit has been completed yet, so
+        Datawrap holds no certificate — ask for the control mapping and we will send what exists.
+      </p>
     </div>
   );
 }
@@ -498,7 +516,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
                 <li>Workspace RBAC for who can map, approve drift, and run production loads</li>
                 <li>Region pinning for jobs and artifacts when policy requires residency</li>
                 <li>MCP and Datawrap Pilot inherit the same gates — agents never get a silent shortcut</li>
-                <li>Security questionnaire + SOC 2 posture pack for procurement kickoff</li>
+                <li>Security questionnaire + control-mapping pack for procurement kickoff (no audit certificate yet)</li>
               </ul>
             </div>
             <aside className="lp-ent-panel" aria-label="Enterprise control snapshot">
@@ -524,7 +542,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
                 Start a pilot on the same engine. Add SSO, BYOK, and audit when security is ready —
                 without re-platforming operators.
               </p>
-              <ComplianceBadges items={["SOC 2 Type II posture", "GDPR-ready", "HIPAA paths", "Regional residency"]} />
+              <ComplianceBadges items={["SOC 2 controls mapped", "GDPR data handling", "HIPAA paths on request", "Regional residency"]} />
             </div>
             <div className="lp-ent-cta-actions">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -542,67 +560,28 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
 }
 
 function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
-  const featured = {
-    industry: "Fortune 500 retail",
-    title: "Weekend cutover with checksum MATCH",
-    quote:
-      "We replaced a tangle of brittle scripts with Datawrap in a weekend. Preflight caught schema drift that would have cost hours of rework — then checksum MATCH signed the cutover.",
-    author: "Alex R.",
-    role: "Staff Data Engineer",
-    results: [
-      { k: "Cutover", v: "48 hours" },
-      { k: "Silent drops", v: "Zero" },
-      { k: "Gates cleared", v: "8 / 8" },
-    ],
+  // No named customer stories are published here: Datawrap is pre-reference, and
+  // an invented quote is exactly the kind of unbacked claim the product refuses
+  // to make about a transfer. What replaces them is the evidence itself.
+  const statusLabel: Record<UnprovenRow["status"], string> = {
+    planned: "Planned",
+    blocked: "Blocked",
+    unaudited: "Unaudited",
   };
-
-  const stories = [
-    {
-      industry: "Healthcare",
-      title: "Semantic maps that survive schema drift",
-      quote:
-        "Semantic mapping is genuinely better than string matching. AMT and payment_amount line up even when names change — and quarantine keeps coerce failures visible.",
-      author: "Priya K.",
-      role: "Data Architect, health systems",
-    },
-    {
-      industry: "SaaS platform",
-      title: "Agents under the same RBAC as Studio",
-      quote:
-        "MCP let our agent trigger governed transfers from Cursor. Same gates as the UI — that is the future of data ops for our platform team.",
-      author: "Jordan M.",
-      role: "Head of Platform",
-    },
-    {
-      industry: "Financial ops",
-      title: "Audit packs finance can archive",
-      quote:
-        "Reconcile artifacts and RBAC trails mean we can show auditors exactly what moved, what quarantined, and why — without reconstructing from logs.",
-      author: "Sam T.",
-      role: "Director of Data Governance",
-    },
-  ];
-
-  const sectors = [
-    "Retail & commerce",
-    "Healthcare",
-    "Financial services",
-    "SaaS platforms",
-    "Data mesh teams",
-  ];
 
   return (
     <div className="lp-mkt-page lp-cust-v3">
-      <section className="lp-cust3-hero" aria-label="Customers">
+      <section className="lp-cust3-hero" aria-label="Evidence">
         <div className="lp-shell lp-cust3-hero-inner">
-          <p className="lp-mkt-kicker">Customers</p>
+          <p className="lp-mkt-kicker">Evidence</p>
           <h1>
-            Teams that refuse
-            <em> silent failure</em>
+            Proof before
+            <em> promises</em>
           </h1>
           <p className="lp-cust3-lead">
-            Datawrap is chosen when accuracy beats raw throughput — retail cutovers, healthcare
-            loads, SaaS agents, and finance archives that must prove every row.
+            We are pre-reference, so this page carries measured runs instead of testimonials.
+            Every row below is a live transfer through the product path against a real engine,
+            with the destination re-read afterwards. Measured {EVIDENCE_AS_OF}.
           </p>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -615,79 +594,43 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         </div>
       </section>
 
-      <section className="lp-cust3-metrics" aria-label="Operating outcomes">
+      <section className="lp-cust3-metrics" aria-label="Measured totals">
         <div className="lp-shell lp-cust3-metrics-row">
-          <div><strong>12k+</strong><span>Migrations governed</span></div>
-          <div><strong>0</strong><span>Silent drops by design</span></div>
-          <div><strong>48h</strong><span>Typical pilot kickoff</span></div>
-          <div><strong>8 / 8</strong><span>Gates on every load</span></div>
-        </div>
-      </section>
-
-      <MarketingReveal>
-        <section className="lp-cust3-featured" aria-label="Featured story">
-          <div className="lp-shell lp-cust3-featured-grid">
-            <div className="lp-cust3-featured-copy">
-              <p className="lp-mkt-kicker">{featured.industry}</p>
-              <h2>{featured.title}</h2>
-              <blockquote>
-                <p>&ldquo;{featured.quote}&rdquo;</p>
-                <footer>
-                  <strong>{featured.author}</strong>
-                  <span>{featured.role}</span>
-                </footer>
-              </blockquote>
-            </div>
-            <aside className="lp-cust3-featured-aside" aria-label="Results">
-              <p className="lp-mkt-kicker">Results</p>
-              <ul>
-                {featured.results.map((r) => (
-                  <li key={r.k}>
-                    <strong>{r.v}</strong>
-                    <span>{r.k}</span>
-                  </li>
-                ))}
-              </ul>
-              <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("solution-migrations")}>
-                See migration path →
-              </button>
-            </aside>
+          <div>
+            <strong>{PROVEN_EVIDENCE.reduce((n, row) => n + row.cases, 0)}</strong>
+            <span>Live matrix cases recorded</span>
           </div>
-        </section>
-      </MarketingReveal>
-
-      <section className="lp-cust3-sectors" aria-label="Industries">
-        <div className="lp-shell">
-          <p className="lp-mkt-kicker">Industries</p>
-          <div className="lp-cust3-sector-rail">
-            {sectors.map((name) => (
-              <span key={name}>{name}</span>
-            ))}
+          <div>
+            <strong>{BACKEND_SUITE.passed.toLocaleString()}</strong>
+            <span>Backend tests passing ({BACKEND_SUITE.failed} failing)</span>
+          </div>
+          <div>
+            <strong>{TRANSFER_READY_DRIVERS}</strong>
+            <span>Drivers with transfer-ready evidence</span>
+          </div>
+          <div>
+            <strong>0</strong>
+            <span>Claims without an artifact</span>
           </div>
         </div>
       </section>
 
       <MarketingReveal>
-        <section className="lp-cust3-stories" aria-label="Customer stories">
+        <section className="lp-cust3-stories" aria-label="Proven capabilities">
           <div className="lp-shell">
             <div className="lp-cust3-section-head">
-              <p className="lp-mkt-kicker">Stories</p>
-              <h2>From teams running production loads</h2>
+              <p className="lp-mkt-kicker">Proven</p>
+              <h2>Run live, against real engines</h2>
             </div>
-            <div className="lp-cust3-story-stack">
-              {stories.map((s, i) => (
-                <article key={s.author} className={`lp-cust3-story ${i % 2 === 1 ? "is-flip" : ""}`}>
-                  <div className="lp-cust3-story-meta">
-                    <span>{s.industry}</span>
-                    <h3>{s.title}</h3>
-                  </div>
-                  <blockquote>
-                    <p>&ldquo;{s.quote}&rdquo;</p>
-                    <footer>
-                      <strong>{s.author}</strong>
-                      <span>{s.role}</span>
-                    </footer>
-                  </blockquote>
+            <div className="lp-mkt-evidence-grid">
+              {PROVEN_EVIDENCE.map((row) => (
+                <article key={row.artifact} className="lp-mkt-evidence-card">
+                  <span className="lp-cust-industry">{row.cases} cases · {row.engines}</span>
+                  <p>{row.claim}</p>
+                  <footer>
+                    <strong>{row.result}</strong>
+                    <code>{row.artifact}</code>
+                  </footer>
                 </article>
               ))}
             </div>
@@ -695,11 +638,33 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         </section>
       </MarketingReveal>
 
+      <MarketingReveal>
+        <section className="lp-cust3-sectors" aria-label="Not proven">
+          <div className="lp-shell">
+            <div className="lp-cust3-section-head">
+              <p className="lp-mkt-kicker">Not proven</p>
+              <h2>What we will not claim yet</h2>
+            </div>
+            <ul className="lp-mkt-gap-list">
+              {NOT_PROVEN.map((gap) => (
+                <li key={gap.area}>
+                  <span className={`lp-mkt-gap-badge is-${gap.status}`}>{statusLabel[gap.status]}</span>
+                  <div>
+                    <strong>{gap.area}</strong>
+                    <p>{gap.reason}</p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      </MarketingReveal>
+
       <section className="lp-cust3-cta">
         <div className="lp-shell lp-cust3-cta-inner">
           <div>
-            <h2>Join teams shipping with proof</h2>
-            <p>Design partners get a scoped pilot on your sources — same nine core gates as production.</p>
+            <h2>Run the same matrix on your data</h2>
+            <p>Design partners get a scoped pilot on their own sources — same gates, same artifacts, yours to keep.</p>
           </div>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -1194,7 +1159,15 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
 
       <MarketingReveal>
         <section className="lp-sec-badges" aria-label="Compliance posture">
-          <ComplianceBadges items={["SOC 2 Type II posture", "GDPR", "HIPAA-ready paths", "ISO 27001 aligned", "Regional residency"]} />
+          <ComplianceBadges
+            items={[
+              "SOC 2 controls mapped",
+              "GDPR data handling",
+              "HIPAA paths on request",
+              "ISO 27001 controls mapped",
+              "Regional residency",
+            ]}
+          />
         </section>
       </MarketingReveal>
 
@@ -1299,8 +1272,9 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
               <span className="lp-pricing-hero-em"> Honest labels.</span>
             </h1>
             <p className="lp-int-hero-lead">
-              Catalog tiles are not the same as production drivers. Every transfer-ready route still
-              runs mapping, nine core gates, quarantine, and proof.
+              Catalog tiles are not the same as production drivers. {TRANSFER_READY_DRIVERS} drivers
+              carry transfer-ready evidence today; everything else is labelled Planned. Every
+              transfer-ready route still runs mapping, nine core gates, quarantine, and proof.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>

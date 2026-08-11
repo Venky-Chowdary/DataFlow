@@ -9,6 +9,18 @@ import re
 from typing import Any
 
 from services.engine_pool import release_engine
+from services.unique_key_introspect import (
+    _mysql_fetch_unique_keys,
+    _oracle_fetch_unique_keys,
+    _pg_fetch_unique_keys,
+    _snowflake_fetch_unique_keys,
+    _sqlite_fetch_unique_keys,
+    _sqlserver_fetch_unique_keys,
+)
+from services.check_constraints import probe_check_constraints
+from services.foreign_key_metadata import probe_foreign_keys
+from services.physical_storage_metadata import probe_physical_storage
+from services.secondary_indexes import probe_secondary_indexes
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -46,6 +58,23 @@ def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str
     except Exception:
         logger.debug("schema infer_column failed for %s", field_name, exc_info=True)
         return None
+
+
+def _as_int(value: Any, fallback: int) -> int:
+    """Catalog number as an int, whatever container the driver used.
+
+    SQL Server returns ``sys.identity_columns.seed_value`` as ``sql_variant``,
+    which pyodbc hands back as little-endian bytes — ``int()`` raises on it, and
+    swallowing that loses the source's key progression.
+    """
+    if isinstance(value, bool) or value is None:
+        return fallback
+    if isinstance(value, bytes):
+        return int.from_bytes(value, "little", signed=True)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _refine_columns_by_samples(
@@ -195,6 +224,7 @@ def introspect_schema(
             connection_string=connection_string,
             ssl=ssl,
             table=table,
+            strict_namespace=strict_namespace,
         )
     if db_type in ("sqlserver", "mssql", "sql_server", "azure_sql"):
         return _introspect_sqlserver(
@@ -462,6 +492,10 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                 "unique_keys": [],
             }
             foreign_keys: list[dict[str, Any]] = []
+            foreign_keys_meta: dict[str, Any] | None = None
+            physical_storage: dict[str, Any] | None = None
+            check_meta: dict[str, Any] | None = None
+            indexes_meta: dict[str, Any] | None = None
             if target:
                 columns = _pg_fetch_columns(cur, schema, target)
                 # Table may live outside the requested schema (common when UI
@@ -497,7 +531,18 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                     unique_meta = _pg_fetch_unique_keys(cur, resolved_schema, target)
                     if advisory_keys:
                         unique_meta = _mark_unique_keys_advisory(unique_meta)
-                    foreign_keys = _pg_fetch_foreign_keys(cur, resolved_schema, target)
+                    foreign_keys, foreign_keys_meta = _fetch_foreign_keys(
+                        "postgresql", cur, resolved_schema, target
+                    )
+                    physical_storage = probe_physical_storage(
+                        "postgresql", cur, resolved_schema, target
+                    ).to_dict()
+                    check_meta = probe_check_constraints(
+                        "postgresql", cur, resolved_schema, target
+                    ).to_dict()
+                    indexes_meta = probe_secondary_indexes(
+                        "postgresql", cur, resolved_schema, target
+                    ).to_dict()
         conn.close()
         out: dict[str, Any] = {
             "ok": True,
@@ -507,6 +552,10 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
             "foreign_keys": foreign_keys,
+            "foreign_keys_meta": foreign_keys_meta,
+            "physical_storage": physical_storage,
+            "check_constraints_meta": check_meta,
+            "indexes_meta": indexes_meta,
         }
         if advisory_keys and (out["primary_key_columns"] or out["unique_keys"]):
             out["warnings"] = [
@@ -706,24 +755,18 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             columns: list[dict] = []
             target_table = table or (tables[0] if tables else None)
             if target_table:
-                from connectors.snowflake_conn import resolve_or_fold_snowflake_table
+                from connectors.snowflake_conn import (
+                    resolve_or_fold_snowflake_table,
+                    snowflake_physical_column_rows,
+                )
 
                 try:
                     target_table = resolve_or_fold_snowflake_table(cur, schema, str(target_table))
                 except Exception as exc:
                     logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                cur.execute(
-                    """
-                    SELECT column_name, data_type, is_nullable,
-                           character_maximum_length, numeric_precision,
-                           numeric_scale, datetime_precision
-                    FROM information_schema.columns
-                    WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s
-                    ORDER BY ordinal_position
-                    """,
-                    (schema, target_table),
+                col_rows = snowflake_physical_column_rows(
+                    cur, schema, str(target_table)
                 )
-                col_rows = list(cur.fetchall() or [])
                 if not col_rows and not bool(kwargs.get("strict_namespace")):
                     cur.execute(
                         """
@@ -747,18 +790,9 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                             )
                         except Exception as exc:
                             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        cur.execute(
-                            """
-                            SELECT column_name, data_type, is_nullable,
-                                   character_maximum_length, numeric_precision,
-                                   numeric_scale, datetime_precision
-                            FROM information_schema.columns
-                            WHERE UPPER(table_schema) = UPPER(%s) AND table_name = %s
-                            ORDER BY ordinal_position
-                            """,
-                            (found_schema, found_table),
+                        col_rows = snowflake_physical_column_rows(
+                            cur, str(found_schema), str(found_table)
                         )
-                        col_rows = list(cur.fetchall() or [])
                         if col_rows:
                             schema = found_schema
                             target_table = found_table
@@ -905,7 +939,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 cur.execute(
                     """
                     SELECT column_name, column_type, is_nullable, EXTRA,
-                           COLLATION_NAME, CHARACTER_SET_NAME
+                           COLLATION_NAME, CHARACTER_SET_NAME, COLUMN_DEFAULT
                     FROM information_schema.columns
                     WHERE table_schema = %s AND table_name = %s
                     ORDER BY ordinal_position
@@ -917,7 +951,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                     cur.execute(
                         """
                         SELECT column_name, column_type, is_nullable, EXTRA,
-                               COLLATION_NAME, CHARACTER_SET_NAME
+                               COLLATION_NAME, CHARACTER_SET_NAME, COLUMN_DEFAULT
                         FROM information_schema.columns
                         WHERE table_schema = %s AND LOWER(table_name) = LOWER(%s)
                         ORDER BY ordinal_position
@@ -950,7 +984,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         cur.execute(
                             """
                             SELECT column_name, column_type, is_nullable, EXTRA,
-                                   COLLATION_NAME, CHARACTER_SET_NAME
+                                   COLLATION_NAME, CHARACTER_SET_NAME, COLUMN_DEFAULT
                             FROM information_schema.columns
                             WHERE table_schema = %s AND table_name = %s
                             ORDER BY ordinal_position
@@ -975,10 +1009,14 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         logical = f"{logical} GENERATED ALWAYS"
                     if collation:
                         logical = f"{logical} COLLATE {collation}"
+                    default = row[6] if len(row) > 6 else None
                     columns.append({
                         "name": name,
                         "inferred_type": logical,
                         "nullable": nullable == "YES",
+                        "default": (
+                            str(default) if default is not None else None
+                        ),
                         "is_identity": "auto_increment" in extra,
                         "generation": (
                             "always"
@@ -997,9 +1035,24 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 "unique_keys": [],
             }
             foreign_keys: list[dict[str, Any]] = []
+            foreign_keys_meta: dict[str, Any] | None = None
+            physical_storage: dict[str, Any] | None = None
+            check_meta: dict[str, Any] | None = None
+            indexes_meta: dict[str, Any] | None = None
             if columns and target:
                 unique_meta = _mysql_fetch_unique_keys(cur, db_name, target)
-                foreign_keys = _mysql_fetch_foreign_keys(cur, db_name, target)
+                foreign_keys, foreign_keys_meta = _fetch_foreign_keys(
+                    "mysql", cur, db_name, target
+                )
+                physical_storage = probe_physical_storage(
+                    "mysql", cur, db_name, target
+                ).to_dict()
+                check_meta = probe_check_constraints(
+                    "mysql", cur, db_name, target
+                ).to_dict()
+                indexes_meta = probe_secondary_indexes(
+                    "mysql", cur, db_name, target
+                ).to_dict()
         conn.close()
         return {
             "ok": True,
@@ -1009,6 +1062,10 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             "primary_key_columns": unique_meta.get("primary_key_columns") or [],
             "unique_keys": unique_meta.get("unique_keys") or [],
             "foreign_keys": foreign_keys,
+            "foreign_keys_meta": foreign_keys_meta,
+            "physical_storage": physical_storage,
+            "check_constraints_meta": check_meta,
+            "indexes_meta": indexes_meta,
         }
     except ImportError:
         return {"ok": False, "error": "Install pymysql for MySQL schema introspection", "columns": [], "tables": []}
@@ -1362,664 +1419,17 @@ def _pg_apply_identity_carrier(logical: str, attidentity: str, default_expr: str
     return logical
 
 
-def _pg_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
-    """Return PRIMARY KEY + UNIQUE constraints and unique indexes (incl. expressions).
+def _fetch_foreign_keys(
+    dialect: str, cur: Any, schema: str, table: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Measured foreign keys for ``schema.table`` plus the full status payload.
 
-    ``UNIQUE (lower(email))`` is invisible in ``information_schema`` alone — we
-    also read ``pg_index`` / ``pg_get_expr`` so Validate casefolds like the engine.
+    One canonical probe (``services.foreign_key_metadata``) for every dialect:
+    the carry planner and the post-load destination re-read must compare the
+    same evidence shape the source was measured with.
     """
-    from services.type_system import parse_case_insensitive_index_expression
-
-    pk: list[str] = []
-    unique_keys: list[dict[str, Any]] = []
-    by_name: dict[str, dict[str, Any]] = {}
-    try:
-        cur.execute(
-            """
-            SELECT tc.constraint_name,
-                   tc.constraint_type,
-                   kcu.column_name,
-                   kcu.ordinal_position
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-              ON tc.constraint_schema = kcu.constraint_schema
-             AND tc.constraint_name = kcu.constraint_name
-             AND tc.table_schema = kcu.table_schema
-             AND tc.table_name = kcu.table_name
-            WHERE tc.table_schema = %s
-              AND tc.table_name = %s
-              AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-            ORDER BY tc.constraint_type,
-                     tc.constraint_name,
-                     kcu.ordinal_position
-            """,
-            (schema, table),
-        )
-        for name, ctype, col, _ord in cur.fetchall() or []:
-            key = str(name)
-            bucket = by_name.setdefault(
-                key,
-                {
-                    "name": key,
-                    "columns": [],
-                    "primary": str(ctype).upper() == "PRIMARY KEY",
-                    "expression": "",
-                    "expression_columns": [],
-                    "case_insensitive": False,
-                },
-            )
-            bucket["columns"].append(str(col))
-    except Exception:
-        return {"primary_key_columns": [], "unique_keys": []}
-
-    # Unique indexes (including expression / functional indexes).
-    try:
-        cur.execute(
-            """
-            SELECT a.attnum, a.attname
-            FROM pg_catalog.pg_attribute a
-            JOIN pg_catalog.pg_class t ON t.oid = a.attrelid
-            JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
-            WHERE n.nspname = %s
-              AND t.relname = %s
-              AND a.attnum > 0
-              AND NOT a.attisdropped
-            """,
-            (schema, table),
-        )
-        attmap = {int(num): str(name) for num, name in (cur.fetchall() or [])}
-
-        try:
-            cur.execute(
-                """
-                SELECT ic.relname AS index_name,
-                       i.indisprimary AS is_primary,
-                       COALESCE(pg_get_expr(i.indexprs, i.indrelid), '') AS exprs,
-                       COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS pred,
-                       pg_get_indexdef(i.indexrelid) AS indexdef,
-                       i.indkey,
-                       COALESCE(i.indnullsnotdistinct, false) AS nulls_not_distinct
-                FROM pg_catalog.pg_index i
-                JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
-                JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
-                JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
-                WHERE n.nspname = %s
-                  AND t.relname = %s
-                  AND i.indisunique
-                  AND i.indisvalid
-                """,
-                (schema, table),
-            )
-        except Exception:
-            # PG < 15 lacks indnullsnotdistinct.
-            cur.execute(
-                """
-                SELECT ic.relname AS index_name,
-                       i.indisprimary AS is_primary,
-                       COALESCE(pg_get_expr(i.indexprs, i.indrelid), '') AS exprs,
-                       COALESCE(pg_get_expr(i.indpred, i.indrelid), '') AS pred,
-                       pg_get_indexdef(i.indexrelid) AS indexdef,
-                       i.indkey,
-                       false AS nulls_not_distinct
-                FROM pg_catalog.pg_index i
-                JOIN pg_catalog.pg_class ic ON ic.oid = i.indexrelid
-                JOIN pg_catalog.pg_class t ON t.oid = i.indrelid
-                JOIN pg_catalog.pg_namespace n ON n.oid = t.relnamespace
-                WHERE n.nspname = %s
-                  AND t.relname = %s
-                  AND i.indisunique
-                  AND i.indisvalid
-                """,
-                (schema, table),
-            )
-        for (
-            idx_name,
-            is_primary,
-            exprs,
-            pred,
-            indexdef,
-            indkey,
-            nulls_not_distinct,
-        ) in cur.fetchall() or []:
-            key = str(idx_name)
-            bucket = by_name.setdefault(
-                key,
-                {
-                    "name": key,
-                    "columns": [],
-                    "primary": bool(is_primary),
-                    "expression": "",
-                    "expression_columns": [],
-                    "case_insensitive": False,
-                    "filter_predicate": "",
-                    "nulls_not_distinct": False,
-                },
-            )
-            bucket["primary"] = bool(is_primary) or bool(bucket.get("primary"))
-            bucket["nulls_not_distinct"] = bool(nulls_not_distinct)
-            if pred:
-                bucket["filter_predicate"] = str(pred).strip()
-            expr_text = str(exprs or "").strip() or str(indexdef or "")
-            if exprs:
-                bucket["expression"] = str(exprs).strip()
-            ci_cols = parse_case_insensitive_index_expression(expr_text)
-            if ci_cols:
-                bucket["case_insensitive"] = True
-                for c in ci_cols:
-                    if c not in bucket["expression_columns"]:
-                        bucket["expression_columns"].append(c)
-            # Resolve simple column attnums when constraints did not already list them.
-            if not bucket["columns"] and indkey is not None:
-                try:
-                    attnums = [
-                        int(x)
-                        for x in str(indkey).split()
-                        if str(x).lstrip("-").isdigit() and int(x) > 0
-                    ]
-                except Exception:
-                    attnums = []
-                for attnum in attnums:
-                    attname = attmap.get(attnum)
-                    if attname and attname not in bucket["columns"]:
-                        bucket["columns"].append(attname)
-    except Exception:
-        # Constraints alone are still useful when pg_index probe fails.
-        pass
-
-    for bucket in by_name.values():
-        if bucket.get("primary"):
-            pk = list(bucket.get("columns") or [])
-        unique_keys.append(bucket)
-    return {"primary_key_columns": pk, "unique_keys": unique_keys}
-
-
-def _pg_fetch_foreign_keys(cur: Any, schema: str, table: str) -> list[dict[str, Any]]:
-    """Return FOREIGN KEY metadata for ``schema.table`` (information_schema).
-
-    Shape matches constraint_hints / sample_orphan_probe:
-    ``{name, columns, referenced_schema, referenced_table, referenced_columns}``.
-    Never invents FKs — empty list on query failure.
-    """
-    by_name: dict[str, dict[str, Any]] = {}
-    try:
-        cur.execute(
-            """
-            SELECT tc.constraint_name,
-                   kcu.column_name,
-                   kcu.ordinal_position,
-                   ccu.table_schema AS foreign_table_schema,
-                   ccu.table_name AS foreign_table_name,
-                   ccu.column_name AS foreign_column_name
-            FROM information_schema.table_constraints AS tc
-            JOIN information_schema.key_column_usage AS kcu
-              ON tc.constraint_catalog = kcu.constraint_catalog
-             AND tc.constraint_schema = kcu.constraint_schema
-             AND tc.constraint_name = kcu.constraint_name
-            JOIN information_schema.constraint_column_usage AS ccu
-              ON ccu.constraint_catalog = tc.constraint_catalog
-             AND ccu.constraint_schema = tc.constraint_schema
-             AND ccu.constraint_name = tc.constraint_name
-            WHERE tc.constraint_type = 'FOREIGN KEY'
-              AND tc.table_schema = %s
-              AND tc.table_name = %s
-            ORDER BY tc.constraint_name, kcu.ordinal_position
-            """,
-            (schema, table),
-        )
-        for (
-            cname,
-            col,
-            _ord,
-            ref_schema,
-            ref_table,
-            ref_col,
-        ) in cur.fetchall() or []:
-            key = str(cname)
-            bucket = by_name.setdefault(
-                key,
-                {
-                    "name": key,
-                    "columns": [],
-                    "referenced_schema": str(ref_schema or "").strip(),
-                    "referenced_table": str(ref_table or "").strip(),
-                    "referenced_columns": [],
-                },
-            )
-            col_s = str(col).strip()
-            ref_s = str(ref_col).strip()
-            if col_s and col_s not in bucket["columns"]:
-                bucket["columns"].append(col_s)
-            if ref_s and ref_s not in bucket["referenced_columns"]:
-                bucket["referenced_columns"].append(ref_s)
-            if ref_schema and not bucket.get("referenced_schema"):
-                bucket["referenced_schema"] = str(ref_schema).strip()
-            if ref_table and not bucket.get("referenced_table"):
-                bucket["referenced_table"] = str(ref_table).strip()
-    except Exception as exc:
-        logger.debug("pg foreign key introspect failed: %s", exc, exc_info=exc)
-        return []
-    return list(by_name.values())
-
-
-def _mysql_fetch_foreign_keys(cur: Any, schema: str, table: str) -> list[dict[str, Any]]:
-    """Return FOREIGN KEY metadata from ``KEY_COLUMN_USAGE`` (MySQL / MariaDB)."""
-    by_name: dict[str, dict[str, Any]] = {}
-    try:
-        cur.execute(
-            """
-            SELECT CONSTRAINT_NAME,
-                   COLUMN_NAME,
-                   ORDINAL_POSITION,
-                   REFERENCED_TABLE_SCHEMA,
-                   REFERENCED_TABLE_NAME,
-                   REFERENCED_COLUMN_NAME
-            FROM information_schema.KEY_COLUMN_USAGE
-            WHERE TABLE_SCHEMA = %s
-              AND TABLE_NAME = %s
-              AND REFERENCED_TABLE_NAME IS NOT NULL
-            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
-            """,
-            (schema, table),
-        )
-        for (
-            cname,
-            col,
-            _ord,
-            ref_schema,
-            ref_table,
-            ref_col,
-        ) in cur.fetchall() or []:
-            key = str(cname)
-            bucket = by_name.setdefault(
-                key,
-                {
-                    "name": key,
-                    "columns": [],
-                    "referenced_schema": str(ref_schema or "").strip(),
-                    "referenced_table": str(ref_table or "").strip(),
-                    "referenced_columns": [],
-                },
-            )
-            col_s = str(col).strip()
-            ref_s = str(ref_col).strip()
-            if col_s and col_s not in bucket["columns"]:
-                bucket["columns"].append(col_s)
-            if ref_s and ref_s not in bucket["referenced_columns"]:
-                bucket["referenced_columns"].append(ref_s)
-            if ref_schema and not bucket.get("referenced_schema"):
-                bucket["referenced_schema"] = str(ref_schema).strip()
-            if ref_table and not bucket.get("referenced_table"):
-                bucket["referenced_table"] = str(ref_table).strip()
-    except Exception as exc:
-        logger.debug("mysql foreign key introspect failed: %s", exc, exc_info=exc)
-        return []
-    return list(by_name.values())
-
-
-def _sqlserver_fetch_unique_keys(conn: Any, schema: str, table: str) -> dict[str, Any]:
-    """Return PRIMARY KEY + UNIQUE indexes from ``sys.indexes``.
-
-    Also resolves computed-column definitions (``LOWER(email)``) so Validate
-    casefolds like the engine when uniqueness is on a computed CI column.
-    """
-    import sqlalchemy as sa
-    from services.type_system import parse_case_insensitive_index_expression
-
-    pk: list[str] = []
-    unique_keys: list[dict[str, Any]] = []
-    try:
-        rows = conn.execute(
-            sa.text(
-                """
-                SELECT
-                  i.name AS index_name,
-                  i.is_primary_key,
-                  c.name AS column_name,
-                  ic.key_ordinal,
-                  CONVERT(nvarchar(4000), cc.definition) AS computed_def,
-                  CONVERT(nvarchar(4000), i.filter_definition) AS filter_def
-                FROM sys.indexes i
-                JOIN sys.index_columns ic
-                  ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-                JOIN sys.columns c
-                  ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-                LEFT JOIN sys.computed_columns cc
-                  ON cc.object_id = c.object_id AND cc.column_id = c.column_id
-                JOIN sys.tables t ON t.object_id = i.object_id
-                JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = :schema
-                  AND t.name = :table
-                  AND i.is_unique = 1
-                  AND ic.is_included_column = 0
-                  AND i.is_hypothetical = 0
-                ORDER BY i.name, ic.key_ordinal
-                """
-            ),
-            {"schema": schema, "table": table},
-        ).fetchall()
-    except Exception:
-        return {"primary_key_columns": [], "unique_keys": []}
-
-    grouped: dict[str, dict[str, Any]] = {}
-    for idx_name, is_pk, col, _ord, computed_def, filter_def in rows or []:
-        if not idx_name:
-            continue
-        key = str(idx_name)
-        bucket = grouped.setdefault(
-            key,
-            {
-                "name": key,
-                "columns": [],
-                "primary": bool(is_pk),
-                "expression": "",
-                "expression_columns": [],
-                "case_insensitive": False,
-                "filter_predicate": "",
-            },
-        )
-        bucket["primary"] = bool(is_pk) or bool(bucket.get("primary"))
-        bucket["columns"].append(str(col))
-        if filter_def and not bucket.get("filter_predicate"):
-            bucket["filter_predicate"] = str(filter_def).strip()
-        expr = str(computed_def or "").strip()
-        if expr:
-            bucket["expression"] = (
-                f"{bucket['expression']}; {expr}" if bucket["expression"] else expr
-            )
-            # SQL Server brackets: LOWER([email]) → LOWER(email)
-            normalized = expr.replace("[", "").replace("]", "")
-            ci_cols = parse_case_insensitive_index_expression(normalized)
-            if ci_cols:
-                bucket["case_insensitive"] = True
-                for c in ci_cols:
-                    if c not in bucket["expression_columns"]:
-                        bucket["expression_columns"].append(c)
-    for bucket in grouped.values():
-        if bucket.get("primary"):
-            pk = list(bucket.get("columns") or [])
-        unique_keys.append(bucket)
-    return {"primary_key_columns": pk, "unique_keys": unique_keys}
-
-
-def _oracle_fetch_unique_keys(conn: Any, owner: str, table: str) -> dict[str, Any]:
-    """Return PRIMARY/UNIQUE constraints + function-based unique indexes.
-
-    ``CREATE UNIQUE INDEX … (UPPER(email))`` lives in ``ALL_IND_EXPRESSIONS``,
-    not ``ALL_CONSTRAINTS`` — must be read or Validate false-greens Abc/abc.
-    """
-    import sqlalchemy as sa
-    from services.type_system import parse_case_insensitive_index_expression
-
-    pk: list[str] = []
-    unique_keys: list[dict[str, Any]] = []
-    by_name: dict[str, dict[str, Any]] = {}
-    owner_u = (owner or "").upper()
-    table_u = (table or "").upper()
-    try:
-        rows = conn.execute(
-            sa.text(
-                """
-                SELECT
-                  ac.constraint_name,
-                  ac.constraint_type,
-                  acc.column_name,
-                  acc.position
-                FROM all_constraints ac
-                JOIN all_cons_columns acc
-                  ON ac.owner = acc.owner
-                 AND ac.constraint_name = acc.constraint_name
-                 AND ac.table_name = acc.table_name
-                WHERE ac.owner = :owner
-                  AND ac.table_name = :table
-                  AND ac.constraint_type IN ('P', 'U')
-                  AND ac.status = 'ENABLED'
-                ORDER BY ac.constraint_name, acc.position
-                """
-            ),
-            {"owner": owner_u, "table": table_u},
-        ).fetchall()
-    except Exception:
-        return {"primary_key_columns": [], "unique_keys": []}
-
-    for name, ctype, col, _pos in rows or []:
-        key = str(name)
-        bucket = by_name.setdefault(
-            key,
-            {
-                "name": key,
-                "columns": [],
-                "primary": str(ctype).upper() == "P",
-                "expression": "",
-                "expression_columns": [],
-                "case_insensitive": False,
-                "filter_predicate": "",
-            },
-        )
-        bucket["columns"].append(str(col))
-
-    # Unique function-based indexes (UPPER/LOWER) — not constraint-backed.
-    try:
-        fbi_rows = conn.execute(
-            sa.text(
-                """
-                SELECT
-                  ai.index_name,
-                  TO_CHAR(aie.column_expression) AS column_expression,
-                  aie.column_position
-                FROM all_indexes ai
-                JOIN all_ind_expressions aie
-                  ON ai.owner = aie.index_owner
-                 AND ai.index_name = aie.index_name
-                WHERE ai.table_owner = :owner
-                  AND ai.table_name = :table
-                  AND ai.uniqueness = 'UNIQUE'
-                ORDER BY ai.index_name, aie.column_position
-                """
-            ),
-            {"owner": owner_u, "table": table_u},
-        ).fetchall()
-        for idx_name, expr, _pos in fbi_rows or []:
-            key = str(idx_name)
-            bucket = by_name.setdefault(
-                key,
-                {
-                    "name": key,
-                    "columns": [],
-                    "primary": False,
-                    "expression": "",
-                    "expression_columns": [],
-                    "case_insensitive": False,
-                    "filter_predicate": "",
-                },
-            )
-            expr_text = str(expr or "").strip()
-            if expr_text:
-                bucket["expression"] = (
-                    f"{bucket['expression']}; {expr_text}"
-                    if bucket["expression"]
-                    else expr_text
-                )
-                # Oracle quotes identifiers: UPPER("EMAIL")
-                normalized = expr_text.replace('"', "")
-                ci_cols = parse_case_insensitive_index_expression(normalized)
-                if ci_cols:
-                    bucket["case_insensitive"] = True
-                    for c in ci_cols:
-                        if c not in bucket["expression_columns"]:
-                            bucket["expression_columns"].append(c)
-    except Exception:
-        pass
-
-    for bucket in by_name.values():
-        if bucket.get("primary"):
-            pk = list(bucket.get("columns") or [])
-        unique_keys.append(bucket)
-    return {"primary_key_columns": pk, "unique_keys": unique_keys}
-
-
-def _snowflake_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
-    """Return PRIMARY KEY / UNIQUE from Snowflake INFORMATION_SCHEMA.
-
-    Hybrid tables enforce these at write time; standard tables often declare
-    ``NOT ENFORCED`` constraints — surface ``enforced`` so Validate does not
-    invent blockers for advisory-only keys (Snowflake honesty bar).
-    """
-    pk: list[str] = []
-    unique_keys: list[dict[str, Any]] = []
-    by_name: dict[str, dict[str, Any]] = {}
-    try:
-        try:
-            cur.execute(
-                """
-                SELECT tc.constraint_name,
-                       tc.constraint_type,
-                       kcu.column_name,
-                       kcu.ordinal_position,
-                       COALESCE(tc.enforced, 'YES') AS enforced
-                FROM information_schema.table_constraints tc
-                JOIN information_schema.key_column_usage kcu
-                  ON tc.constraint_catalog = kcu.constraint_catalog
-                 AND tc.constraint_schema = kcu.constraint_schema
-                 AND tc.constraint_name = kcu.constraint_name
-                 AND tc.table_schema = kcu.table_schema
-                 AND tc.table_name = kcu.table_name
-                WHERE UPPER(tc.table_schema) = UPPER(%s)
-                  AND tc.table_name = %s
-                  AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-                ORDER BY tc.constraint_type, tc.constraint_name, kcu.ordinal_position
-                """,
-                (schema, table),
-            )
-        except Exception:
-            # Older SF builds may lack ENFORCED — treat as YES (fail-closed).
-            cur.execute(
-                """
-                SELECT tc.constraint_name,
-                       tc.constraint_type,
-                       kcu.column_name,
-                       kcu.ordinal_position,
-                       'YES' AS enforced
-                FROM information_schema.table_constraints tc
-                JOIN information_schema.key_column_usage kcu
-                  ON tc.constraint_catalog = kcu.constraint_catalog
-                 AND tc.constraint_schema = kcu.constraint_schema
-                 AND tc.constraint_name = kcu.constraint_name
-                 AND tc.table_schema = kcu.table_schema
-                 AND tc.table_name = kcu.table_name
-                WHERE UPPER(tc.table_schema) = UPPER(%s)
-                  AND tc.table_name = %s
-                  AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE')
-                ORDER BY tc.constraint_type, tc.constraint_name, kcu.ordinal_position
-                """,
-                (schema, table),
-            )
-        for name, ctype, col, _ord, enforced in cur.fetchall() or []:
-            key = str(name)
-            is_primary = str(ctype).upper() == "PRIMARY KEY"
-            bucket = by_name.setdefault(
-                key,
-                {
-                    "name": key,
-                    "columns": [],
-                    "primary": is_primary,
-                    "expression": "",
-                    "expression_columns": [],
-                    "case_insensitive": False,
-                    "filter_predicate": "",
-                    "enforced": str(enforced or "YES").upper() != "NO",
-                },
-            )
-            bucket["primary"] = is_primary or bool(bucket.get("primary"))
-            if str(enforced or "YES").upper() == "NO":
-                bucket["enforced"] = False
-            if col:
-                bucket["columns"].append(str(col))
-    except Exception:
-        return {"primary_key_columns": [], "unique_keys": []}
-
-    for bucket in by_name.values():
-        if bucket.get("primary"):
-            pk = list(bucket.get("columns") or [])
-        unique_keys.append(bucket)
-    return {"primary_key_columns": pk, "unique_keys": unique_keys}
-
-
-def _mysql_fetch_unique_keys(cur: Any, schema: str, table: str) -> dict[str, Any]:
-    """Return PRIMARY / UNIQUE indexes from ``STATISTICS`` (incl. functional exprs)."""
-    from services.type_system import parse_case_insensitive_index_expression
-
-    pk: list[str] = []
-    unique_keys: list[dict[str, Any]] = []
-    try:
-        # MySQL 8.0.13+ exposes EXPRESSION for functional indexes; older builds
-        # lack the column — fall back to COLUMN_NAME only.
-        try:
-            cur.execute(
-                """
-                SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE, EXPRESSION
-                FROM information_schema.STATISTICS
-                WHERE TABLE_SCHEMA = %s
-                  AND TABLE_NAME = %s
-                  AND NON_UNIQUE = 0
-                ORDER BY INDEX_NAME, SEQ_IN_INDEX
-                """,
-                (schema, table),
-            )
-            rows = cur.fetchall() or []
-            has_expr = True
-        except Exception:
-            cur.execute(
-                """
-                SELECT INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE
-                FROM information_schema.STATISTICS
-                WHERE TABLE_SCHEMA = %s
-                  AND TABLE_NAME = %s
-                  AND NON_UNIQUE = 0
-                ORDER BY INDEX_NAME, SEQ_IN_INDEX
-                """,
-                (schema, table),
-            )
-            rows = [(*r, None) for r in (cur.fetchall() or [])]
-            has_expr = False
-        grouped: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            idx_name, col, _seq, _nu = row[0], row[1], row[2], row[3]
-            expr = row[4] if has_expr and len(row) > 4 else None
-            key = str(idx_name)
-            bucket = grouped.setdefault(
-                key,
-                {
-                    "name": key,
-                    "columns": [],
-                    "primary": key.upper() == "PRIMARY",
-                    "expression": "",
-                    "expression_columns": [],
-                    "case_insensitive": False,
-                    "filter_predicate": "",
-                },
-            )
-            if col:
-                bucket["columns"].append(str(col))
-            expr_text = str(expr or "").strip()
-            if expr_text:
-                bucket["expression"] = (
-                    f"{bucket['expression']}; {expr_text}"
-                    if bucket["expression"]
-                    else expr_text
-                )
-                ci_cols = parse_case_insensitive_index_expression(expr_text)
-                if ci_cols:
-                    bucket["case_insensitive"] = True
-                    for c in ci_cols:
-                        if c not in bucket["expression_columns"]:
-                            bucket["expression_columns"].append(c)
-        for bucket in grouped.values():
-            if bucket["primary"]:
-                pk = list(bucket["columns"])
-            unique_keys.append(bucket)
-    except Exception:
-        return {"primary_key_columns": [], "unique_keys": []}
-    return {"primary_key_columns": pk, "unique_keys": unique_keys}
+    measured = probe_foreign_keys(dialect, cur, schema, table)
+    return [fk.to_dict() for fk in measured.items], measured.to_dict()
 
 
 def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
@@ -2528,6 +1938,13 @@ def _oracle_to_logical(dtype: str) -> str:
         return f"DECIMAL({m.group(1)})"
     if d == "NUMBER" or d.startswith("NUMBER("):
         return "DECIMAL"
+    # Oracle ANSI FLOAT(p) is NUMBER-backed binary precision (bare FLOAT = 126
+    # binary digits ~ 38 decimal), not IEEE-64. Reading it as DOUBLE silently
+    # drops it to a 53-bit mantissa, so the declared carrier is preserved and
+    # the destination decides how to hold it.
+    m_float = re.match(r"^FLOAT(?:\((\d+)\))?$", d)
+    if m_float:
+        return f"FLOAT({m_float.group(1)})" if m_float.group(1) else "FLOAT"
     if d in {"BINARY_FLOAT", "BINARY_DOUBLE"} or d.startswith("FLOAT"):
         from services.type_system import float_width_carrier
 
@@ -2632,6 +2049,12 @@ def _sqlserver_to_logical(dtype: str) -> str:
     if d in {"int", "bigint", "smallint", "tinyint"}:
         from services.type_system import integer_width_carrier
 
+        # SQL Server INT is unambiguously 32-bit. The shared carrier widens the
+        # ambiguous INT/INTEGER keyword to BIGINT (never-narrower invent), which
+        # would turn a read int32 column into a BIGINT on the destination and
+        # lose the declared width — so name it explicitly, as PostgreSQL int4 is.
+        if d == "int":
+            return "INT4"
         return integer_width_carrier(d) or "BIGINT"
     if d == "bit":
         return "BOOLEAN"
@@ -2750,19 +2173,34 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 return {"ok": True, "columns": [], "tables": tables, "schema": schema}
 
             owner = schema or (kwargs.get("username") or "").upper()
-            resolved_table = table.upper()
+            # Stored spelling inside the requested owner: a quoted lower-case
+            # table read as "does not exist" under the folded name, so Validate
+            # planned create-new (and skipped the destination PK / duplicate
+            # gate) for a table that was really there. Same-owner resolution
+            # only — cross-owner healing stays behind ``strict_namespace``.
+            from services.sql_object_identity import resolve_object_identity
+
+            _ident = resolve_object_identity(conn, table, owner)
+            resolved_table = _ident.table if _ident.exists else table.upper()
+            if _ident.exists and _ident.schema:
+                owner = _ident.schema
             # VIRTUAL_COLUMN / IDENTITY_COLUMN — client INSERT must omit ALWAYS.
+            # ALL_TAB_COLS (not ALL_TAB_COLUMNS) is the view that exposes
+            # VIRTUAL_COLUMN; the join used to fail with ORA-00904 on every
+            # Oracle and silently degrade to the identity-blind fallback, so a
+            # virtual or identity column looked like an ordinary insertable one.
             _oracle_col_sql = """
                     SELECT atc.column_name, atc.data_type, atc.data_precision, atc.data_scale,
                            atc.nullable, atc.char_length, atc.char_used,
                            atc.virtual_column, atc.identity_column,
-                           ic.generation_type
-                    FROM all_tab_columns atc
+                           ic.generation_type, atc.data_default
+                    FROM all_tab_cols atc
                     LEFT JOIN all_tab_identity_cols ic
                       ON atc.owner = ic.owner
                      AND atc.table_name = ic.table_name
                      AND atc.column_name = ic.column_name
                     WHERE atc.owner = :owner AND atc.table_name = :table
+                      AND atc.hidden_column = 'NO'
                     ORDER BY atc.column_id
                     """
             try:
@@ -2774,9 +2212,10 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 # Pre-12c / limited grants: fall back without identity join.
                 _oracle_col_sql = """
                     SELECT column_name, data_type, data_precision, data_scale, nullable,
-                           char_length, char_used, virtual_column, 'NO', NULL
-                    FROM all_tab_columns
+                           char_length, char_used, virtual_column, 'NO', NULL, data_default
+                    FROM all_tab_cols
                     WHERE owner = :owner AND table_name = :table
+                      AND hidden_column = 'NO'
                     ORDER BY column_id
                     """
                 try:
@@ -2787,7 +2226,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 except Exception:
                     _oracle_col_sql = """
                         SELECT column_name, data_type, data_precision, data_scale, nullable,
-                               char_length, char_used, 'NO', 'NO', NULL
+                               char_length, char_used, 'NO', 'NO', NULL, data_default
                         FROM all_tab_columns
                         WHERE owner = :owner AND table_name = :table
                         ORDER BY column_id
@@ -2796,7 +2235,9 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                         sa.text(_oracle_col_sql),
                         {"owner": owner, "table": resolved_table},
                     ).fetchall()
-            if not col_rows:
+            # Destination probes must NOT heal across owners: another schema's
+            # columns would mark a create-new target as already existing.
+            if not col_rows and not bool(kwargs.get("strict_namespace")):
                 found = conn.execute(
                     sa.text(
                         """
@@ -2831,6 +2272,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 virtual_col = row[7] if len(row) > 7 else "NO"
                 identity_col = row[8] if len(row) > 8 else "NO"
                 generation = row[9] if len(row) > 9 else None
+                data_default = row[10] if len(row) > 10 else None
                 dtype = str(data_type or "")
                 dtype_u = dtype.upper()
                 if dtype_u == "NUMBER" and precision is not None:
@@ -2838,6 +2280,17 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                         dtype = f"NUMBER({int(precision)},{int(scale)})"
                     else:
                         dtype = f"NUMBER({int(precision)})"
+                elif dtype_u == "NUMBER" and (
+                    (scale is not None and int(scale) == 0)
+                    or str(identity_col or "").upper() == "YES"
+                ):
+                    # Oracle reports an unconstrained NUMBER for an identity
+                    # column (precision and scale both NULL), but the identity
+                    # sequence only ever yields integers. Read bare it became a
+                    # fractional DECIMAL, so the key landed in a column with
+                    # decimal places that no destination will generate into.
+                    # 38 is Oracle's maximum precision.
+                    dtype = "NUMBER(38,0)"
                 elif (
                     dtype_u in {"VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR"}
                     and char_length is not None
@@ -2862,6 +2315,13 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                         "name": name,
                         "inferred_type": logical,
                         "nullable": str(nullable).upper() == "Y",
+                        "default": (
+                            str(data_default).strip()
+                            if data_default is not None
+                            and str(data_default).strip() not in ("", "NULL")
+                            else None
+                        ),
+                        "is_identity": str(identity_col or "").upper() == "YES",
                         "data_type": dtype,
                     }
                 )
@@ -2870,6 +2330,11 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 if columns
                 else {"primary_key_columns": [], "unique_keys": []}
             )
+            foreign_keys, foreign_keys_meta = (
+                _fetch_foreign_keys("oracle", conn, owner, resolved_table)
+                if columns
+                else ([], None)
+            )
             return {
                 "ok": True,
                 "columns": columns,
@@ -2877,6 +2342,23 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                 "schema": owner,
                 "primary_key_columns": unique_meta.get("primary_key_columns") or [],
                 "unique_keys": unique_meta.get("unique_keys") or [],
+                "foreign_keys": foreign_keys,
+                "foreign_keys_meta": foreign_keys_meta,
+                "physical_storage": (
+                    probe_physical_storage("oracle", conn, owner, resolved_table).to_dict()
+                    if columns
+                    else None
+                ),
+                "check_constraints_meta": (
+                    probe_check_constraints("oracle", conn, owner, resolved_table).to_dict()
+                    if columns
+                    else None
+                ),
+                "indexes_meta": (
+                    probe_secondary_indexes("oracle", conn, owner, resolved_table).to_dict()
+                    if columns
+                    else None
+                ),
             }
     except Exception as exc:
         logger.warning("oracle introspect failed", exc_info=True)
@@ -2962,7 +2444,8 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                       c.CHARACTER_MAXIMUM_LENGTH,
                       c.DATETIME_PRECISION,
                       c.COLLATION_NAME,
-                      c.IS_NULLABLE
+                      c.IS_NULLABLE,
+                      c.COLUMN_DEFAULT
                     FROM INFORMATION_SCHEMA.COLUMNS c
                     WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
                     ORDER BY c.ORDINAL_POSITION
@@ -2999,7 +2482,8 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                               c.CHARACTER_MAXIMUM_LENGTH,
                               c.DATETIME_PRECISION,
                               c.COLLATION_NAME,
-                              c.IS_NULLABLE
+                              c.IS_NULLABLE,
+                              c.COLUMN_DEFAULT
                             FROM INFORMATION_SCHEMA.COLUMNS c
                             WHERE c.TABLE_SCHEMA = :schema AND c.TABLE_NAME = :table
                             ORDER BY c.ORDINAL_POSITION
@@ -3011,16 +2495,18 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         schema = found_schema
                         break
             columns: list[dict] = []
-            for (
-                name,
-                data_type,
-                precision,
-                scale,
-                char_len,
-                dt_prec,
-                collation,
-                nullable,
-            ) in col_rows:
+            for row in col_rows:
+                (
+                    name,
+                    data_type,
+                    precision,
+                    scale,
+                    char_len,
+                    dt_prec,
+                    collation,
+                    nullable,
+                ) = tuple(row)[:8]
+                column_default = row[8] if len(row) > 8 else None
                 dtype = str(data_type or "")
                 base = dtype.lower()
                 if base in {"decimal", "numeric"} and precision is not None:
@@ -3049,10 +2535,57 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         "name": name,
                         "inferred_type": logical,
                         "nullable": str(nullable).upper() == "YES",
+                        "default": (
+                            str(column_default)
+                            if column_default is not None
+                            else None
+                        ),
                         "data_type": dtype,
                         "collation": coll,
                     }
                 )
+            # IDENTITY columns: INFORMATION_SCHEMA does not expose them, so a
+            # SQL Server source looked like a plain BIGINT key and the
+            # destination was created without a generator — the client's first
+            # insert after cutover then had no key to use.
+            if columns:
+                try:
+                    identity_rows = conn.execute(
+                        sa.text(
+                            """
+                            SELECT c.name,
+                                   CAST(c.seed_value AS BIGINT),
+                                   CAST(c.increment_value AS BIGINT)
+                            FROM sys.identity_columns c
+                            JOIN sys.tables t ON t.object_id = c.object_id
+                            JOIN sys.schemas s ON s.schema_id = t.schema_id
+                            WHERE s.name = :schema AND t.name = :table
+                            """
+                        ),
+                        {"schema": schema, "table": table},
+                    ).fetchall()
+                    identity_names = {
+                        str(r[0]): (r[1], r[2]) for r in (identity_rows or []) if r and r[0]
+                    }
+                    for col in columns:
+                        if col["name"] not in identity_names:
+                            continue
+                        seed, step = identity_names[col["name"]]
+                        typ = str(col.get("inferred_type") or "")
+                        col["is_identity"] = True
+                        # SQL Server IDENTITY always accepts client values under
+                        # SET IDENTITY_INSERT, so it is by-default polarity.
+                        col["generation"] = "by_default"
+                        if "IDENTITY" not in typ.upper():
+                            col["inferred_type"] = (
+                                f"{typ} IDENTITY({_as_int(seed, 1)},"
+                                f"{_as_int(step, 1)})"
+                            )
+                except Exception as exc:
+                    # Losing the sequence silently recreates IDENTITY(1,1) on a
+                    # table whose keys run on another progression.
+                    logger.warning("sqlserver identity probe failed: %s", exc)
+
             # Computed columns are not insertable — annotate GENERATED ALWAYS
             # so writers omit them (same path as PG/MySQL identity).
             if columns:
@@ -3084,6 +2617,11 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                 if columns
                 else {"primary_key_columns": [], "unique_keys": []}
             )
+            foreign_keys, foreign_keys_meta = (
+                _fetch_foreign_keys("sqlserver", conn, schema, table)
+                if columns
+                else ([], None)
+            )
             return {
                 "ok": True,
                 "columns": columns,
@@ -3091,6 +2629,23 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                 "schema": schema,
                 "primary_key_columns": unique_meta.get("primary_key_columns") or [],
                 "unique_keys": unique_meta.get("unique_keys") or [],
+                "foreign_keys": foreign_keys,
+                "foreign_keys_meta": foreign_keys_meta,
+                "physical_storage": (
+                    probe_physical_storage("sqlserver", conn, schema, table).to_dict()
+                    if columns
+                    else None
+                ),
+                "check_constraints_meta": (
+                    probe_check_constraints("sqlserver", conn, schema, table).to_dict()
+                    if columns
+                    else None
+                ),
+                "indexes_meta": (
+                    probe_secondary_indexes("sqlserver", conn, schema, table).to_dict()
+                    if columns
+                    else None
+                ),
             }
     except Exception as exc:
         logger.warning("sqlserver introspect failed", exc_info=True)
@@ -3361,7 +2916,16 @@ def _sf_to_logical(
             r"^(INT|INTEGER|BIGINT|SMALLINT|TINYINT|BYTEINT)",
             d,
         )
-        return integer_width_carrier(tok.group(1) if tok else d) or "BIGINT"
+        # Every one of these spellings is an alias of NUMBER(38,0) in Snowflake
+        # — the narrow ones included: SMALLINT holds 38 digits there, not 5. A
+        # width carrier read off the spelling would hand the destination a
+        # BIGINT and overflow on the 19th digit, which is exactly what the
+        # NUMBER(p,0) branch above refuses to do. Carry the declared precision.
+        from services.type_system import zero_scale_numeric_carrier
+
+        return zero_scale_numeric_carrier(num_prec or 38) or (
+            integer_width_carrier(tok.group(1) if tok else d) or "BIGINT"
+        )
     # Snowflake FLOAT / DOUBLE / REAL — preserve IEEE width polarity.
     if d in {"FLOAT", "FLOAT4", "FLOAT8", "DOUBLE", "DOUBLE PRECISION", "REAL"} or d.startswith("FLOAT"):
         from services.type_system import float_width_carrier
@@ -3908,6 +3472,62 @@ def _es_mapping_type(es_type: str) -> str:
     return "TEXT"
 
 
+def _sqlite_declared_over_samples(declared: str, inferred: str) -> str:
+    """Keep an explicit SQLite DDL token when samples blur it within its family.
+
+    A column's contract is its declaration, not its current contents. SQLite
+    records the CREATE token verbatim, so a ``TIMESTAMPTZ`` sampled as naive
+    strings must stay offset-aware — otherwise re-reading a table DataFlow
+    itself created reports a polarity change against its own DDL. Cross-family
+    inference is left alone: an untyped affinity genuinely carries no contract.
+    """
+    from services.type_system import normalize_logical_type
+
+    decl = (declared or "").strip()
+    inf = (inferred or "").strip()
+    if not decl or not inf:
+        return inferred
+    try:
+        decl_logical = normalize_logical_type(decl)
+        inf_logical = normalize_logical_type(inf)
+    except Exception:
+        return inferred
+    if decl_logical == inf_logical and decl.upper() != inf.upper():
+        # Same family, different token — the declaration carries the polarity,
+        # precision and width the samples cannot prove.
+        return decl
+    return inferred
+
+
+def _sqlite_text_over_numeric_samples(declared: str, inferred: str) -> str:
+    """Refuse numeric capacity invented from the contents of a TEXT column.
+
+    TEXT is the exact-digit carrier our own DDL picks for DECIMAL on SQLite
+    (REAL would round). Inferring ``DECIMAL(p,s)`` back from those digits invents
+    a precision the declaration never had, so re-running a migration into a table
+    DataFlow itself created read ``DECIMAL(12,2) → DECIMAL(8,4)`` and blocked as a
+    narrowing. Semantic inference (temporal, JSON, UUID, boolean) claims no
+    capacity and still applies.
+    """
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        normalize_logical_type,
+    )
+
+    decl = (declared or "").strip()
+    if not decl:
+        return inferred
+    try:
+        inf_logical = normalize_logical_type(inferred)
+    except Exception:
+        return inferred
+    if inf_logical in {LOGICAL_DECIMAL, LOGICAL_FLOAT, LOGICAL_INTEGER}:
+        return decl
+    return inferred
+
+
 def _introspect_sqlite(
     *,
     database: str = "",
@@ -3994,7 +3614,16 @@ def _introspect_sqlite(
                     if declared_base in {"NUMERIC", "DECIMAL", "NUMBER"} or declared.startswith(
                         ("NUMERIC", "DECIMAL", "NUMBER")
                     ):
-                        inferred = "DECIMAL"
+                        # Keep the declared (p,s) — SQLite records the DDL token
+                        # verbatim, and dropping it to bare DECIMAL forces
+                        # downstream invent to guess a precision from samples.
+                        from services.type_system import parse_numeric_precision_scale
+
+                        p, s = parse_numeric_precision_scale(declared)
+                        if p is not None:
+                            inferred = f"DECIMAL({p},{s if s is not None else 0})"
+                        else:
+                            inferred = "DECIMAL"
                     elif declared_base in {"INTEGER", "INT", "BIGINT"}:
                         # SQLite INTEGER affinity is a signed int64 storage class
                         # (not PG/MySQL INT32). Stamping INTEGER invents INT32 on
@@ -4021,6 +3650,12 @@ def _introspect_sqlite(
                             inferred = "DECIMAL"
                         else:
                             inferred = "DOUBLE PRECISION"
+                    elif declared_base in {"TEXT", "VARCHAR", "CHAR", "CLOB", "STRING"}:
+                        inferred = _sqlite_text_over_numeric_samples(
+                            declared, _sqlite_declared_over_samples(declared, inferred)
+                        )
+                    else:
+                        inferred = _sqlite_declared_over_samples(declared, inferred)
 
                 prow = pragma_by_name.get(name)
                 notnull = int(prow[3] or 0) if prow is not None else 0
@@ -4056,90 +3691,6 @@ def _introspect_sqlite(
             "columns": [],
             "tables": [],
         }
-
-
-def _sqlite_fetch_unique_keys(
-    cur: Any, table_quoted: str, info_rows: list[Any]
-) -> dict[str, Any]:
-    """Return SQLite PRIMARY KEY + UNIQUE indexes (enforced at write)."""
-    pk_ord: list[tuple[int, str]] = []
-    for row in info_rows or []:
-        # PRAGMA table_info: cid, name, type, notnull, dflt_value, pk
-        try:
-            name = str(row[1])
-            pk_flag = int(row[5] or 0)
-        except Exception:
-            continue
-        if pk_flag > 0:
-            pk_ord.append((pk_flag, name))
-    pk_ord.sort(key=lambda x: x[0])
-    pk_cols = [name for _, name in pk_ord]
-
-    unique_keys: list[dict[str, Any]] = []
-    if pk_cols:
-        unique_keys.append(
-            {
-                "name": "PRIMARY",
-                "columns": list(pk_cols),
-                "primary": True,
-                "expression": "",
-                "expression_columns": [],
-                "case_insensitive": False,
-                "filter_predicate": "",
-                "enforced": True,
-            }
-        )
-    try:
-        cur.execute(f"PRAGMA index_list({table_quoted})")
-        for idx in cur.fetchall() or []:
-            # seq, name, unique, origin, partial
-            try:
-                idx_name = str(idx[1])
-                is_unique = int(idx[2] or 0) == 1
-                origin = str(idx[3] or "").lower() if len(idx) > 3 else ""
-            except Exception:
-                continue
-            if not is_unique:
-                continue
-            # PK already covered via table_info.
-            if origin == "pk":
-                continue
-            cur.execute(f"PRAGMA index_info({quote_sql_identifier_safe(idx_name)})")
-            cols: list[str] = []
-            for info in cur.fetchall() or []:
-                try:
-                    col = info[2]
-                except Exception:
-                    col = None
-                if col:
-                    cols.append(str(col))
-            if not cols:
-                continue
-            unique_keys.append(
-                {
-                    "name": idx_name,
-                    "columns": cols,
-                    "primary": False,
-                    "expression": "",
-                    "expression_columns": [],
-                    "case_insensitive": False,
-                    "filter_predicate": "",
-                    "enforced": True,
-                }
-            )
-    except Exception:
-        pass
-    return {"primary_key_columns": pk_cols, "unique_keys": unique_keys}
-
-
-def quote_sql_identifier_safe(name: str) -> str:
-    """Quote a SQLite identifier for PRAGMA index_info (local helper)."""
-    try:
-        from connectors.sql_identifiers import quote_sql_identifier
-
-        return quote_sql_identifier(name)
-    except Exception:
-        return '"' + str(name).replace('"', '""') + '"'
 
 
 def salesforce_field_to_logical(

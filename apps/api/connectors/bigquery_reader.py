@@ -163,6 +163,8 @@ def read_table_cursor_batch(
     del username, password, ssl, warehouse
     from google.cloud import bigquery
 
+    from services.keyset_pagination import split_cursor_bookmark
+
     project_id = database or host
     dataset_id = schema or "dataflow"
     table_ref = quote_table_ref(
@@ -199,12 +201,11 @@ def read_table_cursor_batch(
         where = ""
         order = cursor_q
         if cursor_after is not None and cursor_after != "":
-            if pk and pk != cursor_column and "|" in str(cursor_after):
-                cur_val, pk_val = str(cursor_after).split("|", 1)
-            elif pk and pk != cursor_column:
-                cur_val, pk_val = cursor_after, ""
-            else:
-                cur_val, pk_val = cursor_after, None
+            has_tiebreak = bool(pk and pk != cursor_column)
+            cur_val, split_pk = split_cursor_bookmark(
+                cursor_after, has_tiebreak=has_tiebreak
+            )
+            pk_val = split_pk if has_tiebreak else None
             params.append(bigquery.ScalarQueryParameter("cursor", "STRING", str(cur_val)))
             if pk and pk != cursor_column and pk_val is not None:
                 pk_q = quote_column_list(

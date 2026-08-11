@@ -1406,8 +1406,20 @@ def coerce_integer_wire(
                 raise ValueError(
                     f"integer out of range for {ddl_type or upper}: {n}"
                 )
-        elif upper in {"INT", "INTEGER", "INT4"}:
+        elif upper == "INT4":
             if n < -2147483648 or n > 2147483647:
+                raise ValueError(
+                    f"integer out of range for {ddl_type or upper}: {n}"
+                )
+        elif upper in {"INT", "INTEGER"}:
+            # Bare INT/INTEGER is dialect-defined (SQLite holds 8 bytes,
+            # BigQuery INT64, Snowflake/Oracle a decimal carrier). Ask the
+            # storage-bounds SSOT instead of assuming the SQL-standard int4 —
+            # a wrong bound refuses rows the destination stores natively.
+            from services.numeric_fit import integer_storage_bounds
+
+            bounds = integer_storage_bounds(upper, dest_db=eng)
+            if bounds is not None and not (bounds[0] <= n <= bounds[1]):
                 raise ValueError(
                     f"integer out of range for {ddl_type or upper}: {n}"
                 )
@@ -2030,6 +2042,14 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> 
 
     if is_missing_sentinel(value):
         return value
+    from services.transform_engine import boolean_carrier_numeric_value
+
+    _p, _s = parse_numeric_precision_scale(ddl_type)
+    carrier_bool = boolean_carrier_numeric_value(value, _p, _s)
+    if carrier_bool is not None:
+        # NUMBER(1)/DECIMAL(1,0) is the boolean carrier on engines without a
+        # native boolean — binding 1/0 there is total, not an invented number.
+        return Decimal(carrier_bool)
     try:
         if isinstance(value, Decimal):
             d = value
@@ -2208,7 +2228,7 @@ def normalize_sql_bind_value(
         } or eng.startswith("postgres")
         return coerce_set_wire(value, ddl_type=ddl_type, as_list=pg_set_list)
 
-    temporal = coerce_sql_temporal(value, ddl_type)
+    temporal = coerce_sql_temporal(value, ddl_type, engine=eng)
     if temporal is not value:
         return temporal
 

@@ -58,3 +58,15 @@ Artifact: `apps/api/data/proofs/module_size_budgets.json`
 | `services/preflight_service.py` | 2573 → ≤2500 | Policy-gate merge → `preflight_policy_gates.py` |
 
 Next: `type_lossy.py` for `is_lossy_coercion` / `is_precision_collapse_coercion`; specialty helpers stay in `type_system` until C2c.
+
+## ADR — extract 2026-08-10 (Gate-8 read side)
+
+| Module | Change | Why |
+|--------|--------|-----|
+| `services/reconciliation.py` | 6339 → ≤4700 | Per-engine sample reads → `services/target_sample.py`; Oracle catalog identity / LOB comparison / read-back → `services/reconciliation_oracle.py`. Delegating entry points (`read_target_sample`, `verify_oracle_table`) stay in `reconciliation` |
+| `services/target_sample.py` | new | One owner for "read an ordered, key-scoped sample back out of the destination" across engine families |
+
+Oracle moved first because its object identity is not derivable from the typed
+name (quoted vs folded are different tables): the read side must resolve the
+stored spelling through `services/sql_object_identity.py`, the same resolver the
+writer and introspection use.

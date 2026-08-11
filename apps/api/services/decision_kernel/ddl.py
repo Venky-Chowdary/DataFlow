@@ -11,6 +11,8 @@ from services.conversion_contract import (
     DdlIdentityError,
     approved_mapping_ddl_fingerprint,
     assert_ddl_identity,
+    ddl_identity_columns,
+    ddl_identity_divergence,
     ddl_identity_report,
 )
 
@@ -18,5 +20,7 @@ __all__ = [
     "DdlIdentityError",
     "approved_mapping_ddl_fingerprint",
     "assert_ddl_identity",
+    "ddl_identity_columns",
+    "ddl_identity_divergence",
     "ddl_identity_report",
 ]

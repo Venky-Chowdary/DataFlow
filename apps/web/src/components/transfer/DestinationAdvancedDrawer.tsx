@@ -5,6 +5,11 @@ import { FilterTabs } from "../ui/FilterTabs";
 import { DtIcon } from "../DtIcon";
 import type { StreamFieldContract } from "../../lib/streamContracts";
 import { resolveStreamFields } from "../../lib/streamContracts";
+import {
+  CURSOR_SEMANTICS,
+  CURSOR_SEMANTICS_LABELS,
+  evaluateCursorSemantics,
+} from "../../lib/cursorSemantics";
 
 export type DestSyncMode =
   | "full_refresh_overwrite"
@@ -75,6 +80,8 @@ interface DestinationAdvancedDrawerProps {
   /** Shared fallbacks when a stream has no override yet. */
   defaultCursor: string;
   defaultPrimaryKey: string;
+  /** Declared cursor meaning shared by streams without an override. */
+  defaultCursorSemantics?: string;
   sourceColumns: string[];
   sourceSchema: Record<string, string>;
   /** Per-stream columns when multi-stream schemas diverge. */
@@ -91,6 +98,7 @@ interface DestinationAdvancedDrawerProps {
   onDateLocaleChange: (locale: DestDateLocale) => void;
   onBackfillChange: (value: boolean) => void;
   onStreamCursorChange: (stream: string, value: string) => void;
+  onStreamCursorSemanticsChange: (stream: string, value: string) => void;
   onStreamPrimaryKeyChange: (stream: string, value: string) => void;
   /** Heuristic suggestions for empty cursor / PK selects. */
   suggestedCursor?: string;
@@ -188,6 +196,7 @@ export function DestinationAdvancedDrawer({
   streamFields,
   defaultCursor,
   defaultPrimaryKey,
+  defaultCursorSemantics = "",
   sourceColumns,
   sourceSchema,
   sourceColumnsByStream = {},
@@ -203,6 +212,7 @@ export function DestinationAdvancedDrawer({
   onDateLocaleChange,
   onBackfillChange,
   onStreamCursorChange,
+  onStreamCursorSemanticsChange,
   onStreamPrimaryKeyChange,
   suggestedCursor = "",
   suggestedPrimaryKey = "",
@@ -758,7 +768,11 @@ export function DestinationAdvancedDrawer({
               ? "Primary key is required for this sync mode (upsert / CDC / mirror / SCD2)."
               : "Full refresh · Append / Overwrite does not require a unique primary key. "
                 + "You can still set one for documentation; duplicate id values will not block Validate."}
-            {requiresCursor ? " Cursor is required for incremental / CDC." : ""}
+            {requiresCursor
+              ? " Cursor is required for incremental / CDC, and what it means in the "
+                + "source decides what this sync can capture \u2014 a column name cannot "
+                + "establish that, so declare it."
+              : ""}
           </p>
           {names.length > 1 && (
             <p className="df2-label-hint" style={{ margin: "0 0 10px" }}>
@@ -772,6 +786,7 @@ export function DestinationAdvancedDrawer({
                   <th>Stream</th>
                   <th>Mode</th>
                   <th>Cursor</th>
+                  <th>Cursor means</th>
                   <th>Primary key</th>
                   <th>Policy</th>
                   <th>Status</th>
@@ -784,6 +799,7 @@ export function DestinationAdvancedDrawer({
                     streamFields,
                     defaultCursor,
                     defaultPrimaryKey,
+                    defaultCursorSemantics,
                   );
                   const streamCols = sourceColumnsByStream[streamName]?.length
                     ? sourceColumnsByStream[streamName]
@@ -791,10 +807,17 @@ export function DestinationAdvancedDrawer({
                   const streamSchema = sourceSchemaByStream[streamName] && Object.keys(sourceSchemaByStream[streamName]).length
                     ? sourceSchemaByStream[streamName]
                     : sourceSchema;
+                  const semantics = evaluateCursorSemantics({
+                    syncMode,
+                    cursorField: fields.cursorField,
+                    declared: fields.cursorSemantics || "",
+                    validationMode,
+                  });
                   const rowNeeds =
                     streamCols.length > 0
                     && ((requiresCursor && (!fields.cursorField || !streamCols.includes(fields.cursorField)))
-                      || (requiresPrimaryKey && (!fields.primaryKeyField || !streamCols.includes(fields.primaryKeyField))));
+                      || (requiresPrimaryKey && (!fields.primaryKeyField || !streamCols.includes(fields.primaryKeyField)))
+                      || semantics.status === "block");
                   return (
                     <tr key={streamName}>
                       <td>
@@ -830,6 +853,25 @@ export function DestinationAdvancedDrawer({
                       <td>
                         <select
                           className="df2-input df2-select df2-stream-select"
+                          value={fields.cursorSemantics || ""}
+                          disabled={!requiresCursor || !fields.cursorField}
+                          onChange={(e) =>
+                            onStreamCursorSemanticsChange(streamName, e.target.value)}
+                          aria-label={`Cursor semantics for ${streamName}`}
+                        >
+                          <option value="">
+                            {requiresCursor ? "Declare meaning" : "Not required"}
+                          </option>
+                          {CURSOR_SEMANTICS.map((value) => (
+                            <option key={value} value={value}>
+                              {CURSOR_SEMANTICS_LABELS[value]}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <select
+                          className="df2-input df2-select df2-stream-select"
                           value={fields.primaryKeyField && streamCols.includes(fields.primaryKeyField)
                             ? fields.primaryKeyField
                             : ""}
@@ -852,6 +894,12 @@ export function DestinationAdvancedDrawer({
                         <span className={`df2-badge ${rowNeeds ? "df2-badge-run" : "df2-badge-live"}`}>
                           {streamCols.length ? (rowNeeds ? "Needs contract" : "Valid") : "Pending"}
                         </span>
+                        {semantics.reason && (
+                          <small className="df2-label-hint df2-stream-cursor-note">
+                            {semantics.reason}
+                            {semantics.primaryAction ? ` \u2192 ${semantics.primaryAction}.` : ""}
+                          </small>
+                        )}
                       </td>
                     </tr>
                   );

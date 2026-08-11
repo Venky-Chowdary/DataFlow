@@ -52,7 +52,10 @@ from connectors.writer_common import (
     row_fingerprints,
     transform_error_policy_for_validation_mode,
 )
+from services.dest_precount import PRECOUNT_KEY, precount_table
+from services.excel_parser import sheet_headers
 from services.reconciliation import FingerprintAccumulator
+from services.tabular_rows import is_blank_row
 
 try:
     from services.csv_profiler import (
@@ -206,11 +209,13 @@ def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) 
         if not first:
             return [], [], 0
 
-        headers = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(first)]
+        headers = sheet_headers(first)
         preview: list[list[str]] = []
         total = 0
 
         for row in row_iter:
+            if is_blank_row(row):
+                continue
             total += 1
             if len(preview) < preview_rows:
                 preview.append([str(c).strip() if c is not None else "" for c in row])
@@ -241,9 +246,13 @@ def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
         if not first:
             return
 
-        headers = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(first)]
+        headers = sheet_headers(first)
         batch: list[dict] = []
         for row in row_iter:
+            # A formatting-only row is not a record; writing it would land an
+            # all-NULL row the source never had.
+            if is_blank_row(row):
+                continue
             # Wider data rows than the header silently lost trailing cells —
             # refuse rather than slice away columns (JSONL-style honesty).
             if len(row) > len(headers):
@@ -281,7 +290,11 @@ def _excel_count(content: bytes | str | os.PathLike) -> int:
         ws = wb.active
         if ws is None:
             return 0
-        return max(0, (ws.max_row or 1) - 1)
+        row_iter = ws.iter_rows(values_only=True)
+        if next(row_iter, None) is None:
+            return 0
+        # ``max_row`` is the used range, which formatting inflates.
+        return sum(1 for row in row_iter if not is_blank_row(row))
     finally:
         wb.close()
 
@@ -353,9 +366,11 @@ def peek_file_source(
                 headers = next(reader)
             except StopIteration:
                 raise ValueError("CSV file has no header row") from None
-            for i, row in enumerate(reader):
+            for row in reader:
+                if is_blank_row(row):
+                    continue
                 total += 1
-                if i < 100:
+                if len(preview_rows) < 100:
                     preview_rows.append([_csv_empty_to_none(c) for c in row])
         sample = [dict(zip(headers, row)) for row in preview_rows]
         schema = FileParser.infer_schema(sample)
@@ -531,7 +546,12 @@ def _iter_csv_batches(
         reader = csv.DictReader(reader_file, delimiter=delim)
         batch: list[dict] = []
         for row in reader:
-            batch.append({k: _csv_empty_to_none(v) for k, v in dict(row).items()})
+            values = dict(row)
+            # Must match count_csv_rows, or the source cardinality reconcile
+            # compares against is not the set of rows that was read.
+            if is_blank_row(values.values()):
+                continue
+            batch.append({k: _csv_empty_to_none(v) for k, v in values.items()})
             if len(batch) >= chunk_size:
                 yield batch
                 batch = []
@@ -852,6 +872,13 @@ def stream_file_to_database(
     chunk_idx = checkpoint.chunk_index or 0
     resumed = chunk_idx > 0 or written > 0
     dest_summary: dict[str, Any] = {}
+    # Gate-8 append proof needs the cardinality from before the first batch. On a
+    # resume the destination already holds rows this job wrote, so the count is
+    # no longer a "before" and the delta stays unproven rather than wrong.
+    if not resumed:
+        rows_before = precount_table(dest_type, dest_cfg, dest_table)
+        if rows_before is not None:
+            dest_summary[PRECOUNT_KEY] = int(rows_before)
     last_checksum = ""
     rejected_total = 0
     coerced_null_total = 0
@@ -1104,7 +1131,12 @@ def stream_file_to_database(
         if isinstance(batch_summary, dict) and batch_summary:
             # Merge batch writer meta; accumulate written_ids across chunks.
             prior_ids = list(dest_summary.get("written_ids") or [])
+            # The pre-write count belongs to the FIRST batch: later batches see
+            # rows this job already appended, which would hide the delta.
+            prior_precount = dest_summary.get(PRECOUNT_KEY)
             dest_summary = dict(batch_summary)
+            if prior_precount is not None:
+                dest_summary[PRECOUNT_KEY] = prior_precount
             batch_ids = list(batch_summary.get("written_ids") or [])
             if prior_ids or batch_ids:
                 merged: list[str] = []

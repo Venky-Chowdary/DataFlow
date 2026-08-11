@@ -5,7 +5,7 @@ from __future__ import annotations
 import io
 import sys
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -143,10 +143,23 @@ def test_avro_streaming_batches():
 def test_dynamo_fail_policy_on_transform_errors():
     from connectors.dynamodb_writer import write_mapped_rows
 
+    # A bare MagicMock client answers describe_table with an empty KeySchema,
+    # which the writer now refuses on its own — the transform policy under test
+    # would never be reached, so the table describes itself honestly here.
+    client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            "TableName": "t",
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+            "TableStatus": "ACTIVE",
+        }
+    }
+
     with patch(
         "connectors.dynamodb_writer.build_mapped_rows_with_details",
         return_value=([], ["bad type"], [{"row": 1, "reason": "bad type"}]),
-    ), patch("connectors.dynamodb_writer.boto3_client"):
+    ), patch("connectors.dynamodb_writer.boto3_client", return_value=client):
         result = write_mapped_rows(
             host="",
             port=0,

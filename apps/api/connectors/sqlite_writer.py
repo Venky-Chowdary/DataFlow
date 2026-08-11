@@ -595,6 +595,7 @@ def write_mapped_rows(
                 policy,
                 dialect_label="SQLite",
                 mappings=list(mappings or []) or None,
+                dest_db="sqlite",
             )
             if write_mode == "upsert" and conflict_cols:
                 mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
@@ -787,6 +788,7 @@ def write_mapped_rows(
                     policy,
                     dialect_label="SQLite",
                     mappings=list(mappings or []) or None,
+                    dest_db="sqlite",
                 )
                 sparse_rows = []
                 if write_mode == "upsert" and conflict_cols:
@@ -902,6 +904,7 @@ def write_mapped_rows(
                             target_types=target_types,
                             dest_dialect="sqlite",
                             table_already_exists=bool(table_existed),
+                            dest_table=table_name,
                         )
                     except Exception as exc:
                         logger.warning(
@@ -936,6 +939,11 @@ def write_mapped_rows(
                         cur.execute(
                             f"CREATE TABLE IF NOT EXISTS {table_quoted} ({col_defs})"
                         )
+                        from services.schema_fidelity import apply_post_create_sql
+
+                        # A refused CREATE INDEX downgrades that index in the
+                        # certificate instead of failing the load.
+                        apply_post_create_sql(fidelity_plan, cur.execute)
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     else:
                         col_defs = ", ".join(

@@ -44,6 +44,7 @@ def test_policy_gates_merge_into_preflight_result():
                 "selected": True,
                 "cursor_field": "updated_at",
                 "primary_key": "order_id",
+                "cursor_semantics": "modification_timestamp",
             }],
             backfill_new_fields=True,
         ),
@@ -83,6 +84,7 @@ def test_cdc_passes_for_database_source_with_cursor_and_pk():
             "selected": True,
             "cursor_field": "updated_at",
             "primary_key": "order_id",
+            "cursor_semantics": "cdc_position",
         }],
         source_columns=["order_id", "updated_at"],
         source_kind="database",
@@ -193,9 +195,34 @@ def test_cdc_cursor_and_pk_pass_when_present_in_source_columns():
             "selected": True,
             "cursor_field": "updated_at",
             "primary_key": "order_id",
+            "cursor_semantics": "modification_timestamp",
         }],
         source_columns=["order_id", "updated_at", "amount"],
     )
     g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
     assert g9["status"] == "pass"
+
+
+def test_incremental_deduped_blocks_an_undeclared_cursor():
+    """Nothing about `updated_at` proves the source moves it when a row changes.
+
+    Live evidence (cursor_semantics_live_results.json): under a `created_at`
+    cursor the destination kept a stale row and the run reported success.
+    """
+    gates = run_transfer_policy_gates(
+        sync_mode="incremental_deduped",
+        schema_policy="propagate_columns",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+        }],
+        source_columns=["order_id", "updated_at", "amount"],
+    )
+    g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
+    assert g9["status"] == "block"
+    verdicts = g9["details"]["cursor_semantics"]
+    assert verdicts and verdicts[0]["primary_action"]
 

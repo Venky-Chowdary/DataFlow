@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from services.mapping_constraints import write_mappings
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 from services.decision_kernel import (
@@ -331,7 +332,8 @@ def analyze_coercion(
             "by_source": {},
         }
 
-    for m in mappings:
+    # Declared omissions have no destination carrier to coerce into.
+    for m in write_mappings(mappings):
         src = m.get("source", "")
         if not src:
             continue
@@ -429,7 +431,11 @@ def analyze_coercion(
                     val, typ, engine=_d
                 )
             else:
-                wire_check_fn = wire_check_temporal
+                # Validate must simulate the destination engine's bind, not a
+                # generic one (MySQL TIMESTAMP is instant + epoch-bounded).
+                wire_check_fn = lambda val, typ, _d=dest_l: wire_check_temporal(  # noqa: E731
+                    val, typ, engine=_d
+                )
         except ImportError:
             wire_check_fn = None
 

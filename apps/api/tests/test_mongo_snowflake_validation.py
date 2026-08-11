@@ -542,3 +542,24 @@ def test_objectid_does_not_map_onto_number_id_without_samples():
     )
     assert mapped[0].get("create_new") is True
     assert mapped[0]["target"].lower() != "id"
+
+
+def test_gate_block_is_visible_in_the_report_every_surface_reads():
+    """A blocked run must not sit above a report that says nothing is blocking.
+
+    The coercion probe judges values; G3 judges the declared conversion. When
+    the cells cast cleanly but the conversion changes the domain, the report the
+    UI, the assistant and the proof bundle read used to say
+    ``has_blocking_failures: false`` under a blocked Validate.
+    """
+    pf = _run_preflight(
+        sample_rows=[{"id": "1", "tags": '["a"]'}, {"id": "2", "tags": "single"}],
+        dest_types={"id": "NUMBER(38,0)", "tags": "VARIANT"},
+    )
+    report = pf["coercion_report"]
+    assert _gate(pf, "g3_schema_contract")["status"] == "block"
+    assert report["has_blocking_failures"] is True
+    assert [b["source"] for b in report["declared_type_blocks"]] == ["tags"]
+    # The value-level verdict stays honest: those cells really did cast.
+    assert report["by_source"]["tags"]["severity"] != "block"
+    assert report["by_source"]["tags"]["blocked_by"] == "g3_schema_contract"

@@ -19,6 +19,8 @@ from services.decision_kernel.ddl import (
     DdlIdentityError,
     approved_mapping_ddl_fingerprint,
     assert_ddl_identity,
+    ddl_identity_columns,
+    ddl_identity_divergence,
     ddl_identity_report,
 )
 from services.decision_kernel.execute_gate import (
@@ -148,6 +150,8 @@ __all__ = [
     "classify_transform_failure",
     "compute_content_hash",
     "create_new_mapping_target_type",
+    "ddl_identity_columns",
+    "ddl_identity_divergence",
     "ddl_identity_report",
     "ddl_invent_never_narrower_than_table",
     "ddl_type",

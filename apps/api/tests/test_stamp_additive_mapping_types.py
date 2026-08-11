@@ -223,3 +223,48 @@ def test_preflight_stamps_additive_before_execute_refuse():
     assert "Change_from_Previous_Year" in stamped
     assert str(stamped["Change_from_Previous_Year"]).strip()
     assert not any(b.get("id") == "g6_additive_stamp" for b in (result.get("blockers") or []))
+
+
+def test_kernel_invent_refreshes_when_source_type_is_profiled_later():
+    """Provisional TEXT stamp must not outlive the profiled source type.
+
+    Validate stamps once before profiling (every file column looks like TEXT →
+    VARCHAR) and again after. The stale VARCHAR used to create the destination
+    column *and* then be reported as a DECIMAL→VARCHAR fidelity collapse — a
+    blocker the product inflicted on itself on every file → warehouse route.
+    """
+    first, _ = stamp_additive_mapping_types(
+        [{"source": "amount", "target": "amount", "confidence": 0.99}],
+        dest_db="snowflake",
+        live_dest_types={},
+        source_types={"amount": "TEXT"},
+        dest_table_exists=False,
+    )
+    assert first[0]["target_type"].upper().startswith(("VARCHAR", "TEXT", "STRING"))
+
+    second, _ = stamp_additive_mapping_types(
+        first,
+        dest_db="snowflake",
+        live_dest_types={},
+        source_types={"amount": "DECIMAL(9,4)"},
+        dest_table_exists=False,
+    )
+    assert "NUMBER(9,4)" in second[0]["target_type"].upper().replace(" ", "")
+
+
+def test_operator_stamp_is_never_refreshed_by_profiling():
+    rows, _ = stamp_additive_mapping_types(
+        [
+            {
+                "source": "amount",
+                "target": "amount",
+                "target_type": "VARCHAR(64)",
+                "create_new": True,
+            }
+        ],
+        dest_db="snowflake",
+        live_dest_types={},
+        source_types={"amount": "DECIMAL(9,4)"},
+        dest_table_exists=False,
+    )
+    assert rows[0]["target_type"] == "VARCHAR(64)"

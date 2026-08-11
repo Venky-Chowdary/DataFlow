@@ -6,6 +6,8 @@ import csv
 import io
 from collections import Counter
 
+from services.tabular_rows import is_blank_row
+
 
 def detect_encoding(content: bytes) -> str:
     """Return encoding without loading the whole file into a decoded string."""
@@ -57,8 +59,12 @@ def parse_csv_preview(content: bytes, encoding: str | None = None, preview_rows:
         except StopIteration:
             return [], [], enc, delim
         preview: list[list[str]] = []
-        for i, row in enumerate(reader):
-            if i >= preview_rows:
+        for row in reader:
+            # A blank line or a spreadsheet-exported ``,,,,`` line holds no
+            # field value; counting it as a record lands an all-NULL row.
+            if is_blank_row(row):
+                continue
+            if len(preview) >= preview_rows:
                 break
             preview.append(row)
     return headers, preview, enc, delim
@@ -72,8 +78,10 @@ def count_csv_rows(content: bytes, encoding: str | None = None) -> int:
     with _text_reader(content, enc) as reader_file:
         reader = csv.reader(reader_file, delimiter=delim)
         count = 0
-        for i, _row in enumerate(reader):
+        for i, row in enumerate(reader):
             if i == 0:
+                continue
+            if is_blank_row(row):
                 continue
             count += 1
     return count
@@ -89,7 +97,7 @@ def parse_csv_full(content: bytes, encoding: str | None = None) -> tuple[list[st
         rows = list(reader)
     if not rows:
         return [], [], enc, delim
-    return rows[0], rows[1:], enc, delim
+    return rows[0], [r for r in rows[1:] if not is_blank_row(r)], enc, delim
 
 
 def parse_csv(content: bytes, encoding: str | None = None) -> tuple[list[str], list[list[str]], str, str]:

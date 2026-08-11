@@ -3,10 +3,12 @@
 Every migration must either CARRY a schema aspect or emit an explicit
 ``unsupported`` / ``skipped`` line. Silence is a bug.
 
-v1 create-new (PostgreSQL + SQLite):
-  CARRY: primary_key, not_null, simple DEFAULT, unique (column-list)
-  CERTIFY as unsupported: CHECK, FK, views, triggers, partial/expression
-  indexes, generated expr, identity RESTART, partitioning, comments, …
+create-new:
+  CARRY: primary_key, not_null, simple DEFAULT, unique (column-list), CHECK,
+  secondary indexes, physical placement, key generators (identity /
+  AUTO_INCREMENT / IDENTITY)
+  CERTIFY as unsupported: FK on single-table create, views, triggers,
+  partial/expression indexes, generated expr, comments, …
 
 Name-collision policy is also explicit (fold + length + deterministic suffix).
 """
@@ -16,7 +18,10 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
+
+from services.identity_carry import plan_identity_carry
+from services.physical_placement_ddl import plan_physical_placement, verify_placement
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,8 @@ REQUIRED_ASPECTS: tuple[str, ...] = (
     "charset",
     "index",
     "partitioning",
+    "tablespace",
+    "clustering",
     "comment",
     "view",
     "trigger",
@@ -69,7 +76,11 @@ _SAFE_DEFAULT_RE = re.compile(
 class SchemaFidelityItem:
     aspect: str
     name: str
-    status: str  # carried | unsupported | skipped
+    # carried | unsupported | skipped | unknown.
+    # "skipped" means measured-and-absent on source; "unknown" means the source
+    # catalog was never read for this aspect, which must never be presented as
+    # proof that the source does not have it.
+    status: str
     reason: str
     source_detail: str = ""
     dest_ddl: str = ""
@@ -91,6 +102,7 @@ class SchemaFidelityReport:
         carried = sum(1 for i in self.items if i.status == "carried")
         unsupported = sum(1 for i in self.items if i.status == "unsupported")
         skipped = sum(1 for i in self.items if i.status == "skipped")
+        unknown = sum(1 for i in self.items if i.status == "unknown")
         return {
             "version": self.version,
             "source_dialect": self.source_dialect,
@@ -99,6 +111,7 @@ class SchemaFidelityReport:
             "carried_count": carried,
             "unsupported_count": unsupported,
             "skipped_count": skipped,
+            "unknown_count": unknown,
             "items": [i.to_dict() for i in self.items],
             "name_collision_policy": dict(self.name_collision_policy or {}),
         }
@@ -118,16 +131,25 @@ class SourceSchemaCatalog:
     # Aspects present on source that v1 cannot carry.
     foreign_keys: list[dict[str, Any]] = field(default_factory=list)
     check_constraints: list[str] = field(default_factory=list)
+    # services.check_constraints.CheckConstraints payload: keeps "catalog
+    # unreadable" distinct from "table has no CHECK constraints".
+    check_constraints_meta: dict[str, Any] | None = None
     indexes: list[dict[str, Any]] = field(default_factory=list)
+    # services.secondary_indexes.SourceIndexes payload: keeps "catalog
+    # unreadable" distinct from "table has no secondary indexes".
+    indexes_meta: dict[str, Any] | None = None
     views: list[str] = field(default_factory=list)
     triggers: list[str] = field(default_factory=list)
     generated_columns: list[str] = field(default_factory=list)
     identity_columns: list[str] = field(default_factory=list)
     collations: dict[str, str] = field(default_factory=dict)
     comments: dict[str, str] = field(default_factory=dict)
-    has_partitioning: bool = False
-    has_enums: bool = False
-    has_nested_shapes: bool = False
+    # Tri-state: None means the source catalog was not read for this aspect.
+    has_partitioning: bool | None = None
+    has_enums: bool | None = None
+    has_nested_shapes: bool | None = None
+    # services.physical_storage_metadata.PhysicalStorage payload, when measured.
+    physical_storage: dict[str, Any] | None = None
 
 
 @dataclass
@@ -145,15 +167,44 @@ class CreateFidelityPlan:
     dest_columns: list[str] = field(default_factory=list)
     # source_col -> dest_col remaps from collision policy
     column_renames: dict[str, str] = field(default_factory=dict)
+    # Structured mirror of the DDL above, for writers that build CREATE TABLE
+    # with a toolkit instead of string concatenation (generic_sql/SQLAlchemy).
+    # Both views must come from this one planner: a destination whose DDL is
+    # assembled elsewhere is a destination the certificate cannot vouch for.
+    primary_key: list[str] = field(default_factory=list)
+    unique_constraints: list[list[str]] = field(default_factory=list)
+    check_predicates: list[tuple[str, str]] = field(default_factory=list)
+    not_null_columns: list[str] = field(default_factory=list)
+    column_defaults: dict[str, str] = field(default_factory=dict)
+    # Clause appended after CREATE TABLE (...): PARTITION BY … / TABLESPACE …
+    # (see services/physical_placement_ddl.py). Empty when nothing is carried.
+    create_suffix: str = ""
+    placement_decisions: list[Any] = field(default_factory=list)
+    # The measured source placement the decisions were made from, kept so the
+    # post-CREATE destination re-read can compare like for like.
+    source_storage: dict[str, Any] | None = None
+    # Destination columns created as key generators, and the subset whose engine
+    # refuses a client-supplied value unless the session opts in (SQL Server
+    # SET IDENTITY_INSERT). The load must know: the rows carry explicit keys.
+    identity_columns: dict[str, str] = field(default_factory=dict)
+    identity_insert_columns: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "report": self.report.to_dict(),
+            "identity_columns": dict(self.identity_columns),
+            "identity_insert_columns": list(self.identity_insert_columns),
+            "create_suffix": self.create_suffix,
             "column_suffixes": {k: list(v) for k, v in self.column_suffixes.items()},
             "table_constraints": list(self.table_constraints),
             "post_create_sql": list(self.post_create_sql),
             "dest_columns": list(self.dest_columns),
             "column_renames": dict(self.column_renames),
+            "primary_key": list(self.primary_key),
+            "unique_constraints": [list(u) for u in self.unique_constraints],
+            "check_predicates": [list(c) for c in self.check_predicates],
+            "not_null_columns": list(self.not_null_columns),
+            "column_defaults": dict(self.column_defaults),
         }
 
 
@@ -311,17 +362,47 @@ def build_catalog_from_introspect(
         unique_keys=unique_keys,
         foreign_keys=list(foreign_keys or keys.get("foreign_keys") or []),
         check_constraints=list(check_constraints or keys.get("check_constraints") or []),
+        check_constraints_meta=_check_payload(keys.get("check_constraints_meta")),
         views=list(views or keys.get("views") or []),
         triggers=list(triggers or keys.get("triggers") or []),
         indexes=list(keys.get("indexes") or []),
+        indexes_meta=_check_payload(keys.get("indexes_meta")),
         generated_columns=list(keys.get("generated_columns") or []),
         identity_columns=list(keys.get("identity_columns") or []),
         collations=dict(keys.get("collations") or {}),
         comments=dict(keys.get("comments") or {}),
-        has_partitioning=bool(keys.get("has_partitioning")),
-        has_enums=bool(keys.get("has_enums")),
-        has_nested_shapes=bool(keys.get("has_nested_shapes")),
+        has_partitioning=_partitioning_flag(keys),
+        has_enums=_tristate(keys.get("has_enums")),
+        has_nested_shapes=_tristate(keys.get("has_nested_shapes")),
+        physical_storage=_storage_payload(keys.get("physical_storage")),
     )
+
+
+def _tristate(value: Any) -> bool | None:
+    """Keep "never measured" distinct from "measured and absent"."""
+    return None if value is None else bool(value)
+
+
+def _check_payload(value: Any) -> dict[str, Any] | None:
+    """Accept a CheckConstraints dataclass or its dict form."""
+    return _storage_payload(value)
+
+
+def _storage_payload(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return dict(value)
+    to_dict = getattr(value, "to_dict", None)
+    return to_dict() if callable(to_dict) else None
+
+
+def _partitioning_flag(source: dict[str, Any]) -> bool | None:
+    """Prefer a measured physical probe over any caller-supplied hint."""
+    storage = _storage_payload(source.get("physical_storage"))
+    if storage and storage.get("status") == "measured":
+        return _tristate(storage.get("partitioned"))
+    return _tristate(source.get("has_partitioning"))
 
 
 def source_to_target_from_mappings(mappings: list[dict[str, Any]] | None) -> dict[str, str]:
@@ -359,16 +440,19 @@ def catalog_from_payload(payload: Any) -> SourceSchemaCatalog | None:
             ],
             foreign_keys=list(payload.get("foreign_keys") or []),
             check_constraints=list(payload.get("check_constraints") or []),
+            check_constraints_meta=_check_payload(payload.get("check_constraints_meta")),
             indexes=list(payload.get("indexes") or []),
+            indexes_meta=_check_payload(payload.get("indexes_meta")),
             views=list(payload.get("views") or []),
             triggers=list(payload.get("triggers") or []),
             generated_columns=list(payload.get("generated_columns") or []),
             identity_columns=list(payload.get("identity_columns") or []),
             collations=dict(payload.get("collations") or {}),
             comments=dict(payload.get("comments") or {}),
-            has_partitioning=bool(payload.get("has_partitioning")),
-            has_enums=bool(payload.get("has_enums")),
-            has_nested_shapes=bool(payload.get("has_nested_shapes")),
+            has_partitioning=_partitioning_flag(payload),
+            has_enums=_tristate(payload.get("has_enums")),
+            has_nested_shapes=_tristate(payload.get("has_nested_shapes")),
+            physical_storage=_storage_payload(payload.get("physical_storage")),
         )
     return build_catalog_from_introspect(
         dialect=str(payload.get("dialect") or ""),
@@ -392,6 +476,9 @@ def resolve_create_fidelity_plan(
     target_types: list[str],
     dest_dialect: str,
     table_already_exists: bool = False,
+    dest_table: str = "",
+    dest_schema: str = "",
+    dest_tablespaces: set[str] | None = None,
 ) -> CreateFidelityPlan:
     """Build a create-new fidelity plan; always returns a certificate (never silent)."""
     dest = (dest_dialect or "").strip().lower()
@@ -417,6 +504,9 @@ def resolve_create_fidelity_plan(
         target_columns=list(target_columns),
         target_types=list(target_types),
         source_to_target=source_to_target_from_mappings(mappings),
+        dest_table=dest_table,
+        dest_schema=dest_schema,
+        dest_tablespaces=dest_tablespaces,
     )
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.
@@ -432,6 +522,13 @@ def resolve_create_fidelity_plan(
         plan.column_suffixes = {}
         plan.table_constraints = []
         plan.post_create_sql = []
+        plan.primary_key = []
+        plan.unique_constraints = []
+        plan.check_predicates = []
+        plan.not_null_columns = []
+        plan.column_defaults = {}
+        plan.create_suffix = ""
+        plan.placement_decisions = []
     return plan
 
 
@@ -442,6 +539,9 @@ def plan_create_new_fidelity(
     target_columns: list[str],
     target_types: list[str],
     source_to_target: dict[str, str] | None = None,
+    dest_table: str = "",
+    dest_schema: str = "",
+    dest_tablespaces: set[str] | None = None,
 ) -> CreateFidelityPlan:
     """Plan CREATE TABLE fidelity for mapped columns on dest_dialect."""
     dest = (dest_dialect or "").strip().lower()
@@ -452,10 +552,16 @@ def plan_create_new_fidelity(
     tgt_to_src = {v: k for k, v in src_to_tgt.items() if v}
 
     # Collision policy on the target column names we are about to emit.
+    # Case is preserved on every dialect because every create-new writer emits
+    # quoted identifiers verbatim. Folding here produced a plan whose PK/NOT
+    # NULL/UNIQUE column names ("id") did not match the columns the writer
+    # created ("ID"), so on an uppercase source — every Oracle and most SQL
+    # Server catalogs — those constraints were dropped while the certificate
+    # still read "carried". Sanitizing, truncation and collision suffixes stay.
     dest_cols, name_items, renames = resolve_identifier_collisions(
         target_columns,
         dialect=dest,
-        preserve_case=dest in {"postgresql", "sqlite"},
+        preserve_case=True,
     )
     # Apply renames to dest column list already returned.
 
@@ -474,6 +580,10 @@ def plan_create_new_fidelity(
     suffixes: dict[str, list[str]] = {c: [] for c in dest_cols}
     table_constraints: list[str] = []
     post_sql: list[str] = []
+    struct_unique: list[list[str]] = []
+    struct_checks: list[tuple[str, str]] = []
+    struct_not_null: list[str] = []
+    struct_defaults: dict[str, str] = {}
 
     # Map catalog PK/unique/null/default through source→target→dest rename.
     def _dest_name_for_source(src: str) -> str | None:
@@ -490,8 +600,9 @@ def plan_create_new_fidelity(
             return None
 
     # --- CARRY: primary key ---
-    pk_dest = [_dest_name_for_source(c) for c in catalog.primary_key]
-    pk_dest = [c for c in pk_dest if c]
+    pk_dest: list[str] = [
+        c for c in (_dest_name_for_source(x) for x in catalog.primary_key) if c
+    ]
     if catalog.primary_key and len(pk_dest) == len(catalog.primary_key):
         quoted = ", ".join(_q(c, dest) for c in pk_dest)
         table_constraints.append(f"PRIMARY KEY ({quoted})")
@@ -537,6 +648,7 @@ def plan_create_new_fidelity(
         if not dest_col:
             continue
         suffixes.setdefault(dest_col, []).append("NOT NULL")
+        struct_not_null.append(dest_col)
         nn_carried += 1
         report.items.append(
             SchemaFidelityItem(
@@ -580,6 +692,7 @@ def plan_create_new_fidelity(
             continue
         default_sql = _normalize_default_sql(expr, dest)
         suffixes.setdefault(dest_col, []).append(f"DEFAULT {default_sql}")
+        struct_defaults[dest_col] = default_sql
         def_carried += 1
         report.items.append(
             SchemaFidelityItem(
@@ -622,6 +735,7 @@ def plan_create_new_fidelity(
             continue  # covered by PRIMARY KEY
         quoted = ", ".join(_q(c, dest) for c in dest_uk_s)
         table_constraints.append(f"UNIQUE ({quoted})")
+        struct_unique.append(list(dest_uk_s))
         uniq_carried += 1
         report.items.append(
             SchemaFidelityItem(
@@ -643,8 +757,95 @@ def plan_create_new_fidelity(
             )
         )
 
+    # --- CARRY: CHECK constraints (portable predicates only) ---
+    check_handled = _emit_check_aspect(
+        report,
+        catalog,
+        dest=dest,
+        dest_name_for_source=_dest_name_for_source,
+        table_constraints=table_constraints,
+        check_predicates=struct_checks,
+    )
+
+    # --- CARRY: secondary indexes (portable key/uniqueness only) ---
+    index_handled = _emit_index_aspect(
+        report,
+        catalog,
+        dest=dest,
+        dest_name_for_source=_dest_name_for_source,
+        post_create_sql=post_sql,
+        dest_table=dest_table,
+        dest_schema=dest_schema,
+        pk_columns=list(pk_dest),
+        unique_constraints=struct_unique,
+    )
+
+    # --- CARRY: key generator (identity / AUTO_INCREMENT / IDENTITY) ---
+    # Placed after PK/NOT NULL/DEFAULT so the generator is the last fragment on
+    # the column (MySQL requires AUTO_INCREMENT after NOT NULL) and so a DEFAULT
+    # planned above can be withdrawn: a column cannot both generate and default.
+    identity_plan = plan_identity_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        primary_key=list(pk_dest),
+    )
+    for decision in identity_plan.decisions:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+    for dest_col, suffix in identity_plan.column_suffixes.items():
+        dropped_default = struct_defaults.pop(dest_col, None)
+        if dropped_default is not None:
+            suffixes[dest_col] = [
+                s for s in suffixes.get(dest_col) or []
+                if not s.upper().startswith("DEFAULT ")
+            ]
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="default",
+                    name=dest_col,
+                    status="unsupported",
+                    reason=(
+                        "DEFAULT withdrawn: the column is created as a key "
+                        "generator, and a generator and a default cannot both "
+                        "fill the same column."
+                    ),
+                    source_detail=dropped_default,
+                )
+            )
+        if dest in {"oracle", "sqlserver"}:
+            # Both engines imply NOT NULL on an identity column and reject the
+            # redundant fragment in the same definition.
+            suffixes[dest_col] = [
+                s for s in suffixes.get(dest_col) or [] if s.upper() != "NOT NULL"
+            ]
+        suffixes.setdefault(dest_col, []).append(suffix)
+
+    # --- CARRY: physical placement (partitioning / tablespace / clustering) ---
+    placement = plan_physical_placement(
+        source_storage=catalog.physical_storage,
+        source_dialect=catalog.dialect,
+        dest_dialect=dest,
+        dest_schema=dest_schema,
+        dest_table=dest_table,
+        dest_columns=list(dest_cols),
+        primary_key=list(pk_dest),
+        unique_constraints=struct_unique,
+        dest_tablespaces=dest_tablespaces,
+    )
+    post_sql.extend(placement.post_create_sql)
+    report.items.extend(placement_items(placement.decisions))
+
     # --- Explicit unsupported / skipped for remaining aspects ---
-    _emit_unsupported_catalog(report, catalog)
+    _emit_unsupported_catalog(
+        report,
+        catalog,
+        skip_check=check_handled,
+        skip_index=index_handled,
+        skip_identity=bool(identity_plan.decisions),
+    )
 
     # Column order — carried as mapping order (honest).
     report.items.append(
@@ -670,7 +871,182 @@ def plan_create_new_fidelity(
         post_create_sql=post_sql,
         dest_columns=dest_cols,
         column_renames=renames,
+        primary_key=list(pk_dest) if len(pk_dest) == len(catalog.primary_key) else [],
+        unique_constraints=struct_unique,
+        check_predicates=struct_checks,
+        not_null_columns=struct_not_null,
+        column_defaults=struct_defaults,
+        create_suffix=placement.create_suffix,
+        placement_decisions=list(placement.decisions),
+        source_storage=catalog.physical_storage,
+        identity_columns=dict(identity_plan.column_suffixes),
+        identity_insert_columns=list(identity_plan.identity_insert_columns),
     )
+
+
+def placement_items(decisions: list[Any]) -> list[SchemaFidelityItem]:
+    """Certificate items for placement decisions.
+
+    ``planned`` is deliberately certified ``unsupported`` until
+    ``finalize_placement`` re-reads the destination: emitted DDL is a claim, and
+    a certificate must never award a carry on intent alone.
+    """
+    items: list[SchemaFidelityItem] = []
+    for decision in decisions:
+        planned = decision.status == "planned"
+        items.append(
+            SchemaFidelityItem(
+                aspect=decision.aspect,
+                name="*",
+                status="unsupported" if planned else decision.status,
+                reason=(
+                    f"{decision.reason} Not yet verified on the destination catalog."
+                    if planned
+                    else decision.reason
+                ),
+                source_detail=decision.source_detail,
+                dest_ddl=decision.dest_ddl,
+            )
+        )
+    return items
+
+
+def finalize_placement(
+    plan: CreateFidelityPlan | None,
+    *,
+    source_storage: dict[str, Any] | None,
+    dest_storage: dict[str, Any] | None,
+) -> None:
+    """Replace placement items with the verdict of a destination catalog re-read."""
+    if plan is None or not plan.placement_decisions:
+        return
+    verified = verify_placement(
+        decisions=list(plan.placement_decisions),
+        source_storage=source_storage,
+        dest_storage=dest_storage,
+    )
+    plan.placement_decisions = list(verified)
+    aspects = {d.aspect for d in verified}
+    plan.report.items = [i for i in plan.report.items if i.aspect not in aspects]
+    plan.report.items.extend(
+        SchemaFidelityItem(
+            aspect=d.aspect,
+            name="*",
+            status=d.status,
+            reason=d.reason,
+            source_detail=d.source_detail,
+            dest_ddl=d.dest_ddl,
+        )
+        for d in verified
+    )
+
+
+def certify_placement_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dialect: str,
+    cursor: Any,
+    schema: str,
+    table: str,
+) -> None:
+    """Re-read the destination catalog and settle every placement aspect.
+
+    The one place a writer needs to call after CREATE: emitting
+    ``PARTITION BY``/``TABLESPACE`` is a claim, and engines are free to ignore
+    or redirect placement, so the certificate is only allowed to say "carried"
+    after the destination itself reports it.
+    """
+    if plan is None or not plan.placement_decisions:
+        return
+    from services.physical_storage_metadata import probe_physical_storage
+
+    try:
+        dest_storage = probe_physical_storage(dialect, cursor, schema, table).to_dict()
+    except Exception as exc:  # noqa: BLE001 — verification must not fail the load
+        logger.debug("destination placement re-read failed: %s", exc)
+        dest_storage = None
+    finalize_placement(
+        plan, source_storage=plan.source_storage, dest_storage=dest_storage
+    )
+
+
+def certify_identity_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> None:
+    """Settle the identity aspect from the destination catalog, not the DDL.
+
+    A generator clause an engine quietly ignored (SQLAlchemy drops
+    ``autoincrement`` on a non-integer key) would otherwise be certified as
+    carried while the client's first insert after cutover still fails.
+    """
+    if plan is None or not plan.identity_columns:
+        return
+    from services.identity_carry import destination_generator_columns
+
+    generators = destination_generator_columns(
+        dialect=dialect, schema=schema, table=table, fetchall=fetchall
+    )
+    for item in plan.report.items:
+        if item.aspect != "identity_sequence" or item.status != "carried":
+            continue
+        if generators is None:
+            item.status = "unknown"
+            item.reason = (
+                "The destination catalog could not be read after CREATE, so the "
+                "generator is unverified. Emitted DDL is not proof. "
+                f"Would have: {item.reason}"
+            )
+            continue
+        folded = {g.casefold() for g in generators}
+        if item.name.casefold() not in folded:
+            item.status = "unsupported"
+            item.reason = (
+                "The destination did not take the generator: its catalog reports "
+                "no identity/AUTO_INCREMENT on this column, so a client insert "
+                "without a key will fail. "
+                f"Attempted: {item.dest_ddl or 'generator clause'}."
+            )
+            item.dest_ddl = ""
+            plan.identity_columns.pop(item.name, None)
+            plan.identity_insert_columns = [
+                c for c in plan.identity_insert_columns if c != item.name
+            ]
+
+
+def apply_post_create_sql(
+    plan: CreateFidelityPlan | None,
+    execute: Callable[[str], Any],
+) -> list[str]:
+    """Run the plan's post-CREATE statements, downgrading what does not apply.
+
+    A CREATE INDEX can fail on data the source tolerated but the destination
+    does not (a unique index over rows a lossy type conversion collapsed). The
+    certificate must then say the index was *not* carried: a plan is a claim,
+    and only execution makes it true.
+    """
+    failures: list[str] = []
+    if plan is None:
+        return failures
+    for stmt in list(plan.post_create_sql):
+        try:
+            execute(stmt)
+        except Exception as exc:  # noqa: BLE001 — a refused DDL is evidence
+            failures.append(f"{stmt}: {exc}")
+            for item in plan.report.items:
+                if item.dest_ddl == stmt and item.status == "carried":
+                    item.status = "unsupported"
+                    item.reason = (
+                        f"Destination refused the statement ({type(exc).__name__}: "
+                        f"{exc}); the index does not exist on the destination. "
+                        f"Would have: {item.reason}"
+                    )
+                    item.dest_ddl = ""
+    return failures
 
 
 def render_create_column_defs(
@@ -756,7 +1132,280 @@ def _normalize_default_sql(expr: str, dest_dialect: str) -> str:
     return text
 
 
-def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchemaCatalog) -> None:
+def _emit_check_aspect(
+    report: SchemaFidelityReport,
+    catalog: SourceSchemaCatalog,
+    *,
+    dest: str,
+    dest_name_for_source: Any,
+    table_constraints: list[str],
+    check_predicates: list[tuple[str, str]] | None = None,
+) -> bool:
+    """Carry portable CHECK predicates; return True when the aspect is settled.
+
+    A CHECK is an integrity guarantee, so a predicate the destination would
+    evaluate differently is refused, not approximated. Returning False leaves
+    the legacy "not introspected — refuse to certify absence" line in charge.
+    """
+    from services.check_constraints import CheckConstraint, CheckConstraints, plan_check_carry
+
+    payload = catalog.check_constraints_meta
+    if not payload:
+        return False
+    status = str(payload.get("status") or "")
+    if status != "measured":
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="check",
+                name="*",
+                status="unknown",
+                reason=(
+                    str(payload.get("detail"))
+                    or "Source CHECK catalog was unreadable; unmeasured, not proven absent."
+                ),
+            )
+        )
+        return True
+
+    items = tuple(
+        CheckConstraint(
+            name=str(i.get("name") or ""),
+            predicate=str(i.get("predicate") or ""),
+            columns=tuple(str(c) for c in (i.get("columns") or [])),
+        )
+        for i in (payload.get("items") or [])
+        if isinstance(i, dict)
+    )
+    if not items:
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="check",
+                name="*",
+                status="skipped",
+                reason="Source catalog read: table has no CHECK constraints.",
+            )
+        )
+        return True
+
+    column_map: dict[str, str] = {}
+    for src_col in catalog.columns:
+        dest_col = dest_name_for_source(src_col)
+        if dest_col:
+            column_map[str(src_col).casefold()] = dest_col
+
+    decisions = plan_check_carry(
+        CheckConstraints(
+            dialect=str(payload.get("dialect") or catalog.dialect),
+            status="measured",
+            items=items,
+        ),
+        dest_dialect=dest,
+        column_map=column_map,
+        quote=_q,
+    )
+    for decision in decisions:
+        name = decision.source.name or "check"
+        if decision.carried:
+            ddl = f"CHECK ({decision.dest_sql})"
+            table_constraints.append(ddl)
+            if check_predicates is not None:
+                check_predicates.append((name, decision.dest_sql))
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="check",
+                    name=name,
+                    status="carried",
+                    reason="CHECK predicate re-rendered for the destination dialect.",
+                    source_detail=decision.source.predicate[:240],
+                    dest_ddl=ddl,
+                )
+            )
+        else:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="check",
+                    name=name,
+                    status="unsupported",
+                    reason=(
+                        f"{decision.reason} Destination will not enforce this rule — "
+                        "apply it manually or reject the source rows upstream."
+                    ),
+                    source_detail=decision.source.predicate[:240],
+                )
+            )
+    return True
+
+
+def _emit_index_aspect(
+    report: SchemaFidelityReport,
+    catalog: SourceSchemaCatalog,
+    *,
+    dest: str,
+    dest_name_for_source: Any,
+    post_create_sql: list[str],
+    dest_table: str,
+    dest_schema: str,
+    pk_columns: list[str],
+    unique_constraints: list[list[str]],
+) -> bool:
+    """Carry portable secondary indexes; return True when the aspect is settled.
+
+    A UNIQUE index is an integrity guarantee and a filtered index scopes that
+    guarantee, so anything whose rule cannot be reproduced exactly is refused
+    rather than emitted as an approximation. Returning False leaves the legacy
+    "not carried in v1" line in charge.
+    """
+    from services.secondary_indexes import (
+        IndexColumn,
+        SourceIndex,
+        SourceIndexes,
+        plan_index_carry,
+    )
+
+    payload = catalog.indexes_meta
+    if not payload:
+        return False
+    status = str(payload.get("status") or "")
+    if status != "measured":
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="index",
+                name="*",
+                status="unknown",
+                reason=(
+                    str(payload.get("detail"))
+                    or "Source index catalog was unreadable; unmeasured, not proven absent."
+                ),
+            )
+        )
+        return True
+
+    items = tuple(
+        SourceIndex(
+            name=str(i.get("name") or ""),
+            columns=tuple(
+                IndexColumn(str(c.get("name") or ""), bool(c.get("descending")))
+                for c in (i.get("columns") or [])
+                if isinstance(c, dict)
+            ),
+            unique=bool(i.get("unique")),
+            predicate=str(i.get("predicate") or ""),
+            include_columns=tuple(str(c) for c in (i.get("include_columns") or [])),
+            expression=str(i.get("expression") or ""),
+            method=str(i.get("method") or ""),
+            constraint_backed=bool(i.get("constraint_backed")),
+        )
+        for i in (payload.get("items") or [])
+        if isinstance(i, dict)
+    )
+    if not items:
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="index",
+                name="*",
+                status="skipped",
+                reason="Source catalog read: table has no secondary indexes.",
+            )
+        )
+        return True
+
+    if not dest_table:
+        # CREATE INDEX names the table; without it the DDL cannot be emitted,
+        # and a caller that did not supply it must not read "no indexes".
+        report.items.append(
+            SchemaFidelityItem(
+                aspect="index",
+                name="*",
+                status="unsupported",
+                reason=(
+                    f"{len(items)} source index(es) were measured but the destination "
+                    "table name was not supplied to the planner, so CREATE INDEX "
+                    "could not be emitted."
+                ),
+                source_detail=",".join(i.name for i in items)[:240],
+            )
+        )
+        return True
+
+    column_map: dict[str, str] = {}
+    for src_col in catalog.columns:
+        dest_col = dest_name_for_source(src_col)
+        if dest_col:
+            column_map[str(src_col)] = dest_col
+
+    source_dialect = str(payload.get("dialect") or catalog.dialect)
+
+    def _render_filter(predicate: str) -> tuple[str, str]:
+        from services.check_constraints import render_check_for_dialect
+
+        return render_check_for_dialect(
+            predicate,
+            source_dialect=source_dialect,
+            dest_dialect=dest,
+            column_map={k.casefold(): v for k, v in column_map.items()},
+            quote=_q,
+        )
+
+    decisions = plan_index_carry(
+        SourceIndexes(dialect=source_dialect, status="measured", items=items),
+        dest_dialect=dest,
+        dest_table=dest_table,
+        dest_schema=dest_schema,
+        column_map=column_map,
+        quote=lambda ident: _q(ident, dest),
+        pk_columns=list(pk_columns),
+        unique_constraints=[list(u) for u in unique_constraints],
+        check_renderer=_render_filter,
+    )
+    for decision in decisions:
+        name = decision.source.name or "index"
+        detail = ",".join(c.name for c in decision.source.columns)[:240]
+        if decision.carried:
+            post_create_sql.append(decision.dest_sql)
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="index",
+                    name=name,
+                    status="carried",
+                    reason=decision.reason,
+                    source_detail=detail,
+                    dest_ddl=decision.dest_sql,
+                )
+            )
+        elif decision.skipped:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="index",
+                    name=name,
+                    status="skipped",
+                    reason=decision.reason,
+                    source_detail=detail,
+                )
+            )
+        else:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="index",
+                    name=name,
+                    status="unsupported",
+                    reason=(
+                        f"{decision.reason} Destination will not have this index — "
+                        "create it manually if the rule or the read path depends on it."
+                    ),
+                    source_detail=detail,
+                )
+            )
+    return True
+
+
+def _emit_unsupported_catalog(
+    report: SchemaFidelityReport,
+    catalog: SourceSchemaCatalog,
+    *,
+    skip_check: bool = False,
+    skip_index: bool = False,
+    skip_identity: bool = False,
+) -> None:
     if catalog.foreign_keys:
         for fk in catalog.foreign_keys[:20]:
             report.items.append(
@@ -765,8 +1414,10 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
                     name=str(fk.get("name") or fk.get("constraint") or "fk"),
                     status="unsupported",
                     reason=(
-                        "FOREIGN KEY create-new is not carried in v1 "
-                        "(multi-table ordering is Property 7)."
+                        "CREATE TABLE does not add this reference: the parent must "
+                        "hold its rows first. A multi-table transfer adds and "
+                        "re-reads it after the load (job report 'foreign_keys'); a "
+                        "single-table create leaves it uncarried."
                     ),
                     source_detail=str(fk)[:240],
                 )
@@ -779,13 +1430,17 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
                 name="*",
                 status="unsupported",
                 reason=(
-                    "FOREIGN KEY not introspected for this source dialect in v1; "
-                    "refuse to certify absence. Multi-table carry is Property 7."
+                    "Source foreign keys were not read for this catalog; refuse to "
+                    "certify absence. Where they are measured, a multi-table "
+                    "transfer carries them after the load and proves them from the "
+                    "destination catalog."
                 ),
             )
         )
 
-    if catalog.check_constraints:
+    if skip_check:
+        pass
+    elif catalog.check_constraints:
         for chk in catalog.check_constraints[:20]:
             report.items.append(
                 SchemaFidelityItem(
@@ -810,7 +1465,27 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
             )
         )
 
-    def _aspect_list(aspect: str, present: bool, reason_unsup: str, reason_skip: str) -> None:
+    def _aspect_list(
+        aspect: str,
+        present: bool | None,
+        reason_unsup: str,
+        reason_skip: str,
+        reason_unknown: str = "",
+    ) -> None:
+        if present is None:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect=aspect,
+                    name="*",
+                    status="unknown",
+                    reason=reason_unknown
+                    or (
+                        f"Source catalog was not read for {aspect}; "
+                        "unmeasured, not proven absent."
+                    ),
+                )
+            )
+            return
         report.items.append(
             SchemaFidelityItem(
                 aspect=aspect,
@@ -820,12 +1495,13 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
             )
         )
 
-    _aspect_list(
-        "index",
-        bool(catalog.indexes),
-        "Non-UNIQUE / partial / expression indexes are not carried in v1.",
-        "No secondary indexes listed on source catalog.",
-    )
+    if not skip_index:
+        _aspect_list(
+            "index",
+            bool(catalog.indexes),
+            "Non-UNIQUE / partial / expression indexes are not carried in v1.",
+            "No secondary indexes listed on source catalog.",
+        )
     _aspect_list(
         "view",
         bool(catalog.views),
@@ -844,12 +1520,13 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
         "Generated/computed expressions are not carried (insert-omit only).",
         "No generated columns on source.",
     )
-    _aspect_list(
-        "identity_sequence",
-        bool(catalog.identity_columns),
-        "Identity/sequence RESTART values are not carried; SERIAL polarity may widen.",
-        "No identity columns flagged on source.",
-    )
+    if not skip_identity:
+        _aspect_list(
+            "identity_sequence",
+            bool(catalog.identity_columns),
+            "Identity/sequence RESTART values are not carried; SERIAL polarity may widen.",
+            "No identity columns flagged on source.",
+        )
     _aspect_list(
         "collation",
         bool(catalog.collations),
@@ -860,15 +1537,9 @@ def _emit_unsupported_catalog(report: SchemaFidelityReport, catalog: SourceSchem
         SchemaFidelityItem(
             aspect="charset",
             name="*",
-            status="skipped",
-            reason="Character set not introspected for this source dialect in v1.",
+            status="unknown",
+            reason="Character set is not introspected for this source dialect.",
         )
-    )
-    _aspect_list(
-        "partitioning",
-        catalog.has_partitioning,
-        "Partitioning / clustering is not carried.",
-        "No partitioning on source.",
     )
     _aspect_list(
         "comment",
@@ -899,7 +1570,10 @@ def _ensure_all_aspects_present(report: SchemaFidelityReport) -> None:
             SchemaFidelityItem(
                 aspect=aspect,
                 name="*",
-                status="skipped",
-                reason="No source evidence; aspect certified absent for this transfer.",
+                status="unknown",
+                reason=(
+                    "No source evidence was collected for this aspect; it is "
+                    "unmeasured, not proven absent."
+                ),
             )
         )

@@ -437,6 +437,12 @@ def _mapping_risks(
         is_precision_collapse_coercion = None  # type: ignore
         is_timezone_polarity_loss = None  # type: ignore
 
+    # One named policy per temporal pair — the same resolution Validate and
+    # Execute read, so a route cannot green under one policy and write another.
+    from services.timezone_policy import resolve_timezone_policy
+
+    tz_policy = resolve_timezone_policy(src_type, tgt_type, dest_db=dest)
+
     if is_timezone_polarity_loss and is_timezone_polarity_loss(
         src_type, tgt_type, dest_db=dest
     ):
@@ -446,23 +452,27 @@ def _mapping_risks(
             "message": (
                 f"Timezone polarity drop: {src_type} → {tgt_type} discards offset "
                 "(timestamp_with_timezone → without_timezone). "
-                "Prefer TIMESTAMPTZ/TIMESTAMP_TZ/DATETIMEOFFSET on the destination."
+                + (
+                    tz_policy.remediation
+                    if tz_policy and tz_policy.remediation
+                    else "Prefer TIMESTAMPTZ/TIMESTAMP_TZ/DATETIMEOFFSET on the destination."
+                )
             ),
+            **({"timezone_policy": tz_policy.as_dict()} if tz_policy else {}),
         })
-    elif src_logical in {"datetime", "timestamp"} and tgt_logical in {"datetime", "timestamp", "date"}:
-        if dest in {
-            "snowflake", "bigquery", "redshift", "postgresql", "postgres", "mysql",
-            "databricks", "iceberg",
-        } or "timestamp" in tgt_type.lower():
-            risks.append({
-                "code": "timezone_policy",
-                "severity": "info",
-                "message": (
-                    "Temporal write follows destination timezone/bind policy "
-                    f"({destination_db_type or 'dest'}); MySQL TIMESTAMP vs DATETIME "
-                    "and Iceberg timestamptz vs timestamp without TZ differ — confirm expectations."
-                ),
-            })
+    elif tz_policy is not None:
+        risks.append({
+            "code": "timezone_policy",
+            "severity": "warn" if tz_policy.requires_contract else "info",
+            "message": (
+                f"Timezone policy {tz_policy.policy}: destination reads as "
+                f"{tz_policy.destination_reads_as} "
+                f"(instant {'preserved' if tz_policy.instant_preserved else 'NOT preserved'}, "
+                f"offset label {'preserved' if tz_policy.offset_label_preserved else 'not stored'}"
+                f", range {tz_policy.range_limit}). {tz_policy.note}"
+            ),
+            "timezone_policy": tz_policy.as_dict(),
+        })
 
     if is_precision_collapse_coercion and is_precision_collapse_coercion(
         src_type,

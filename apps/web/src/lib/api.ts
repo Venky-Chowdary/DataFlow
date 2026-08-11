@@ -962,6 +962,34 @@ export async function verifySignedProofPack(
   return res.json();
 }
 
+/** Client-facing Migration Certificate (Markdown) for a completed run. */
+export async function fetchMigrationCertificateMarkdown(jobId: string): Promise<string> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate?format=markdown`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Migration certificate not available"));
+  return res.text();
+}
+
+/** Audit deliverable: the same signed certificate, paginated and hash-stamped. */
+export async function fetchMigrationCertificatePdf(jobId: string): Promise<Blob> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate?format=pdf`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Migration certificate not available"));
+  return res.blob();
+}
+
+/** Signed JSON form of the certificate — the artifact /certificate/verify checks. */
+export async function fetchMigrationCertificate(
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  return requestJson(
+    [`${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate`],
+    "Migration certificate not available",
+  );
+}
+
 /** Execute signed rollback plan — DISCARD_STAGING only (never population undo). */
 export async function executeJobRollback(
   jobId: string,
@@ -1011,21 +1039,53 @@ export async function renameJob(jobId: string, name: string): Promise<JobProgres
   throw lastError instanceof Error ? lastError : new Error("Rename failed");
 }
 
-export async function retryJob(jobId: string): Promise<{ job_id: string; retry_of: string }> {
+/** Retry from start was refused because it would duplicate committed rows. */
+export class RetryRefusedError extends Error {
+  readonly rowsCommitted: number | null;
+  readonly rowsCommittedKnown: boolean;
+
+  constructor(reason: string, rowsCommitted: number | null, rowsCommittedKnown: boolean) {
+    super(reason);
+    this.name = "RetryRefusedError";
+    this.rowsCommitted = rowsCommitted;
+    this.rowsCommittedKnown = rowsCommittedKnown;
+  }
+}
+
+export async function retryJob(
+  jobId: string,
+  options: { force?: boolean } = {},
+): Promise<{ job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean }> {
+  const query = options.force ? "?force=true" : "";
   const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/retry`,
-    `${API_BASE}/jobs/${jobId}/retry`,
+    `${API_BASE}/connectors/jobs/${jobId}/retry${query}`,
+    `${API_BASE}/jobs/${jobId}/retry${query}`,
   ];
   let lastError: unknown;
   for (const url of urls) {
     try {
       const res = await apiFetch(url, { method: "POST" });
       const data = await res.json();
+      if (res.status === 409 && data?.detail && typeof data.detail === "object") {
+        // A refusal is the server's answer, not a route miss: surface it rather
+        // than falling through to the legacy URL and reporting its 404 instead.
+        const detail = data.detail as {
+          reason?: string;
+          rows_committed?: number | null;
+          rows_committed_known?: boolean;
+        };
+        throw new RetryRefusedError(
+          detail.reason || "Retry from start would duplicate committed rows.",
+          detail.rows_committed ?? null,
+          detail.rows_committed_known !== false,
+        );
+      }
       if (!res.ok) {
         throw new Error(typeof data.detail === "string" ? data.detail : "Retry failed");
       }
-      return data as { job_id: string; retry_of: string };
+      return data as { job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean };
     } catch (error) {
+      if (error instanceof RetryRefusedError) throw error;
       lastError = error;
     }
   }
@@ -2102,6 +2162,8 @@ export async function runUniversalTransfer(options: {
   acknowledgmentReason?: string;
   /** Phase C11 — 64-hex Decision Artifact content_hash from last green Validate. */
   approvedDecisionArtifactHash?: string;
+  /** Map→DDL fingerprint stamped by the same Validate run. */
+  approvedDdlIdentityHash?: string;
   /** Optional full artifact payload (content_hash must match approved hash). */
   decisionArtifact?: Record<string, unknown>;
 }) {
@@ -2183,6 +2245,10 @@ export async function runUniversalTransfer(options: {
   const approvedHash = (options.approvedDecisionArtifactHash || "").trim();
   if (approvedHash) {
     formData.append("approved_decision_artifact_hash", approvedHash);
+  }
+  const approvedDdlHash = (options.approvedDdlIdentityHash || "").trim();
+  if (approvedDdlHash) {
+    formData.append("approved_ddl_identity_hash", approvedDdlHash);
   }
   if (options.decisionArtifact && Object.keys(options.decisionArtifact).length) {
     formData.append("decision_artifact_json", JSON.stringify(options.decisionArtifact));
@@ -2266,6 +2332,7 @@ export async function executeTransferJson(payload: {
   acknowledgmentActor?: string;
   acknowledgmentReason?: string;
   approvedDecisionArtifactHash?: string;
+  approvedDdlIdentityHash?: string;
   decisionArtifact?: Record<string, unknown>;
 }) {
   const idempotencyKey =
@@ -2297,6 +2364,8 @@ export async function executeTransferJson(payload: {
       acknowledgment_reason: payload.acknowledgmentReason || undefined,
       approved_decision_artifact_hash:
         (payload.approvedDecisionArtifactHash || "").trim() || undefined,
+      approved_ddl_identity_hash:
+        (payload.approvedDdlIdentityHash || "").trim() || undefined,
       decision_artifact: payload.decisionArtifact || undefined,
     }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
@@ -3587,6 +3656,8 @@ export interface TransformCompiledModel {
   sources: string[];
   statements: string[];
   error?: string;
+  /** How the executed SQL differs from this preview, when it does. */
+  note?: string;
   tests: { test_type: string; column: string; severity: string; sql: string }[];
 }
 

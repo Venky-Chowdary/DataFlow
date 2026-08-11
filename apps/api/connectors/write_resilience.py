@@ -215,6 +215,10 @@ def apply_mysql_session_guards(
             cur.execute("SET SESSION interactive_timeout = 28800")
             cur.execute("SET SESSION net_read_timeout = 600")
             cur.execute("SET SESSION net_write_timeout = 600")
+            # TIMESTAMP columns are converted with the session time_zone on both
+            # write and read. Pinning UTC makes the instant deterministic instead
+            # of inheriting whatever zone the server happens to run in.
+            cur.execute("SET SESSION time_zone = '+00:00'")
             cur.execute(f"SET SESSION lock_wait_timeout = {lock_s}")
             cur.execute(f"SET SESSION innodb_lock_wait_timeout = {lock_s}")
             _ensure_mysql_strict_sql_mode(cur, require=require_strict_sql_mode)

@@ -9,12 +9,14 @@ dialect helper tables remain in ``type_system`` until later C2 splits.
 from __future__ import annotations
 
 import re
-from typing import Any, Final
+from functools import lru_cache
+from typing import Final
 
 # Helpers / tables still owned by type_system (shared core). Import the module
 # object so circular init stays safe: type_system shims lazy-import this module.
 from services import type_system as _ts
 from services.decision_kernel.logical_type import LogicalType, NativeType
+from services.source_engine_scope import active_source_engine
 
 # Bind shared helpers/tables from type_system into this module namespace.
 # Invent bodies below expect unqualified names (historical type_system style).
@@ -92,6 +94,11 @@ _bind_from_type_system()
 
 
 
+# Type strings are a tiny fixed vocabulary per job while this runs once per
+# *cell* on the bind and fingerprint paths — a 10M-row load called it ~230M
+# times, and the regex work dominated the profile. Memoized on the raw string;
+# the function is pure (str in, str out) so the cache cannot change a verdict.
+@lru_cache(maxsize=8192)
 def normalize_logical_type(inferred: str | None) -> str:
     """Return a canonical logical type for parser, DB, and warehouse types."""
     raw = strip_identity_qualifier(inferred)
@@ -431,6 +438,20 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
         if db == "clickhouse":
             return strip_identity_qualifier(inferred).strip() or base_early
         return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT, DEFAULT_DDL.get(db, "TEXT"))
+    # Oracle ANSI FLOAT(p) is NUMBER-backed binary precision (bare = FLOAT(126),
+    # ~38 decimal digits), so BINARY_DOUBLE would cut it to a 53-bit mantissa.
+    #
+    # Only a *declared* Oracle carrier keeps that storage class. Two things it
+    # is not: the logical family alias ``float`` (a family, not a stamp), and a
+    # bare ``FLOAT`` read off some other engine's catalog — PostgreSQL and SQL
+    # Server both spell IEEE-64 that way, and holding those in NUMBER-backed
+    # FLOAT(126) changes the destination's storage class on nothing but the
+    # spelling's letter case. A precision is unambiguous; a bare token needs an
+    # Oracle source to mean the Oracle type.
+    if db == "oracle" and strip_identity_qualifier(inferred).strip() != LOGICAL_FLOAT:
+        declared = re.match(r"^FLOAT(\((\d+)\))?$", base_early)
+        if declared and (declared.group(2) or active_source_engine() == "oracle"):
+            return base_early
     # IBM DECFLOAT — IEEE decimal float; never invent NUMBER(p,0) from digit count.
     if base_early == "DECFLOAT" or base_early.startswith("DECFLOAT("):
         if db in {
@@ -911,6 +932,29 @@ def create_new_mapping_target_type(
     dest_db_type: str = "",
     *,
     samples: list | None = None,
+    source_db: str = "",
+) -> str:
+    """Target type stamped on create-new mappings for Validate + writers.
+
+    ``source_db`` is the source engine id. It only widens the stamp: a source
+    that can emit any code point must not land on a SQL Server code-page
+    ``VARCHAR`` that silently rewrites it to ``?``."""
+    from services.type_system import unicode_safe_target_carrier
+
+    stamp = _create_new_mapping_target_type(
+        src_type, dest_db_type, samples=samples, source_db=source_db
+    )
+    return unicode_safe_target_carrier(
+        stamp, dest_db=dest_db_type, source_db=source_db
+    )
+
+
+def _create_new_mapping_target_type(
+    src_type: str,
+    dest_db_type: str = "",
+    *,
+    samples: list | None = None,
+    source_db: str = "",
 ) -> str:
     """Target type stamped on create-new mappings for Validate + writers.
 
@@ -930,7 +974,14 @@ def create_new_mapping_target_type(
     # fixed-point or open text sources (observe path elsewhere).
     if samples and normalize_logical_type(src_type) == LOGICAL_DECIMAL:
         p, _s = parse_numeric_precision_scale(src_type)
-        if p is None:
+        from services.decimal_observe import source_declares_numeric_domain
+
+        # A typed source (relational NUMBER/DECIMAL, BSON Decimal128) holds a
+        # domain the Validate sample never bounds — sizing create-new from that
+        # sample invents a carrier narrower than the source, which the product
+        # then blocks as its own fidelity collapse and which would quarantine
+        # unsampled rows. Fall through to the platform carrier instead.
+        if p is None and not source_declares_numeric_domain(source_db):
             from services.decimal_observe import (
                 create_new_decimal_carrier,
                 observe_numeric_samples,
@@ -1202,8 +1253,12 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
         "TIMESTAMP_TZ", "TIMESTAMPTZ", "DATETIMEOFFSET", "SMALLDATETIME",
         "TIME", "TIMETZ", "YEAR",
         # Foreign IEEE → BINARY_FLOAT / BINARY_DOUBLE. Keep BINARY_*.
+        # FLOAT / FLOAT(p) is *not* foreign IEEE here: Oracle's ANSI FLOAT is
+        # NUMBER-backed binary precision (bare = 126 binary digits), so
+        # rematerializing it to BINARY_DOUBLE cuts an Oracle→Oracle column down
+        # to a 53-bit mantissa. Keep it native; it is never narrower.
         "FLOAT4", "FLOAT8", "REAL", "HALF", "HALFFLOAT", "FLOAT16", "FLOAT32",
-        "FLOAT64", "DOUBLE", "FLOAT",
+        "FLOAT64", "DOUBLE",
         # Foreign VECTOR/BIT/ENUM/MONEY/YEAR/MEDIUMINT → ddl_type SSOT.
         "VECTOR", "HALFVEC", "SPARSEVEC",
         "BIT", "BOOL", "TINYINT",
@@ -1378,6 +1433,14 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         if "<" in upper or "[" in upper:
             return True
         bare_typmod = upper.split("(", 1)[0].strip()
+        # Oracle character-length semantics (``VARCHAR2(64 BYTE)``) are physical
+        # only on Oracle. Everywhere else the unit is a syntax error, so the
+        # carrier must be rematerialized rather than pasted into the CREATE.
+        if re.search(r"\(\s*\d+\s+(BYTE|CHAR)\s*\)$", upper) and db not in {
+            "oracle",
+            "oracledb",
+        }:
+            return False
         # Valued MySQL ENUM/SET is native CREATE wire — keep Map stamp.
         if bare_typmod in {"ENUM", "SET"} and db in {"mysql", "mariadb", "tidb"}:
             return True

@@ -73,6 +73,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from services.transform_resolver import LiveDestTypes
 
 logger = logging.getLogger(__name__)
 
@@ -720,6 +721,7 @@ def _pg_materialize_mapped_batch(
         rejected_details,
         policy,
         dialect_label="PostgreSQL INTEGER",
+        dest_db="postgresql",
     )
     mapped_rows = quarantine_unfit_bitstrings(
         mapped_rows, target_cols, target_types, rejected_details, policy
@@ -1205,6 +1207,9 @@ def write_mapped_rows(
     rows_for_checksum: list = []
     rejected_rows = 0
     coerced_null_rows = 0
+    # Strict-policy abort withheld from the Map-projected pass until live DDL
+    # either confirms it or rematerializes it away.
+    deferred_map_abort: str | None = None
     if not studio_err:
         # Map before opening a socket so public proxies are not idle during transform.
         _batch = _pg_materialize_mapped_batch(
@@ -1239,6 +1244,15 @@ def write_mapped_rows(
         _map_abort = reject_on_strict_policy(
             policy, rejected_details, "PostgreSQL", transform_errors
         )
+        # Map stamps only *project* the carriers create-new would invent. An
+        # existing table's physical DDL is read below and rematerializes the
+        # batch, so aborting here fails rows the real sink accepts (BOOLEAN
+        # stamp over a live TEXT column rejected every 'Y'). Hold the verdict:
+        # the post-overlay pass re-decides, and the no-physical path re-raises
+        # it unchanged.
+        if _map_abort and not isinstance(dest_types, LiveDestTypes):
+            deferred_map_abort = _map_abort
+            _map_abort = None
         if _map_abort:
             return WriteResult(
                 ok=False,
@@ -1374,6 +1388,9 @@ def write_mapped_rows(
                 for stmt in collect_pg_enum_prerequisites(logical_types):
                     cursor.execute(stmt)
             fidelity_plan = None
+            # None = existence never established; only a proven False allows the
+            # orphan-rollback registration below to drop the object.
+            pg_table_existed: bool | None = None
             from services.schema_fidelity import (
                 empty_unsupported_report,
                 render_create_column_defs,
@@ -1391,6 +1408,10 @@ def write_mapped_rows(
                     (schema, table_name),
                 )
                 pg_table_existed = cursor.fetchone() is not None
+                from services.physical_placement_ddl import (
+                    list_destination_tablespaces,
+                )
+
                 fidelity_plan = resolve_create_fidelity_plan(
                     source_schema_catalog=_kwargs.get("source_schema_catalog"),
                     mappings=mappings,
@@ -1398,6 +1419,11 @@ def write_mapped_rows(
                     target_types=target_types,
                     dest_dialect="postgresql",
                     table_already_exists=pg_table_existed,
+                    dest_table=table_name,
+                    dest_schema=schema,
+                    dest_tablespaces=list_destination_tablespaces(
+                        "postgresql", cursor
+                    ),
                 )
                 if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)
@@ -1407,12 +1433,53 @@ def write_mapped_rows(
                     plan=(None if pg_table_existed else fidelity_plan),
                     dialect="postgresql",
                 )
+                # Placement (PARTITION BY / TABLESPACE) is part of the CREATE
+                # itself — a table cannot be partitioned after the fact.
                 cursor.execute(
-                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({})").format(
+                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({}) {}").format(
                         sql.Identifier(schema),
                         sql.Identifier(table_name),
                         sql.SQL(body),
+                        sql.SQL(fidelity_plan.create_suffix or ""),
                     )
+                )
+                from services.schema_fidelity import apply_post_create_sql
+
+                # A refused CREATE INDEX must not abort the load or leave the
+                # certificate claiming an index the destination does not have;
+                # each statement gets its own savepoint.
+                def _run_post_create(stmt: str) -> None:
+                    cursor.execute("SAVEPOINT df_post_create")
+                    try:
+                        cursor.execute(stmt)
+                    except Exception:
+                        cursor.execute("ROLLBACK TO SAVEPOINT df_post_create")
+                        raise
+                    cursor.execute("RELEASE SAVEPOINT df_post_create")
+
+                apply_post_create_sql(fidelity_plan, _run_post_create)
+                from services.schema_fidelity import (
+                    certify_placement_on_destination,
+                )
+
+                certify_placement_on_destination(
+                    fidelity_plan,
+                    dialect="postgresql",
+                    cursor=cursor,
+                    schema=schema,
+                    table=table_name,
+                )
+                from services.identity_carry import psycopg2_fetchall
+                from services.schema_fidelity import (
+                    certify_identity_on_destination,
+                )
+
+                certify_identity_on_destination(
+                    fidelity_plan,
+                    dialect="postgresql",
+                    schema=schema,
+                    table=table_name,
+                    fetchall=psycopg2_fetchall(cursor),
                 )
                 _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
             except Exception as exc:
@@ -1440,27 +1507,36 @@ def write_mapped_rows(
                         "fell back to types-only CREATE TABLE — constraints not carried."
                     ),
                 ).to_dict()
-            # Track empty shell for orphan rollback if job fails before first ack.
-            try:
-                from services.auto_create_lifecycle import register_auto_create
+            # Track empty shell for orphan rollback if the job fails before the
+            # first ack. Only a table this run actually created may be dropped:
+            # ``CREATE TABLE IF NOT EXISTS`` is a no-op on an operator's existing
+            # table, and registering that made a failed write (a NOT NULL
+            # violation on row 1) drop a populated destination.
+            if pg_table_existed is False:
+                try:
+                    from services.auto_create_lifecycle import register_auto_create
 
-                register_auto_create(
-                    db_type="postgresql" if engine not in {"redshift", "amazon_redshift"} else "redshift",
-                    table=table_name,
-                    schema=schema,
-                    config={
-                        "host": host,
-                        "port": port,
-                        "user": username,
-                        "username": username,
-                        "password": password,
-                        "database": database,
-                        "connection_string": connection_string,
-                    },
-                    job_id=job_id,
-                )
-            except Exception:
-                logger.debug("auto_create register skipped", exc_info=True)
+                    register_auto_create(
+                        db_type=(
+                            "postgresql"
+                            if engine not in {"redshift", "amazon_redshift"}
+                            else "redshift"
+                        ),
+                        table=table_name,
+                        schema=schema,
+                        config={
+                            "host": host,
+                            "port": port,
+                            "user": username,
+                            "username": username,
+                            "password": password,
+                            "database": database,
+                            "connection_string": connection_string,
+                        },
+                        job_id=job_id,
+                    )
+                except Exception:
+                    logger.debug("auto_create register skipped", exc_info=True)
 
         if backfill_new_fields:
             cursor.execute(
@@ -1506,22 +1582,29 @@ def write_mapped_rows(
                 if tgt and tgt not in active_by_tgt:
                     active_by_tgt[tgt] = mapping
             candidate_by_col: dict[str, str] = {}
+            source_type_by_col: dict[str, str] = {}
             for col in target_cols:
                 mapping = active_by_tgt.get(col) or {}
                 source = mapping.get("source") or ""
                 source_samples = batch_samples.get(source, []) if batch_samples else []
-                if source_samples:
+                # Declared source DDL wins over sample inference: inferring from
+                # a batch drops the parameters that decide drift (VARCHAR(40)
+                # became a bare VARCHAR, which reads as "already fits" against a
+                # live VARCHAR(10) and suppressed the widen the rows needed).
+                declared = str(
+                    column_types.get(source) or mapping.get("source_type") or ""
+                ).strip()
+                if declared:
+                    source_type = declared
+                elif source_samples:
                     source_type = infer_type(source_samples, field_name=source)
                 else:
-                    source_type = (
-                        column_types.get(source)
-                        or mapping.get("source_type")
-                        or ""
-                    )
+                    source_type = ""
                 # Unknown source DDL: do not invent VARCHAR widen candidate —
                 # keep Map/current ceiling (desired_types falls back to cur_type).
                 if not str(source_type or "").strip():
                     continue
+                source_type_by_col[col] = str(source_type)
                 candidate_by_col[col] = pg_type(source_type, engine=engine)
 
             desired_types, alter_refusals = desired_types_honoring_map_stamps(
@@ -1536,6 +1619,7 @@ def write_mapped_rows(
                     alter_refusals,
                 )
 
+            suppressed_widens: dict[str, str] = {}
             widen_existing_columns_native(
                 cursor,
                 "postgresql",
@@ -1545,7 +1629,14 @@ def write_mapped_rows(
                 desired_types,
                 backfill=backfill_new_fields,
                 skip_cols=conflict_columns or [],
+                source_types=source_type_by_col,
+                suppressed_out=suppressed_widens,
             )
+            if suppressed_widens:
+                desired_types = [
+                    suppressed_widens.get(col, typ)
+                    for col, typ in zip(target_cols, desired_types)
+                ]
             target_types = desired_types
 
         if write_mode == "upsert" and conflict_columns and uses_pg_on_conflict_upsert(engine):
@@ -1668,6 +1759,21 @@ def write_mapped_rows(
                     rejected_details=rejected_details,
                     warnings=transform_errors,
                 )
+            if not physical and deferred_map_abort:
+                # No physical carriers to overturn the projection (create-new /
+                # unreadable DDL): the Map verdict stands exactly as computed.
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=deferred_map_abort,
+                    rejected_rows=rejected_rows,
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
             if physical:
                 from connectors.writer_common import rematerialize_live_dest_types
 
@@ -1770,6 +1876,7 @@ def write_mapped_rows(
                         mapped_rows
                     )
                     rows_for_checksum = list(mapped_rows)
+                deferred_map_abort = None
                 _phys_abort = reject_on_strict_policy(
                     policy, rejected_details, "PostgreSQL", transform_errors
                 )

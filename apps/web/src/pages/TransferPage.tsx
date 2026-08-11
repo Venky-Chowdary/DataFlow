@@ -103,6 +103,10 @@ import {
   type MappingTransform,
 } from "../lib/mapping";
 import {
+  carryOperatorDecisions,
+  holdOutRowsAndContinue,
+} from "../lib/mappingDecisions";
+import {
   Connector,
   EnhancedAnalysis,
   ParsedUpload,
@@ -126,8 +130,8 @@ import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from 
 import { needsMappingReview } from "../lib/columnWorkbench";
 import {
   buildStreamContracts,
+  firstStreamContractIssue,
   seedStreamFieldsFromCandidates,
-  streamContractsNeedReview,
   type StreamFieldContract,
 } from "../lib/streamContracts";
 import type { TransferPageProps } from "./transfer/TransferPageProps";
@@ -269,6 +273,10 @@ export function TransferPage({
   const [embeddingCacheStats, setEmbeddingCacheStats] = useState<EmbeddingCacheStats | null>(null);
   const [embeddingCacheBusy, setEmbeddingCacheBusy] = useState(false);
   const [cursorField, setCursorField] = useState("");
+  // What the cursor column means in the source. Only ever set by the operator:
+  // a column name cannot establish whether the source moves the value when a
+  // row changes, and assuming it silently loses updates and backdated inserts.
+  const [cursorSemantics, setCursorSemantics] = useState("");
   const [primaryKeyField, setPrimaryKeyField] = useState("");
   const [priorityColumn, setPriorityColumn] = useState("");
   const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">("desc");
@@ -281,6 +289,10 @@ export function TransferPage({
   /** Per-stream cursor/PK when source lists multiple tables (comma-separated). */
   const [streamFields, setStreamFields] = useState<Record<string, StreamFieldContract>>({});
   const [columnMappings, setColumnMappings] = useState<EditableMapping[]>([]);
+  // Regeneration (step change, dest schema reload) must not wipe operator
+  // approvals — carryOperatorDecisions replays them by decision fingerprint.
+  const columnMappingsRef = useRef<EditableMapping[]>([]);
+  columnMappingsRef.current = columnMappings;
   /** Per-stream column mappings when source lists multiple tables. */
   const [streamMappings, setStreamMappings] = useState<Record<string, EditableMapping[]>>({});
   const [mapActiveStream, setMapActiveStream] = useState<string | null>(null);
@@ -729,6 +741,8 @@ export function TransferPage({
     };
   }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns]);
 
+  // A name-matched column is a starting point for the operator, never a claim
+  // about the column's behaviour — the declaration beside it carries that.
   const cursorCandidate = findColumn(currentSourceColumns, [
     /^updated_at$/i,
     /^modified_at$/i,
@@ -822,6 +836,7 @@ export function TransferPage({
     requiresPrimaryKey,
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
+    defaultCursorSemantics: cursorSemantics,
     streamFields,
     snapshotMode: syncMode === "cdc" ? snapshotMode : undefined,
     streamMappings: isMultiStreamSource
@@ -831,7 +846,7 @@ export function TransferPage({
         }
       : undefined,
   });
-  const streamNeedsReview = streamContractsNeedReview({
+  const streamContractIssue = firstStreamContractIssue({
     streamNames: advancedStreamNames,
     sourceColumns: currentSourceColumns,
     sourceColumnsByStream,
@@ -839,8 +854,12 @@ export function TransferPage({
     requiresPrimaryKey,
     defaultCursor: cursorField,
     defaultPrimaryKey: primaryKeyField,
+    defaultCursorSemantics: cursorSemantics,
     streamFields,
+    syncMode,
+    validationMode,
   });
+  const streamNeedsReview = streamContractIssue !== null;
   const syncModeLabel =
     routeSyncModes.find((m) => m.id === syncMode)?.label
     ?? SYNC_MODES.find((m) => m.id === syncMode)?.label
@@ -1116,8 +1135,12 @@ export function TransferPage({
         proof: import("../components/MappingProofDrawer").MappingProof | null,
       ) => {
         if (gen !== mappingGenRef.current) return next;
+        const prior = columnMappingsRef.current;
         if (!next.length && sourceCols.length) {
-          const identity = buildMappingsFromSource(analysisCols, targetCols);
+          const identity = carryOperatorDecisions(
+            buildMappingsFromSource(analysisCols, targetCols),
+            prior,
+          );
           if (identity.length) {
             setColumnMappings(identity);
             setLlmMappingUsed(false);
@@ -1125,10 +1148,11 @@ export function TransferPage({
             return identity;
           }
         }
-        setColumnMappings(next);
+        const carried = carryOperatorDecisions(next, prior);
+        setColumnMappings(carried);
         setLlmMappingUsed(llmUsed);
         setMappingProof(proof);
-        return next;
+        return carried;
       };
       try {
         // Prefer direct map when fresh dest schema is in-hand — plan persistence
@@ -2056,10 +2080,12 @@ export function TransferPage({
       setStep(STEP_DESTINATION);
       return true;
     }
-    if (streamNeedsReview) {
+    if (streamContractIssue) {
+      // One cause, one action, and the stream it belongs to — the engine refuses
+      // per stream, so a generic "contract incomplete" would hide which one.
       toast({
         title: "Stream contract needs review",
-        message: `${requiresCursor && !cursorField ? "Select a cursor field. " : ""}${requiresPrimaryKey && !primaryKeyField ? "Select a primary key." : ""}`.trim(),
+        message: `${streamContractIssue.reason} ${streamContractIssue.action}`,
         tone: "warning",
       });
       setStep(STEP_DESTINATION);
@@ -2690,6 +2716,37 @@ export function TransferPage({
 
   const approveAllMappings = () => {
     setColumnMappings((prev) => approveMappingsHonestly(prev));
+  };
+
+  /**
+   * Validate's forward door — sign holdout Risk Contracts in place and re-run,
+   * instead of bouncing to Map. Failing rows go to the DLQ for replay; nothing
+   * is written lossily and nothing is silently dropped.
+   */
+  const holdOutRowsAndRevalidate = async () => {
+    const { mappings: next, signed } = holdOutRowsAndContinue(columnMappings, {
+      rowsSampled: parsed?.data?.length ?? parsed?.sample_data?.length ?? 0,
+      estimatedRows: parsed?.row_count ?? sourceRowEstimate ?? null,
+      planId: persistedPlanId || undefined,
+      table: targetCollection || "",
+    });
+    if (!signed.length) {
+      toast({
+        title: "Nothing to hold out",
+        message: "No column is blocking on unacknowledged fidelity risk.",
+        tone: "warning",
+      });
+      return;
+    }
+    setColumnMappings(next);
+    toast({
+      title: "Running with rows held out",
+      message: `Signed a quarantine Risk Contract for ${signed.length} column(s): ${signed
+        .slice(0, 3)
+        .join(", ")}${signed.length > 3 ? "…" : ""}. Failing rows go to quarantine for replay — re-validating…`,
+      tone: "success",
+    });
+    await executePreflight(next);
   };
 
   const approveAllAndPreflight = async () => {
@@ -3648,6 +3705,11 @@ export function TransferPage({
         || preflight?.proof_bundle?.decision_artifact?.content_hash
         || "",
     ).trim();
+    // Map→DDL fingerprint Validate stamped over these same Map rows. Execute
+    // checks the operator contract against it instead of re-deriving its own.
+    const approvedDdlIdentityHash = String(
+      preflight?.proof_bundle?.ddl_identity?.ddl_identity_hash || "",
+    ).trim();
     if (
       enforcePreflight
       && (!approvedDecisionArtifactHash || approvedDecisionArtifactHash.length !== 64)
@@ -3808,6 +3870,7 @@ export function TransferPage({
           fkRiskAcknowledged ? "FK risk acknowledged on Validate" : "",
         ].filter(Boolean).join("; ") || undefined,
         approvedDecisionArtifactHash: approvedDecisionArtifactHash || undefined,
+        approvedDdlIdentityHash: approvedDdlIdentityHash || undefined,
         decisionArtifact:
           preflight?.proof_bundle?.decision_artifact
           && typeof preflight.proof_bundle.decision_artifact === "object"
@@ -5738,6 +5801,8 @@ export function TransferPage({
             onRunPreflight={() => void executePreflight()}
             onApproveMappings={() => void approveAllAndPreflight()}
             onOpenMapForRisk={() => setStep(STEP_MAP)}
+            onHoldOutRows={() => void holdOutRowsAndRevalidate()}
+            holdingOutRows={preflighting}
             onExecute={() => void executeTransfer()}
             onOpenJobTheater={openJobTheater}
             onSaveAsContract={() => void handleSaveAsContract()}
@@ -6108,6 +6173,7 @@ export function TransferPage({
         streamFields={streamFields}
         defaultCursor={cursorField}
         defaultPrimaryKey={primaryKeyField}
+        defaultCursorSemantics={cursorSemantics}
         sourceColumns={currentSourceColumns}
         sourceSchema={currentSourceSchema}
         sourceColumnsByStream={sourceColumnsByStream}
@@ -6197,10 +6263,27 @@ export function TransferPage({
             [stream]: {
               cursorField: value,
               primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+              // A new column is a new question: the previous column's declared
+              // meaning says nothing about this one.
+              cursorSemantics: "",
             },
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
             setCursorField(value);
+            setCursorSemantics("");
+          }
+        }}
+        onStreamCursorSemanticsChange={(stream, value) => {
+          setStreamFields((prev) => ({
+            ...prev,
+            [stream]: {
+              cursorField: prev[stream]?.cursorField ?? cursorField,
+              primaryKeyField: prev[stream]?.primaryKeyField ?? primaryKeyField,
+              cursorSemantics: value,
+            },
+          }));
+          if (!isMultiStreamSource || stream === advancedStreamNames[0]) {
+            setCursorSemantics(value);
           }
         }}
         onStreamPrimaryKeyChange={(stream, value) => {
@@ -6209,6 +6292,7 @@ export function TransferPage({
             [stream]: {
               cursorField: prev[stream]?.cursorField ?? cursorField,
               primaryKeyField: value,
+              cursorSemantics: prev[stream]?.cursorSemantics ?? cursorSemantics,
             },
           }));
           if (!isMultiStreamSource || stream === advancedStreamNames[0]) {

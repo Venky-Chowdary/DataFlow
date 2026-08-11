@@ -201,6 +201,28 @@ async def run_preflight(body: PreflightRequest):
         if not source_connected:
             source_error = msg
 
+    # Validate must score the mappings against the schema Execute will read.
+    # Live source introspection wins over the browser's Map stamps; anything it
+    # cannot answer keeps the posted declaration.
+    from services.source_schema_authority import (
+        live_source_column_types,
+        reconcile_source_types,
+        restamp_mapping_source_types,
+    )
+
+    source_column_types, source_type_drift = reconcile_source_types(
+        body.column_types,
+        live_source_column_types(
+            source_connector_id=body.source_connector_id or "",
+            source_table=body.source_table or "",
+            source_collection=body.source_collection or "",
+        ),
+    )
+    preflight_mappings = restamp_mapping_source_types(
+        [m.model_dump() for m in body.mappings],
+        source_column_types,
+    )
+
     dest_column_types = dest_meta.get("column_types") or {}
     # Prefer live introspect. Never fall back to Studio Map stamps when the
     # table exists but live schema is empty — that greens empties as VARCHAR.
@@ -252,9 +274,9 @@ async def run_preflight(body: PreflightRequest):
     ):
         result = run_file_preflight(
             columns=body.columns,
-            column_types=body.column_types,
+            column_types=source_column_types,
             row_count=body.row_count,
-            mappings=[m.model_dump() for m in body.mappings],
+            mappings=preflight_mappings,
             destination_connected=destination_connected,
             destination_error=dest_error,
             source_connected=source_connected,
@@ -267,6 +289,9 @@ async def run_preflight(body: PreflightRequest):
             confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
             destination_column_types=dest_column_types,
             destination_column_nullability=dest_meta.get("column_nullability") or {},
+            destination_column_defaults=dest_meta.get("column_defaults") or {},
+            destination_identity_columns=dest_meta.get("identity_columns") or [],
+            destination_generated_columns=dest_meta.get("generated_columns") or [],
             destination_table_exists=dest_meta.get("table_exists"),
             destination_can_create=dest_meta.get("can_create_table"),
             destination_can_write=dest_meta.get("can_write"),
@@ -283,6 +308,7 @@ async def run_preflight(body: PreflightRequest):
             destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
             destination_unique_keys=dest_meta.get("unique_keys") or [],
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+            destination_config=dest_meta.get("_probe_cfg") or None,
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
             compliance_acknowledged=bool(body.compliance_acknowledged),
@@ -358,6 +384,28 @@ async def run_preflight(body: PreflightRequest):
                 status_code=500,
                 detail="Could not record acknowledgment audit event — acknowledgment not accepted",
             ) from exc
+    dest_identity = dest_meta.get("destination_identity")
+    if isinstance(dest_identity, dict) and dest_identity.get("database"):
+        # Show the effective destination before Execute — the write must never be
+        # the first place the operator learns which value won.
+        result["destination_identity"] = dest_identity
+        if dest_identity.get("conflict") and dest_identity.get("note"):
+            bucket = result.setdefault("warnings", [])
+            note = str(dest_identity["note"])
+            if note not in bucket:
+                bucket.append(note)
+    if source_type_drift:
+        # The operator's Map rows disagreed with the live source. Gates already
+        # ran on the live truth — say so instead of silently rescoring.
+        result["source_schema_drift"] = source_type_drift
+        bucket = result.setdefault("warnings", [])
+        for d in source_type_drift:
+            note = (
+                f"Source type re-read from live connector: {d['column']} "
+                f"{d['declared']} → {d['live']} (Map stamp was stale)"
+            )
+            if note not in bucket:
+                bucket.append(note)
     # Advisory catalog honesty from destination introspect (warn-only).
     for w in dest_meta.get("warnings") or dest_meta.get("schema_warnings") or []:
         note = str(w).strip()

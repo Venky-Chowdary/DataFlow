@@ -128,6 +128,12 @@ class ScheduleResponse(BaseModel):
     last_job_id: Optional[str] = None
     last_status: Optional[str] = None
     run_count: int = 0
+    # A retry owed after a failed attempt, and cadence windows that elapsed with
+    # no run: both are invisible from run_count alone.
+    retry_at: Optional[str] = None
+    retry_attempt: int = 0
+    missed_window_count: int = 0
+    last_missed_windows: int = 0
     running: bool = False
     created_at: str
     # Pipeline Detail needs schema map without a second Transfer Studio hop.
@@ -176,6 +182,10 @@ class ScheduleSummaryResponse(BaseModel):
     last_job_id: Optional[str] = None
     last_status: Optional[str] = None
     run_count: int = 0
+    retry_at: Optional[str] = None
+    retry_attempt: int = 0
+    missed_window_count: int = 0
+    last_missed_windows: int = 0
     running: bool = False
     created_at: str
     mapping_count: int = 0

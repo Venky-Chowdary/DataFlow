@@ -135,6 +135,29 @@ export interface CdcStreamHealth {
   error?: string | null;
 }
 
+/**
+ * Server-side cutover window, projected only from throughput the engine
+ * actually persisted. When `available` is false, `reason` says why — the UI
+ * must show that reason rather than inventing a number.
+ */
+export interface RuntimeEstimate {
+  available: boolean;
+  reason?: string;
+  basis?: string;
+  rows_total?: number | null;
+  rows_done?: number;
+  rows_remaining?: number | null;
+  rows_per_second_p50?: number | null;
+  rows_per_second_p10?: number | null;
+  remaining_seconds_p50?: number | null;
+  remaining_seconds_p90?: number | null;
+  finishes_at_p50?: string;
+  finishes_at_p90?: string;
+  intervals_observed?: number;
+  runs_observed?: number;
+  notes?: string[];
+}
+
 export interface TransferJob {
   _id: string;
   /** User-editable display name (defaults to source → dest on create). */
@@ -148,6 +171,7 @@ export interface TransferJob {
   records_processed: number;
   created_at: string;
   total_rows?: number;
+  runtime_estimate?: RuntimeEstimate;
   progress_pct?: number;
   /** True when job has no finite row denominator (e.g. continuous CDC). */
   progress_indeterminate?: boolean;

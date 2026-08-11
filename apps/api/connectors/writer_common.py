@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from services.brand_env import getenv_brand
 import re
@@ -12,7 +13,7 @@ from typing import Any
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
-from services.transform_resolver import resolve_transform
+from services.transform_resolver import LiveDestTypes, resolve_transform
 from services.value_serializer import SQL_NULL_SENTINEL
 
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
@@ -22,6 +23,8 @@ from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical h
     require_safe_identifier,
     sanitize_identifier,
 )
+
+logger = logging.getLogger(__name__)
 
 # Configurable batch size — default 20 000 rows per commit (enterprise scale)
 CHUNK_SIZE = int(getenv_brand("CHUNK_SIZE", "20000"))
@@ -264,6 +267,61 @@ def resolve_writer_backfill(
     )
 
 
+def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
+    """True when ``target_type`` is an approved ceiling, not a catalog echo.
+
+    Map stamps a ``target_type`` for every bound column, including the ones it
+    merely read out of the destination catalog. Treating that echo as an
+    operator decision freezes the column: a source that drifted wider then
+    quarantines every row as "would truncate on write" while the ALTER that
+    would fix it is refused as widening past the Map stamp. Only an operator
+    edit (or a stamp with no recorded catalog provenance) is a real ceiling.
+    """
+    if not mapping:
+        return False
+    if not str(mapping.get("target_type") or mapping.get("dest_type") or "").strip():
+        return False
+    if mapping.get("user_override") or mapping.get("userOverride"):
+        return True
+    origin = str(mapping.get("target_type_origin") or "").strip().lower()
+    return origin != "destination_catalog"
+
+
+def effective_dest_types_under_backfill(
+    dest_types: dict[str, str],
+    mappings: list[dict[str, Any]] | None,
+    *,
+    backfill: bool,
+) -> dict[str, str]:
+    """Resolve the carriers a backfill write will actually land against.
+
+    Under backfill the writer widens a drifted column to the source's declared
+    type before inserting, so any consumer that judges the same rows against
+    the pre-drift Map stamp (Gate-8 fingerprints most of all) reaches a
+    different verdict than the write: the digest is taken over quarantined or
+    truncated cells the destination never saw, and reconciliation reports a
+    checksum mismatch on a load that landed correctly.
+    """
+    if not backfill or not mappings:
+        return dict(dest_types or {})
+    from connectors.schema_drift import is_wider_type
+
+    out = dict(dest_types or {})
+    for mapping in mappings:
+        tgt = str(mapping.get("target") or "").strip()
+        if not tgt or tgt not in out:
+            continue
+        if stamp_is_operator_ceiling(mapping):
+            continue
+        source_type = str(mapping.get("source_type") or "").strip()
+        current = str(out.get(tgt) or "").strip()
+        if not source_type or not current:
+            continue
+        if is_wider_type(current, source_type):
+            out[tgt] = source_type
+    return out
+
+
 def desired_types_honoring_map_stamps(
     *,
     target_cols: list[str],
@@ -309,7 +367,7 @@ def desired_types_honoring_map_stamps(
         if explicit_columns is not None:
             is_explicit = col in explicit_columns
         else:
-            is_explicit = bool(str(mapping.get("target_type") or "").strip())
+            is_explicit = stamp_is_operator_ceiling(mapping)
         if is_explicit:
             if candidate and is_wider_type(ceiling, candidate):
                 refusals.append(
@@ -671,8 +729,8 @@ def dedupe_rows(
     return list(seen.values())
 
 
-# Destination metadata column for CDC monotonic apply (PK + LSN guard).
-DF_LSN_COL = "_df_lsn"
+# Destination metadata column for CDC monotonic apply — owned by lsn_guards.
+from connectors.lsn_guards import DF_LSN_COL  # noqa: E402
 
 
 def null_safe_merge_on(
@@ -803,581 +861,24 @@ def vector_gate8_meta(
     return gate8_writer_meta(records, cols, ids)
 
 
-def lsn_family(lsn: Any) -> str:
-    """Return CDC stamp family for LSN-guard compares (Debezium-class).
-
-    Families: ``empty``, ``pg_wal``, ``mysql_binlog``, ``mysql_gtid``,
-    ``oracle_scn``, ``mongo_resume``, ``mssql_lsn``, ``numeric_version``,
-    ``opaque``. Cross-family compares are incomparable — never invent
-    ``newer`` across dialects (silent regression). Oracle SCN must not share
-    ``numeric_version`` with SQL Server CT (bare integers collide).
-    """
-    if lsn is None:
-        return "empty"
-    text = str(lsn).strip()
-    if not text:
-        return "empty"
-    lower = text.lower()
-    if lower.startswith("gtid:"):
-        return "mysql_gtid"
-    if lower.startswith("scn:"):
-        return "oracle_scn"
-    if lower.startswith("mongo:"):
-        return "mongo_resume"
-    # Postgres WAL LSN: hex/hex
-    if "/" in text:
-        hi, _, lo = text.partition("/")
-        if hi and lo and all(c in "0123456789abcdefABCDEF" for c in hi + lo):
-            return "pg_wal"
-    # MySQL binlog file:pos
-    if ":" in text:
-        file_name, _, pos = text.rpartition(":")
-        if file_name and pos.isdigit():
-            return "mysql_binlog"
-    # SQL Server binary LSN hex (0x… or long hex)
-    if lower.startswith("0x") and all(c in "0123456789abcdef" for c in lower[2:]):
-        return "mssql_lsn"
-    if len(text) >= 10 and all(c in "0123456789abcdefABCDEF" for c in text) and not text.isdigit():
-        return "mssql_lsn"
-    if text.isdigit():
-        return "numeric_version"
-    return "opaque"
-
-
-def lsn_sort_key(lsn: Any) -> tuple:
-    """Return a sortable key for PG ``hi/lo``, MySQL ``file:pos``, versions, or opaque tokens.
-
-    Kind order is only valid **within** the same ``lsn_family``. Use
-    ``compare_lsn`` for guards — it refuses cross-family invent.
-    """
-    if lsn is None:
-        return (0, -1, -1, "")
-    text = str(lsn).strip()
-    if not text:
-        return (0, -1, -1, "")
-    lower = text.lower()
-    if lower.startswith("scn:"):
-        body = text.split(":", 1)[1].strip()
-        try:
-            return (1, int(body), 0, "")
-        except (TypeError, ValueError):
-            return (0, 0, 0, body)
-    if lower.startswith("mongo:"):
-        return (0, 0, 0, text.split(":", 1)[1])
-    # Postgres WAL LSN: hex/hex (reject paths that look like URLs).
-    if "/" in text and not lower.startswith("gtid:"):
-        hi, _, lo = text.partition("/")
-        if hi and lo and all(c in "0123456789abcdefABCDEF" for c in hi + lo):
-            try:
-                return (3, int(hi, 16), int(lo, 16), "")
-            except ValueError:
-                pass
-    # MySQL binlog file:pos (pos may already be zero-padded from extract_cdc_lsn).
-    if ":" in text and not lower.startswith("gtid:"):
-        file_name, _, pos = text.rpartition(":")
-        if file_name and pos.isdigit():
-            return (2, file_name, int(pos), "")
-    # Zero-padded / numeric versions (SQL Server CT, etc.).
-    if text.isdigit():
-        return (1, int(text), 0, "")
-    return (0, 0, 0, text)
-
-
-def compare_lsn(left: Any, right: Any) -> int:
-    """Compare two LSN-like values. Returns -1, 0, or 1.
-
-    Same-family stamps compare numerically/lexically. Cross-family pairs are
-    **incomparable** and return ``0`` so LSN guards refuse invent overwrite
-    (Debezium at-least-once + PK high-water-mark class). Empty is older than
-    any concrete stamp.
-    """
-    left_empty = left is None or str(left).strip() == ""
-    right_empty = right is None or str(right).strip() == ""
-    if left_empty and right_empty:
-        return 0
-    if left_empty:
-        return -1
-    if right_empty:
-        return 1
-    fa, fb = lsn_family(left), lsn_family(right)
-    if fa != fb:
-        return 0
-    a, b = lsn_sort_key(left), lsn_sort_key(right)
-    if a < b:
-        return -1
-    if a > b:
-        return 1
-    return 0
-
-
-def lsn_is_newer(incoming: Any, existing: Any) -> bool:
-    """True when ``incoming`` should replace ``existing`` under at-least-once CDC.
-
-    Requires a strictly greater same-family stamp. Equal and cross-family are
-    not newer (idempotent redelivery / refuse invent).
-    """
-    if existing is None or str(existing).strip() == "":
-        return True
-    if incoming is None or str(incoming).strip() == "":
-        return False
-    return compare_lsn(incoming, existing) > 0
-
-
-def parse_mysql_gtid_set(gtid_set: Any) -> dict[str, list[tuple[int, int]]]:
-    """Parse MySQL ``gtid_executed`` into ``{uuid: [(start, end), ...]}``.
-
-    Research: Debezium read-only incremental snapshots use executed GTID sets
-    as low/high watermarks (DBZ-3577). Intervals are inclusive.
-    """
-    text = str(gtid_set or "").strip()
-    if text.lower().startswith("gtid:"):
-        text = text[5:].strip()
-    out: dict[str, list[tuple[int, int]]] = {}
-    if not text:
-        return out
-    for chunk in text.replace("\n", ",").split(","):
-        part = chunk.strip()
-        if not part or ":" not in part:
-            continue
-        uuid, _, ranges = part.partition(":")
-        uuid = uuid.strip()
-        if not uuid:
-            continue
-        intervals: list[tuple[int, int]] = []
-        for rng in ranges.split(":"):
-            rng = rng.strip()
-            if not rng:
-                continue
-            if "-" in rng:
-                a, _, b = rng.partition("-")
-                try:
-                    start, end = int(a), int(b)
-                except ValueError:
-                    continue
-                if end < start:
-                    start, end = end, start
-                intervals.append((start, end))
-            else:
-                try:
-                    n = int(rng)
-                except ValueError:
-                    continue
-                intervals.append((n, n))
-        if intervals:
-            out.setdefault(uuid, []).extend(intervals)
-    return out
-
-
-def gtid_set_contains(haystack: Any, needle: Any) -> bool:
-    """True when every GTID interval in ``needle`` is covered by ``haystack``.
-
-    Used for Debezium-class watermark checks: high watermark contains a
-    streamed event's GTID ⇒ window can close. Cross-empty: empty needle is
-    contained; empty haystack contains nothing non-empty.
-    """
-    needle_map = parse_mysql_gtid_set(needle)
-    if not needle_map:
-        return True
-    hay = parse_mysql_gtid_set(haystack)
-    if not hay:
-        return False
-    for uuid, intervals in needle_map.items():
-        covers = hay.get(uuid) or []
-        if not covers:
-            return False
-        for start, end in intervals:
-            for n in range(start, end + 1):
-                if not any(a <= n <= b for a, b in covers):
-                    return False
-    return True
-
-
-def gtid_watermark_window_closed(
-    *,
-    low: Any,
-    high: Any,
-    event_gtid: Any = None,
-) -> bool:
-    """True when read-only incremental snapshot GTID window can close.
-
-    Research: Debezium DBZ-3577 — executed GTID set as low/high watermarks.
-    Window closes when ``high`` contains ``low`` (and optional event GTID).
-    Never invent closed from lexicographic string order.
-    """
-    if not gtid_set_contains(high, low):
-        return False
-    if event_gtid is None or str(event_gtid).strip() == "":
-        return True
-    return gtid_set_contains(high, event_gtid)
-
-
-def dedupe_rows_by_pk_and_lsn(
-    rows: list[tuple],
-    conflict_columns: list[str],
-    target_cols: list[str],
-    *,
-    lsn_column: str = DF_LSN_COL,
-) -> list[tuple]:
-    """Keep the highest-LSN row per PK; fall back to last-wins when LSN absent."""
-    if not conflict_columns or not rows:
-        return rows
-    if lsn_column not in target_cols:
-        return dedupe_rows(rows, conflict_columns, target_cols)
-    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
-    if not conflict:
-        return rows
-    indices = [target_cols.index(c) for c in conflict]
-    lsn_idx = target_cols.index(lsn_column)
-    best: dict[tuple, tuple] = {}
-    for row in rows:
-        key = tuple(row[i] for i in indices)
-        prev = best.get(key)
-        if prev is None or compare_lsn(row[lsn_idx], prev[lsn_idx]) >= 0:
-            best[key] = row
-    return list(best.values())
-
-
-def _format_file_pos_lsn(file_name: str, pos: Any) -> str:
-    """Format file:pos LSN for downstream SQL guards.
-
-    MySQL binlog files use zero-padded numeric suffixes (e.g. ``mysql-bin.000003``);
-    for those we zero-pad the position so lexicographic text ordering stays
-    monotonic.  For unpadded file names we emit the plain integer position so
-    unit-test fixtures like ``bin.1:9`` stay readable.
-    """
-    try:
-        int_pos = int(pos)
-    except (TypeError, ValueError):
-        return f"{file_name}:{pos}"
-    # Detect zero-padded numeric token in the file name (MySQL binlog style).
-    if re.search(r"(?<!\d)0\d+(?!\d)", file_name):
-        return f"{file_name}:{int_pos:020d}"
-    return f"{file_name}:{int_pos}"
-
-
-def extract_cdc_lsn(resume_token: Any) -> str | None:
-    """Pull a sortable LSN/position string from a CDC resume token.
-
-    Supports PG ``lsn=``, MySQL ``file:pos`` / ``gtid``, Mongo ``_data``,
-    SQL Server LSN hex, and Oracle SCN. Used to stamp ``_df_lsn`` for
-    at-least-once upsert guards (not exactly-once).
-    """
-    if resume_token is None:
-        return None
-    if isinstance(resume_token, dict):
-        # Nested PG hold / incremental wrappers
-        nested = resume_token.get("token")
-        if isinstance(nested, (dict, str)) and nested:
-            nested_lsn = extract_cdc_lsn(nested)
-            if nested_lsn:
-                return nested_lsn
-        file_name = resume_token.get("file") or resume_token.get("filename")
-        pos = resume_token.get("pos")
-        if file_name is not None and pos is not None:
-            return _format_file_pos_lsn(file_name, pos)
-        gtid = resume_token.get("gtid") or resume_token.get("gtid_set")
-        if gtid is not None and str(gtid).strip():
-            return f"gtid:{str(gtid).strip()}"
-        for key in ("lsn", "scn", "version", "position", "resume_lsn", "pos", "_data"):
-            value = resume_token.get(key)
-            if value is None or not str(value).strip():
-                continue
-            if key == "scn":
-                body = str(value).strip()
-                return body if body.lower().startswith("scn:") else f"scn:{body}"
-            if key == "_data":
-                body = str(value).strip()
-                return body if body.lower().startswith("mongo:") else f"mongo:{body}"
-            if key == "version":
-                try:
-                    return f"{int(value):020d}"
-                except (TypeError, ValueError):
-                    return str(value).strip()
-            return str(value).strip()
-        return None
-    text = str(resume_token).strip()
-    if not text or text in {"None", "null"}:
-        return None
-    # Bare MySQL file:pos strings — pad pos for lexicographic guards.
-    if ":" in text and not text.lower().startswith("gtid:") and "/" not in text and not text.startswith("{"):
-        file_name, _, pos = text.rpartition(":")
-        if file_name and pos.isdigit():
-            return _format_file_pos_lsn(file_name, pos)
-    # JSON CDC tokens (SQL Server native / CT, Oracle LogMiner, etc.)
-    if text.startswith("{"):
-        try:
-            data = json.loads(text)
-        except Exception:
-            data = None
-        if isinstance(data, dict):
-            kind = str(data.get("kind") or "")
-            if kind == "mssql-cdc":
-                lsn = data.get("lsn")
-                if lsn is not None and str(lsn).strip():
-                    return str(lsn).strip()
-            if kind in {"mssql-ct", "sqlserver-ct"}:
-                ver = data.get("version")
-                if ver is not None and str(ver).strip():
-                    # Zero-pad so lexicographic compare stays monotonic for versions.
-                    try:
-                        return f"{int(ver):020d}"
-                    except (TypeError, ValueError):
-                        return str(ver).strip()
-            nested = extract_cdc_lsn(data)
-            if nested:
-                return nested
-    if "lsn=" in text:
-        for part in text.split("|"):
-            if part.startswith("lsn=") and part[4:].strip():
-                return part[4:].strip()
-    return text
-
-
-def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
-    """WHERE fragment for ON CONFLICT when ``_df_lsn`` is present.
-
-    Real PG ``hi/lo`` LSNs use ``::pg_lsn``. Mixed CDC stamps use family-aware
-    compare for ``file:pos`` / numeric versions / opaque tokens — never invent
-    cross-family ``newer`` via bare text ``>`` (mirrors :func:`compare_lsn`).
-    """
-    pg_pat = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
-    num_pat = r"^[0-9]+$"
-    excl = f'EXCLUDED."{lsn_column}"'
-    dest = f'"{table_name}"."{lsn_column}"'
-    dest_c = f"COALESCE({dest}, '')"
-    both_filepos = (
-        f"({excl} LIKE '%%:%%' AND {excl} NOT LIKE 'gtid:%%' "
-        f"AND {dest_c} LIKE '%%:%%' AND {dest_c} NOT LIKE 'gtid:%%')"
-    )
-    # split_part is Postgres-native (same dialect as ON CONFLICT).
-    filepos_newer = (
-        f"(split_part({excl}, ':', 1) > split_part({dest}, ':', 1) "
-        f"OR (split_part({excl}, ':', 1) = split_part({dest}, ':', 1) "
-        f"AND NULLIF(split_part({excl}, ':', 2), '')::bigint "
-        f"> NULLIF(split_part({dest}, ':', 2), '')::bigint))"
-    )
-    both_numeric = f"({excl} ~ '{num_pat}' AND {dest_c} ~ '{num_pat}')"
-    # Opaque: neither side looks like pg / file:pos / all-digits.
-    both_opaque = (
-        f"({excl} !~ '{pg_pat}' AND {dest_c} !~ '{pg_pat}' "
-        f"AND NOT ({excl} LIKE '%%:%%' AND {excl} NOT LIKE 'gtid:%%') "
-        f"AND NOT ({dest_c} LIKE '%%:%%' AND {dest_c} NOT LIKE 'gtid:%%') "
-        f"AND {excl} !~ '{num_pat}' AND {dest_c} !~ '{num_pat}')"
-    )
-    return (
-        f"( "
-        f"({excl} ~ '{pg_pat}' AND {dest_c} ~ '{pg_pat}' "
-        f"AND {excl}::pg_lsn > COALESCE(NULLIF({dest}, '')::pg_lsn, '0/0'::pg_lsn)) "
-        f"OR "
-        f"({excl} !~ '{pg_pat}' AND ("
-        f"{dest} IS NULL OR {dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_numeric} AND {excl}::bigint > {dest}::bigint) "
-        f"OR ({both_opaque} AND {excl} > {dest})"
-        f")) "
-        f")"
-    )
-
-
-def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`") -> str:
-    """Boolean SQL: ``VALUES(lsn)`` is strictly newer than the destination cell.
-
-    Handles empty dest, ``file:pos`` (file then integer pos), numeric versions,
-    and opaque tokens — refuses cross-family invent. Used inside
-    ``ON DUPLICATE KEY UPDATE col=IF(<pred>, VALUES(col), col)``.
-    """
-    col = f"{quote}{lsn_column}{quote}"
-    inc = f"VALUES({col})"
-    dest = col
-    pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
-    num_re = r"^[0-9]+$"
-    both_filepos = (
-        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
-    filepos_newer = (
-        f"(SUBSTRING_INDEX({inc}, ':', 1) > SUBSTRING_INDEX({dest}, ':', 1) "
-        f"OR (SUBSTRING_INDEX({inc}, ':', 1) = SUBSTRING_INDEX({dest}, ':', 1) "
-        f"AND CAST(SUBSTRING_INDEX({inc}, ':', -1) AS UNSIGNED) "
-        f"> CAST(SUBSTRING_INDEX({dest}, ':', -1) AS UNSIGNED)))"
-    )
-    both_numeric = f"({inc} REGEXP '{num_re}' AND {dest} REGEXP '{num_re}')"
-    both_opaque = (
-        f"(NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%') "
-        f"AND NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%') "
-        f"AND {inc} NOT REGEXP '{pg_re}' AND {dest} NOT REGEXP '{pg_re}' "
-        f"AND {inc} NOT REGEXP '{num_re}' AND {dest} NOT REGEXP '{num_re}')"
-    )
-    return (
-        f"({dest} IS NULL OR {dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_numeric} AND CAST({inc} AS UNSIGNED) > CAST({dest} AS UNSIGNED)) "
-        f"OR ({both_opaque} AND {inc} > {dest}))"
-    )
-
-
-def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
-    """WHERE fragment for SQLite ``ON CONFLICT DO UPDATE``.
-
-    Family-aware for ``file:pos`` / numeric / opaque. PG ``hi/lo`` hex is
-    best-effort opaque text here (SQLite lacks portable hex→int); writers also
-    run :func:`filter_stale_lsn_rows` / :func:`compare_lsn` in Python before bind.
-    Cross-family pairs never invent ``newer`` via bare text ``>``.
-    """
-    excl = f'excluded."{lsn_column}"'
-    dest = f'"{table_name}"."{lsn_column}"'
-    both_filepos = (
-        f"({excl} LIKE '%:%' AND {excl} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
-    # instr/substr — portable without REGEXP extension.
-    excl_file = f"substr({excl}, 1, instr({excl}, ':') - 1)"
-    dest_file = f"substr({dest}, 1, instr({dest}, ':') - 1)"
-    excl_pos = f"CAST(substr({excl}, instr({excl}, ':') + 1) AS INTEGER)"
-    dest_pos = f"CAST(substr({dest}, instr({dest}, ':') + 1) AS INTEGER)"
-    filepos_newer = (
-        f"({excl_file} > {dest_file} "
-        f"OR ({excl_file} = {dest_file} AND {excl_pos} > {dest_pos}))"
-    )
-    # GLOB [0-9]* matches empty too — require at least one digit via length.
-    excl_numeric = (
-        f"({excl} GLOB '[0-9]*' AND {excl} NOT GLOB '*[^0-9]*' AND length({excl}) > 0)"
-    )
-    dest_numeric = (
-        f"({dest} GLOB '[0-9]*' AND {dest} NOT GLOB '*[^0-9]*' AND length({dest}) > 0)"
-    )
-    both_numeric = f"({excl_numeric} AND {dest_numeric})"
-    excl_opaque = (
-        f"(NOT ({excl} LIKE '%:%' AND {excl} NOT LIKE 'gtid:%') "
-        f"AND {excl} NOT LIKE '%/%' AND NOT {excl_numeric})"
-    )
-    dest_opaque = (
-        f"(NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%') "
-        f"AND {dest} NOT LIKE '%/%' AND NOT {dest_numeric})"
-    )
-    both_opaque = f"({excl_opaque} AND {dest_opaque})"
-    return (
-        f"({dest} IS NULL OR {dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_numeric} AND CAST({excl} AS INTEGER) > CAST({dest} AS INTEGER)) "
-        f"OR ({both_opaque} AND {excl} > {dest}))"
-    )
-
-
-def snowflake_lsn_match_predicate(
-    target_alias: str = "t",
-    source_alias: str = "s",
-    lsn_column: str = DF_LSN_COL,
-) -> str:
-    """MATCHED guard for Snowflake MERGE — mirrors :func:`compare_lsn` families.
-
-    Bare ``s.lsn > t.lsn`` mis-orders PG ``0/100`` vs ``0/20`` and invents
-    cross-family ``newer``. Parse pg / file:pos / numeric; opaque text only
-    when both sides are the same opaque family.
-    """
-    inc = f'{source_alias}."{lsn_column}"'
-    dest = f'COALESCE({target_alias}."{lsn_column}", \'\')'
-    pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
-    num_re = r"^[0-9]+$"
-    both_filepos = (
-        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
-    # SPLIT_PART(..., -1) = last segment (pos) in Snowflake.
-    filepos_newer = (
-        f"(SPLIT_PART({inc}, ':', 1) > SPLIT_PART({dest}, ':', 1) "
-        f"OR (SPLIT_PART({inc}, ':', 1) = SPLIT_PART({dest}, ':', 1) "
-        f"AND TRY_TO_NUMBER(SPLIT_PART({inc}, ':', -1)) "
-        f"> TRY_TO_NUMBER(SPLIT_PART({dest}, ':', -1))))"
-    )
-    both_pg = (
-        f"(REGEXP_LIKE({inc}, '{pg_re}') AND REGEXP_LIKE({dest}, '{pg_re}'))"
-    )
-    # Hex hi/lo via TO_NUMBER with hex format mask.
-    inc_hi = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 1), 'XXXXXXXXXXXXXXXX')"
-    dest_hi = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 1), 'XXXXXXXXXXXXXXXX')"
-    inc_lo = f"TRY_TO_NUMBER(SPLIT_PART({inc}, '/', 2), 'XXXXXXXXXXXXXXXX')"
-    dest_lo = f"TRY_TO_NUMBER(SPLIT_PART({dest}, '/', 2), 'XXXXXXXXXXXXXXXX')"
-    pg_newer = (
-        f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
-    )
-    both_numeric = (
-        f"(REGEXP_LIKE({inc}, '{num_re}') AND REGEXP_LIKE({dest}, '{num_re}'))"
-    )
-    inc_opaque = (
-        f"(NOT REGEXP_LIKE({inc}, '{pg_re}') AND NOT REGEXP_LIKE({inc}, '{num_re}') "
-        f"AND NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%'))"
-    )
-    dest_opaque = (
-        f"(NOT REGEXP_LIKE({dest}, '{pg_re}') AND NOT REGEXP_LIKE({dest}, '{num_re}') "
-        f"AND NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%'))"
-    )
-    both_opaque = f"({inc_opaque} AND {dest_opaque})"
-    return (
-        f"({dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_pg} AND {pg_newer}) "
-        f"OR ({both_numeric} AND TRY_TO_NUMBER({inc}) > TRY_TO_NUMBER({dest})) "
-        f"OR ({both_opaque} AND {inc} > {dest}))"
-    )
-
-
-def bigquery_lsn_match_predicate(
-    target_alias: str = "T",
-    source_alias: str = "S",
-    lsn_column: str = DF_LSN_COL,
-) -> str:
-    """MATCHED guard for BigQuery MERGE — mirrors :func:`compare_lsn` families.
-
-    Plain ``S.lsn > T.lsn`` is unsafe for PG ``hi/lo`` hex and invents
-    cross-family ``newer``. Parse pg / file:pos / numeric; opaque text only
-    within the same opaque family.
-    """
-    inc = f"{source_alias}.`{lsn_column}`"
-    dest = f"COALESCE({target_alias}.`{lsn_column}`, '')"
-    pg_re = r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$"
-    num_re = r"^[0-9]+$"
-    both_filepos = (
-        f"({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%' "
-        f"AND {dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%')"
-    )
-    filepos_newer = (
-        f"(SPLIT({inc}, ':')[OFFSET(0)] > SPLIT({dest}, ':')[OFFSET(0)] "
-        f"OR (SPLIT({inc}, ':')[OFFSET(0)] = SPLIT({dest}, ':')[OFFSET(0)] "
-        f"AND SAFE_CAST(ARRAY_REVERSE(SPLIT({inc}, ':'))[OFFSET(0)] AS INT64) "
-        f"> SAFE_CAST(ARRAY_REVERSE(SPLIT({dest}, ':'))[OFFSET(0)] AS INT64)))"
-    )
-    both_pg = (
-        f"(REGEXP_CONTAINS({inc}, r'{pg_re}') AND REGEXP_CONTAINS({dest}, r'{pg_re}'))"
-    )
-    inc_hi = f"SAFE_CAST(CONCAT('0x', SPLIT({inc}, '/')[OFFSET(0)]) AS INT64)"
-    dest_hi = f"SAFE_CAST(CONCAT('0x', SPLIT({dest}, '/')[OFFSET(0)]) AS INT64)"
-    inc_lo = f"SAFE_CAST(CONCAT('0x', SPLIT({inc}, '/')[OFFSET(1)]) AS INT64)"
-    dest_lo = f"SAFE_CAST(CONCAT('0x', SPLIT({dest}, '/')[OFFSET(1)]) AS INT64)"
-    pg_newer = (
-        f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
-    )
-    both_numeric = (
-        f"(REGEXP_CONTAINS({inc}, r'{num_re}') AND REGEXP_CONTAINS({dest}, r'{num_re}'))"
-    )
-    inc_opaque = (
-        f"(NOT REGEXP_CONTAINS({inc}, r'{pg_re}') "
-        f"AND NOT REGEXP_CONTAINS({inc}, r'{num_re}') "
-        f"AND NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%'))"
-    )
-    dest_opaque = (
-        f"(NOT REGEXP_CONTAINS({dest}, r'{pg_re}') "
-        f"AND NOT REGEXP_CONTAINS({dest}, r'{num_re}') "
-        f"AND NOT ({dest} LIKE '%:%' AND {dest} NOT LIKE 'gtid:%'))"
-    )
-    both_opaque = f"({inc_opaque} AND {dest_opaque})"
-    return (
-        f"({dest} = '' "
-        f"OR ({both_filepos} AND {filepos_newer}) "
-        f"OR ({both_pg} AND {pg_newer}) "
-        f"OR ({both_numeric} AND SAFE_CAST({inc} AS INT64) > SAFE_CAST({dest} AS INT64)) "
-        f"OR ({both_opaque} AND {inc} > {dest}))"
-    )
+# CDC LSN guards (compare / dedupe / dialect predicates) live in
+# ``connectors.lsn_guards``; re-exported for the historical import surface.
+from connectors.lsn_guards import (  # noqa: E402,F401 — re-export
+    bigquery_lsn_match_predicate,
+    compare_lsn,
+    dedupe_rows_by_pk_and_lsn,
+    extract_cdc_lsn,
+    gtid_set_contains,
+    gtid_watermark_window_closed,
+    lsn_family,
+    lsn_is_newer,
+    lsn_sort_key,
+    mysql_lsn_values_newer_sql,
+    parse_mysql_gtid_set,
+    postgres_lsn_update_guard_sql,
+    snowflake_lsn_match_predicate,
+    sqlite_lsn_update_guard_sql,
+)
 
 
 def transform_error_policy(
@@ -1412,6 +913,58 @@ def transform_error_policy(
         "primary writes require a Risk Contract NULL/COERCE policy or staging allow"
     )
     return "quarantine"
+
+
+def summarize_reject_findings(
+    rejected_details: list[dict[str, Any]] | None, *, limit: int = 3
+) -> str:
+    """Name the columns and reasons behind a refusal.
+
+    A bare "rejected 1 cell finding(s); strict error policy blocks partial
+    write" tells an operator nothing they can act on. Every refusal must carry
+    the offending column, the row, and the engine's own reason so the next
+    correct action (fix the mapping, widen the destination, allow quarantine)
+    is obvious from the run itself.
+    """
+    seen: list[str] = []
+    for d in rejected_details or []:
+        col = str(d.get("target") or d.get("column") or "").strip()
+        reason = " ".join(str(d.get("reason") or "").split())[:180]
+        if not col and not reason:
+            continue
+        row = d.get("row")
+        where = f"{col} (row {row})" if col and row else col or f"row {row}"
+        entry = f"{where}: {reason}" if reason else where
+        if entry not in seen:
+            seen.append(entry)
+        if len(seen) >= limit:
+            break
+    if not seen:
+        return ""
+    return " — " + "; ".join(seen)
+
+
+def _distinct_reject_rows(details: list[dict[str, Any]]) -> int:
+    """Count the distinct rows a finding list touches.
+
+    Writers key findings by whatever identifies a record on that sink, so ``row``
+    also arrives as a document id or a vector id. An ``int()`` on those raised
+    inside the refusal builder and turned a clean fail-closed refusal into an
+    unhandled ValueError; a non-numeric id still identifies one row.
+    """
+    rows: set[object] = set()
+    for detail in details:
+        raw = detail.get("row")
+        if raw is None or raw == "":
+            continue
+        try:
+            numeric = int(raw)
+        except (TypeError, ValueError):
+            rows.add(str(raw))
+            continue
+        if numeric > 0:
+            rows.add(numeric)
+    return len(rows)
 
 
 def reject_on_strict_policy(
@@ -1463,10 +1016,11 @@ def reject_on_strict_policy(
         # Details are per-cell findings; counting them as "rows" invented 28k
         # rejects on a 2k-row Excel load (operator panic / wrong Resume hint).
         cell_n = int(n or len(details))
-        row_n = len({int(d.get("row") or 0) for d in details if int(d.get("row") or 0) > 0})
+        row_n = _distinct_reject_rows(details)
         return (
             f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
             f"Migration Risk Contract abort policy blocks partial write{scope_note}"
+            f"{summarize_reject_findings(details)}"
         )
 
     if details and rejected_details_are_continue_contract_only(details):
@@ -1477,12 +1031,11 @@ def reject_on_strict_policy(
     if transform_error_policy(policy) == "fail":
         if details:
             cell_n = len(details)
-            row_n = len(
-                {int(d.get("row") or 0) for d in details if int(d.get("row") or 0) > 0}
-            )
+            row_n = _distinct_reject_rows(details)
             return (
                 f"{label} rejected {cell_n} cell finding(s) across {row_n or cell_n} row(s); "
                 "strict error policy blocks partial write"
+                f"{summarize_reject_findings(details)}"
             )
         if errs:
             return f"Transform errors: {'; '.join(errs[:3])}"
@@ -2362,6 +1915,10 @@ def resolve_studio_or_map_dest_types(
     polarity invent). Callers with an existing typed sink should rematerialize
     from live DDL after this helper; create-new / empty sinks must refuse
     ``error`` when Studio was incomplete.
+
+    The Studio branch returns ``LiveDestTypes`` (introspected physical carriers);
+    the Map branch returns a plain dict, because a create-new stamp only projects
+    what the DDL *will* invent. Transform resolution reads that difference.
     """
     from connectors.saas_common import merge_saas_live_types
 
@@ -2376,12 +1933,13 @@ def resolve_studio_or_map_dest_types(
             for k, v in studio.items()
             if k and str(v or "").strip()
         }
-        return merge_saas_live_types(
+        merged, err = merge_saas_live_types(
             live,
             list(target_cols or []),
             studio_types=None,
             product=product,
         )
+        return (merged if err else LiveDestTypes(merged)), err
     return (
         resolve_mapping_dest_types(
             target_cols,
@@ -2459,8 +2017,11 @@ def rematerialize_live_dest_types(
     target_cols: list[str],
     *,
     product: str,
-) -> dict[str, str] | None:
+) -> LiveDestTypes | None:
     """Live sink carriers only for rematerialize — never Map VARCHAR gap-fill.
+
+    The ``LiveDestTypes`` return type is load-bearing: it is how downstream
+    transform resolution tells a proven physical carrier from a Map projection.
 
     Returns ``None`` when ``physical`` is empty or does not cover every mapped
     column (caller must have fail-closed via ``require_physical`` / Studio).
@@ -2482,7 +2043,7 @@ def rematerialize_live_dest_types(
     )
     if err:
         return None
-    return merged
+    return LiveDestTypes(merged)
 
 
 def resolve_mapping_dest_types(
@@ -2727,6 +2288,10 @@ def fits_decimal(
     from services.value_serializer import is_missing_sentinel
 
     if is_missing_sentinel(value):
+        return True
+    from services.transform_engine import boolean_carrier_numeric_value
+
+    if boolean_carrier_numeric_value(value, precision, scale) is not None:
         return True
     try:
         text = str(value).strip()
@@ -3304,12 +2869,32 @@ def quarantine_unfit_booleans(
     return out
 
 
+def _mysql_timestamp_range_violation(
+    target_type: str, value: Any, *, dest_db: str = ""
+) -> bool:
+    """True for a MySQL ``TIMESTAMP`` cell outside the 1970..2038 epoch window."""
+    from services.type_system import _normalize_dest_db
+
+    if not dest_db or _normalize_dest_db(dest_db) != "mysql":
+        return False
+    from services.timezone_policy import (
+        is_mysql_timestamp_carrier,
+        mysql_timestamp_out_of_range,
+    )
+
+    if not is_mysql_timestamp_carrier(target_type):
+        return False
+    return mysql_timestamp_out_of_range(value)
+
+
 def quarantine_unfit_temporals(
     mapped_rows: list[tuple],
     target_cols: list[str],
     target_types: list[str],
     rejected_details: list[dict[str, Any]],
     policy: str,
+    *,
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out temporal cells that would invent NULL, lose FSP, or strip TZ.
 
@@ -3317,6 +2902,11 @@ def quarantine_unfit_temporals(
       Arrow / SQL bind parity)
     - ``TIME(6)`` → ``TIME(0)`` truncates fractional seconds
     - Offset-aware / ``Z`` wire into NTZ/DATETIME strips the offset (Airbyte invent)
+    - MySQL ``TIMESTAMP`` outside 1970..2038 — the carrier is an instant, but an
+      epoch-bounded one, so out-of-range values are held out rather than zeroed
+
+    ``dest_db`` decides bare ``TIMESTAMP`` polarity: on MySQL it is a UTC instant
+    carrier, so an offset-bearing wire is *not* a strip and must not quarantine.
     """
 
     from services.type_system import (
@@ -3334,7 +2924,10 @@ def quarantine_unfit_temporals(
         if logical not in {"date", "time", "datetime"}:
             continue
         check_fsp = parse_temporal_fractional_precision(typ) is not None
-        check_tz = logical == "datetime" and datetime_timezone_polarity(typ) == "ntz"
+        check_tz = (
+            logical == "datetime"
+            and datetime_timezone_polarity(typ, dest_db=dest_db) == "ntz"
+        )
         # Always include temporal columns so empty refuse runs even without FSP/TZ.
         temporal_cols.append((i, typ, check_fsp, check_tz))
     if not temporal_cols:
@@ -3360,6 +2953,12 @@ def quarantine_unfit_temporals(
                 reason = (
                     f"fractional seconds exceed destination {typ} "
                     "— quarantined (refuse silent truncate)"
+                )
+            elif _mysql_timestamp_range_violation(typ, raw, dest_db=dest_db):
+                reason = (
+                    f"value outside the MySQL TIMESTAMP epoch range for {typ} "
+                    "— quarantined; map to DATETIME(6) with a UTC-normalize "
+                    "contract to carry instants beyond 2038"
                 )
             elif check_tz and temporal_value_has_timezone(raw):
                 reason = (
@@ -3466,12 +3065,12 @@ def quarantine_currency_markers_into_numeric(
     return out
 
 
-def fits_integer(value: Any, type_str: str) -> bool:
+def fits_integer(value: Any, type_str: str, *, dest_db: str = "") -> bool:
     """True if value fits the signed/unsigned integer destination carrier."""
     from decimal import Decimal, InvalidOperation
     from services.type_system import integer_storage_bounds
 
-    bounds = integer_storage_bounds(type_str)
+    bounds = integer_storage_bounds(type_str, dest_db=dest_db)
     if bounds is None:
         return True
     if value is None:
@@ -3504,6 +3103,7 @@ def quarantine_unfit_integers(
     policy: str,
     *,
     dialect_label: str = "INTEGER",
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out / NULL cells that overflow signed/unsigned integer destinations.
 
@@ -3517,7 +3117,7 @@ def quarantine_unfit_integers(
     for i, typ in enumerate(target_types):
         if normalize_logical_type(typ) != "integer":
             continue
-        if integer_storage_bounds(typ) is None:
+        if integer_storage_bounds(typ, dest_db=dest_db) is None:
             continue
         int_cols.append((i, typ))
     if not int_cols:
@@ -3536,7 +3136,7 @@ def quarantine_unfit_integers(
 
             if is_missing_sentinel(cells[col_idx]):
                 continue
-            if fits_integer(cells[col_idx], typ):
+            if fits_integer(cells[col_idx], typ, dest_db=dest_db):
                 continue
             sample = cell_to_string(cells[col_idx])[:120]
             append_write_quarantine_detail(
@@ -4199,10 +3799,34 @@ def quarantine_unfit_json(
 
 
 def _infer_dest_db_from_dialect_label(dialect_label: str) -> str:
-    """Best-effort dest_db for bare DECIMAL/NUMERIC parse honesty."""
+    """Best-effort dest_db for bare DECIMAL/NUMERIC/INTEGER parse honesty.
+
+    Engines whose bare ``INTEGER``/``DECIMAL`` keyword is *not* the SQL-standard
+    32-bit / (38,x) carrier must be recognised here, otherwise the shared write
+    quarantine invents a bound the destination never enforces and holds out
+    perfectly writable rows (SQLite ``INTEGER`` is 8 bytes; document and object
+    sinks have no integer column at all).
+    """
     low = (dialect_label or "").strip().lower()
     if not low:
         return ""
+    for token, db in (
+        ("sqlite", "sqlite"),
+        ("mongo", "mongodb"),
+        ("dynamodb", "dynamodb"),
+        ("elasticsearch", "elasticsearch"),
+        ("opensearch", "elasticsearch"),
+        ("redis", "redis"),
+        ("kafka", "kafka"),
+        ("salesforce", "salesforce"),
+        ("hubspot", "hubspot"),
+        ("airtable", "airtable"),
+        ("notion", "notion"),
+    ):
+        if token in low:
+            return db
+    if low in {"s3", "gcs", "adls"}:
+        return low
     if "redshift" in low:
         return "redshift"
     if "postgres" in low or "cockroach" in low or "greenplum" in low:
@@ -4278,6 +3902,7 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=f"{label} INTEGER",
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_floats(
             mapped_rows,
@@ -5173,3 +4798,88 @@ def require_physical_types_for_existing_table(
                 "table (empty→NULL invent risk). Re-introspect or remap."
             )
     return None
+
+
+class IdentityInsertSession:
+    """SQL Server session that is allowed to write its own identity values.
+
+    Migrating a table means carrying the *keys*, not letting the destination
+    mint new ones: children reference the source's values. SQL Server refuses
+    an explicit value for an ``IDENTITY`` column unless the session opts in,
+    and the opt-in is per session and per table, so it must be released again —
+    a pooled connection left with ``IDENTITY_INSERT`` ON makes the *next*
+    table's load fail with an error that names the wrong table.
+    """
+
+    def __init__(self, conn: Any, qualified: str) -> None:
+        self._conn = conn
+        self._qualified = qualified
+        self._open = False
+
+    def open(self) -> None:
+        import sqlalchemy as sa
+
+        self._conn.execute(sa.text(f"SET IDENTITY_INSERT {self._qualified} ON"))
+        self._open = True
+
+    def close(self) -> None:
+        if not self._open:
+            return
+        import sqlalchemy as sa
+
+        self._open = False
+        try:
+            self._conn.execute(sa.text(f"SET IDENTITY_INSERT {self._qualified} OFF"))
+        except Exception as exc:  # pragma: no cover - connection already dead
+            logger.warning(
+                "could not release IDENTITY_INSERT on %s: %s", self._qualified, exc
+            )
+
+
+def sqlserver_identity_columns(conn: Any, schema: str, table: str) -> set[str]:
+    """Identity columns of one SQL Server table, read from ``sys.identity_columns``."""
+    import sqlalchemy as sa
+
+    rows = conn.execute(
+        sa.text(
+            "SELECT c.name FROM sys.identity_columns c "
+            "JOIN sys.tables t ON t.object_id = c.object_id "
+            "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+            "WHERE t.name = :t AND s.name = COALESCE(:s, SCHEMA_NAME())"
+        ),
+        {"t": str(table), "s": str(schema) if schema else None},
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def begin_identity_insert(
+    conn: Any,
+    *,
+    dialect_name: str,
+    schema: str,
+    table: str,
+    target_cols: list[str],
+) -> IdentityInsertSession | None:
+    """Open an identity-insert session when the load supplies the key itself.
+
+    Returns ``None`` when the destination is not SQL Server, when the table has
+    no identity column, or when no identity column is among the mapped columns
+    (the generator fills it and there is nothing to override). Probe failures
+    return ``None`` too: the write then fails loudly on the first row rather
+    than silently letting the destination renumber the keys.
+    """
+    if (dialect_name or "").lower() not in {"mssql", "sqlserver"}:
+        return None
+    try:
+        identity_cols = sqlserver_identity_columns(conn, schema, table)
+    except Exception as exc:
+        logger.debug("identity column probe failed for %s: %s", table, exc)
+        return None
+    folded = {c.casefold() for c in identity_cols}
+    if not any(str(c).casefold() in folded for c in target_cols):
+        return None
+    session = IdentityInsertSession(
+        conn, quote_table_ref(table, schema=schema, dialect="sqlserver")
+    )
+    session.open()
+    return session

@@ -10,6 +10,9 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any
 
+from services.column_case import column_type_or_none
+from services.mapping_constraints import is_intentional_omit
+
 
 class InventContext(str, Enum):
     """Why invent is being asked — drives DDL authority."""
@@ -93,7 +96,13 @@ def invent_dest_type(
     # CREATE_NEW invent authority is create_new_mapping_target_type alone
     # (width-preserving + bare-logical 64-bit floor). Never re-widen here —
     # a second BIGINT floor made Map INT/SMALLINT disagree with Validate stamp.
-    stamped = create_new_mapping_target_type(src, db, samples=samples)
+    # Source engine (when a transfer bound one) only widens the stamp: a source
+    # that can emit any code point must not land on a code-page VARCHAR.
+    from services.source_engine_scope import active_source_engine
+
+    stamped = create_new_mapping_target_type(
+        src, db, samples=samples, source_db=active_source_engine()
+    )
     if stamped:
         return str(stamped)
     return str(ddl_type(db, src) or src or "TEXT")
@@ -162,6 +171,32 @@ def _is_source_as_dest_bootstrap(stamped: str, src: str) -> bool:
     return True
 
 
+# Marks a ``target_type`` this Kernel invented (vs. an operator/Studio stamp).
+_KERNEL_INVENT = "kernel_invent"
+
+
+def _kernel_invent_is_stale(row: dict[str, Any], src: str) -> bool:
+    """True when our own earlier invent used a now-superseded source type.
+
+    Validate stamps before profiling has typed the payload, so every column of
+    a CSV/Parquet/SaaS source looks like TEXT and invents VARCHAR. When the
+    profiled type later arrives (DECIMAL(9,4)), that stale VARCHAR would create
+    the destination column *and* then be reported as a DECIMAL→VARCHAR fidelity
+    collapse — a blocker the product inflicted on itself. Only Kernel-invented
+    stamps are refreshed; an operator/Studio stamp is never overridden.
+    """
+    if str(row.get("target_type_provenance") or "") != _KERNEL_INVENT:
+        return False
+    prior = str(row.get("target_type_invented_from") or "").strip()
+    now = (src or "").strip()
+    if not prior or not now or prior == now:
+        return False
+    from services.type_system import normalize_logical_type
+
+    changed: bool = normalize_logical_type(prior) != normalize_logical_type(now)
+    return changed
+
+
 def stamp_additive_mapping_types(
     mappings: list[dict[str, Any]] | None,
     *,
@@ -209,14 +244,7 @@ def stamp_additive_mapping_types(
             row.pop("dest_type", None)
             row["create_new"] = False
             continue
-        if row.get("intentional_omit") or row.get("intentionalOmit"):
-            continue
-        if str(row.get("transform") or "").lower() in {
-            "omit",
-            "intentional_omit",
-            "drop",
-            "exclude",
-        }:
+        if is_intentional_omit(row):
             continue
         tgt = str(row.get("target") or "").strip()
         if not tgt:
@@ -241,9 +269,12 @@ def stamp_additive_mapping_types(
             or backfill_new_fields
             or create_table_authority
         )
+        # Case-tolerant: Oracle/Snowflake catalogs fold to upper case while the
+        # mapping carries the operator's case — an exact-key miss used to fall
+        # through to "TEXT" and invent a text column for live NUMBER(12,2).
         src = (
             str(row.get("source_type") or "").strip()
-            or str(src_types.get(str(row.get("source") or "")) or "").strip()
+            or column_type_or_none(src_types, str(row.get("source") or ""))
             or "TEXT"
         )
         # Source-as-dest FE bootstrap (target_type == source_type) is NOT Kernel
@@ -252,7 +283,8 @@ def stamp_additive_mapping_types(
         # same token as physical INT32 ``INTEGER``, which would re-invent a
         # 32-bit column and undo never-narrower invent (audit ITEM 1).
         source_identity_stamp = _is_source_as_dest_bootstrap(stamped, src)
-        if stamped and not (is_create and source_identity_stamp):
+        stale_invent = _kernel_invent_is_stale(row, src)
+        if stamped and not (is_create and (source_identity_stamp or stale_invent)):
             if is_create and not row.get("create_new"):
                 row["create_new"] = True
             continue
@@ -275,6 +307,10 @@ def stamp_additive_mapping_types(
             unstamped.append(tgt)
             continue
         row["target_type"] = str(invented)
+        # Provenance so a later pass with a richer source type can re-invent
+        # (first Validate pass often sees every file column as TEXT).
+        row["target_type_provenance"] = _KERNEL_INVENT
+        row["target_type_invented_from"] = src
         row["create_new"] = True
         if not strategy:
             row["assignment_strategy"] = "create_compatible_new"

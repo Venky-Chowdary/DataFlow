@@ -13,6 +13,7 @@ import json
 import math
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation, Overflow
 from enum import Enum
@@ -57,6 +58,32 @@ DF_MISSING_SENTINEL = "__DF_MISSING__"
 
 def is_missing_sentinel(value: Any) -> bool:
     return value is Missing or value == DF_MISSING_SENTINEL
+
+
+# Wire spellings that mean "no value here" — a DuckDB reader adds its own.
+NULL_WIRE_SENTINELS: frozenset[str] = frozenset(
+    {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL, "__df_ddb_null__"}
+)
+
+
+def is_null_evidence(value: Any) -> bool:
+    """True when a cell carries no type evidence (NULL / absent / blank)."""
+    if value is None or value is Missing:
+        return True
+    text = str(value).strip()
+    return not text or text in NULL_WIRE_SENTINELS
+
+
+def evidence_samples(values: Any, *, limit: int | None = None) -> list[str]:
+    """Sample values usable as type evidence.
+
+    A NULL is the *absence* of evidence, never evidence of text. Feeding the
+    wire sentinel to inference made an all-NULL ``DECIMAL(7,3)`` column look
+    like non-numeric strings, so Map invented a lossy ``<col>_text`` LONGTEXT
+    destination for a column whose declared type was perfectly representable.
+    """
+    out = [str(v).strip() for v in (values or []) if not is_null_evidence(v)]
+    return out[:limit] if limit else out
 
 
 def public_mapped_cell(value: Any, *, dense_null: bool = False) -> Any:
@@ -272,6 +299,33 @@ def _json_default(value: Any) -> Any:
 
     # Last resort: never emit repr() artifacts such as "b'...'".
     return str(value)
+
+
+def project_row_cells(
+    row: Mapping[str, Any], headers: list[str], *, preserve_sql_null: bool = False
+) -> list[str]:
+    """Project a record onto ``headers`` — absent key ≠ empty string.
+
+    Schemaless and sparse sources (Mongo documents, DynamoDB items, NDJSON,
+    API payloads) omit keys entirely. Defaulting those to ``""`` made Validate
+    report ``Empty value cannot coerce to decimal`` for a field the document
+    simply does not carry, blocking a transfer whose write path would have
+    omitted the key (sparse upsert) or written SQL NULL (dense insert). The
+    missing sentinel keeps that distinction all the way to the writer.
+    """
+    out: list[str] = []
+    for h in headers:
+        if h not in row:
+            out.append(DF_MISSING_SENTINEL)
+            continue
+        cell = row[h]
+        # ``cell_to_string`` flattens the sentinel to "" so exports never leak
+        # it; a reader that already marked the field absent must keep it here.
+        if is_missing_sentinel(cell):
+            out.append(DF_MISSING_SENTINEL)
+            continue
+        out.append(cell_to_string(cell, preserve_sql_null=preserve_sql_null))
+    return out
 
 
 def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:

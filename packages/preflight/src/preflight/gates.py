@@ -517,6 +517,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         )
         if not lossy and nested_collapse:
             lossy = True
+        # ObjectId → unbounded TEXT keeps the hex value but the destination no
+        # longer enforces the ObjectId domain — Accept risk, never silent green.
+        objectid_text_domain = False
+        try:
+            from services.specialty_fit import objectid_text_domain_polarity
+
+            objectid_text_domain = objectid_text_domain_polarity(
+                source_col.inferred_type, target.inferred_type
+            )
+        except ImportError:
+            objectid_text_domain = False
+        if objectid_text_domain:
+            lossy = True
         # Coercion probe may block wire values even when declared types look
         # safe (naive DATETIME→TIMESTAMPTZ). Never skip those columns.
         probe_early = by_source.get(m.source) if value_aware else None
@@ -644,7 +657,13 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         document_collapse = bool(
             is_nested_document_collapse
             and is_nested_document_collapse(
-                source_col.inferred_type, target.inferred_type
+                source_col.inferred_type,
+                target.inferred_type,
+                # Without the dialect the helper fails closed, so ARRAY/MAP into
+                # the destination's own document wire (Snowflake VARIANT, MySQL
+                # JSON, PG JSONB) was reported as field-DDL loss and blocked
+                # every schemaless source that had no struct_policy set.
+                dest_db=dest_kind,
             )
         )
         field_shape_loss = bool(nested_collapse and not document_collapse)
@@ -711,18 +730,24 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         # ObjectId→bare TEXT/VARCHAR: hex wire is value-lossless; domain polarity
         # still needs Accept risk (not a silent hard-block on existing PG TEXT).
         objectid_text_polarity = False
-        if fidelity_collapse and not field_shape_loss:
+        if not field_shape_loss:
             try:
                 from services.type_system import (
                     specialty_carrier_base,
                     specialty_carrier_would_collapse,
                 )
 
-                objectid_text_polarity = bool(
-                    specialty_carrier_would_collapse(
-                        source_col.inferred_type, target.inferred_type
+                objectid_source = (
+                    specialty_carrier_base(source_col.inferred_type) == "OBJECTID"
+                )
+                objectid_text_polarity = objectid_source and (
+                    (
+                        fidelity_collapse
+                        and specialty_carrier_would_collapse(
+                            source_col.inferred_type, target.inferred_type
+                        )
                     )
-                    and specialty_carrier_base(source_col.inferred_type) == "OBJECTID"
+                    or objectid_text_domain
                 )
             except ImportError:
                 objectid_text_polarity = False
@@ -1655,6 +1680,78 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             _scope(
                 {"scrubbed_drift_issues": scrubbed, "host_flag_ignored": True},
                 note="Drift-only host flag ignored",
+            ),
+        )
+
+    # Append into a table that already enforces this key: the write aborts on the
+    # first stored key, so the verdict belongs here, not in a duplicate-key error
+    # after Execute has started.
+    collision = getattr(ctx, "destination_collision", None)
+    if collision is not None and getattr(collision, "findings", None):
+        found = list(collision.findings)
+        key = getattr(collision, "key_column", "") or "identity key"
+        if getattr(collision, "idempotent_apply", False):
+            # Resume: the overlap is the interrupted batch being re-delivered and
+            # the writer resolves it on the enforced key. Blocking here leaves a
+            # half-loaded destination with no forward path.
+            return _pass(
+                GateId.G6_TARGET_DDL,
+                (
+                    f"Resume re-delivery overlaps {len(found)} existing destination "
+                    f"key(s) on {key} — applied idempotently on the enforced key "
+                    "(at-least-once read, key-resolved write)."
+                ),
+                start,
+                _scope(
+                    {
+                        "sample_collisions": found[:5],
+                        "primary_key": {"target": key},
+                        "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+                        "rule_id": "g6_target_ddl.append_key_collision_resume",
+                        "probe_status": getattr(collision, "status", ""),
+                        "values_probed": getattr(collision, "values_probed", 0),
+                        "delivery": "at_least_once_idempotent_apply",
+                        "delta_scope": getattr(collision, "delta_scope", {}) or {},
+                    },
+                    coverage="sample",
+                    note="Destination key collision probe on resumed append batch",
+                ),
+            )
+        delta_scope = getattr(collision, "delta_scope", {}) or {}
+        if delta_scope:
+            # The collision is inside the delta this cursor will re-read, so the
+            # operator needs to know the key returns with a newer cursor value —
+            # an append cannot store it twice.
+            cause = (
+                f"The rows after watermark {delta_scope.get('watermark')} on "
+                f"{delta_scope.get('cursor_column')} carry {len(found)} key(s) the "
+                f"destination already stores on {key}, so an append aborts. "
+                "Switch this sync to upsert/merge (key-resolved), which is how an "
+                "updated row is meant to land."
+            )
+        else:
+            cause = (
+                f"Append would duplicate {len(found)} existing destination key(s) on "
+                f"{key} — the destination enforces uniqueness, so the insert aborts. "
+                "Switch this sync to upsert/merge (key-resolved) or overwrite."
+            )
+        return _block(
+            GateId.G6_TARGET_DDL,
+            cause,
+            start,
+            _scope(
+                {
+                    "sample_collisions": found[:5],
+                    "primary_key": {"target": key},
+                    "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+                    "rule_id": "g6_target_ddl.append_key_collision",
+                    "remediation_kind": "change_sync_mode",
+                    "probe_status": getattr(collision, "status", ""),
+                    "values_probed": getattr(collision, "values_probed", 0),
+                    "delta_scope": delta_scope,
+                },
+                coverage="sample",
+                note="Destination key collision probe on append batch",
             ),
         )
 

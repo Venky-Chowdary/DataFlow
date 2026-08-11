@@ -9,6 +9,7 @@ from services.decision_kernel import (
     is_precision_collapse_coercion,
     normalize_logical_type,
 )
+from services.mapping_constraints import write_mappings
 from services.type_system import (
     resolve_mapping_target_type,
     specialty_carrier_base,
@@ -49,7 +50,10 @@ def validate_mapping_coercions(
     balanced = mode in {"balanced", "review"}
     floor = max(0.0, min(1.0, float(confidence_floor)))
     issues: list[dict[str, Any]] = []
-    for m in mappings:
+    # A declared omission has no destination type to coerce into; reading its
+    # empty target as "pending Studio/Map stamp" turned the operator's recorded
+    # decision into a data-integrity blocker.
+    for m in write_mappings(mappings):
         src = m.get("source", "")
         tgt = m.get("target", "")
         src_type = source_types.get(src, "VARCHAR")
@@ -119,10 +123,13 @@ def validate_mapping_coercions(
             and tgt_logical in {"string", "text"}
             and not uuid_capacity_string_carrier(tgt_type)
         )
+        locked_block = False
         if type_locked and (src_logical != tgt_logical or wire_ok):
             severity = "block"
+            locked_block = True
         elif type_locked and precision_collapse:
             severity = "block"
+            locked_block = True
         elif uuid_string_create_new:
             from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
@@ -153,7 +160,16 @@ def validate_mapping_coercions(
             "lossy": lossy,
             "severity": severity,
             "validation_mode": mode,
-            "message": f"{src} ({src_type}) → {tgt} ({tgt_type})",
+            "schema_policy": "type_locked" if type_locked else (schema_policy or ""),
+            "message": (
+                f"{src} ({src_type}) → {tgt} ({tgt_type})"
+                + (
+                    " — schema_policy=type_locked forbids changing the "
+                    "destination type"
+                    if locked_block
+                    else ""
+                )
+            ),
             "suggested_fix": (
                 f"Remap '{src}' to a compatible {tgt_logical} column, or change the "
                 f"target type — '{src}' ({src_logical}) does not safely become {tgt_logical}."

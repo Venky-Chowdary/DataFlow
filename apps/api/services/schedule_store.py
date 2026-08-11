@@ -46,6 +46,12 @@ SCHEMA_POLICIES = {
 }
 # Keep only the most recent N runs per schedule so the history document stays small.
 RUN_HISTORY_LIMIT = 25
+# Window between taking a claim and its job becoming visible; a claim whose job
+# has ended is reclaimable once this has passed.
+CLAIM_GRACE = timedelta(minutes=5)
+# Only used when the job cannot be looked up at all — a claim of unknown state
+# must not wedge a schedule forever.
+CLAIM_MAX_RUNTIME = timedelta(hours=4)
 
 _file_import_attempted = False
 
@@ -136,9 +142,20 @@ class PipelineSchedule:
     last_job_id: str | None = None
     last_status: str | None = None
     run_count: int = 0
+    #: Due instants that elapsed without a run (outage, overrun, paused deploy).
+    #: Counted rather than dropped so a cadence gap is visible after the fact.
+    missed_window_count: int = 0
+    last_missed_windows: int = 0
+    #: A pending retry is durable state, not an in-process timer: a redeploy
+    #: between attempt 1 and attempt 2 must not drop the retry on the floor.
+    retry_at: str | None = None
+    retry_attempt: int = 0
     running: bool = False
     running_instance: str = ""
     running_started_at: str | None = None
+    #: The job the claim was taken for. Liveness of that job — not a clock —
+    #: decides whether the claim may be reclaimed.
+    running_job_id: str = ""
     run_history: list[dict] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: _now())
 
@@ -184,9 +201,14 @@ class PipelineSchedule:
             last_job_id=data.get("last_job_id"),
             last_status=data.get("last_status"),
             run_count=int(data.get("run_count", 0)),
+            missed_window_count=max(0, int(data.get("missed_window_count", 0) or 0)),
+            last_missed_windows=max(0, int(data.get("last_missed_windows", 0) or 0)),
+            retry_at=data.get("retry_at"),
+            retry_attempt=max(0, int(data.get("retry_attempt", 0) or 0)),
             running=bool(data.get("running", False)),
             running_instance=data.get("running_instance", ""),
             running_started_at=data.get("running_started_at"),
+            running_job_id=(data.get("running_job_id") or "").strip(),
             run_history=list(data.get("run_history") or []),
             created_at=data.get("created_at", _now()),
         )
@@ -224,6 +246,52 @@ def compute_next_run(
         return _cron_next_run(cron, base, tz or "UTC").isoformat()
     delta = INTERVALS.get(interval, INTERVALS["daily"])
     return (base.astimezone(timezone.utc) + delta).isoformat()
+
+
+#: Ceiling on how many skipped windows are counted; an outage of months on a
+#: minutely cron must not turn a bookkeeping update into an unbounded loop.
+MISSED_WINDOW_SCAN_LIMIT = 1000
+
+
+def count_missed_windows(
+    *,
+    cron: str,
+    interval: str,
+    tz: str,
+    next_run_at: str | None,
+    now: datetime | None = None,
+) -> int:
+    """How many due instants elapsed before this run, excluding the one running.
+
+    A scheduler outage, a paused deployment or a run that overran its own
+    cadence leaves due times in the past. The next beat runs the schedule once
+    and the next due time is recomputed from the present, so the windows in
+    between disappear with nothing recording that they were skipped — an
+    operator reading `Runs: 7` cannot tell it should have been 10.
+    """
+    due = _parse_ts(next_run_at)
+    if due is None:
+        return 0
+    current = now or datetime.now(timezone.utc)
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    if due > current:
+        return 0
+    cron = (cron or "").strip()
+    missed = 0
+    cursor = due
+    for _ in range(MISSED_WINDOW_SCAN_LIMIT):
+        if cron:
+            try:
+                cursor = _cron_next_run(cron, cursor, tz or "UTC")
+            except CronError:
+                return missed
+        else:
+            cursor = cursor + INTERVALS.get(interval, INTERVALS["daily"])
+        if cursor > current:
+            return missed
+        missed += 1
+    return missed
 
 
 def next_run_for(sched: PipelineSchedule, from_time: datetime | None = None) -> str:
@@ -427,15 +495,47 @@ def delete_schedule(schedule_id: str) -> bool:
     return True
 
 
+def _job_is_live(job_id: str) -> bool | None:
+    """Whether the claimed job is still in flight. ``None`` when unknowable."""
+    if not job_id:
+        return None
+    try:
+        from services.job_status import is_terminal
+        from services.mongodb_service import get_mongodb_service
+
+        job = get_mongodb_service().get_job(job_id)
+    except Exception:
+        return None
+    if not job:
+        return False
+    return not is_terminal(job.get("status"))
+
+
 def _is_running_stale(sched: PipelineSchedule) -> bool:
-    """Return True if a schedule's running flag is too old to be trustworthy."""
+    """Return True if a schedule's running flag may be reclaimed.
+
+    A clock alone cannot answer this: a 40 GB migration legitimately runs for
+    hours, and reclaiming it mid-flight starts a second writer against the same
+    destination. So the claimed job's own state decides — a job still in flight
+    holds the claim for as long as it runs, and a job that ended or vanished
+    releases it after a short grace period rather than hours later. The elapsed
+    ceiling applies only when the job cannot be looked up at all.
+    """
     if not sched.running:
         return True
     started = _parse_ts(sched.running_started_at)
     if started is None:
         return True
-    # Allow a generous 4-hour runtime before treating a run as stale.
-    return (datetime.now(timezone.utc) - started) > timedelta(hours=4)
+    age = datetime.now(timezone.utc) - started
+    live = _job_is_live(sched.running_job_id)
+    if live is True:
+        return False
+    if live is False:
+        # The run is over (or its job record is gone) but the claim was never
+        # cleared — a crashed or killed worker. Grace covers the window between
+        # job creation and the claim being written.
+        return age > CLAIM_GRACE
+    return age > CLAIM_MAX_RUNTIME
 
 
 def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule | None:
@@ -459,6 +559,7 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
             "running": True,
             "running_instance": instance,
             "running_started_at": now,
+            "running_job_id": "",
         })
         schedules[i] = updated
         _save_all(schedules)
@@ -477,10 +578,24 @@ def clear_schedule_running(schedule_id: str) -> PipelineSchedule | None:
             "running": False,
             "running_instance": "",
             "running_started_at": None,
+            "running_job_id": "",
         })
         schedules[i] = updated
         _save_all(schedules)
         return updated
+
+
+def set_running_job(schedule_id: str, job_id: str) -> PipelineSchedule | None:
+    """Record which job the running claim is held for."""
+    schedules = _load_all()
+    for i, s in enumerate(schedules):
+        if s.id != schedule_id:
+            continue
+        updated = PipelineSchedule.from_dict({**s.to_dict(), "running_job_id": job_id})
+        schedules[i] = updated
+        _save_all(schedules)
+        return updated
+    return None
     return None
 
 
@@ -503,9 +618,16 @@ def mark_schedule_run(
     for i, s in enumerate(schedules):
         if s.id != schedule_id:
             continue
+        missed = count_missed_windows(
+            cron=s.cron, interval=s.interval, tz=s.timezone, next_run_at=s.next_run_at
+        )
         history = list(s.run_history)
         if run_entry:
-            history.append(run_entry)
+            entry = dict(run_entry)
+            if missed:
+                entry["missed_windows"] = missed
+                entry["scheduled_for"] = s.next_run_at
+            history.append(entry)
             history = history[-RUN_HISTORY_LIMIT:]
         payload = {
             **s.to_dict(),
@@ -514,14 +636,57 @@ def mark_schedule_run(
             "last_job_id": job_id,
             "last_status": status or s.last_status,
             "run_count": s.run_count + 1,
+            "missed_window_count": s.missed_window_count + missed,
+            "last_missed_windows": missed,
+            "retry_at": None,
+            "retry_attempt": 0,
             "running": False,
             "running_instance": "",
             "running_started_at": None,
+            "running_job_id": "",
             "run_history": history,
         }
         if cursor_value is not None:
             payload["cursor_value"] = str(cursor_value)
         updated = PipelineSchedule.from_dict(payload)
+        schedules[i] = updated
+        _save_all(schedules)
+        return updated
+    return None
+
+
+def schedule_retry(
+    schedule_id: str,
+    *,
+    retry_at: datetime,
+    attempt: int,
+    run_entry: dict[str, Any] | None = None,
+) -> PipelineSchedule | None:
+    """Park a failed attempt for another try without ending the schedule's run.
+
+    The retry is written to the store and the running claim released, so the
+    next beat picks it up through the same concurrency guard as any other run.
+    Holding the attempt in an in-process timer instead loses it whenever the
+    service restarts — routine on a rolling deploy — and leaves the schedule
+    flagged running until the staleness window expires hours later.
+    """
+    schedules = _load_all()
+    for i, s in enumerate(schedules):
+        if s.id != schedule_id:
+            continue
+        history = list(s.run_history)
+        if run_entry:
+            history = (history + [run_entry])[-RUN_HISTORY_LIMIT:]
+        updated = PipelineSchedule.from_dict({
+            **s.to_dict(),
+            "retry_at": retry_at.astimezone(timezone.utc).isoformat(),
+            "retry_attempt": max(0, int(attempt)),
+            "running": False,
+            "running_instance": "",
+            "running_started_at": None,
+            "running_job_id": "",
+            "run_history": history,
+        })
         schedules[i] = updated
         _save_all(schedules)
         return updated
@@ -564,6 +729,13 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
         if not s.enabled:
             continue
         if s.running and not _is_running_stale(s):
+            continue
+        retry_at = _parse_ts(s.retry_at)
+        if retry_at is not None:
+            # A parked retry owns the schedule until it runs: the cadence must
+            # not start a fresh attempt on top of the one still owed.
+            if retry_at <= current:
+                due.append(s)
             continue
         nxt = _parse_ts(s.next_run_at)
         if nxt is None or nxt <= current:

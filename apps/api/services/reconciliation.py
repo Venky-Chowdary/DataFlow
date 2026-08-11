@@ -12,20 +12,39 @@ from services.brand_env import getenv_brand
 import re
 import struct
 import tempfile
+import uuid
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import time as _time
 from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow
-from typing import Any, Callable, Iterable
+from functools import lru_cache
+from typing import Any, Callable, Final, Iterable, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier
+from services.decision_kernel.findings import (
+    typed_cast_incompatible_with_text_sink,
+)
+from services.readback_projection import project_readback
+from services.reconcile_sftp import verify_sftp_object
+from services.reconcile_coverage import (
+    WRITTEN_BATCH_KEYS,
+    append_row_count_report,
+    extra_rows_note,
+    is_sample_authority,
+    is_unproven_export,
+    is_writer_ack_only,
+    row_count_scope_stamp,
+)
 from services.transform_engine import (
     _DATE_LIKE_RE,
     _parse_date,
     _parse_datetime,
     apply_transform,
 )
+from services.type_system import normalize_logical_type
 from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
@@ -84,6 +103,8 @@ class ReconciliationReport:
     checksum_match: bool | None = None
     population_proof: bool = False
     assurance_level: str = ""
+    # Set when the digests cover different populations (see reconcile_coverage).
+    checksum_scope: str = ""
 
     def to_dict(self) -> dict:
         return stamp_post_write_phase(asdict(self))
@@ -108,6 +129,9 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         return out
 
     passed = bool(out.get("passed"))
+    scoped = row_count_scope_stamp(out)
+    if scoped is not None:
+        return scoped
     src = str(out.get("source_checksum") or "").strip()
     tgt = str(out.get("target_checksum") or "").strip()
     msg = str(out.get("message") or "").lower()
@@ -116,18 +140,7 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
 
-    # File/object export messages use "File/object export" — substring "file export"
-    # alone never matched and falsely fell through to writer_ack / verified.
-    unproven_export = (
-        out.get("unproven") is True
-        or out.get("skipped_readback") is True
-        or "file/object export" in msg
-        or "file export" in msg
-        or "object export" in msg
-        or ("skipped" in msg and "reconciliation skipped" in msg)
-        or ("cell fidelity" in msg and "unproven" in msg)
-    )
-    if unproven_export:
+    if is_unproven_export(out, msg):
         out["phase"] = "post_write_skipped"
         out["post_write_pending"] = False
         out["preview"] = False
@@ -147,12 +160,7 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["assurance_level"] = "none"
         return out
 
-    writer_only = (
-        not tgt
-        or "verified by writer" in msg
-        or "read-back verifier not available" in msg
-        or "read-back" in msg and "unavailable" in msg
-    )
+    writer_only = is_writer_ack_only(msg, tgt)
     sample = out.get("sample_compare") if isinstance(out.get("sample_compare"), dict) else {}
     sample_ok = bool(sample.get("passed")) and int(sample.get("compared") or 0) > 0
     # GA: diverging independent digests never become sample-verified success.
@@ -167,13 +175,8 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["checksum_match"] = False
         return out
 
-    sample_authority = sample_ok and (
-        writer_only
-        or not tgt
-        or "sample-verified" in msg
-        or "sample verified" in msg
-        or "key-aligned" in msg
-        or "sample-only assurance" in msg
+    sample_authority = sample_ok and is_sample_authority(
+        msg, tgt, writer_only=writer_only
     )
     if passed and sample_authority and not (src and tgt):
         out["phase"] = "post_write_sample_verified"
@@ -219,6 +222,30 @@ def _get_case_insensitive(rec: dict[str, Any], key: str | None) -> Any:
     return None
 
 
+@lru_cache(maxsize=4096)
+def _canonical_fingerprint_ddl(engine: str, ddl: str) -> str:
+    """Normalize a destination type stamp before it steers a fingerprint.
+
+    The two sides of Gate-8 learn the destination type from different places:
+    the writer knows the DDL it emitted (``DATETIME(6)``, ``varchar(255)``)
+    while the read-back reads the live catalog (``TIMESTAMP_NTZ(6)``,
+    ``VARCHAR(255) COLLATE utf8mb4_0900_ai_ci``). Those name the same physical
+    column, so fingerprinting on the raw spelling made an identical population
+    hash differently and Gate-8 failed a correct write. Both sides now
+    canonicalize through the same materializer. SQL type names are
+    case-insensitive, so the canonical form is upper case — ``bigint`` and
+    ``BIGINT`` must not steer two different fingerprints.
+    """
+    if not ddl:
+        return ""
+    try:
+        from services.decision_kernel.types import materialize_dest_ddl
+
+        return str(materialize_dest_ddl(engine, ddl) or ddl).upper()
+    except Exception:
+        return ddl.upper()
+
+
 def _fingerprint_cell(
     value: Any,
     *,
@@ -237,6 +264,7 @@ def _fingerprint_cell(
                 if str(k).lower() == column.lower():
                     ddl = str(v or "")
                     break
+    ddl = _canonical_fingerprint_ddl(eng, ddl)
     if eng:
         try:
             # Defined later in this module; resolved at call time.
@@ -548,7 +576,17 @@ def reconcile(
     sample_compare: dict[str, Any] | None = None,
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
+    target_rows_before: int | None = None,
+    checksum_scope: str = "",
 ) -> ReconciliationReport:
+    """Compare source and destination evidence into one Gate-8 verdict.
+
+    ``checksum_scope`` names the population the target digest covers. It is
+    :data:`WRITTEN_BATCH_KEYS` when the destination was re-read by written key,
+    which is the only comparable digest for an append into a table that already
+    held rows — the whole-table count still goes in the report, but the digest
+    must not be described as covering it.
+    """
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
     rows_skipped = max(int(rows_skipped or 0), 0)
     # Coerced rows are KEPT in the destination (a cell became NULL), so they do
@@ -616,16 +654,8 @@ def reconcile(
             and bool(sample_compare.get("passed", False))
             and compared > 0
         )
-        extra_note = ""
-        if allow_extra_rows and target_rows > expected_rows:
-            written_hint = int(expected_rows) if expected_rows else 0
-            extra_note = (
-                f" Destination has {target_rows - expected_rows} extra row(s) "
-                "(append/upsert into a non-empty table); whole-table digests are "
-                "not comparable. Use overwrite/truncate for a clean load, or "
-                "upsert with a primary key — this is not proof the "
-                f"{written_hint} written row(s) are wrong."
-            )
+        has_extra = allow_extra_rows and target_rows > expected_rows
+        extra_note = extra_rows_note(target_rows, expected_rows) if has_extra else ""
         sample_note = ""
         if sample_ok:
             sample_note = (
@@ -638,6 +668,20 @@ def reconcile(
                 "soften checksum mismatch."
             )
         mode_label = "strict" if strict_checksum else "balanced"
+        if has_extra and not strict_checksum:
+            return append_row_count_report(
+                source_rows=source_rows,
+                target_rows=target_rows,
+                target_rows_before=target_rows_before,
+                expected_rows=expected_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                sample_note=sample_note,
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                sample_compare=sample_compare,
+            )
         return ReconciliationReport(
             passed=False,
             source_rows=source_rows,
@@ -668,6 +712,15 @@ def reconcile(
         )
         if rejected_rows and rejected_rows != coerced_null_rows:
             message += f"; {rejected_rows} row(s) rejected"
+    elif checksum_scope == WRITTEN_BATCH_KEYS and target_rows > expected_rows:
+        message = (
+            f"Row fidelity verified for the {expected_rows} row(s) this run wrote "
+            f"— destination digest re-read by written key. Destination holds "
+            f"{target_rows} row(s) in total; rows written by earlier runs are "
+            "outside this proof."
+        )
+        if rejected_rows:
+            message += f" {rejected_rows} row(s) rejected."
     else:
         message = f"Row fidelity verified — source and target checksums match ({target_rows} rows)"
         if rejected_rows:
@@ -686,6 +739,7 @@ def reconcile(
         checksum_match=True,
         population_proof=False,
         assurance_level="full_checksum",
+        checksum_scope=checksum_scope,
     )
 
 
@@ -697,6 +751,185 @@ def _iter_fetchmany(cur, batch_size: int = 5000):
             break
         for row in rows:
             yield row
+
+
+READBACK_ITERSIZE: Final[int] = 5000
+
+
+@contextmanager
+def streaming_readback_cursor(conn: Any, *, engine: str) -> Iterator[Any]:
+    """Cursor that streams a whole-table read-back instead of buffering it.
+
+    ``fetchmany`` alone does not stream: psycopg2 and PyMySQL both pull the
+    entire result set into client memory when the statement executes, so the
+    Gate-8 proof was the largest allocation of the migration — a measured
+    2.0 GB RSS to verify 10M rows, and linear from there. A PostgreSQL named
+    (server-side) cursor and a PyMySQL ``SSCursor`` hold one batch at a time
+    (39 MB for the same read), which is what lets the proof scale past the
+    table it is proving.
+
+    Engines whose drivers already stream (SQLite, DuckDB, FreeTDS, Snowflake,
+    Oracle) fall through to a plain cursor.
+    """
+    cur = None
+    try:
+        if engine in {"postgresql", "redshift", "timescaledb", "cockroachdb"}:
+            # Named cursors are WITHOUT HOLD: they need an open transaction,
+            # which an autocommit connection does not have.
+            if not getattr(conn, "autocommit", False):
+                cur = conn.cursor(name=f"df_readback_{uuid.uuid4().hex}")
+                cur.itersize = READBACK_ITERSIZE
+        elif engine == "mysql":
+            import pymysql.cursors
+
+            cur = conn.cursor(pymysql.cursors.SSCursor)
+        if cur is None:
+            cur = conn.cursor()
+        yield cur
+    finally:
+        if cur is not None:
+            # A server-side cursor dies with its transaction; a close failure
+            # here must not mask the verdict the read-back just produced.
+            with suppress(Exception):
+                cur.close()
+
+
+def dbapi_streaming_rows(
+    cur: Any, *, batch_size: int = READBACK_ITERSIZE
+) -> tuple[list[str], Iterator[Any]]:
+    """Return ``(column_names, rows)`` for an already-executed DBAPI cursor.
+
+    A psycopg2 server-side cursor has no ``description`` until the first block
+    is fetched, so the names must be read *after* priming — reading them first
+    fingerprints zero columns and yields the digest of an empty table.
+    """
+    first = cur.fetchmany(batch_size)
+    names = [d[0] for d in cur.description] if cur.description else []
+
+    def _rows() -> Iterator[Any]:
+        batch = first
+        while batch:
+            yield from batch
+            batch = cur.fetchmany(batch_size)
+
+    return names, _rows()
+
+
+def sa_streaming_result(
+    conn: Any, statement: Any, *, itersize: int = READBACK_ITERSIZE
+) -> tuple[list[str], Iterator[Any]]:
+    """Return ``(column_names, rows)`` where rows arrive a block at a time.
+
+    Drivers without server-side cursors ignore ``stream_results`` and buffer as
+    before — no engine is made worse, and those that can stream stop paying for
+    the whole table.
+    """
+    result = conn.execution_options(
+        stream_results=True, max_row_buffer=itersize
+    ).execute(statement)
+    names = [str(k) for k in result.keys()]
+
+    def _rows() -> Iterator[Any]:
+        for partition in result.partitions(itersize):
+            yield from partition
+
+    return names, _rows()
+
+
+# Cap on keys fetched back per batch proof: bounded so a 10M-row append does
+# not build a 10M-term IN list, and matched by the writer's stashed id sample.
+KEYED_READBACK_ID_CAP: Final[int] = 500
+
+# Text carrier per dialect. The keys arrive from writer meta as strings; an
+# uncast bigint/uuid column aborts the read-back, and an aborted read-back is
+# not a soft failure — it is silently *no* proof at all.
+_KEYED_TEXT_CAST: Final[dict[str, str]] = {
+    "mysql": "CHAR",
+    "mariadb": "CHAR",
+    "sqlserver": "NVARCHAR(4000)",
+    "mssql": "NVARCHAR(4000)",
+    "oracle": "VARCHAR2(4000)",
+    "clickhouse": "String",
+    "databricks": "STRING",
+}
+
+_KEYED_QUOTE_CHAR: Final[dict[str, str]] = {
+    "mysql": "`",
+    "mariadb": "`",
+    "clickhouse": "`",
+    "sqlserver": "[",
+    "mssql": "[",
+}
+
+
+# Destinations whose verifier re-reads only ``written_ids``. Anything absent
+# here falls back to a whole-table digest, which an append into a populated
+# sink cannot compare — the honest verdict is row-count scope, not a mismatch.
+KEYED_READBACK_ENGINES: Final[frozenset[str]] = frozenset(
+    {
+        "sqlite",
+        "duckdb",
+        "postgresql",
+        "redshift",
+        "timescaledb",
+        "cockroachdb",
+        "mysql",
+        "mariadb",
+        "sqlserver",
+        "mssql",
+        "azure_sql",
+        "oracle",
+        "clickhouse",
+        "snowflake",
+        "databricks",
+        "generic_sql",
+        "mongodb",
+    }
+)
+
+
+def keyed_readback_scope(
+    written_ids: list[str] | None,
+    pk_column: str | None,
+    *,
+    cap: int = KEYED_READBACK_ID_CAP,
+) -> tuple[list[str], str]:
+    """Normalize ``(written_ids, pk_column)`` into a usable batch scope.
+
+    Returns ``([], "")`` when the batch cannot be keyed, which every caller
+    treats as "fingerprint the whole table" — the honest fallback.
+    """
+    ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][:cap]
+    pk = (pk_column or "").strip()
+    return (ids, pk) if ids and pk else ([], "")
+
+
+def keyed_readback_where(
+    pk: str, ids: list[str], *, dialect: str, placeholders: list[str]
+) -> str:
+    """``WHERE CAST(pk AS <text>) IN (...)`` for proving one appended batch.
+
+    Append or upsert into a non-empty table makes whole-table digests
+    incomparable — the destination legitimately holds rows this job never
+    wrote. Re-scoping the destination digest to the written keys is what turns
+    that from a row-count-only verdict back into full-population proof of the
+    batch.
+    """
+    dial = (dialect or "").strip().lower()
+    pk_q = quote_sql_identifier(pk, _KEYED_QUOTE_CHAR.get(dial, '"'))
+    cast = _KEYED_TEXT_CAST.get(dial, "VARCHAR(4000)")
+    return f"WHERE CAST({pk_q} AS {cast}) IN ({','.join(placeholders[: len(ids)])})"
+
+
+def keyed_readback_sa_clause(
+    pk: str, ids: list[str], *, dialect: str
+) -> tuple[str, dict[str, str]]:
+    """SQLAlchemy flavour of :func:`keyed_readback_where` with bound keys."""
+    params = {f"k{i}": v for i, v in enumerate(ids)}
+    where = keyed_readback_where(
+        pk, ids, dialect=dialect, placeholders=[f":{k}" for k in params]
+    )
+    return where, params
 
 
 def verify_postgres_table(
@@ -728,7 +961,7 @@ def verify_postgres_table(
             connection_string=connection_string,
             ssl=ssl,
         )
-        from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+        from connectors.sql_identifiers import quote_table_ref
 
         table_ref = quote_table_ref(
             table_name, schema or "public", dialect="postgresql"
@@ -736,22 +969,22 @@ def verify_postgres_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            ids = [
-                str(x) for x in (written_ids or []) if x is not None and str(x) != ""
-            ][:500]
-            pk = (pk_column or "").strip()
-            if ids and pk:
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
+        with streaming_readback_cursor(conn, engine="postgresql") as cur:
+            if ids:
                 pk_q = quote_sql_identifier(pk)
+                # Ids are text; an uncast bigint/uuid key aborts the read-back.
                 cur.execute(
-                    f"SELECT * FROM {table_ref} WHERE {pk_q} = ANY(%s)",  # nosec B608
+                    f"SELECT * FROM {table_ref} "  # nosec B608
+                    f"WHERE CAST({pk_q} AS text) = ANY(%s)",
                     (ids,),
                 )
             else:
                 cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
-            names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
+            names, rows = dbapi_streaming_rows(cur)
+            columns, projected = project_readback(names, target_columns, rows)
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="postgresql",
@@ -798,40 +1031,41 @@ def verify_pgvector_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
+        with streaming_readback_cursor(conn, engine="postgresql") as cur:
             cur.execute(f"SELECT source_id, metadata FROM {table_ref}")  # nosec B608
-            names = (
-                [d[0] for d in cur.description]
-                if cur.description
-                else ["source_id", "metadata"]
-            )
-            rows: list[dict[str, Any]] = []
-            for raw in _iter_fetchmany(cur):
-                rec = dict(zip(names, raw))
-                source_id = rec.get("source_id", "")
-                metadata = rec.get("metadata") or {}
-                if isinstance(metadata, str):
-                    try:
-                        metadata = json.loads(metadata)
-                    except Exception:
+            names, raw_rows = dbapi_streaming_rows(cur)
+            names = names or ["source_id", "metadata"]
+
+            def _source_shaped_rows():
+                for raw in raw_rows:
+                    rec = dict(zip(names, raw))
+                    source_id = rec.get("source_id", "")
+                    metadata = rec.get("metadata") or {}
+                    if isinstance(metadata, str):
+                        try:
+                            metadata = json.loads(metadata)
+                        except Exception:
+                            metadata = {}
+                    if not isinstance(metadata, dict):
                         metadata = {}
-                if not isinstance(metadata, dict):
-                    metadata = {}
-                # Reconstruct a source-shaped row from metadata; fall back to source_id for 'id'.
-                row: dict[str, Any] = dict(metadata)
-                if target_columns:
-                    for col in target_columns:
-                        if col not in row and col.lower() == "id" and source_id:
-                            row[col] = source_id
-                    row = {k: v for k, v in row.items() if k in target_columns}
-                elif source_id and "id" not in {c.lower() for c in row}:
-                    row["id"] = source_id
-                rows.append(row)
+                    # Reconstruct a source-shaped row from metadata; fall back
+                    # to source_id for 'id'.
+                    row: dict[str, Any] = dict(metadata)
+                    if target_columns:
+                        for col in target_columns:
+                            if col not in row and col.lower() == "id" and source_id:
+                                row[col] = source_id
+                        row = {k: v for k, v in row.items() if k in target_columns}
+                    elif source_id and "id" not in {c.lower() for c in row}:
+                        row["id"] = source_id
+                    yield row
+
+            checksum = canonical_checksum_from_iter(
+                _source_shaped_rows(),
+                columns=target_columns or None,
+                limit=limit,
+            )
         conn.close()
-        checksum = canonical_checksum_from_iter(
-            iter(rows),
-            columns=target_columns or None,
-            limit=limit,
-        )
         return count, checksum
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -1212,7 +1446,15 @@ def verify_mysql_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
+    """Independent MySQL/MariaDB read-back for Gate-8.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys
+    while ``count`` stays whole-table, so an append into a populated table can
+    still prove per-cell fidelity of what it wrote.
+    """
     try:
         from connectors.mysql_conn import get_connection
 
@@ -1231,11 +1473,19 @@ def verify_mysql_table(
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
-            names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
+        with streaming_readback_cursor(conn, engine="mysql") as cur:
+            if ids:
+                where = keyed_readback_where(
+                    pk, ids, dialect="mysql", placeholders=["%s"] * len(ids)
+                )
+                cur.execute(f"SELECT * FROM {table_ref} {where}", ids)  # nosec B608
+            else:
+                cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+            names, rows = dbapi_streaming_rows(cur)
+            columns, projected = project_readback(names, target_columns, rows)
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="mysql",
@@ -1261,8 +1511,13 @@ def verify_sqlserver_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Independent SQL Server / Azure SQL Edge read-back for Gate-8 reconcile."""
+    """Independent SQL Server / Azure SQL Edge read-back for Gate-8 reconcile.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         import pymssql
 
@@ -1283,11 +1538,18 @@ def verify_sqlserver_table(
         try:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            if ids:
+                where = keyed_readback_where(
+                    pk, ids, dialect="sqlserver", placeholders=["%s"] * len(ids)
+                )
+                cur.execute(f"SELECT * FROM {table_ref} {where}", tuple(ids))  # nosec B608
+            else:
+                cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="sqlserver",
@@ -1315,46 +1577,27 @@ def verify_oracle_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Independent Oracle read-back for Gate-8 (write-location ''≡NULL fingerprints)."""
-    try:
-        import sqlalchemy as sa
+    """Oracle Gate-8 read-back — see :mod:`services.reconciliation_oracle`."""
+    from services.reconciliation_oracle import verify_oracle_table as _verify
 
-        from connectors.generic_sql import get_sqlalchemy_engine
-        from connectors.sql_identifiers import quote_table_ref
-
-        cfg: dict[str, Any] = {
-            "type": "oracle",
-            "host": host or "",
-            "port": int(port or 1521),
-            "database": database or "",
-            "username": username or "",
-            "password": password or "",
-            "connection_string": connection_string or "",
-            "schema": schema or "",
-        }
-        engine = get_sqlalchemy_engine(cfg)
-        sch = (schema or username or "").strip() or None
-        table_ref = quote_table_ref(table_name, schema=sch, dialect="oracle")
-        with engine.connect() as conn:
-            count = int(
-                conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
-                or 0
-            )
-            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
-            names = list(result.keys())
-            columns = names or target_columns or []
-            checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
-                columns,
-                limit=limit,
-                dest_db_type="oracle",
-                dest_types=dest_types,
-            )
-        return count, checksum
-    except Exception as exc:
-        logger.warning("Oracle reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
+    return _verify(
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password,
+        connection_string=connection_string,
+        schema=schema,
+        table_name=table_name,
+        target_columns=target_columns,
+        limit=limit,
+        dest_types=dest_types,
+        written_ids=written_ids,
+        pk_column=pk_column,
+    )
 
 
 def verify_bigquery_table(
@@ -1381,8 +1624,6 @@ def verify_bigquery_table(
         table = client.get_table(table_id)
         count = table.num_rows or 0
         field_names = [field.name for field in table.schema] if table.schema else []
-        columns = field_names or target_columns or []
-
         def _row_iter():
             yielded = 0
             for row in client.list_rows(table_id):
@@ -1391,8 +1632,9 @@ def verify_bigquery_table(
                 yield list(row.values()) if hasattr(row, "values") else list(row)
                 yielded += 1
 
+        columns, projected = project_readback(field_names, target_columns, _row_iter())
         return int(count), canonical_checksum_from_iter(
-            _row_iter(), columns, limit=limit
+            projected, columns, limit=limit
         )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -1497,55 +1739,6 @@ def verify_s3_object(
         return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
-        return -1, ""
-
-
-def verify_sftp_object(
-    *,
-    host: str = "",
-    port: int = 22,
-    username: str = "",
-    password: str = "",
-    connection_string: str = "",
-    database: str = "",
-    table_name: str = "",
-    target_columns: list[str] | None = None,
-    limit: int = 0,
-    dest_types: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    """Independent SFTP download + parse for Gate-8 (parity with S3/GCS/ADLS)."""
-    try:
-        from connectors.sftp_common import connect_sftp, parse_sftp_config
-
-        cfg = parse_sftp_config(
-            connection_string=connection_string,
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            database=database,
-            table=table_name,
-        )
-        if not cfg.host or not cfg.path:
-            return -1, ""
-        transport, sftp = connect_sftp(cfg)
-        try:
-            with sftp.file(cfg.path, "rb") as fh:
-                body = fh.read()
-        finally:
-            sftp.close()
-            transport.close()
-        rows, headers = _rows_from_object_bytes(body, cfg.path, target_columns)
-        columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(
-            rows,
-            columns,
-            limit=limit,
-            dest_db_type="sftp",
-            dest_types=dest_types,
-        )
-    except Exception as exc:
-        logger.warning("SFTP reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
 
 
@@ -2081,8 +2274,13 @@ def verify_databricks_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Independent Databricks SQL warehouse read-back for Gate-8."""
+    """Independent Databricks SQL warehouse read-back for Gate-8.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         import sqlalchemy as sa
 
@@ -2108,11 +2306,17 @@ def verify_databricks_table(
                 conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
                 or 0
             )
-            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
-            names = list(result.keys())
-            columns = names or target_columns or []
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            select = sa.text(f"SELECT * FROM {table_ref}")  # nosec B608
+            if ids:
+                where, params = keyed_readback_sa_clause(pk, ids, dialect="databricks")
+                select = sa.text(
+                    f"SELECT * FROM {table_ref} {where}"  # nosec B608
+                ).bindparams(**params)
+            names, result = sa_streaming_result(conn, select)
+            columns, projected = project_readback(names, target_columns, (tuple(row) for row in result))
             checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="databricks",
@@ -2149,18 +2353,15 @@ def verify_sqlite_table(
         path = sqlite_file_path(database, connection_string, host)
         if not path:
             return -1, ""
-        from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+        from connectors.sql_identifiers import quote_table_ref
 
         table_ref = quote_table_ref(table_name, dialect="sqlite")
         conn = sqlite3.connect(str(path))
         cur = conn.cursor()
         cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
         count = cur.fetchone()[0]
-        ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][
-            :500
-        ]
-        pk = (pk_column or "").strip()
-        if ids and pk:
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
+        if ids:
             pk_q = quote_sql_identifier(pk)
             placeholders = ",".join("?" for _ in ids)
             cur.execute(
@@ -2170,10 +2371,8 @@ def verify_sqlite_table(
         else:
             cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
-        columns = names or target_columns or []
-        checksum = canonical_checksum_from_iter(
-            _iter_fetchmany(cur), columns, limit=limit
-        )
+        columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
+        checksum = canonical_checksum_from_iter(projected, columns, limit=limit)
         conn.close()
         return int(count), checksum
     except sqlite3.OperationalError as exc:
@@ -2194,8 +2393,13 @@ def verify_duckdb_table(
     table_name: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Reconcile a DuckDB target by reading the local file."""
+    """Reconcile a DuckDB target by reading the local file.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         import duckdb
 
@@ -2207,12 +2411,17 @@ def verify_duckdb_table(
         table_ref = quote_table_ref(table_name, dialect="duckdb")
         conn = duckdb.connect(str(path))
         count = conn.execute(f"SELECT COUNT(*) FROM {table_ref}").fetchone()[0]  # nosec B608
-        cur = conn.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
+        if ids:
+            where = keyed_readback_where(
+                pk, ids, dialect="duckdb", placeholders=["?"] * len(ids)
+            )
+            cur = conn.execute(f"SELECT * FROM {table_ref} {where}", ids)  # nosec B608
+        else:
+            cur = conn.execute(f"SELECT * FROM {table_ref}")  # nosec B608
         names = [d[0] for d in cur.description] if cur.description else []
-        columns = names or target_columns or []
-        checksum = canonical_checksum_from_iter(
-            _iter_fetchmany(cur), columns, limit=limit
-        )
+        columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
+        checksum = canonical_checksum_from_iter(projected, columns, limit=limit)
         conn.close()
         return int(count), checksum
     except Exception as exc:
@@ -2234,6 +2443,8 @@ def verify_clickhouse_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
     """Independent ClickHouse read-back with ``SELECT … FINAL`` (Airbyte-class).
 
@@ -2274,11 +2485,18 @@ def verify_clickhouse_table(
                 ).scalar()
                 or 0
             )
-            result = conn.execute(sa.text(f"SELECT * FROM {from_sql}"))  # nosec B608
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            select = sa.text(f"SELECT * FROM {from_sql}")  # nosec B608
+            if ids:
+                where, params = keyed_readback_sa_clause(pk, ids, dialect="clickhouse")
+                select = sa.text(
+                    f"SELECT * FROM {from_sql} {where}"  # nosec B608
+                ).bindparams(**params)
+            result = conn.execute(select)
             names = list(result.keys())
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, (tuple(row) for row in result))
             checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="clickhouse",
@@ -2299,6 +2517,8 @@ def verify_generic_sql_table(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     engine_hint: str = "",
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
     """Independent SQLAlchemy read-back for catalog ``generic_sql`` engines.
 
@@ -2335,11 +2555,17 @@ def verify_generic_sql_table(
                 ).scalar()
                 or 0
             )
-            result = conn.execute(sa.text(f"SELECT * FROM {table_ref}"))  # nosec B608
-            names = list(result.keys())
-            columns = names or target_columns or []
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            select = sa.text(f"SELECT * FROM {table_ref}")  # nosec B608
+            if ids:
+                where, params = keyed_readback_sa_clause(pk, ids, dialect=dialect)
+                select = sa.text(
+                    f"SELECT * FROM {table_ref} {where}"  # nosec B608
+                ).bindparams(**params)
+            names, result = sa_streaming_result(conn, select)
+            columns, projected = project_readback(names, target_columns, (tuple(row) for row in result))
             checksum = canonical_checksum_from_iter(
-                (tuple(row) for row in result),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type=hint or dialect,
@@ -2433,12 +2659,9 @@ def verify_mongodb_collection(
         db = client[database or "test"]
         coll = db[table_name]
         count = coll.count_documents({})
-        ids = [str(x) for x in (written_ids or []) if x is not None and str(x) != ""][
-            :500
-        ]
-        pk = (pk_column or "").strip()
+        ids, pk = keyed_readback_scope(written_ids, pk_column)
         query: dict[str, Any] = {}
-        if ids and pk:
+        if ids:
             # Match string or numeric id forms (CSV upserts often land as int).
             expanded: list[Any] = []
             for raw in ids:
@@ -2620,7 +2843,13 @@ def verify_snowflake_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
+    """Independent Snowflake read-back for Gate-8.
+
+    ``written_ids`` + ``pk_column`` re-scope the digest to this batch's keys.
+    """
     try:
         from connectors.snowflake_conn import (
             get_connection,
@@ -2658,11 +2887,18 @@ def verify_snowflake_table(
             qualified_name = snowflake_qualified_table(schema or "PUBLIC", resolved)
             cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")  # nosec B608
             count = int(cur.fetchone()[0])
-            cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
+            ids, pk = keyed_readback_scope(written_ids, pk_column)
+            if ids:
+                where = keyed_readback_where(
+                    pk, ids, dialect="snowflake", placeholders=["%s"] * len(ids)
+                )
+                cur.execute(f"SELECT * FROM {qualified_name} {where}", ids)  # nosec B608
+            else:
+                cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
-            columns = names or target_columns or []
+            columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
             checksum = canonical_checksum_from_iter(
-                _iter_fetchmany(cur),
+                projected,
                 columns,
                 limit=limit,
                 dest_db_type="snowflake",
@@ -2816,6 +3052,8 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "generic_sql":
         # Route local file engines / Oracle / ClickHouse by URL or dest.type.
@@ -2840,6 +3078,8 @@ def verify_target(
                 table_name=table_name,
                 target_columns=target_columns,
                 limit=limit,
+                written_ids=ids,
+                pk_column=pk,
             )
         elif conn.startswith("oracle") or engine_hint.startswith("oracle"):
             count, chk = verify_oracle_table(
@@ -2854,6 +3094,8 @@ def verify_target(
                 target_columns=target_columns,
                 limit=limit,
                 dest_types=dest_types,
+                written_ids=ids,
+                pk_column=pk,
             )
         elif "clickhouse" in engine_hint or "clickhouse" in conn:
             count, chk = verify_clickhouse_table(
@@ -2869,6 +3111,8 @@ def verify_target(
                 target_columns=target_columns,
                 limit=limit,
                 dest_types=dest_types,
+                written_ids=ids,
+                pk_column=pk,
             )
         else:
             # Teradata / HANA / Vertica / Informix / Trino / Firebird / …
@@ -2881,6 +3125,8 @@ def verify_target(
                 limit=limit,
                 dest_types=dest_types,
                 engine_hint=engine_hint,
+                written_ids=ids,
+                pk_column=pk,
             )
     elif db_type == "clickhouse":
         count, chk = verify_clickhouse_table(
@@ -2896,6 +3142,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "pgvector":
         # pgvector tables store an opaque embedding; reconstruct source rows from
@@ -2973,6 +3221,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "mysql":
         count, chk = verify_mysql_table(
@@ -2987,6 +3237,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type in {"sqlserver", "mssql", "azure_sql"}:
         count, chk = verify_sqlserver_table(
@@ -3001,6 +3253,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type in {
         "oracle",
@@ -3022,6 +3276,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "bigquery":
         count, chk = verify_bigquery_table(
@@ -3077,6 +3333,8 @@ def verify_target(
             dest_types=dest_types,
         )
     elif db_type == "sftp":
+        from connectors.sftp_common import host_key_settings
+
         count, chk = verify_sftp_object(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 22),
@@ -3088,6 +3346,7 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            **host_key_settings(dest),
         )
     elif db_type in {
         "databricks",
@@ -3110,6 +3369,8 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type == "hubspot":
         count, chk = verify_hubspot_object(
@@ -3299,6 +3560,8 @@ def verify_target(
             limit=limit,
             dest_types=dest_types,
             engine_hint=db_type,
+            written_ids=ids,
+            pk_column=pk,
         )
     else:
         count, chk = -1, ""
@@ -3321,8 +3584,10 @@ def fingerprint_for_reconcile(
     ``\"true\"`` / MySQL ``0`` / Postgres ``False`` compare as equal.
     """
     from services.transform_engine import apply_transform
+    from services.type_system import instant_date_carrier
     from services.value_serializer import cell_to_string
 
+    ddl_type = instant_date_carrier(engine, ddl_type)
     wire: Any = value
     tname = (transform or "").strip().lower()
     if tname and tname not in {"", "none", "identity", "passthrough"}:
@@ -4040,6 +4305,20 @@ def sample_compare_rows(
                 if str(m.get("target") or "") == tgt_col:
                     ddl = str(m.get("target_type") or m.get("inferredType") or "")
                     break
+        if ddl and typed_cast_incompatible_with_text_sink(
+            transform or "", normalize_logical_type(ddl)
+        ):
+            # A text carrier holds whichever of the two the write produced: the
+            # converted value when the cast succeeded ('$1,000.00' → '1000.00'),
+            # or the token verbatim when it failed ('Y' against boolean, which
+            # otherwise made Gate-8 report corruption on a row that landed
+            # correctly). Only the failing case may retire the cast.
+            try:
+                _, cast_err = apply_transform(raw, transform or "")
+            except Exception:
+                cast_err = "transform_failed"
+            if cast_err:
+                transform = None
         if eng and ddl:
             try:
                 return fingerprint_for_reconcile(
@@ -4318,1599 +4597,20 @@ def read_target_sample(
     sort_key: str | None = None,
     key_values: list[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Read a small ordered sample from destination for value reconciliation.
+    """Read a small ordered sample from the destination for value reconciliation.
 
-    When ``key_values`` is provided with ``sort_key``, prefer a keyed ``IN (...)``
-    read so append/upsert Gate-8 can prove fidelity against pre-existing rows
-    (ORDER BY … LIMIT alone often misses the batch keys in a large table).
-
-    Returns an empty list only when the destination is genuinely empty (or the
-    keyed ``IN`` matched nothing). Read failures raise
-    :class:`TargetSampleUnavailable` — never ``[]``.
+    Implemented in :mod:`services.target_sample`; kept here as the stable entry
+    point Gate-8 and the transfer engine already import.
     """
-    from connectors.sql_identifiers import (
-        quote_column_list,
-        quote_sql_identifier,
-        quote_table_ref,
-        require_safe_identifier,
-    )
-
-    cols = columns or ["*"]
-    keys = [k for k in (key_values or []) if k is not None and k != ""][
-        : max(1, int(limit or 50))
-    ]
-
-    def _row_names(description: Any) -> list[str]:
-        # When explicit columns were requested, trust the caller's keys so
-        # downstream mapping/reconciliation matches by the mapping target names.
-        # Cursor.description names may differ in case (e.g. fakesnow lower-cases
-        # quoted identifiers), which would make dict lookups fail for CURRENCY.
-        if cols and cols != ["*"]:
-            return list(cols)
-        return [d[0] for d in (description or [])]
-
-    def _ssl_flag(default: bool = False) -> bool:
-        # Match list/probe defaults — ssl=True here previously emptied samples on
-        # local / non-TLS hosts while verify_target still counted rows.
-        return bool(dest.get("ssl", default))
-
-    try:
-        if db_type in ("postgresql", "redshift"):
-            # Redshift speaks the Postgres wire protocol; local CI and many
-            # managed endpoints use the PG driver. Checksum verify already
-            # treated them as one family — sample compare must too, or Gate-8
-            # fails closed with "no sample reader" after a successful write.
-            from connectors.postgresql_conn import get_connection
-
-            col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            table_ref = quote_table_ref(
-                table_name, schema or "public", dialect="postgresql"
-            )
-            order_sql = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            ssl_flag = _ssl_flag(False)
-            last_exc: Exception | None = None
-            for attempt_ssl in (ssl_flag, not ssl_flag):
-                try:
-                    conn = get_connection(
-                        host=dest.get("host", ""),
-                        port=dest.get("port", 5432),
-                        database=dest.get("database", ""),
-                        username=dest.get("username", ""),
-                        password=dest.get("password", ""),
-                        connection_string=dest.get("connection_string", ""),
-                        ssl=attempt_ssl,
-                    )
-                    with conn.cursor() as cur:
-                        if keys and sort_key:
-                            key_col = quote_sql_identifier(
-                                require_safe_identifier(sort_key, preserve_case=True)
-                            )
-                            placeholders = ",".join(["%s"] * len(keys))
-                            cur.execute(
-                                f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                                f"WHERE {key_col} IN ({placeholders}) "
-                                f"ORDER BY {order_sql} LIMIT %s",
-                                (*keys, int(limit)),
-                            )
-                        else:
-                            cur.execute(
-                                f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",  # nosec B608
-                                (limit,),
-                            )
-                        names = _row_names(cur.description)
-                        rows = cur.fetchall()
-                    conn.close()
-                    return [dict(zip(names, row)) for row in rows]
-                except Exception as exc:
-                    last_exc = exc
-                    continue
-            if last_exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {last_exc}"
-                ) from last_exc
-            raise TargetSampleUnavailable(
-                f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                "postgresql connection failed for both SSL modes"
-            )
-
-        if db_type == "mysql":
-            from connectors.mysql_conn import get_connection
-
-            mysql_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols],
-                    quote_char="`",
-                )
-            )
-            table_ref = quote_table_ref(table_name, dialect="mysql")
-            mysql_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True), "`"
-                )
-                if sort_key
-                else "1"
-            )
-            conn = get_connection(
-                host=dest.get("host", ""),
-                port=int(dest.get("port", 3306)),
-                database=dest.get("database", ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                connection_string=dest.get("connection_string", ""),
-                ssl=dest.get("ssl", False),
-            )
-            with conn.cursor() as cur:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True), "`"
-                    )
-                    placeholders = ",".join(["%s"] * len(keys))
-                    cur.execute(
-                        f"SELECT {mysql_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {mysql_order} LIMIT %s",
-                        (*keys, int(limit)),
-                    )
-                else:
-                    cur.execute(
-                        f"SELECT {mysql_col_sql} FROM {table_ref} ORDER BY {mysql_order} LIMIT %s",  # nosec B608
-                        (limit,),
-                    )
-                names = _row_names(cur.description)
-                rows = cur.fetchall()
-            conn.close()
-            return [dict(zip(names, row)) for row in rows]
-
-        if db_type in {"sqlserver", "mssql", "azure_sql"}:
-            import pymssql
-
-            lim = max(1, int(limit or 50))
-            if cols == ["*"]:
-                ss_col_sql = "*"
-            else:
-                ss_col_sql = ", ".join(
-                    f"[{require_safe_identifier(c, preserve_case=True).replace(']', ']]')}]"
-                    for c in cols
-                )
-            sch = (schema or dest.get("schema") or "dbo").strip() or "dbo"
-            table_ref = quote_table_ref(table_name, schema=sch, dialect="sqlserver")
-            ss_order = (
-                f"[{require_safe_identifier(sort_key, preserve_case=True).replace(']', ']]')}]"
-                if sort_key
-                else "1"
-            )
-            conn = pymssql.connect(
-                server=dest.get("host") or "127.0.0.1",
-                port=int(dest.get("port") or 1433),
-                user=dest.get("username") or "sa",
-                password=dest.get("password") or "",
-                database=dest.get("database") or "master",
-                login_timeout=10,
-                timeout=30,
-            )
-            cur = conn.cursor()
-            try:
-                if keys and sort_key:
-                    key_col = (
-                        f"[{require_safe_identifier(sort_key, preserve_case=True).replace(']', ']]')}]"
-                    )
-                    placeholders = ",".join(["%s"] * len(keys))
-                    cur.execute(
-                        f"SELECT TOP ({lim}) {ss_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {ss_order}",
-                        tuple(keys),
-                    )
-                else:
-                    cur.execute(
-                        f"SELECT TOP ({lim}) {ss_col_sql} FROM {table_ref} "  # nosec B608
-                        f"ORDER BY {ss_order}"
-                    )
-                names = _row_names(cur.description)
-                rows = cur.fetchall()
-            finally:
-                cur.close()
-                conn.close()
-            return [dict(zip(names, row)) for row in rows]
-
-        if db_type in {
-            "oracle",
-            "oracledb",
-            "oracle_db",
-            "oracle_autonomous",
-            "oracle_autonomous_warehouse",
-            "amazon_rds_oracle",
-        } or (
-            db_type == "generic_sql"
-            and (dest.get("connection_string") or "").lower().startswith("oracle")
-        ):
-            import sqlalchemy as sa
-
-            from connectors.generic_sql import get_sqlalchemy_engine
-
-            lim = max(1, int(limit or 50))
-            ora_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            sch = (schema or dest.get("schema") or dest.get("username") or "").strip() or None
-            table_ref = quote_table_ref(table_name, schema=sch, dialect="oracle")
-            ora_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            engine = get_sqlalchemy_engine(
-                {
-                    "type": "oracle",
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 1521),
-                    "database": dest.get("database", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "schema": schema or dest.get("schema") or "",
-                }
-            )
-            with engine.connect() as conn:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
-                    params["lim"] = lim
-                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
-                    sql = (
-                        f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {ora_order} FETCH FIRST :lim ROWS ONLY"
-                    )
-                else:
-                    params = {"lim": lim}
-                    sql = (
-                        f"SELECT {ora_col_sql} FROM {table_ref} "  # nosec B608
-                        f"ORDER BY {ora_order} FETCH FIRST :lim ROWS ONLY"
-                    )
-                result = conn.execute(sa.text(sql), params)
-                names = (
-                    list(cols)
-                    if cols and cols != ["*"]
-                    else list(result.keys())
-                )
-                rows = result.fetchall()
-                return [dict(zip(names, tuple(row))) for row in rows]
-
-        if db_type == "duckdb" or (
-            db_type == "generic_sql"
-            and (
-                "duckdb"
-                in (dest.get("connection_string") or dest.get("database") or "").lower()
-                or (dest.get("connection_string") or dest.get("database") or "")
-                .lower()
-                .endswith((".duckdb", ".duck"))
-            )
-        ):
-            import sqlalchemy as sa
-            from connectors.generic_sql import get_sqlalchemy_engine
-
-            path = dest.get("connection_string") or dest.get("database", "")
-            if not path:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "duckdb path missing (connection_string/database)"
-                )
-            duckdb_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            table_ref = quote_table_ref(table_name, dialect="duckdb")
-            duckdb_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            try:
-                engine = get_sqlalchemy_engine(
-                    {"type": "duckdb", "connection_string": path}
-                )
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-            with engine.connect() as conn:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    params: dict[str, Any] = {f"k{i}": k for i, k in enumerate(keys)}
-                    params["lim"] = int(limit)
-                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
-                    sql = (
-                        f"SELECT {duckdb_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {duckdb_order} LIMIT :lim"
-                    )
-                else:
-                    params = {"lim": int(limit)}
-                    sql = f"SELECT {duckdb_col_sql} FROM {table_ref} ORDER BY {duckdb_order} LIMIT :lim"  # nosec B608
-                try:
-                    result = conn.execute(sa.text(sql), params)
-                    rows = result.mappings().all()
-                    # DuckDB returns column labels using the sanitized (underscore)
-                    # form of names like "fields.Name".  Re-label them with the
-                    # requested target column names so reconciliation keys match
-                    # the engine's mapping targets.
-                    if cols and cols != ["*"]:
-                        return [
-                            {cols[i]: list(row.values())[i] for i in range(len(cols))}
-                            for row in rows
-                        ]
-                    return [dict(row) for row in rows]
-                except TargetSampleUnavailable:
-                    raise
-                except Exception as exc:
-                    raise TargetSampleUnavailable(
-                        f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                    ) from exc
-
-        if db_type == "mongodb":
-            from connectors.mongodb_common import (
-                _mongo_client,
-                normalize_mongodb_connection_string,
-            )
-
-            try:
-                conn_str = normalize_mongodb_connection_string(
-                    dest.get("connection_string", ""),
-                    database=dest.get("database", ""),
-                    host=dest.get("host", ""),
-                    port=int(dest.get("port") or 27017),
-                    username=dest.get("username", ""),
-                    password=dest.get("password", ""),
-                    ssl=bool(dest.get("ssl", False)),
-                    auth_source=dest.get("auth_source", ""),
-                )
-                client = _mongo_client(conn_str)
-                db = client[dest.get("database") or "test"]
-                coll = db[table_name]
-                query_filter: dict[str, Any] = {}
-                if keys and sort_key:
-                    # Mongo $in is type-sensitive; widened key set matches strings,
-                    # integers, and decimals that the writer may have produced.
-                    widened: set[Any] = set()
-                    for k in keys:
-                        widened.add(k)
-                        try:
-                            if str(k).isdigit():
-                                widened.add(int(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        try:
-                            widened.add(float(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        # ObjectId keys from schemaless sources are serialized as hex strings.
-                        try:
-                            from bson import ObjectId
-
-                            if (
-                                isinstance(k, str)
-                                and len(k) == 24
-                                and all(c in "0123456789abcdefABCDEF" for c in k)
-                            ):
-                                widened.add(ObjectId(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                    query_filter = {sort_key: {"$in": list(widened)}}
-                cursor = coll.find(query_filter)
-                if sort_key:
-                    cursor = cursor.sort(sort_key, 1)
-                return list(cursor.limit(int(limit)))
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type == "sqlite" or (
-            db_type == "generic_sql"
-            and (
-                "sqlite"
-                in (dest.get("connection_string") or dest.get("database") or "").lower()
-                or (dest.get("connection_string") or dest.get("database") or "")
-                .lower()
-                .endswith((".db", ".sqlite"))
-            )
-        ):
-            import sqlite3
-
-            from connectors.sqlite_common import sqlite_file_path
-
-            path = sqlite_file_path(
-                dest.get("database") or "",
-                dest.get("connection_string") or "",
-                dest.get("host") or "",
-            )
-            if not path:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "sqlite path missing"
-                )
-            sqlite_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            table_ref = quote_table_ref(table_name, dialect="sqlite")
-            sqlite_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            conn = sqlite3.connect(str(path))
-            try:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    placeholders = ",".join(["?"] * len(keys))
-                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}) ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
-                    cur = conn.execute(sql, [*keys, int(limit)])
-                else:
-                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
-                    cur = conn.execute(sql, (int(limit),))
-                rows = cur.fetchall()
-                names = _row_names(cur.description)
-                return [dict(zip(names, row)) for row in rows]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-            finally:
-                conn.close()
-
-        if db_type == "redis":
-            from connectors.redis_reader import _decode, _redis_client
-            from connectors.sql_identifiers import sanitize_identifier
-
-            prefix = table_name or "dataflow"
-            cfg = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 6379),
-                "database": dest.get("database", "0"),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "ssl": bool(dest.get("ssl", False)),
-            }
-            try:
-                client = _redis_client(cfg)
-                rows_out: list[dict[str, Any]] = []
-                if keys and sort_key:
-                    # Writer stores keys as ``prefix:<sanitized_id>``.
-                    key_names = [
-                        f"{prefix}:{sanitize_identifier(str(k), preserve_case=True)}"
-                        for k in keys
-                    ]
-                    for raw in client.mget(key_names):
-                        text = _decode(raw)
-                        if not text:
-                            continue
-                        try:
-                            payload = json.loads(text)
-                        except (json.JSONDecodeError, TypeError):
-                            payload = {"value": text}
-                        if isinstance(payload, dict):
-                            rows_out.append(payload)
-                        else:
-                            rows_out.append({"value": payload})
-                        if len(rows_out) >= limit:
-                            break
-                else:
-                    pattern = f"{prefix}:*" if prefix else "*"
-                    cursor = 0
-                    while True:
-                        cursor, batch = client.scan(
-                            cursor=cursor, match=pattern, count=500
-                        )
-                        for raw_key in batch:
-                            key = (
-                                raw_key.decode()
-                                if isinstance(raw_key, bytes)
-                                else str(raw_key)
-                            )
-                            raw = client.get(key)
-                            text = _decode(raw)
-                            try:
-                                payload = (
-                                    json.loads(text)
-                                    if text.startswith("{")
-                                    else {"value": text}
-                                )
-                            except (json.JSONDecodeError, TypeError):
-                                payload = {"value": text}
-                            if isinstance(payload, dict):
-                                rows_out.append(payload)
-                            else:
-                                rows_out.append({"value": payload})
-                            if len(rows_out) >= limit:
-                                break
-                        if cursor == 0 or len(rows_out) >= limit:
-                            break
-                if columns:
-                    rows_out = [
-                        {k: v for k, v in row.items() if k in columns}
-                        for row in rows_out
-                    ]
-                return rows_out[:limit]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type in {"elasticsearch", "opensearch", "elastic"}:
-            from connectors.elasticsearch_reader import read_index_batch
-
-            cfg = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 9200),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "ssl": bool(dest.get("ssl", False)),
-                "api_key": str(dest.get("api_key") or dest.get("service_account") or ""),
-            }
-            try:
-                batch, _ = read_index_batch(
-                    cfg=cfg,
-                    index=table_name,
-                    columns=None if cols == ["*"] else cols,
-                    limit=max(1, int(limit or 50)),
-                )
-                headers = list(batch.headers or [])
-                rows_out: list[dict[str, Any]] = []
-                for row in batch.rows or []:
-                    if isinstance(row, dict):
-                        payload = row
-                    elif headers:
-                        payload = {
-                            headers[i]: row[i] if i < len(row) else None
-                            for i in range(len(headers))
-                        }
-                    else:
-                        continue
-                    if keys and sort_key:
-                        sk = str(payload.get(sort_key, ""))
-                        if sk not in {str(k) for k in keys}:
-                            continue
-                    rows_out.append(payload)
-                    if len(rows_out) >= limit:
-                        break
-                if columns and columns != ["*"]:
-                    rows_out = [
-                        {k: v for k, v in row.items() if k in columns}
-                        for row in rows_out
-                    ]
-                return rows_out[:limit]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type == "snowflake":
-            from connectors.snowflake_conn import (
-                get_connection,
-                normalize_account,
-                resolve_or_fold_snowflake_table,
-                snowflake_qualified_table,
-            )
-
-            try:
-                conn = get_connection(
-                    account=normalize_account(dest.get("host", "")),
-                    username=dest.get("username", ""),
-                    password=dest.get("password", ""),
-                    database=dest.get("database", ""),
-                    schema=schema or "PUBLIC",
-                    warehouse=dest.get("warehouse", ""),
-                    connection_string=dest.get("connection_string", ""),
-                )
-                from connectors.sql_identifiers import (
-                    quote_sql_identifier,
-                    require_safe_identifier,
-                )
-
-                with conn.cursor() as cur:
-                    resolved = resolve_or_fold_snowflake_table(
-                        cur, schema or "PUBLIC", table_name
-                    )
-                    qualified_name = snowflake_qualified_table(
-                        schema or "PUBLIC", resolved
-                    )
-                    sf_col_sql = (
-                        "*"
-                        if cols == ["*"]
-                        else quote_column_list(
-                            [
-                                require_safe_identifier(c, preserve_case=True)
-                                for c in cols
-                            ]
-                        )
-                    )
-                    sf_order = (
-                        quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
-                        if sort_key
-                        else "1"
-                    )
-                    if keys and sort_key:
-                        key_col = quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
-                        # Snowflake IN is type-sensitive; widen strings to ints/floats.
-                        widened: set[Any] = set()
-                        for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        placeholders = ",".join(["%s"] * len(widened))
-                        cur.execute(
-                            f"SELECT {sf_col_sql} FROM {qualified_name} "  # nosec B608
-                            f"WHERE {key_col} IN ({placeholders}) "
-                            f"ORDER BY {sf_order} LIMIT %s",
-                            (*widened, int(limit)),
-                        )
-                    else:
-                        cur.execute(
-                            f"SELECT {sf_col_sql} FROM {qualified_name} ORDER BY {sf_order} LIMIT %s",  # nosec B608
-                            (int(limit),),
-                        )
-                    names = _row_names(cur.description)
-                    rows = cur.fetchall()
-                conn.close()
-                return [dict(zip(names, row)) for row in rows]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type == "bigquery":
-            from connectors.bigquery_conn import get_client, _is_local_endpoint
-
-            project_id = dest.get("database", "")
-            dataset_id = schema or "dataflow"
-            is_local, _ = _is_local_endpoint(
-                dest.get("host", ""), dest.get("connection_string", "")
-            )
-            try:
-                client = get_client(
-                    project_id=project_id,
-                    credentials_path=dest.get("connection_string", ""),
-                    service_account=dest.get("service_account", ""),
-                    host=dest.get("host", ""),
-                    port=int(dest.get("port") or 0),
-                    connection_string=dest.get("connection_string", ""),
-                )
-                table_id = f"{project_id}.{dataset_id}.{table_name}"
-                if is_local:
-                    # Emulator path: scan rows and filter in-process; avoids
-                    # query().result() hangs on the goccy emulator for some jobs.
-                    out: list[dict[str, Any]] = []
-                    scan_limit = (limit or 50) * 10 if (keys and sort_key) else (limit or 50)
-                    widened = set()
-                    if keys and sort_key:
-                        for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to int: %s", k, exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to float: %s", k, exc)
-                    for row in client.list_rows(table_id, max_results=scan_limit):
-                        d = dict(row.items()) if hasattr(row, "items") else {k: v for k, v in zip(cols, row)}
-                        if cols and cols != ["*"]:
-                            d = {k: v for k, v in d.items() if k in cols}
-                        if keys and sort_key:
-                            if d.get(sort_key) in widened:
-                                out.append(d)
-                        else:
-                            out.append(d)
-                        if len(out) >= (limit or 50):
-                            break
-                    return out
-                # Production: use a real BigQuery query with a bounded timeout.
-                col_sql = (
-                    "*"
-                    if cols == ["*"]
-                    else quote_column_list(
-                        [require_safe_identifier(c, preserve_case=True) for c in cols]
-                    )
-                )
-                bq_order = (
-                    quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    if sort_key
-                    else "1"
-                )
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    placeholders = ",".join(["%s"] * len(keys))
-                    sql = (
-                        f"SELECT {col_sql} FROM `{table_id}` "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {bq_order} LIMIT %s"
-                    )
-                    params = (*keys, int(limit))
-                else:
-                    sql = f"SELECT {col_sql} FROM `{table_id}` ORDER BY {bq_order} LIMIT %s"  # nosec B608
-                    params = (int(limit),)
-                res = client.query(sql, timeout=60).result()
-                names = list(res.schema) if res.schema else cols
-                if names and names[0] and not isinstance(names[0], str):
-                    names = [f.name for f in names]
-                return [
-                    {k: v for k, v in dict(row.items()).items() if k in (cols if cols != ["*"] else dict(row.items()).keys())}
-                    for row in res
-                ]
-            except TargetSampleUnavailable:
-                raise
-            except Exception as exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-                ) from exc
-
-        if db_type in {
-            "adls",
-            "azure_blob_storage",
-            "azure_data_lake",
-            "azure_data_lake_storage",
-        }:
-            from connectors.adls_common import blob_service_client
-            from connectors.adls_reader import list_objects
-
-            container = (dest.get("database") or schema or "").strip()
-            if not container or not table_name:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "ADLS container or blob path missing"
-                )
-            cfg_adls = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "service_account": dest.get("service_account", ""),
-                "database": container,
-            }
-            client = blob_service_client(cfg_adls)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_adls, container, prefix),
-                fetch_bytes=lambda k: (
-                    client.get_blob_client(container, k).download_blob().readall()
-                ),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {"s3", "minio", "s3_compatible", "aws_s3"}:
-            from connectors.aws_common import boto3_client
-            from connectors.s3_reader import list_objects
-
-            bucket = (dest.get("database") or schema or "").strip()
-            if not bucket or not table_name:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "S3 bucket or object key missing"
-                )
-            cfg_s3 = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "ssl": bool(dest.get("ssl", False)),
-                "database": bucket,
-                "endpoint_url": dest.get("endpoint_url", "") or "",
-                "path_style": bool(dest.get("path_style", False)),
-                "region": dest.get("region", "") or "",
-            }
-            client = boto3_client("s3", cfg_s3)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_s3, bucket, prefix),
-                fetch_bytes=lambda k: client.get_object(Bucket=bucket, Key=k)["Body"].read(),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {"gcs", "google_cloud_storage"}:
-            from connectors.gcs_common import gcs_client
-            from connectors.gcs_reader import list_objects
-
-            bucket = (dest.get("database") or schema or "").strip()
-            if not bucket or not table_name:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "GCS bucket or object key missing"
-                )
-            cfg_gcs = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "connection_string": dest.get("connection_string", ""),
-                "service_account": dest.get("service_account", ""),
-                "password": dest.get("password", ""),
-            }
-            bucket_obj = gcs_client(cfg_gcs).bucket(bucket)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_gcs, bucket, prefix),
-                fetch_bytes=lambda k: bucket_obj.blob(k).download_as_bytes(),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {
-            "databricks",
-            "databricks_sql",
-            "delta",
-            "delta_lake",
-            "unity_catalog",
-            "spark",
-        }:
-            import sqlalchemy as sa
-
-            from connectors.generic_sql import get_sqlalchemy_engine
-
-            lim = max(1, int(limit or 50))
-            db_col_sql = (
-                "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
-                )
-            )
-            sch = (schema or dest.get("schema") or dest.get("database") or "").strip() or None
-            table_ref = quote_table_ref(table_name, schema=sch, dialect="ansi")
-            db_order = (
-                quote_sql_identifier(
-                    require_safe_identifier(sort_key, preserve_case=True)
-                )
-                if sort_key
-                else "1"
-            )
-            engine = get_sqlalchemy_engine(
-                {
-                    "type": "databricks",
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 443),
-                    "database": dest.get("database", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "schema": schema or dest.get("schema") or "",
-                    "http_path": str(dest.get("http_path") or dest.get("warehouse") or ""),
-                }
-            )
-            with engine.connect() as conn:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True)
-                    )
-                    params = {f"k{i}": k for i, k in enumerate(keys)}
-                    params["lim"] = lim
-                    placeholders = ",".join(f":k{i}" for i in range(len(keys)))
-                    sql = (
-                        f"SELECT {db_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
-                        f"ORDER BY {db_order} LIMIT :lim"
-                    )
-                else:
-                    params = {"lim": lim}
-                    sql = (
-                        f"SELECT {db_col_sql} FROM {table_ref} "  # nosec B608
-                        f"ORDER BY {db_order} LIMIT :lim"
-                    )
-                result = conn.execute(sa.text(sql), params)
-                names = list(cols) if cols and cols != ["*"] else list(result.keys())
-                return [dict(zip(names, tuple(row))) for row in result.fetchall()]
-
-        if db_type == "hubspot":
-            from connectors.hubspot import read_object
-
-            batch = read_object(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "table": table_name,
-                    "database": table_name,
-                },
-                object=table_name or "contacts",
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            headers = list(batch.headers or (cols if cols != ["*"] else []) or [])
-            out_rows: list[dict[str, Any]] = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d = dict(row)
-                elif headers:
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "salesforce":
-            from connectors.salesforce import read_object
-
-            batch = read_object(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "api_key": dest.get("api_key", ""),
-                    "table": table_name,
-                    "database": table_name,
-                },
-                object=table_name or "Account",
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            headers = list(batch.headers or [])
-            out_rows = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d = {k: v for k, v in row.items() if k != "attributes"}
-                elif headers:
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "airtable":
-            from connectors.airtable import read_object
-            from connectors.saas_typed_schema import flatten_airtable_record
-
-            batch = read_object(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "api_key": dest.get("api_key", ""),
-                    "database": dest.get("database") or schema or "",
-                    "table": table_name,
-                    "type": "airtable",
-                },
-                object=table_name,
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            out_rows = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d, _ = flatten_airtable_record(row)
-                elif batch.headers:
-                    headers = list(batch.headers)
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type in {"stripe", "shopify", "zendesk", "notion"}:
-            if db_type == "stripe":
-                from connectors.stripe import read_object as _saas_read
-            elif db_type == "shopify":
-                from connectors.shopify import read_object as _saas_read
-            elif db_type == "zendesk":
-                from connectors.zendesk import read_object as _saas_read
-            else:
-                from connectors.notion import read_object as _saas_read
-
-            batch = _saas_read(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "api_key": dest.get("api_key", ""),
-                    "table": table_name,
-                    "database": dest.get("database") or schema or table_name,
-                    "shop": dest.get("host", ""),
-                    "type": db_type,
-                },
-                object=table_name
-                or (
-                    "customers"
-                    if db_type in {"stripe", "shopify"}
-                    else ("tickets" if db_type == "zendesk" else "")
-                ),
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            headers = list(batch.headers or [])
-            out_rows = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d = dict(row)
-                elif headers:
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "kafka":
-            from connectors.kafka_reader import read_topic_batch
-
-            batch, _ = read_topic_batch(
-                cfg={
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 9092),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "database": table_name,
-                    "table": table_name,
-                    "group_id": f"dataflow-gate8-sample-{abs(hash(table_name)) % 10_000_000}",
-                    "auto_offset_reset": "earliest",
-                    "schema_registry_url": str(
-                        dest.get("schema_registry_url") or dest.get("registry_url") or ""
-                    ),
-                },
-                topic=table_name,
-                columns=None if cols == ["*"] else cols,
-                limit=max(1, int(limit or 50)) * 5 if keys else max(1, int(limit or 50)),
-            )
-            headers = list(batch.headers or [])
-            out_rows = []
-            for row in batch.rows or []:
-                if isinstance(row, dict):
-                    d = dict(row)
-                elif headers:
-                    d = {
-                        headers[i]: row[i] if i < len(row) else None
-                        for i in range(len(headers))
-                    }
-                else:
-                    continue
-                if keys and sort_key and d.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    d = {k: d.get(k) for k in cols}
-                out_rows.append(d)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "pinecone":
-            from connectors.pinecone_writer import _headers, _index_url, _requests_session
-
-            index_url = _index_url(dest.get("host", ""), dest.get("connection_string", ""))
-            key = str(
-                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
-            )
-            if not index_url or not key:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "pinecone index URL or API key missing"
-                )
-            session = _requests_session()
-            hdrs = _headers(key)
-            ns = (table_name or dest.get("schema") or "").strip()
-            ids = [str(k) for k in keys] if keys else []
-            if not ids:
-                return []
-            params = [("ids", i) for i in ids[: max(1, int(limit or 50))]]
-            if ns:
-                params.append(("namespace", ns))
-            fetch = session.get(
-                f"{index_url}/vectors/fetch",
-                params=params,
-                headers=hdrs,
-                timeout=30,
-            )
-            if fetch.status_code not in {200, 201}:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    f"pinecone fetch HTTP {fetch.status_code}"
-                )
-            vectors = (fetch.json() or {}).get("vectors") or {}
-            out_rows = []
-            for vid, payload in vectors.items():
-                meta = payload.get("metadata") if isinstance(payload, dict) else {}
-                if not isinstance(meta, dict):
-                    meta = {}
-                row = {"id": vid, **meta}
-                if cols and cols != ["*"]:
-                    row = {k: row.get(k) for k in cols}
-                out_rows.append(row)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "qdrant":
-            from connectors.qdrant_writer import _base_url, _headers, _requests_session
-
-            api_key = dest.get("password") or dest.get("username") or ""
-            base_url = (
-                dest.get("connection_string", "").rstrip("/")
-                if dest.get("connection_string")
-                else _base_url(
-                    dest.get("host", ""),
-                    int(dest.get("port") or 6333),
-                    bool(dest.get("ssl", False)),
-                )
-            )
-            collection = table_name or dest.get("database") or "dataflow_vectors"
-            session = _requests_session()
-            hdrs = _headers(str(api_key))
-            out_rows: list[dict[str, Any]] = []
-            if keys:
-                retrieve = session.post(
-                    f"{base_url}/collections/{collection}/points",
-                    data=json.dumps({
-                        "ids": [str(k) for k in keys[: max(1, int(limit or 50))]],
-                        "with_payload": True,
-                        "with_vector": False,
-                    }),
-                    headers=hdrs,
-                    timeout=30,
-                )
-                points = (
-                    (retrieve.json() or {}).get("result") or []
-                    if retrieve.status_code in {200, 201}
-                    else []
-                )
-            else:
-                scroll = session.post(
-                    f"{base_url}/collections/{collection}/points/scroll",
-                    data=json.dumps({
-                        "limit": max(1, int(limit or 50)),
-                        "with_payload": True,
-                        "with_vector": False,
-                    }),
-                    headers=hdrs,
-                    timeout=30,
-                )
-                points = (
-                    ((scroll.json() or {}).get("result") or {}).get("points") or []
-                    if scroll.status_code in {200, 201}
-                    else []
-                )
-            for pt in points:
-                if not isinstance(pt, dict):
-                    continue
-                payload = pt.get("payload") if isinstance(pt.get("payload"), dict) else {}
-                row = {"id": pt.get("id"), **payload}
-                if cols and cols != ["*"]:
-                    row = {k: row.get(k) for k in cols}
-                out_rows.append(row)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-        if db_type == "weaviate":
-            from connectors.weaviate_writer import (
-                _base_url,
-                _class_name,
-                _headers,
-                _requests_session,
-            )
-
-            key = str(
-                dest.get("api_key") or dest.get("password") or dest.get("username") or ""
-            )
-            base_url = _base_url(
-                dest.get("host", ""),
-                int(dest.get("port") or 8080),
-                bool(dest.get("ssl", False)),
-                dest.get("connection_string", ""),
-            )
-            cls = _class_name(table_name or dest.get("database") or "DataflowChunk")
-            session = _requests_session()
-            hdrs = _headers(key)
-            out_rows = []
-            if keys:
-                for oid in keys[: max(1, int(limit or 50))]:
-                    resp = session.get(
-                        f"{base_url}/v1/objects/{cls}/{oid}",
-                        headers=hdrs,
-                        timeout=15,
-                    )
-                    if resp.status_code not in {200, 201}:
-                        resp = session.get(
-                            f"{base_url}/v1/objects/{oid}",
-                            headers=hdrs,
-                            timeout=15,
-                        )
-                    if resp.status_code not in {200, 201}:
-                        continue
-                    obj = resp.json() or {}
-                    if not isinstance(obj, dict):
-                        continue
-                    props = (
-                        obj.get("properties")
-                        if isinstance(obj.get("properties"), dict)
-                        else {}
-                    )
-                    row = {"id": obj.get("id") or oid, **props}
-                    if cols and cols != ["*"]:
-                        row = {k: row.get(k) for k in cols}
-                    out_rows.append(row)
-            else:
-                agg = session.get(
-                    f"{base_url}/v1/objects",
-                    params={"class": cls, "limit": max(1, int(limit or 50))},
-                    headers=hdrs,
-                    timeout=30,
-                )
-                if agg.status_code in {200, 201}:
-                    for obj in (agg.json() or {}).get("objects") or []:
-                        if not isinstance(obj, dict):
-                            continue
-                        props = (
-                            obj.get("properties")
-                            if isinstance(obj.get("properties"), dict)
-                            else {}
-                        )
-                        row = {"id": obj.get("id"), **props}
-                        if cols and cols != ["*"]:
-                            row = {k: row.get(k) for k in cols}
-                        out_rows.append(row)
-                        if len(out_rows) >= int(limit or 50):
-                            break
-            return out_rows
-
-        if db_type == "milvus":
-            from connectors.milvus_writer import (
-                _auth_token,
-                _base_url,
-                _collection_name,
-                _headers,
-                _ok_response,
-                _requests_session,
-            )
-
-            coll = _collection_name(table_name or "dataflow_chunks")
-            db_name = (dest.get("database") or schema or "").strip()
-            if db_name.lower() in {"", "test_db", "default", "public"}:
-                db_name = ""
-            token = _auth_token(
-                api_key=str(dest.get("api_key") or ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-            )
-            base_url = _base_url(
-                dest.get("host", ""),
-                int(dest.get("port") or 19530),
-                bool(dest.get("ssl", False)),
-                dest.get("connection_string", ""),
-            )
-            session = _requests_session()
-            hdrs = _headers(token)
-            query_payload: dict[str, Any] = {
-                "collectionName": coll,
-                "outputFields": ["id", "content", "source_id", "chunk_index"],
-                "limit": max(1, int(limit or 50)),
-            }
-            if keys:
-                quoted = ", ".join(json.dumps(str(k)) for k in keys[: max(1, int(limit or 50))])
-                query_payload["filter"] = f"id in [{quoted}]"
-            else:
-                query_payload["filter"] = ""
-            if db_name:
-                query_payload["dbName"] = db_name
-            query = session.post(
-                f"{base_url}/v2/vectordb/entities/query",
-                data=json.dumps(query_payload),
-                headers=hdrs,
-                timeout=30,
-            )
-            qbody = query.json() if query.content else {}
-            out_rows = []
-            if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
-                for row in (qbody.get("data") if isinstance(qbody, dict) else []) or []:
-                    if not isinstance(row, dict):
-                        continue
-                    d = {k: v for k, v in row.items() if k != "vector"}
-                    if cols and cols != ["*"]:
-                        d = {k: d.get(k) for k in cols}
-                    out_rows.append(d)
-                    if len(out_rows) >= int(limit or 50):
-                        break
-            return out_rows
-
-        _engine_hint = str(dest.get("type") or dest.get("engine") or "").lower()
-        _conn_hint = str(dest.get("connection_string") or dest.get("database") or "").lower()
-        if db_type == "clickhouse" or (
-            db_type == "generic_sql"
-            and ("clickhouse" in _engine_hint or "clickhouse" in _conn_hint)
-        ):
-            import sqlalchemy as sa
-
-            from connectors.generic_sql import (
-                clickhouse_final_table_sql,
-                get_sqlalchemy_engine,
-            )
-            from connectors.sql_identifiers import (
-                quote_sql_identifier,
-                quote_table_ref,
-                require_safe_identifier,
-            )
-
-            engine = get_sqlalchemy_engine(
-                {
-                    "type": "clickhouse",
-                    "host": dest.get("host", ""),
-                    "port": int(dest.get("port") or 9000),
-                    "database": dest.get("database", ""),
-                    "username": dest.get("username", ""),
-                    "password": dest.get("password", ""),
-                    "connection_string": dest.get("connection_string", ""),
-                    "schema": schema or dest.get("schema") or "",
-                    "ssl": bool(dest.get("ssl", False)),
-                }
-            )
-            table_ref = quote_table_ref(
-                table_name,
-                schema=schema or dest.get("schema") or None,
-                dialect="clickhouse",
-            )
-            from_sql = clickhouse_final_table_sql(table_ref)
-            col_sql = (
-                "*"
-                if cols == ["*"]
-                else ", ".join(
-                    quote_sql_identifier(
-                        require_safe_identifier(c, preserve_case=True), "`"
-                    )
-                    for c in cols
-                )
-            )
-            with engine.connect() as conn:
-                if keys and sort_key:
-                    key_col = quote_sql_identifier(
-                        require_safe_identifier(sort_key, preserve_case=True), "`"
-                    )
-                    placeholders = ", ".join(f":k{i}" for i in range(len(keys)))
-                    params = {f"k{i}": k for i, k in enumerate(keys)}
-                    result = conn.execute(
-                        sa.text(
-                            f"SELECT {col_sql} FROM {from_sql} "  # nosec B608
-                            f"WHERE {key_col} IN ({placeholders}) "
-                            f"LIMIT {int(limit or 50)}"
-                        ),
-                        params,
-                    )
-                else:
-                    result = conn.execute(
-                        sa.text(
-                            f"SELECT {col_sql} FROM {from_sql} "  # nosec B608
-                            f"LIMIT {int(limit or 50)}"
-                        )
-                    )
-                names = list(result.keys()) if result.keys() else (
-                    list(cols) if cols != ["*"] else []
-                )
-                return [dict(zip(names, row)) for row in result.fetchall()]
-
-        if db_type == "pgvector":
-            from connectors.postgresql_conn import get_connection
-            from connectors.sql_identifiers import (
-                quote_sql_identifier,
-                quote_table_ref,
-                require_safe_identifier,
-            )
-
-            table_ref = quote_table_ref(
-                table_name, schema or "public", dialect="postgresql"
-            )
-            conn = get_connection(
-                host=dest.get("host", ""),
-                port=dest.get("port", 5432),
-                database=dest.get("database", ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                connection_string=dest.get("connection_string", ""),
-                ssl=bool(dest.get("ssl", False)),
-            )
-            try:
-                with conn.cursor() as cur:
-                    if keys and sort_key:
-                        key_col = quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
-                        placeholders = ",".join(["%s"] * len(keys))
-                        cur.execute(
-                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
-                            f"FROM {table_ref} WHERE {key_col} IN ({placeholders}) LIMIT %s",
-                            (*keys, int(limit or 50)),
-                        )
-                    else:
-                        cur.execute(
-                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
-                            f"FROM {table_ref} LIMIT %s",
-                            (int(limit or 50),),
-                        )
-                    names = [d[0] for d in cur.description] if cur.description else []
-                    out_rows = []
-                    for raw in cur.fetchall():
-                        rec = dict(zip(names, raw))
-                        meta = rec.get("metadata") or {}
-                        if isinstance(meta, str):
-                            try:
-                                meta = json.loads(meta)
-                            except Exception:
-                                meta = {}
-                        if not isinstance(meta, dict):
-                            meta = {}
-                        row = {
-                            "id": rec.get("id"),
-                            "content": rec.get("content"),
-                            "source_id": rec.get("source_id"),
-                            "chunk_index": rec.get("chunk_index"),
-                            **meta,
-                        }
-                        if cols and cols != ["*"]:
-                            row = {k: row.get(k) for k in cols}
-                        out_rows.append(row)
-                    return out_rows
-            finally:
-                conn.close()
-
-        if db_type == "sftp":
-            from connectors.sftp_common import connect_sftp, parse_sftp_config
-
-            cfg = parse_sftp_config(
-                connection_string=dest.get("connection_string", ""),
-                host=dest.get("host", ""),
-                port=int(dest.get("port") or 22),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                database=dest.get("database", "") or schema or "",
-                table=table_name,
-            )
-            if not cfg.host or not cfg.path:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "sftp host or path missing"
-                )
-            transport, sftp = connect_sftp(cfg)
-            try:
-                with sftp.file(cfg.path, "rb") as fh:
-                    body = fh.read()
-            finally:
-                sftp.close()
-                transport.close()
-            rows, headers = _rows_from_object_bytes(
-                body, cfg.path, None if cols == ["*"] else cols
-            )
-            out_rows: list[dict[str, Any]] = []
-            for row in rows:
-                if not isinstance(row, dict):
-                    if headers:
-                        row = {
-                            headers[i]: row[i] if i < len(row) else None
-                            for i in range(len(headers))
-                        }
-                    else:
-                        continue
-                if keys and sort_key and row.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    row = {k: row.get(k) for k in cols}
-                out_rows.append(row)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
-
-    except TargetSampleUnavailable:
-        raise
-    except Exception as exc:
-        raise TargetSampleUnavailable(
-            f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
-        ) from exc
-    raise TargetSampleUnavailable(
-        f"No sample reader is wired for destination type {db_type!r} "
-        f"(table {table_name!r}); refusing to treat as empty"
+    from services.target_sample import read_target_sample as _read
+
+    return _read(
+        db_type,
+        dest,
+        schema=schema,
+        table_name=table_name,
+        columns=columns,
+        limit=limit,
+        sort_key=sort_key,
+        key_values=key_values,
     )

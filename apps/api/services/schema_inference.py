@@ -35,6 +35,7 @@ from services.transform_engine import (
     _parse_datetime,
     _parse_decimal,
 )
+from services.value_serializer import evidence_samples, is_null_evidence
 
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
@@ -534,7 +535,7 @@ def samples_fit_logical_type(samples: list[str], logical_type: str, *, field_nam
     """True when every non-empty sample coerces cleanly to ``logical_type``."""
     from services.transform_engine import apply_transform, infer_transform_for_mapping
 
-    non_empty = [str(s).strip() for s in samples if s is not None and str(s).strip()]
+    non_empty = evidence_samples(samples)
     if not non_empty:
         return True
     lt = (logical_type or "VARCHAR").upper()
@@ -685,7 +686,7 @@ def infer_column(
 
     Returns keys: logical_type, semantic_role, confidence, notes, samples.
     """
-    non_empty = [s.strip() for s in samples if s and str(s).strip()]
+    non_empty = evidence_samples(samples)
     notes: list[str] = []
     if not non_empty:
         return {
@@ -914,8 +915,8 @@ def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_sa
                 "semantic_role": intel["semantic_role"],
                 "confidence": intel["confidence"],
                 "notes": intel["notes"],
-                "nullable": any(not str(s).strip() for s in samples),
-                "samples": [s for s in samples[:5] if str(s).strip()],
+                "nullable": any(is_null_evidence(s) for s in samples),
+                "samples": evidence_samples(samples[:5]),
             }
         )
     return columns

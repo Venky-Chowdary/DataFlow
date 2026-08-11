@@ -25,6 +25,7 @@ from services.decision_kernel.models import (
 )
 from services.decision_kernel.conversion import ConversionClass, classify_mapping
 from services.decision_kernel.risk import risk_level_for_conversion
+from services.mapping_constraints import is_intentional_omit
 
 
 def _canonical_from_type_stamp(stamp: str) -> CanonicalType:
@@ -61,7 +62,7 @@ def build_artifact_from_mappings(
     column_ddl: dict[str, str] = {}
 
     for m in maps:
-        if bool(m.get("intentional_omit") or m.get("intentionalOmit")):
+        if is_intentional_omit(m):
             continue
         src = str(m.get("source") or "").strip()
         tgt = str(m.get("target") or "").strip()

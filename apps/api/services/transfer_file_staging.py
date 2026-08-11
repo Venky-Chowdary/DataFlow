@@ -29,6 +29,16 @@ def _safe_filename(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", base)[:160] or "upload.bin"
 
 
+#: Filename prefix for per-job source spills in the shared upload directory.
+#: These belong to one transfer, not to the workspace's dataset catalog.
+TRANSFER_STAGING_PREFIX = "xfer_"
+
+
+def is_transfer_staging_file(name: str) -> bool:
+    """True when ``name`` is a per-job transfer spill rather than a user upload."""
+    return str(name or "").startswith(TRANSFER_STAGING_PREFIX)
+
+
 def file_source_bytes_available(request: "TransferRequest") -> bool:
     """True when Execute can read file bytes (memory, path, or object URI)."""
     if getattr(request, "source", None) is None:
@@ -85,7 +95,7 @@ def persist_file_source(
 
     token = (job_token or uuid.uuid4().hex)[:32]
     filename = _safe_filename(request.source_filename or "upload.bin")
-    dest = upload_dir() / f"xfer_{token}_{filename}"
+    dest = upload_dir() / f"{TRANSFER_STAGING_PREFIX}{token}_{filename}"
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(content)
     request.source_path = str(dest)

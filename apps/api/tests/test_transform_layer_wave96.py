@@ -674,6 +674,169 @@ class TestRealExecution:
         assert "rev_report" not in names
 
 
+class TestIncrementalColumnAlignment:
+    """An incremental load must match columns by name, never by position.
+
+    The target of an incremental model outlives the model definition: an
+    operator pre-creates the mart, an earlier revision of the SELECT built it,
+    or someone adds a column. A positional `INSERT INTO t SELECT *` is only
+    correct while the two orders happen to agree — when they diverge it writes
+    `region` into `city`, the row count reconciles, and the run reports success.
+    Live proof: transform_live_results.json (30 cases, PG/MySQL/SQL Server).
+    """
+
+    def _runner(self, warehouse: str) -> TransformRunner:
+        return TransformRunner({"type": "sqlite", "database": warehouse}, dialect="sqlite")
+
+    def _target(self, warehouse: str, ddl: str, table: str = "mart") -> None:
+        con = sqlite3.connect(warehouse)
+        con.execute(ddl)
+        con.commit()
+        con.close()
+
+    def _model(self, sql: str, **kw) -> TransformModel:
+        kw.setdefault("materialization", "incremental")
+        kw.setdefault("incremental_strategy", "append")
+        return _model("mart", sql, **kw)
+
+    def test_reordered_target_receives_each_value_in_its_own_column(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT, region TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'EMEA' AS region, 'Berlin' AS city")]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        row = con.execute("SELECT id, city, region FROM mart").fetchone()
+        con.close()
+        assert row == (1, "Berlin", "EMEA")
+
+    def test_executed_sql_names_its_columns(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT, region TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'EMEA' AS region, 'Berlin' AS city")]
+        )
+        sql = result.models[0].sql
+        assert 'INSERT INTO "mart" ("id", "region", "city")' in sql
+        assert "INSERT INTO \"mart\" SELECT" not in sql
+        assert result.models[0].column_alignment == {
+            "id": "id",
+            "region": "region",
+            "city": "city",
+        }
+
+    def test_a_column_the_model_omits_is_left_to_the_target(self, warehouse):
+        # Positionally this shifts every value one column to the left.
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, tenant TEXT, city TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city")]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        row = con.execute("SELECT id, tenant, city FROM mart").fetchone()
+        con.close()
+        assert row == (1, None, "Berlin")
+
+    def test_a_column_the_target_lacks_is_refused_by_name(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city, 'EMEA' AS region")]
+        )
+        assert result.models[0].status == "failed"
+        assert "region" in result.models[0].error
+        assert _count(warehouse, "mart") == 0
+
+    def test_a_required_target_column_nothing_fills_is_refused(self, warehouse):
+        self._target(
+            warehouse,
+            "CREATE TABLE mart (id INTEGER, city TEXT, tenant TEXT NOT NULL)",
+        )
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city")]
+        )
+        assert result.models[0].status == "failed"
+        assert "tenant" in result.models[0].error
+        assert _count(warehouse, "mart") == 0
+
+    def test_a_required_target_column_with_a_default_still_loads(self, warehouse):
+        # Fail-closed must not become fail-always: the destination fills this.
+        self._target(
+            warehouse,
+            "CREATE TABLE mart (id INTEGER, city TEXT, "
+            "tenant TEXT NOT NULL DEFAULT 'acme')",
+        )
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city")]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        row = con.execute("SELECT id, city, tenant FROM mart").fetchone()
+        con.close()
+        assert row == (1, "Berlin", "acme")
+
+    def test_delete_insert_onto_a_reordered_target_is_aligned(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT, region TEXT)")
+        self._target(warehouse, "INSERT INTO mart VALUES (1, 'Old', 'OLD')")
+        result = self._runner(warehouse).run(
+            [
+                self._model(
+                    "SELECT 1 AS id, 'EMEA' AS region, 'Berlin' AS city",
+                    incremental_strategy="merge",
+                    unique_key="id",
+                )
+            ]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        rows = con.execute("SELECT id, city, region FROM mart").fetchall()
+        con.close()
+        assert rows == [(1, "Berlin", "EMEA")]
+
+    def test_a_unique_key_the_model_does_not_select_is_refused(self, warehouse):
+        # The DELETE would match nothing, so delete+insert would duplicate.
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT)")
+        result = self._runner(warehouse).run(
+            [
+                self._model(
+                    "SELECT 'Berlin' AS city, 1 AS id",
+                    incremental_strategy="merge",
+                    unique_key="order_id",
+                )
+            ]
+        )
+        assert result.models[0].status == "failed"
+        assert "order_id" in result.models[0].error
+        assert _count(warehouse, "mart") == 0
+
+    def test_alignment_ignores_column_case(self, warehouse):
+        self._target(warehouse, "CREATE TABLE mart (id INTEGER, city TEXT, region TEXT)")
+        result = self._runner(warehouse).run(
+            [self._model('SELECT 1 AS "ID", \'EMEA\' AS "Region", \'Berlin\' AS "City"')]
+        )
+        assert result.status == "success", result.error
+        con = sqlite3.connect(warehouse)
+        row = con.execute("SELECT id, city, region FROM mart").fetchone()
+        con.close()
+        assert row == (1, "Berlin", "EMEA")
+
+    def test_first_run_creates_the_target_and_loads_it(self, warehouse):
+        result = self._runner(warehouse).run(
+            [self._model("SELECT 1 AS id, 'Berlin' AS city")]
+        )
+        assert result.status == "success", result.error
+        assert _count(warehouse, "mart") == 1
+
+    def test_first_append_run_loads_each_row_once(self, warehouse):
+        # The seed used to be `CREATE TABLE ... AS <body>`, which materialized
+        # the rows, and the INSERT then wrote them a second time. Only the first
+        # run of a brand-new model was affected, so every later run looked right.
+        runner = self._runner(warehouse)
+        model = self._model("SELECT id FROM orders")
+        runner.run([model])
+        assert _count(warehouse, "mart") == 4
+        runner.run([model])
+        assert _count(warehouse, "mart") == 8, "append is at-least-once by design"
+
+
 def _count(db: str, table: str) -> int:
     con = sqlite3.connect(db)
     try:
