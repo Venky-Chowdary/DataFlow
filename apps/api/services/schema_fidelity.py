@@ -3,10 +3,12 @@
 Every migration must either CARRY a schema aspect or emit an explicit
 ``unsupported`` / ``skipped`` line. Silence is a bug.
 
-v1 create-new (PostgreSQL + SQLite):
-  CARRY: primary_key, not_null, simple DEFAULT, unique (column-list)
-  CERTIFY as unsupported: CHECK, FK, views, triggers, partial/expression
-  indexes, generated expr, identity RESTART, partitioning, comments, …
+create-new:
+  CARRY: primary_key, not_null, simple DEFAULT, unique (column-list), CHECK,
+  secondary indexes, physical placement, key generators (identity /
+  AUTO_INCREMENT / IDENTITY)
+  CERTIFY as unsupported: FK on single-table create, views, triggers,
+  partial/expression indexes, generated expr, comments, …
 
 Name-collision policy is also explicit (fold + length + deterministic suffix).
 """
@@ -18,6 +20,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
+from services.identity_carry import plan_identity_carry
 from services.physical_placement_ddl import plan_physical_placement, verify_placement
 
 logger = logging.getLogger(__name__)
@@ -180,10 +183,17 @@ class CreateFidelityPlan:
     # The measured source placement the decisions were made from, kept so the
     # post-CREATE destination re-read can compare like for like.
     source_storage: dict[str, Any] | None = None
+    # Destination columns created as key generators, and the subset whose engine
+    # refuses a client-supplied value unless the session opts in (SQL Server
+    # SET IDENTITY_INSERT). The load must know: the rows carry explicit keys.
+    identity_columns: dict[str, str] = field(default_factory=dict)
+    identity_insert_columns: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "report": self.report.to_dict(),
+            "identity_columns": dict(self.identity_columns),
+            "identity_insert_columns": list(self.identity_insert_columns),
             "create_suffix": self.create_suffix,
             "column_suffixes": {k: list(v) for k, v in self.column_suffixes.items()},
             "table_constraints": list(self.table_constraints),
@@ -770,6 +780,49 @@ def plan_create_new_fidelity(
         unique_constraints=struct_unique,
     )
 
+    # --- CARRY: key generator (identity / AUTO_INCREMENT / IDENTITY) ---
+    # Placed after PK/NOT NULL/DEFAULT so the generator is the last fragment on
+    # the column (MySQL requires AUTO_INCREMENT after NOT NULL) and so a DEFAULT
+    # planned above can be withdrawn: a column cannot both generate and default.
+    identity_plan = plan_identity_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        primary_key=list(pk_dest),
+    )
+    for decision in identity_plan.decisions:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+    for dest_col, suffix in identity_plan.column_suffixes.items():
+        dropped_default = struct_defaults.pop(dest_col, None)
+        if dropped_default is not None:
+            suffixes[dest_col] = [
+                s for s in suffixes.get(dest_col) or []
+                if not s.upper().startswith("DEFAULT ")
+            ]
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="default",
+                    name=dest_col,
+                    status="unsupported",
+                    reason=(
+                        "DEFAULT withdrawn: the column is created as a key "
+                        "generator, and a generator and a default cannot both "
+                        "fill the same column."
+                    ),
+                    source_detail=dropped_default,
+                )
+            )
+        if dest in {"oracle", "sqlserver"}:
+            # Both engines imply NOT NULL on an identity column and reject the
+            # redundant fragment in the same definition.
+            suffixes[dest_col] = [
+                s for s in suffixes.get(dest_col) or [] if s.upper() != "NOT NULL"
+            ]
+        suffixes.setdefault(dest_col, []).append(suffix)
+
     # --- CARRY: physical placement (partitioning / tablespace / clustering) ---
     placement = plan_physical_placement(
         source_storage=catalog.physical_storage,
@@ -787,7 +840,11 @@ def plan_create_new_fidelity(
 
     # --- Explicit unsupported / skipped for remaining aspects ---
     _emit_unsupported_catalog(
-        report, catalog, skip_check=check_handled, skip_index=index_handled
+        report,
+        catalog,
+        skip_check=check_handled,
+        skip_index=index_handled,
+        skip_identity=bool(identity_plan.decisions),
     )
 
     # Column order — carried as mapping order (honest).
@@ -822,6 +879,8 @@ def plan_create_new_fidelity(
         create_suffix=placement.create_suffix,
         placement_decisions=list(placement.decisions),
         source_storage=catalog.physical_storage,
+        identity_columns=dict(identity_plan.column_suffixes),
+        identity_insert_columns=list(identity_plan.identity_insert_columns),
     )
 
 
@@ -909,6 +968,54 @@ def certify_placement_on_destination(
     finalize_placement(
         plan, source_storage=plan.source_storage, dest_storage=dest_storage
     )
+
+
+def certify_identity_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> None:
+    """Settle the identity aspect from the destination catalog, not the DDL.
+
+    A generator clause an engine quietly ignored (SQLAlchemy drops
+    ``autoincrement`` on a non-integer key) would otherwise be certified as
+    carried while the client's first insert after cutover still fails.
+    """
+    if plan is None or not plan.identity_columns:
+        return
+    from services.identity_carry import destination_generator_columns
+
+    generators = destination_generator_columns(
+        dialect=dialect, schema=schema, table=table, fetchall=fetchall
+    )
+    for item in plan.report.items:
+        if item.aspect != "identity_sequence" or item.status != "carried":
+            continue
+        if generators is None:
+            item.status = "unknown"
+            item.reason = (
+                "The destination catalog could not be read after CREATE, so the "
+                "generator is unverified. Emitted DDL is not proof. "
+                f"Would have: {item.reason}"
+            )
+            continue
+        folded = {g.casefold() for g in generators}
+        if item.name.casefold() not in folded:
+            item.status = "unsupported"
+            item.reason = (
+                "The destination did not take the generator: its catalog reports "
+                "no identity/AUTO_INCREMENT on this column, so a client insert "
+                "without a key will fail. "
+                f"Attempted: {item.dest_ddl or 'generator clause'}."
+            )
+            item.dest_ddl = ""
+            plan.identity_columns.pop(item.name, None)
+            plan.identity_insert_columns = [
+                c for c in plan.identity_insert_columns if c != item.name
+            ]
 
 
 def apply_post_create_sql(
@@ -1297,6 +1404,7 @@ def _emit_unsupported_catalog(
     *,
     skip_check: bool = False,
     skip_index: bool = False,
+    skip_identity: bool = False,
 ) -> None:
     if catalog.foreign_keys:
         for fk in catalog.foreign_keys[:20]:
@@ -1412,12 +1520,13 @@ def _emit_unsupported_catalog(
         "Generated/computed expressions are not carried (insert-omit only).",
         "No generated columns on source.",
     )
-    _aspect_list(
-        "identity_sequence",
-        bool(catalog.identity_columns),
-        "Identity/sequence RESTART values are not carried; SERIAL polarity may widen.",
-        "No identity columns flagged on source.",
-    )
+    if not skip_identity:
+        _aspect_list(
+            "identity_sequence",
+            bool(catalog.identity_columns),
+            "Identity/sequence RESTART values are not carried; SERIAL polarity may widen.",
+            "No identity columns flagged on source.",
+        )
     _aspect_list(
         "collation",
         bool(catalog.collations),

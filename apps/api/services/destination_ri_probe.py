@@ -26,7 +26,7 @@ from typing import Any
 
 import sqlalchemy as sa
 
-from services.physical_state_diff import resolve_stored_name
+from services.physical_state_diff import catalog_table_names, resolve_stored_name
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +115,10 @@ def verify_destination_referential_integrity(
     with engine.connect() as conn:
         inspector = sa.inspect(conn)
         child_name = resolve_stored_name(
-            inspector.get_table_names(schema=schema_arg), table
+            catalog_table_names(
+                inspector, schema_arg, conn=conn, dialect=str(db_type)
+            ),
+            table,
         )
         if child_name is None:
             return {
@@ -141,7 +144,9 @@ def verify_destination_referential_integrity(
             }
 
         meta = sa.MetaData()
-        table_names = inspector.get_table_names(schema=schema_arg)
+        table_names = catalog_table_names(
+            inspector, schema_arg, conn=conn, dialect=str(db_type)
+        )
         for fk in wanted:
             child_cols = [str(c) for c in fk.get("constrained_columns") or () if c]
             parent_cols = [str(c) for c in fk.get("referred_columns") or () if c]

@@ -1433,6 +1433,14 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         if "<" in upper or "[" in upper:
             return True
         bare_typmod = upper.split("(", 1)[0].strip()
+        # Oracle character-length semantics (``VARCHAR2(64 BYTE)``) are physical
+        # only on Oracle. Everywhere else the unit is a syntax error, so the
+        # carrier must be rematerialized rather than pasted into the CREATE.
+        if re.search(r"\(\s*\d+\s+(BYTE|CHAR)\s*\)$", upper) and db not in {
+            "oracle",
+            "oracledb",
+        }:
+            return False
         # Valued MySQL ENUM/SET is native CREATE wire — keep Map stamp.
         if bare_typmod in {"ENUM", "SET"} and db in {"mysql", "mariadb", "tidb"}:
             return True

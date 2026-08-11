@@ -26,7 +26,7 @@ import sqlalchemy as sa
 
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
 from services.dialect_profiles import fold_identifier, normalize_driver, quote_char_for
-from services.physical_state_diff import resolve_stored_name
+from services.physical_state_diff import catalog_table_names, resolve_stored_name
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,10 @@ class IdentityWatermark:
     reason: str = ""
     repaired_to: int | None = None
     generator: str = ""
+    # Step the generator advances by. A key sequence declared IDENTITY(1000, 10)
+    # must keep issuing 1030, 1040 — reseeding it to max+1 silently moves the
+    # client's keys off the progression their data model runs on.
+    increment: int = 1
     # Spelling the catalog stores, which reflection may normalize away.
     physical_column: str = ""
     physical_table: str = ""
@@ -95,6 +99,7 @@ class IdentityWatermark:
             "collides": self.collides,
             "reason": self.reason,
             "repaired_to": self.repaired_to,
+            "increment": self.increment,
         }
 
 
@@ -105,6 +110,7 @@ class _Probe:
     mechanism: str = ""
     generator: str = ""
     next_value: int | None = None
+    increment: int = 1
     reason: str = ""
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -131,7 +137,9 @@ def _reflect(conn: Any, db_type: str, schema: str, table: str) -> Any:
     evidence with an 'invalid identifier' error.
     """
     try:
-        names = sa.inspect(conn).get_table_names(schema=schema or None)
+        names = catalog_table_names(
+            sa.inspect(conn), schema, conn=conn, dialect=_norm(db_type)
+        )
         stored = resolve_stored_name(names, table)
         if stored is None:
             return None
@@ -215,10 +223,17 @@ def _pg_probe(conn: Any, schema: str, table: str, column: str) -> _Probe:
             reason=f"sequence {seq} returned no state",
         )
     last_value, is_called = row[0], bool(row[1])
+    step = _scalar(
+        conn,
+        "SELECT seqincrement FROM pg_sequence WHERE seqrelid = CAST(:seq AS regclass)",
+        {"seq": str(seq)},
+    )
+    increment = int(step) if step else 1
     return _Probe(
         mechanism="sequence",
         generator=str(seq),
-        next_value=int(last_value) + (1 if is_called else 0),
+        next_value=int(last_value) + (increment if is_called else 0),
+        increment=increment,
     )
 
 
@@ -269,6 +284,7 @@ def _mssql_probe(conn: Any, schema: str, table: str, column: str) -> _Probe:
         mechanism="identity",
         generator=f"{qualified}.{column}",
         next_value=int(current) + step,
+        increment=step,
     )
 
 
@@ -287,20 +303,28 @@ def _oracle_probe(conn: Any, schema: str, table: str, column: str) -> _Probe:
     seq_name = str(row[0])
     # LAST_NUMBER is the next value the instance will serve (it already accounts
     # for the cache), so it is the next key, not the last one issued.
-    last_number = _scalar(
-        conn,
-        "SELECT last_number FROM all_sequences "
-        "WHERE sequence_owner = COALESCE(NULLIF(:own, ''), USER) "
-        "AND sequence_name = :seq",
+    seq_row = conn.execute(
+        sa.text(
+            "SELECT last_number, increment_by FROM all_sequences "
+            "WHERE sequence_owner = COALESCE(NULLIF(:own, ''), USER) "
+            "AND sequence_name = :seq"
+        ),
         {"own": owner, "seq": seq_name},
-    )
+    ).fetchone()
+    last_number = seq_row[0] if seq_row else None
+    increment = int(seq_row[1]) if seq_row and seq_row[1] else 1
     if last_number is None:
         return _Probe(
             mechanism="identity",
             generator=seq_name,
             reason=f"sequence {seq_name} not visible in ALL_SEQUENCES",
         )
-    return _Probe(mechanism="identity", generator=seq_name, next_value=int(last_number))
+    return _Probe(
+        mechanism="identity",
+        generator=seq_name,
+        next_value=int(last_number),
+        increment=increment,
+    )
 
 
 def _sqlite_probe(conn: Any, table: str, column: str) -> _Probe:
@@ -385,6 +409,7 @@ def read_identity_watermark(
         mechanism=probe.mechanism,
         generator=probe.generator,
         next_value=probe.next_value,
+        increment=probe.increment or 1,
         max_value=ceiling,
         available=probe.next_value is not None and ceiling is not None,
         reason=probe.reason
@@ -397,11 +422,12 @@ def _repair_sql(
 ) -> tuple[str, dict[str, Any]] | None:
     """Statement that moves the generator to ``target`` as its next key."""
     norm = _norm(db_type)
+    step = wm.increment or 1
     if norm in _PG_LIKE:
-        # is_called=true ⇒ nextval() returns target, not target - 1.
+        # setval stores the *last* value; nextval then adds the increment.
         return "SELECT setval(:seq, :last, true)", {
             "seq": wm.generator,
-            "last": target - 1,
+            "last": target - step,
         }
     table = wm.physical_table or table
     if norm in _MYSQL_LIKE:
@@ -411,17 +437,17 @@ def _repair_sql(
         # RESEED sets the *last* value; the next identity is reseed + IDENT_INCR.
         qualified = f"{schema or 'dbo'}.{table}"
         return (
-            f"DBCC CHECKIDENT ('{qualified}', RESEED, {int(target) - 1})",
+            f"DBCC CHECKIDENT ('{qualified}', RESEED, {int(target) - step})",
             {},
         )
     if norm == "oracle":
         ref = quote_table_ref(table, schema or None, dialect="oracle")
         col = _quote_column(wm.physical_column or wm.column, "oracle")
-        # START WITH LIMIT VALUE re-seeds the identity sequence from the data
-        # already in the column — exactly the post-migration ceiling.
+        # START WITH LIMIT VALUE would restart at MAX+1, which drops a stepped
+        # sequence off its progression; name the next key on the progression.
         return (
             f"ALTER TABLE {ref} MODIFY ({col} GENERATED BY DEFAULT AS IDENTITY "
-            "(START WITH LIMIT VALUE))",
+            f"(START WITH {int(target)}))",
             {},
         )
     if norm == "sqlite" and wm.mechanism == "autoincrement":
@@ -447,7 +473,10 @@ def repair_identity_watermark(
     """
     if not watermark.collides or watermark.max_value is None:
         return watermark
-    target = int(watermark.max_value) + 1
+    # The first key past the data that still sits on the generator's own
+    # progression: a sequence stepping by 10 resumes at 1030, not 1021.
+    step = watermark.increment if watermark.increment > 0 else 1
+    target = int(watermark.max_value) + step
     statement = _repair_sql(db_type, watermark, schema, table, target)
     if statement is None:
         return replace(

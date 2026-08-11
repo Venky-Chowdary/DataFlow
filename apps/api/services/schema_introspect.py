@@ -60,6 +60,23 @@ def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str
         return None
 
 
+def _as_int(value: Any, fallback: int) -> int:
+    """Catalog number as an int, whatever container the driver used.
+
+    SQL Server returns ``sys.identity_columns.seed_value`` as ``sql_variant``,
+    which pyodbc hands back as little-endian bytes — ``int()`` raises on it, and
+    swallowing that loses the source's key progression.
+    """
+    if isinstance(value, bool) or value is None:
+        return fallback
+    if isinstance(value, bytes):
+        return int.from_bytes(value, "little", signed=True)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
 def _refine_columns_by_samples(
     conn: Any,
     columns: list[dict],
@@ -2263,6 +2280,17 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                         dtype = f"NUMBER({int(precision)},{int(scale)})"
                     else:
                         dtype = f"NUMBER({int(precision)})"
+                elif dtype_u == "NUMBER" and (
+                    (scale is not None and int(scale) == 0)
+                    or str(identity_col or "").upper() == "YES"
+                ):
+                    # Oracle reports an unconstrained NUMBER for an identity
+                    # column (precision and scale both NULL), but the identity
+                    # sequence only ever yields integers. Read bare it became a
+                    # fractional DECIMAL, so the key landed in a column with
+                    # decimal places that no destination will generate into.
+                    # 38 is Oracle's maximum precision.
+                    dtype = "NUMBER(38,0)"
                 elif (
                     dtype_u in {"VARCHAR2", "NVARCHAR2", "CHAR", "NCHAR"}
                     and char_length is not None
@@ -2516,6 +2544,48 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         "collation": coll,
                     }
                 )
+            # IDENTITY columns: INFORMATION_SCHEMA does not expose them, so a
+            # SQL Server source looked like a plain BIGINT key and the
+            # destination was created without a generator — the client's first
+            # insert after cutover then had no key to use.
+            if columns:
+                try:
+                    identity_rows = conn.execute(
+                        sa.text(
+                            """
+                            SELECT c.name,
+                                   CAST(c.seed_value AS BIGINT),
+                                   CAST(c.increment_value AS BIGINT)
+                            FROM sys.identity_columns c
+                            JOIN sys.tables t ON t.object_id = c.object_id
+                            JOIN sys.schemas s ON s.schema_id = t.schema_id
+                            WHERE s.name = :schema AND t.name = :table
+                            """
+                        ),
+                        {"schema": schema, "table": table},
+                    ).fetchall()
+                    identity_names = {
+                        str(r[0]): (r[1], r[2]) for r in (identity_rows or []) if r and r[0]
+                    }
+                    for col in columns:
+                        if col["name"] not in identity_names:
+                            continue
+                        seed, step = identity_names[col["name"]]
+                        typ = str(col.get("inferred_type") or "")
+                        col["is_identity"] = True
+                        # SQL Server IDENTITY always accepts client values under
+                        # SET IDENTITY_INSERT, so it is by-default polarity.
+                        col["generation"] = "by_default"
+                        if "IDENTITY" not in typ.upper():
+                            col["inferred_type"] = (
+                                f"{typ} IDENTITY({_as_int(seed, 1)},"
+                                f"{_as_int(step, 1)})"
+                            )
+                except Exception as exc:
+                    # Losing the sequence silently recreates IDENTITY(1,1) on a
+                    # table whose keys run on another progression.
+                    logger.warning("sqlserver identity probe failed: %s", exc)
+
             # Computed columns are not insertable — annotate GENERATED ALWAYS
             # so writers omit them (same path as PG/MySQL identity).
             if columns:

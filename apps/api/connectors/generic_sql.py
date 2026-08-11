@@ -61,6 +61,7 @@ from services.decision_kernel import (
     normalize_logical_type,
 )
 from services.engine_pool import release_engine
+from services.identity_carry import identity_seed_step
 from services.type_system import parse_numeric_precision_scale
 from services.value_serializer import cell_to_string, json_default
 
@@ -1949,6 +1950,17 @@ def _build_table_for_write(
         ):
             pk_set = set(plan_pk)
 
+    # dest column -> the generator clause the planner decided, which carries the
+    # source's own seed and increment.
+    plan_identity: dict[str, str] = {}
+    if fidelity_plan is not None:
+        by_fold_ident = {str(c).casefold(): c for c in columns}
+        plan_identity = {
+            by_fold_ident[str(c).casefold()]: str(clause or "")
+            for c, clause in (getattr(fidelity_plan, "identity_columns", {}) or {}).items()
+            if str(c).casefold() in by_fold_ident
+        }
+
     cols = []
     for col in columns:
         logical = column_types.get(col, "string")
@@ -1958,12 +1970,31 @@ def _build_table_for_write(
         # automatically.  The PK exists purely for upsert semantics, not identity.
         autoincrement = False if is_pk else None
         nullable = not (is_pk or col in plan_not_null)
+        # A key generator the source declared. MySQL spells it AUTO_INCREMENT,
+        # which SQLAlchemy renders from ``autoincrement``; every other engine
+        # here takes the standard IDENTITY construct. ``always=False`` is
+        # deliberate — the load writes the source's own key values, and the
+        # certificate reports the relaxation.
+        identity_arg: list[Any] = []
+        if col in plan_identity:
+            nullable = False
+            if dialect_name in {"mysql", "mariadb"}:
+                autoincrement = True
+            else:
+                # SQLAlchemy rejects an explicit autoincrement=False beside an
+                # Identity object; the Identity is the generator here.
+                autoincrement = None
+                seed, step = identity_seed_step(plan_identity[col])
+                identity_arg.append(
+                    sa.Identity(always=False, start=seed, increment=step)
+                )
         cols.append(
             sa.Column(
                 col,
                 _sa_type_for_logical(
                     logical, dialect_name, db_type, nullable=nullable
                 ),
+                *identity_arg,
                 primary_key=is_pk,
                 nullable=nullable,
                 autoincrement=autoincrement,
@@ -4717,6 +4748,7 @@ def write_mapped_rows(
     written = 0
     chunks_completed = 0
     rows_skipped = 0
+    identity_session: Any = None
     try:
         with engine.connect() as conn:
             db_type = (cfg.get("type") or "").lower()
@@ -4898,6 +4930,18 @@ def write_mapped_rows(
                             schema=schema_name or (cfg.get("database") or ""),
                             table=table_name,
                         )
+                        from services.identity_carry import sqlalchemy_fetchall
+                        from services.schema_fidelity import (
+                            certify_identity_on_destination,
+                        )
+
+                        certify_identity_on_destination(
+                            fidelity_plan,
+                            dialect=_fidelity_dialect(dest_db, dialect_name),
+                            schema=schema_name or (cfg.get("database") or ""),
+                            table=table_name,
+                            fetchall=sqlalchemy_fetchall(conn),
+                        )
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     conn.commit()
                 except Exception as exc:
@@ -4949,6 +4993,18 @@ def write_mapped_rows(
                 # Drift backfill may have added or widened columns; anything
                 # reflected before this point describes the old shape.
                 reflection_cache.invalidate_table(engine, schema_name, table_name)
+
+            # The rows carry the source's own key values; on SQL Server an
+            # IDENTITY column rejects them unless the session says so.
+            from connectors.writer_common import begin_identity_insert
+
+            identity_session = begin_identity_insert(
+                conn,
+                dialect_name=dialect_name,
+                schema=schema_name or "",
+                table=table_name,
+                target_cols=list(target_cols),
+            )
 
             if sparse_converted and write_mode == "upsert" and conflict_columns:
                 from connectors.writer_common import row_has_missing_sentinel
@@ -5160,6 +5216,10 @@ def write_mapped_rows(
                 if on_checkpoint:
                     on_checkpoint(chunks_completed, chunks, written)
 
+            if identity_session is not None:
+                identity_session.close()
+                identity_session = None
+
         if ledger_chunks_skipped:
             transform_errors.append(
                 f"Skipped {ledger_chunks_skipped} chunk(s) already committed by a "
@@ -5283,4 +5343,9 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
     finally:
+        # A pooled connection left with IDENTITY_INSERT ON fails the *next*
+        # table's load with an error naming the wrong table, so the release is
+        # owed on every exit — success, early return, or exception.
+        if identity_session is not None:
+            identity_session.close()
         release_engine(engine)

@@ -5858,6 +5858,17 @@ def strip_identity_qualifier(inferred: str | None) -> str:
         flags=re.I,
     )
     text = re.sub(r"\s+AUTO_INCREMENT\b", "", text, flags=re.I)
+    # SQL Server stamps the sequence onto the carrier ("BIGINT IDENTITY(1000,10)")
+    # and PostgreSQL/Oracle spell it as a START WITH clause. Both are generator
+    # state, not storage: leaving them on the logical type emits them verbatim
+    # into a foreign destination's CREATE TABLE.
+    text = re.sub(
+        r"\s*\(\s*START\s+WITH\s+-?\d+\s+INCREMENT\s+BY\s+-?\d+\s*\)",
+        "",
+        text,
+        flags=re.I,
+    )
+    text = re.sub(r"\s+IDENTITY(?:\s*\(\s*-?\d+\s*,\s*-?\d+\s*\))?", "", text, flags=re.I)
     return text.strip()
 
 

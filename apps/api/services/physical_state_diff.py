@@ -36,6 +36,7 @@ __all__ = [
     "compare_physical_state",
     "verify_physical_state",
     "resolve_stored_name",
+    "catalog_table_names",
 ]
 
 # Aspects this module compares. Ordered as an operator reads a migration report.
@@ -365,6 +366,51 @@ def resolve_stored_name(candidates: Iterable[str], wanted: str) -> str | None:
     folded = _fold(wanted)
     hits = [n for n in names if _fold(n) == folded]
     return hits[0] if len(hits) == 1 else None
+
+
+def catalog_table_names(
+    inspector: Any,
+    schema: str | None,
+    *,
+    conn: Any = None,
+    dialect: str = "",
+) -> list[str]:
+    """Table names in ``schema``, with an Oracle catalog fallback.
+
+    SQLAlchemy's Oracle inspector hides every table stored in the SYSTEM /
+    SYSAUX tablespaces, so a destination that lives there reflects as absent and
+    each consumer reports its aspect unverifiable instead of reading it. The
+    catalog itself is the authority when the inspector returns nothing.
+    """
+    try:
+        names = [str(n) for n in inspector.get_table_names(schema=schema or None)]
+    except Exception as exc:  # noqa: BLE001 — an unreadable catalog is evidence
+        logger.debug("table listing failed for schema %s: %s", schema, exc)
+        names = []
+    if names or conn is None or (dialect or "").strip().lower() not in {
+        "oracle",
+        "oracledb",
+    }:
+        return names
+    try:
+        rows = conn.execute(
+            sa.text(
+                "SELECT table_name FROM all_tables "
+                "WHERE owner = COALESCE(NULLIF(:own, ''), USER)"
+            ),
+            {"own": (schema or "").upper()},
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("oracle table catalog fallback failed: %s", exc)
+        return names
+    # Hand back the spelling the inspector would have produced: SQLAlchemy
+    # reflects Oracle by its normalized (lower-case) name and reads a raw
+    # catalog ``IDDST_X`` as a case-sensitive quoted identifier that no table
+    # matches.
+    normalize = getattr(conn.dialect, "normalize_name", None)
+    return [
+        str(normalize(str(r[0])) if callable(normalize) else r[0]) for r in (rows or [])
+    ]
 
 
 def _resolve_table_name(inspector: Any, table: str, schema: str | None) -> str | None:

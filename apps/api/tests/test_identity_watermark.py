@@ -171,3 +171,65 @@ def test_mixed_case_key_is_read_not_folded(tmp_path) -> None:
     watermark = read_identity_watermark("sqlite", cfg, table="mixedid", column="id")
     assert watermark.max_value == 7
     assert watermark.available is True
+
+
+@pytest.mark.parametrize(
+    ("db_type", "mechanism", "expected"),
+    [
+        # setval stores the last value; nextval adds the increment back.
+        ("postgresql", "sequence", "1020"),
+        # DBCC RESEED is also a "last value", so it must subtract the step.
+        ("sqlserver", "identity", "1020"),
+        # MySQL and Oracle are told the next key outright.
+        ("mysql", "auto_increment", "1030"),
+        ("oracle", "identity", "1030"),
+    ],
+)
+def test_repair_targets_the_next_key_on_the_generators_progression(
+    db_type, mechanism, expected
+):
+    """A sequence stepping by 10 must resume at 1030 — never at 1021.
+
+    Reseeding a stepped generator to MAX+1 hands the client keys that are off
+    the progression every existing row follows; the table still validates, and
+    its key arithmetic is quietly no longer the one it was migrated from.
+    """
+    from services.identity_watermark import _repair_sql
+
+    wm = IdentityWatermark(
+        column="id",
+        mechanism=mechanism,
+        generator="app.t_id_seq",
+        next_value=1,
+        max_value=1020,
+        increment=10,
+        physical_table="t",
+        available=True,
+    )
+    sql, params = _repair_sql(db_type, wm, "app", "t", 1020 + wm.increment)
+    rendered = sql + " " + " ".join(str(v) for v in params.values())
+    assert expected in rendered, rendered
+
+
+def test_repair_is_still_max_plus_one_when_the_step_is_one():
+    from services.identity_watermark import _repair_sql
+
+    wm = IdentityWatermark(
+        column="id", mechanism="sequence", generator="s", next_value=1, max_value=7
+    )
+    _sql, params = _repair_sql("postgresql", wm, "public", "t", 8)
+    assert params["last"] == 7
+
+
+def test_a_generator_ahead_of_the_data_is_left_alone():
+    """Forward-only: rewinding would re-issue keys that already exist."""
+    wm = IdentityWatermark(
+        column="id", next_value=99, max_value=7, available=True, increment=10
+    )
+    assert not wm.collides
+    assert repair_identity_watermark("postgresql", {}, table="t", watermark=wm) is wm
+
+
+def test_increment_is_reported_so_operators_can_see_the_progression():
+    wm = IdentityWatermark(column="id", next_value=1030, max_value=1020, increment=10)
+    assert wm.to_dict()["increment"] == 10

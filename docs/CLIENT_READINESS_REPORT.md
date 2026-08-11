@@ -51,6 +51,8 @@ Emitted DDL is never accepted as proof.
 | Foreign key carry, multi-table, dependency-ordered | PG, MySQL, SQL Server, Oracle | 9 | 9 ok | `foreign_key_live_results.json` |
 | Foreign key carry, **single-table into an existing parent** | PG, MySQL | 2 | 2 ok | `fk_single_table_live_results.json` |
 | Validate→Execute DDL identity (append, incremental delta, duplicate re-run refusal, narrowed-DDL refusal) | PG, MySQL, SQL Server, Oracle, SQLite | 5 engines | all ok | `ddl_identity_matrix_results.json` |
+| Identity / sequence generator carry on create-new (destination catalog re-read + post-cutover client insert without a key) | PG, MySQL, SQL Server, Oracle | 16 routes | 14 carried, 2 declared unsupported | `identity_live_results.json` |
+| Non-default key sequence `IDENTITY(1000,10)` carried (seed, increment, and the progression the next client key lands on) | SQL Server → SQL Server / PG / Oracle | 3 | 3 ok | `identity_seed_live_results.json` |
 | Schema drift (widen, narrow-refuse, NOT NULL, defaults, concurrency, resume, case variants) | PostgreSQL | 12 | 12 recorded, 0 violations | `drift_live_results.json` |
 | Destination privilege probe | PG, MySQL, SQL Server, Oracle | 7 | 7 ok | `grants_live_results.json` |
 | Oracle catalog identity (quoted/case-folded tables, duplicate probe) | Oracle | 10 | 10 ok | `oracle_live_results.json` |
@@ -130,6 +132,27 @@ signature: the run reported success while the destination was wrong.
     Snowflake `FLOAT` (IEEE-64) was treated as single precision, and Oracle ANSI
     `FLOAT(p)` (NUMBER-backed, ~38 decimal digits) was collapsed to
     `BINARY_DOUBLE`'s 53-bit mantissa.
+15. **Create-new never carried the key generator.** A source `SERIAL` /
+    `AUTO_INCREMENT` / `IDENTITY` landed as a plain integer column: every row
+    reconciled, every checksum matched, and the client's first insert after
+    cutover had no key to use (16/16 routes lost the generator). The generator
+    is now planned per destination, emitted, and only reported `carried` after
+    the destination's own catalog reports it — with a post-cutover insert
+    without a key proving the generated value is non-null, above the copied
+    maximum, and non-colliding. Oracle → PostgreSQL/MySQL is declared
+    **unsupported** rather than silently dropped, and an unsupported or unknown
+    generator now vetoes `MIGRATION PROVEN`.
+16. **A SQL Server key sequence was reset to `IDENTITY(1,1)`.**
+    `sys.identity_columns.seed_value` is `sql_variant`, which pyodbc returns as
+    little-endian bytes; `int()` raised and the swallowed error left the column
+    looking like a plain `BIGINT`. A table keyed 1000, 1010, 1020 was recreated
+    to number new rows 1, 2, 3. Seed and increment are now decoded, carried into
+    the destination's own generator syntax, and the forward-only watermark
+    repair resumes on the progression (1030) instead of `MAX+1` (1021).
+17. **Oracle generator state read as absent.** SQLAlchemy's inspector hides
+    tables in the SYSTEM/SYSAUX tablespaces, so the watermark probe reported
+    "column is not a GENERATED AS IDENTITY column" for a column that was one.
+    One shared catalog fallback now serves the watermark and RI probes.
 
 ---
 
@@ -151,7 +174,7 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
 | Gate-8 reconciliation (row count + checksum + destination re-read) | **Proven** | ddl_identity and drift matrices |
 | Migration certificate / audit PDF / signed proof pack | **Tested**; verdict veto newly added | `tests/test_migration_certificate.py`, `tests/test_certificate_pdf.py` |
 | Schema drift | **Proven on PostgreSQL** (12 scenarios) | not yet re-run on MySQL/SQL Server/Oracle |
-| Identity / sequence high-water marks | **Tested** (read + forward-only repair, vetoes the verdict) | no live matrix yet |
+| Identity / sequence generator carry + high-water marks | **Proven** on PG / MySQL / SQL Server / Oracle (16 routes, catalog re-read, post-cutover insert); SQLite refused explicitly | `identity_live_results.json`, `identity_seed_live_results.json` |
 | MongoDB / DynamoDB (sparse documents) | **Tested**; Mongo→Snowflake focused path passes | no live matrix |
 | DuckDB / Iceberg / lakehouse MERGE | **Tested** | backfill widening regression is live-proven on DuckDB |
 | Snowflake, BigQuery | **Blocked** | no credentials in this environment; emulator only |
@@ -231,7 +254,6 @@ credentials.
 | # | Work | Sessions | Blocked on |
 |---|---|---|---|
 | 1 | Re-run the drift matrix on MySQL / SQL Server / Oracle; close whatever it finds | 1 | — |
-| 2 | Live matrix for identity/sequence watermarks and their repair | 1 | — |
 | 3 | Jobs + Schedules audit at this bar (retry, concurrency, multi-instance, missed windows, backfill) | 1–2 | — |
 | 4 | Pipelines + Transforms audit | 1 | — |
 | 5 | UI/UX audit against the engine: one primary action per root cause, cursor field in Transfer Studio, no claim the engine does not support | 1–2 | — |

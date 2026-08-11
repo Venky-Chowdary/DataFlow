@@ -320,6 +320,35 @@ def _foreign_key_carry_blockers(job: dict[str, Any]) -> list[str]:
     return out
 
 
+def _identity_carry_blockers(job: dict[str, Any]) -> list[str]:
+    """A source key generator the destination never received is not a green run.
+
+    The rows can be byte-identical and the counter irrelevant: if the source
+    column generated its own keys and the destination column does not, the
+    client's first insert after cutover has no key to use. Only a decided
+    aspect blocks — an aspect that does not apply, or that was carried, says so.
+    """
+    fidelity = _dict(_dict(job.get("destination_summary")).get("schema_fidelity"))
+    items = fidelity.get("items")
+    if not isinstance(items, list):
+        return []
+    out: list[str] = []
+    for raw in items:
+        item = _dict(raw)
+        if str(item.get("aspect")) != "identity_sequence":
+            continue
+        status = str(item.get("status") or "")
+        if status not in {"unsupported", "unknown"}:
+            continue
+        name = str(item.get("name") or "").strip()
+        column = f"'{name}'" if name and name != "*" else "the key column"
+        out.append(
+            f"Source key generator on {column} was not carried to the "
+            f"destination ({status}): {item.get('reason') or 'no reason recorded'}"
+        )
+    return out
+
+
 def _identity_blockers(physical: dict[str, Any]) -> list[str]:
     identity = _dict(physical.get("identity_watermark"))
     collisions = [str(c) for c in identity.get("collisions") or []]
@@ -358,6 +387,7 @@ def _verdict(
     blockers.extend(_referential_blockers(physical_state or {}))
     blockers.extend(_schema_object_blockers(physical_state or {}))
     blockers.extend(_foreign_key_carry_blockers(job or {}))
+    blockers.extend(_identity_carry_blockers(job or {}))
     if job_status and job_status not in ("completed", "succeeded", "success"):
         blockers.append(f"Job status is {job_status!r}, not a completed run.")
 

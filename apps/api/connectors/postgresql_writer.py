@@ -1469,6 +1469,18 @@ def write_mapped_rows(
                     schema=schema,
                     table=table_name,
                 )
+                from services.identity_carry import psycopg2_fetchall
+                from services.schema_fidelity import (
+                    certify_identity_on_destination,
+                )
+
+                certify_identity_on_destination(
+                    fidelity_plan,
+                    dialect="postgresql",
+                    schema=schema,
+                    table=table_name,
+                    fetchall=psycopg2_fetchall(cursor),
+                )
                 _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
             except Exception as exc:
                 logger.warning(
