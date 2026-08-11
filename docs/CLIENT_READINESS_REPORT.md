@@ -202,6 +202,20 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
   - schedules selection — 49 passed, 1 skipped
   - sparse-document + type-contract + tracked-execute selection — 1144 passed, 7 skipped
 - Frontend: `npm run build` exit 0.
+- **Full backend suite: 13159 passed, 0 failed, 1515 skipped** (sharded run,
+  `/home/ubuntu/repro/shards/summary.txt`). The 55 failures carried by the base
+  branch are now closed; none were closed by weakening an assertion. The three
+  classes they fell into:
+  - shared product defects — the resume posture reading an unreadable committed
+    row count as zero, Validate's coercion report contradicting a blocking gate,
+    Snowflake `INT`/`SMALLINT` introspected as 64-bit when they are
+    `NUMBER(38,0)`, Oracle `FLOAT` preservation keyed on letter case, source FK
+    reads skipping SQL Server / Oracle / SQLite;
+  - stale assertions pinned to one historical error string where the engine now
+    refuses earlier and for a better-evidenced reason;
+  - routes with no evidence available here (uncertified SaaS brands, Snowflake
+    under `fakesnow`, which has no `GRANTS` catalog) — these assert the honest
+    refusal or skip with a named reason rather than a mocked green.
 - Full backend suite is run sharded (one pytest process per 60 files) because a
   single 14k-test process is killed by the OOM killer on this 7 GB VM; the runner
   is `/home/ubuntu/repro/run_sharded.sh` and the aggregate counts are recorded in
