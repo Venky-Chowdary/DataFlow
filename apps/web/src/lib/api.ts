@@ -3656,6 +3656,8 @@ export interface TransformCompiledModel {
   sources: string[];
   statements: string[];
   error?: string;
+  /** How the executed SQL differs from this preview, when it does. */
+  note?: string;
   tests: { test_type: string; column: string; severity: string; sql: string }[];
 }
 

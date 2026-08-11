@@ -713,6 +713,7 @@ function PlanPreview({ preview }: { preview: TransformPlanPreview }) {
           </header>
           {m.error && <p className="df2-xform-preview-error">{m.error}</p>}
           {m.strategy && <p className="df2-xform-hint">Strategy: {m.strategy}</p>}
+          {m.note && <p className="df2-xform-hint">{m.note}</p>}
           {m.statements.map((stmt, i) => (
             <pre key={i}>
               <code>{stmt}</code>

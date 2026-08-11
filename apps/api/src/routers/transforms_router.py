@@ -286,6 +286,18 @@ def preview_plan(body: PlanPreviewRequest) -> dict[str, Any]:
             # operator needs to see which model the dialect cannot express.
             entry["statements"] = []
             entry["error"] = str(exc)
+        if model.materialization == "incremental":
+            # The preview cannot read the destination, so it shows the shape of
+            # the load. The executed INSERT names both column lists, matched to
+            # the target's own columns — say so rather than let an operator read
+            # `SELECT *` as the final SQL.
+            entry["note"] = (
+                "Column lists are resolved from the destination catalog when "
+                "this runs, and matched to the target by name. A column the "
+                "target does not have, a required column the model does not "
+                "produce, or a unique_key missing from either side stops the "
+                "load before it writes."
+            )
         entry["tests"] = [
             {
                 "test_type": t.test_type,
