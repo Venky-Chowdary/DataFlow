@@ -199,7 +199,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   go("customers");
                 }}
               >
-                Customers
+                Evidence
               </a>
 
               <div

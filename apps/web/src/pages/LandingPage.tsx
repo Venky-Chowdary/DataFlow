@@ -6,7 +6,7 @@ import {
   ProofCinema,
 } from "../components/landing/AlgorithmCinema";
 import { TrustSection } from "../components/landing/TrustSection";
-import { TestimonialSection } from "../components/landing/TestimonialSection";
+import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection";
 import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
 import { fetchCatalogStats } from "../lib/api";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
@@ -594,7 +594,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         </div>
       </section>
 
-      <TestimonialSection onNavigate={onNavigate} />
+      <ProofEvidenceSection onNavigate={onNavigate} />
       <TrustSection />
 
       {/* 10) Final CTA — Airbyte-style close */}

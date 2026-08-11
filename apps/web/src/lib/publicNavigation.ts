@@ -111,9 +111,9 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
     canonicalPath: "#/enterprise",
   },
   customers: {
-    title: "Customers",
-    description: "How data teams use Datawrap for migrations, sync, and warehouse loads without silent data loss.",
-    keywords: "Datawrap customers, data migration case studies, warehouse loading success",
+    title: "Evidence",
+    description: "Measured live-matrix results for Datawrap migrations — what is proven on which engines, and what is explicitly not proven yet.",
+    keywords: "Datawrap evidence, data migration proof, live matrix results, schema drift testing",
     canonicalPath: "#/customers",
   },
   contact: {
