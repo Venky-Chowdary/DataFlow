@@ -248,11 +248,12 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
   - `tests/test_foreign_key_metadata.py`, `tests/test_foreign_key_carry.py` — 32 passed
   - certificate / proof-pack / reconcile / foreign-key / physical-state selection — 170 passed, 5 skipped
   - stream / transfer-engine / multi-stream selection — 133 passed, 10 skipped
-  - schedules selection — 49 passed, 1 skipped
+  - schedules + jobs selection — 187 passed, 3 skipped (includes the new
+    `tests/test_retry_duplicate_guard.py`, 22 cases)
   - sparse-document + type-contract + tracked-execute selection — 1144 passed, 7 skipped
 - Frontend: `npm run build` exit 0.
-- **Full backend suite: 13159 passed, 0 failed, 1515 skipped** (sharded run,
-  `/home/ubuntu/repro/shards/summary.txt`). The 55 failures carried by the base
+- **Full backend suite: 13233 passed, 0 failed, 1515 skipped** (sharded run,
+  `/home/ubuntu/repro/shards5/summary.txt`). The 55 failures carried by the base
   branch are now closed; none were closed by weakening an assertion. The three
   classes they fell into:
   - shared product defects — the resume posture reading an unreadable committed

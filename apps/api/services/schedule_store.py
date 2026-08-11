@@ -643,6 +643,7 @@ def mark_schedule_run(
             "running": False,
             "running_instance": "",
             "running_started_at": None,
+            "running_job_id": "",
             "run_history": history,
         }
         if cursor_value is not None:
@@ -683,6 +684,7 @@ def schedule_retry(
             "running": False,
             "running_instance": "",
             "running_started_at": None,
+            "running_job_id": "",
             "run_history": history,
         })
         schedules[i] = updated
