@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test src/**/*.test.ts",
+    "brand:icons": "tsx scripts/export-brand-icons.mjs",
+    "brand:social": "node scripts/export-social-brand.mjs"
   },
   "dependencies": {
     "@dataflow/design-system": "*",
