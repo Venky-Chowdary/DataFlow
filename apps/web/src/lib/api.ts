@@ -1039,21 +1039,53 @@ export async function renameJob(jobId: string, name: string): Promise<JobProgres
   throw lastError instanceof Error ? lastError : new Error("Rename failed");
 }
 
-export async function retryJob(jobId: string): Promise<{ job_id: string; retry_of: string }> {
+/** Retry from start was refused because it would duplicate committed rows. */
+export class RetryRefusedError extends Error {
+  readonly rowsCommitted: number | null;
+  readonly rowsCommittedKnown: boolean;
+
+  constructor(reason: string, rowsCommitted: number | null, rowsCommittedKnown: boolean) {
+    super(reason);
+    this.name = "RetryRefusedError";
+    this.rowsCommitted = rowsCommitted;
+    this.rowsCommittedKnown = rowsCommittedKnown;
+  }
+}
+
+export async function retryJob(
+  jobId: string,
+  options: { force?: boolean } = {},
+): Promise<{ job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean }> {
+  const query = options.force ? "?force=true" : "";
   const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/retry`,
-    `${API_BASE}/jobs/${jobId}/retry`,
+    `${API_BASE}/connectors/jobs/${jobId}/retry${query}`,
+    `${API_BASE}/jobs/${jobId}/retry${query}`,
   ];
   let lastError: unknown;
   for (const url of urls) {
     try {
       const res = await apiFetch(url, { method: "POST" });
       const data = await res.json();
+      if (res.status === 409 && data?.detail && typeof data.detail === "object") {
+        // A refusal is the server's answer, not a route miss: surface it rather
+        // than falling through to the legacy URL and reporting its 404 instead.
+        const detail = data.detail as {
+          reason?: string;
+          rows_committed?: number | null;
+          rows_committed_known?: boolean;
+        };
+        throw new RetryRefusedError(
+          detail.reason || "Retry from start would duplicate committed rows.",
+          detail.rows_committed ?? null,
+          detail.rows_committed_known !== false,
+        );
+      }
       if (!res.ok) {
         throw new Error(typeof data.detail === "string" ? data.detail : "Retry failed");
       }
-      return data as { job_id: string; retry_of: string };
+      return data as { job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean };
     } catch (error) {
+      if (error instanceof RetryRefusedError) throw error;
       lastError = error;
     }
   }

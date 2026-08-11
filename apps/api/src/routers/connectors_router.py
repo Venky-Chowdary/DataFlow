@@ -549,10 +549,20 @@ async def patch_transfer_job(job_id: str, request: Request):
 
 
 @router.post("/jobs/{job_id}/retry")
-async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
+async def retry_transfer_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    force: bool = False,
+):
     """Re-run a failed transfer from the beginning as a new job (no checkpoint).
 
     Use ``/resume`` to continue the *same* job from its last committed batch.
+    A from-zero retry re-reads the whole source, so it is refused when the
+    failed attempt already committed rows under a sync mode that has no key to
+    collapse a second copy. ``force=true`` is the operator's explicit
+    acknowledgement that the duplicates are acceptable and is recorded on the
+    new job.
     """
     try:
         from ..transfer.background import run_transfer_async
@@ -584,15 +594,52 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, req
                 status_code=400,
                 detail="File uploads must be re-submitted from Transfer Studio.",
             )
+
+        from services.execution_engine_contract import (
+            committed_rows_of,
+            decide_retry_from_start,
+        )
+
+        rows_committed, rows_known = committed_rows_of(job)
+        retry_decision = decide_retry_from_start(
+            status=job.get("status"),
+            sync_mode=getattr(xfer_req, "sync_mode", ""),
+            rows_committed=rows_committed,
+            rows_committed_known=rows_known,
+        )
+        if not retry_decision["allowed"] and not force:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Retry from start refused — it would duplicate committed rows",
+                    "reason": retry_decision["reason"],
+                    "rows_committed": rows_committed if rows_known else None,
+                    "rows_committed_known": rows_known,
+                    "primary_action": "resume",
+                    "resume_url": f"/api/v1/connectors/jobs/{job_id}/resume",
+                    "override": "Re-send with force=true to accept the duplicates.",
+                },
+            )
         # Retries from start also re-run preflight — never inherit skip_preflight.
         xfer_req.skip_preflight = False
         engine = get_transfer_engine()
         new_job_id = engine._create_pending_job(xfer_req)
+        forced = bool(force and not retry_decision["allowed"])
         mongo.update_job_status(
             new_job_id,
             "pending",
             retry_of=job_id,
-            message=f"Retry from start of job {job_id} (no checkpoint)",
+            message=(
+                f"Retry from start of job {job_id} (no checkpoint)"
+                + (
+                    " — operator accepted duplicate rows: "
+                    f"{retry_decision['reason']}"
+                    if forced
+                    else ""
+                )
+            ),
+            duplicate_risk_acknowledged=forced,
+            retry_decision=retry_decision,
         )
 
         # From-zero: do not copy parent checkpoint / resume_from_job_id.
@@ -604,7 +651,12 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, req
             "retry_of": job_id,
             "status": "running",
             "resume": False,
-            "message": "Retry from start — new job, source re-read from the beginning (at-least-once upsert).",
+            "duplicate_risk_acknowledged": forced,
+            "retry_decision": retry_decision,
+            "message": (
+                "Retry from start — new job, source re-read from the beginning "
+                "(at-least-once)."
+            ),
         }
     except HTTPException:
         raise

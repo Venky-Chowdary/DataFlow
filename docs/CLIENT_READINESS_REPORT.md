@@ -26,8 +26,10 @@ append-into-existing, incremental append, upsert, overwrite — are proven live 
 four engines. **Warehouse and SaaS routes (Snowflake, BigQuery, S3, Salesforce)
 are not live-proven** because no credentials have been provisioned to this
 environment; they remain Planned/unproven regardless of the code that exists for
-them. **Jobs, Schedules, Pipelines, Transforms and the UI have not been audited
-to the same bar** — they are implemented and unit-tested, not matrix-proven.
+them. **Pipelines, Transforms and the UI have not been audited to the same bar**
+— they are implemented and unit-tested, not matrix-proven. Jobs and Schedules
+are audited for retry, overlap, cancellation and cadence (see §4); backfill and
+multi-instance failover are not.
 
 Recommended handover posture: hand over the **relational migration-assurance
 workflow** now, with warehouse/SaaS and the operations surfaces explicitly
@@ -194,8 +196,10 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
 | S3 / ADLS / GCS | **Blocked** | no credentials |
 | Salesforce, Stripe, Shopify, Airtable, HubSpot | **Planned / Blocked** | Salesforce org needs SSO login; no integration user provisioned |
 | CDC (PostgreSQL logical, MySQL binlog, SQL Server CDC, Oracle LogMiner, Mongo change streams) | **Tested**, labelled **at-least-once** | exactly-once is not claimed and not proven |
-| Jobs surface | **Unaudited** | implemented, 18 test files touch it |
-| Schedules | **Unaudited** | 49 passed / 1 skipped in the focused selection |
+| Job retry / resume duplicate safety | **Proven** — retry from start is refused when the failed attempt committed rows under a non-convergent sync, and for a cancelled run; allowed when nothing was committed or the mode converges | `schedule_live_results.json` (14/14, live PG), `tests/test_retry_duplicate_guard.py` |
+| Schedule retry durability, overlap, missed windows | **Proven** — a parked retry survives a restart, waits out its backoff, and suppresses the cadence until it runs; a second beat cannot claim a running schedule; skipped windows are counted | `schedule_live_results.json` |
+| Jobs surface (cancellation, checkpoints, leases beyond the above) | **Partly audited** | retry/resume/cancel-retry paths audited; worker leases and claim-queue coordination not yet at this bar |
+| Schedules — backfill, multi-instance lock under a real Mongo failover | **Unaudited** | single-instance and file-backed paths proven; no backfill API exists yet |
 | Pipelines / Transforms | **Unaudited** | implemented, not examined at this bar |
 | Operations / Contracts / Proofs pages | **Unaudited** | — |
 | Web UI | **Builds clean**; not audited | `npm run build` exit 0 |
@@ -222,9 +226,16 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
    invented.
 7. **Transfer Studio has no cursor-column field**, so an incremental append is
    configured through the API/contract rather than the UI.
-8. **Operations surfaces (Jobs, Schedules, Pipelines, Transforms, UI) have not
-   been audited** at the migration-assurance bar.
-9. **The existing `excel` table on the client's Railway Postgres still holds the
+8. **Operations surfaces (Pipelines, Transforms, UI) have not been audited** at
+   the migration-assurance bar. Jobs/Schedules are audited for retry, overlap,
+   cancellation and cadence only.
+9. **Schedules have no backfill.** A historical window must be run as an
+   explicit transfer; there is no scheduled catch-up that replays skipped
+   windows — they are counted (`missed_window_count`) and surfaced, not replayed.
+10. **A scheduled retry waits for the next beat** (up to `SCHEDULER_CHECK`
+    interval, 60s) rather than firing exactly on its backoff, because retries
+    are now durable store state instead of an in-process timer.
+11. **The existing `excel` table on the client's Railway Postgres still holds the
    95 all-NULL rows** from the load that predates the fix — it must be reloaded
    into a fresh table.
 
@@ -268,7 +279,7 @@ credentials.
 
 | # | Work | Sessions | Blocked on |
 |---|---|---|---|
-| 3 | Jobs + Schedules audit at this bar (retry, concurrency, multi-instance, missed windows, backfill) | 1–2 | — |
+| 3 | ~~Jobs + Schedules retry / overlap / cancellation / missed windows~~ — done, `schedule_live_results.json`; remaining: backfill + multi-instance Mongo failover | 1 | — |
 | 4 | Pipelines + Transforms audit | 1 | — |
 | 5 | UI/UX audit against the engine: one primary action per root cause, cursor field in Transfer Studio, no claim the engine does not support | 1–2 | — |
 | 6 | Warehouse certification (Snowflake, BigQuery, S3) | 1–2 | credentials |

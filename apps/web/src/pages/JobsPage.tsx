@@ -14,7 +14,7 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
-import { cancelJob, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob } from "../lib/api";
+import { cancelJob, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, RetryRefusedError } from "../lib/api";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -396,6 +396,17 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       setSelectedId(result.job_id);
       onRefresh?.();
     } catch (e) {
+      if (e instanceof RetryRefusedError) {
+        // Retry re-reads the source from zero; the rows this attempt already
+        // committed would land a second time. Resume is the safe action.
+        toast({
+          title: "Retry refused \u2014 it would duplicate committed rows",
+          message: `${e.message} Use Resume from checkpoint instead.`,
+          tone: "warning",
+        });
+        setRetrying(false);
+        return;
+      }
       const msg = e instanceof Error ? e.message : "Retry failed";
       if (msg.includes("File uploads") || msg.includes("Transfer Studio")) {
         toast({ title: "Re-upload required", message: msg, tone: "warning" });

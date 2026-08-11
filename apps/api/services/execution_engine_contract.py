@@ -135,6 +135,117 @@ def decide_resume(
     }
 
 
+def decide_retry_from_start(
+    *,
+    status: str | None = None,
+    sync_mode: str | None,
+    rows_committed: int = 0,
+    rows_committed_known: bool = True,
+) -> dict[str, Any]:
+    """Decide whether re-running a finished attempt from zero is safe.
+
+    Retry from start re-reads the source from the beginning. For a convergent
+    sync mode that is harmless, and for an attempt that committed nothing there
+    is nothing to duplicate — but an append that already put rows in the
+    destination has no key to collapse them, so the second attempt writes every
+    committed row a second time and both runs report success. The operator's
+    action there is Resume, which continues from the committed checkpoint.
+
+    A cancelled run is refused for a different reason: it stopped because
+    somebody asked it to, and restarting it silently reverses that decision.
+    """
+    if (status or "").strip().lower() == "cancelled":
+        return {
+            "kind": ResumeKind.REFUSED.value,
+            "allowed": False,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                "This run was cancelled, not failed. Restarting it from zero "
+                "reverses that decision and re-reads the whole source — start "
+                "it again explicitly if that is what you want."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
+    if rows_committed_known and int(rows_committed or 0) <= 0:
+        return {
+            "kind": ResumeKind.FROM_ZERO_NO_WRITES.value,
+            "allowed": True,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": "Zero committed rows — restarting from zero cannot duplicate.",
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
+    if is_idempotent_sync(sync_mode):
+        return {
+            "kind": ResumeKind.FROM_ZERO_IDEMPOTENT.value,
+            "allowed": True,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                f"sync_mode={sync_mode} converges — a second full pass lands the "
+                "same rows rather than adding them."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
+    committed = (
+        f"{int(rows_committed or 0)} row(s)"
+        if rows_committed_known
+        else "an unknown number of rows"
+    )
+    return {
+        "kind": ResumeKind.REFUSED.value,
+        "allowed": False,
+        "delivery": DEFAULT_DELIVERY_SEMANTICS,
+        "reason": (
+            f"This attempt already committed {committed} under "
+            f"sync_mode={sync_mode or 'append'}, which has no key to collapse a "
+            "second copy. Retry from start would duplicate them — resume from "
+            "the last committed checkpoint instead."
+        ),
+        "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+    }
+
+
+def assert_retry_from_start_allowed(
+    *,
+    status: str | None = None,
+    sync_mode: str | None,
+    rows_committed: int = 0,
+    rows_committed_known: bool = True,
+) -> dict[str, Any]:
+    """Fail closed when a from-zero retry would duplicate committed rows."""
+    decision = decide_retry_from_start(
+        status=status,
+        sync_mode=sync_mode,
+        rows_committed=rows_committed,
+        rows_committed_known=rows_committed_known,
+    )
+    if not decision["allowed"]:
+        raise ExecutionContractError(decision["reason"])
+    return decision
+
+
+def committed_rows_of(job: dict | None) -> tuple[int, bool]:
+    """``(rows committed, whether that number is knowable)`` for a job document.
+
+    A missing job document or an unreadable counter is *unknown*, never zero:
+    treating it as zero is what turns a refused duplicate into a silent one.
+    """
+    if not isinstance(job, dict):
+        return 0, False
+    for key in ("records_processed", "rows_written"):
+        if key in job:
+            try:
+                return int(job.get(key) or 0), True
+            except (TypeError, ValueError):
+                return 0, False
+    cp = job.get("checkpoint")
+    if isinstance(cp, dict):
+        try:
+            return int(cp.get("rows_processed") or 0), True
+        except (TypeError, ValueError):
+            return 0, False
+    return 0, False
+
+
 def assert_resume_allowed(
     *,
     resume_requested: bool,
@@ -232,7 +343,11 @@ def capability_matrix() -> dict[str, Any]:
         },
         "retry_from_start": {
             "available": True,
-            "semantics": "Distinct from Resume — restarts transfer",
+            "semantics": (
+                "Distinct from Resume — restarts transfer; refused for a "
+                "non-convergent sync that already committed rows, and for a "
+                "cancelled run"
+            ),
         },
         "in_flight_network_retry": {
             "available": True,
@@ -330,6 +445,7 @@ def execution_contract_dict() -> dict[str, Any]:
             "keyed_document",
             "job_idempotency_claim",
             "refuse_insert_resume_without_checkpoint_after_writes",
+            "refuse_retry_from_start_after_committed_append",
             "allow_from_zero_when_rows_committed_zero",
         ],
         "capabilities": capability_matrix(),

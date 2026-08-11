@@ -7,7 +7,6 @@ import logging
 import os
 from services.brand_env import getenv_brand
 import socket
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
@@ -319,15 +318,70 @@ def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> N
         logger.exception("Failed to send schedule notification for %s", sched.id)
 
 
-_SUCCESS_STATUSES = frozenset({"completed", "completed_with_quarantine", "success"})
-
-
 def _is_success(status: str | None) -> bool:
-    return (status or "") in _SUCCESS_STATUSES
+    # One vocabulary: a local copy drifts from the canonical statuses the engine
+    # actually writes, and a status this set does not know is read as a failure.
+    from services.job_status import is_completed
+
+    return is_completed(status)
 
 
-def _should_retry(status: str | None, attempt: int, max_retries: int) -> bool:
-    return (not _is_success(status)) and attempt < max_retries
+def _retry_decision(
+    status: str | None,
+    attempt: int,
+    max_retries: int,
+    *,
+    sync_mode: str | None = None,
+    rows_committed: int = 0,
+    rows_committed_known: bool = True,
+) -> dict:
+    """Whether to start attempt ``attempt + 1``, and why not when refusing.
+
+    A scheduled retry is a *from-zero* run: it builds a fresh request and reads
+    the source from the beginning. That is safe for a convergent sync mode and
+    for an attempt that committed nothing — but re-running an append that
+    already landed rows writes every one of them again, unattended and at the
+    schedule's cadence, so it is refused with the operator pointed at Resume.
+    """
+    from services.execution_engine_contract import decide_retry_from_start
+
+    if _is_success(status):
+        return {"retry": False, "reason": ""}
+    if attempt >= max_retries:
+        return {
+            "retry": False,
+            "reason": f"Retry budget exhausted after {max_retries} attempt(s).",
+        }
+    decision = decide_retry_from_start(
+        status=status,
+        sync_mode=sync_mode,
+        rows_committed=rows_committed,
+        rows_committed_known=rows_committed_known,
+    )
+    if not decision["allowed"]:
+        return {"retry": False, "reason": decision["reason"], "decision": decision}
+    return {"retry": True, "reason": "", "decision": decision}
+
+
+def _should_retry(
+    status: str | None,
+    attempt: int,
+    max_retries: int,
+    *,
+    sync_mode: str | None = None,
+    rows_committed: int = 0,
+    rows_committed_known: bool = True,
+) -> bool:
+    return bool(
+        _retry_decision(
+            status,
+            attempt,
+            max_retries,
+            sync_mode=sync_mode,
+            rows_committed=rows_committed,
+            rows_committed_known=rows_committed_known,
+        )["retry"]
+    )
 
 
 def _job_doc(job_id: str) -> dict | None:
@@ -344,7 +398,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     from services.schedule_store import (
         get_schedule,
         mark_schedule_run,
-        record_run_history,
+        schedule_retry,
     )
 
     sched = get_schedule(schedule_id)
@@ -354,17 +408,35 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     status = (job_doc or {}).get("status") or "failed"
     entry = _run_entry(job_id, status, attempt, started_at, job_doc)
 
-    if _should_retry(status, attempt, sched.max_retries):
-        record_run_history(schedule_id, {**entry, "retry_scheduled": True})
+    from services.execution_engine_contract import committed_rows_of
+
+    rows_committed, rows_known = committed_rows_of(job_doc)
+    decision = _retry_decision(
+        status,
+        attempt,
+        sched.max_retries,
+        sync_mode=_normalize_sync_mode(sched.sync_mode, sched.primary_key),
+        rows_committed=rows_committed,
+        rows_committed_known=rows_known,
+    )
+    if not decision["retry"] and decision["reason"] and not _is_success(status):
+        entry["retry_refused"] = decision["reason"]
+
+    if decision["retry"]:
         delay = max(0, sched.retry_backoff_seconds) * (attempt + 1)
+        retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
         logger.warning(
-            "Schedule %s attempt %s failed; retrying in %ss", schedule_id, attempt + 1, delay
+            "Schedule %s attempt %s failed; retrying at %s",
+            schedule_id,
+            attempt + 1,
+            retry_at.isoformat(),
         )
-        timer = threading.Timer(
-            delay, lambda: _dispatch_transfer(schedule_id, attempt=attempt + 1)
+        schedule_retry(
+            schedule_id,
+            retry_at=retry_at,
+            attempt=attempt + 1,
+            run_entry={**entry, "retry_scheduled": True, "retry_at": retry_at.isoformat()},
         )
-        timer.daemon = True
-        timer.start()
         return
 
     cursor_value = None
@@ -435,6 +507,11 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request)
     started_at = datetime.now(timezone.utc)
+    from services.schedule_store import set_running_job
+
+    # Bind the claim to this job so a long migration keeps it and a crashed one
+    # gives it back, instead of both being judged by the same wall clock.
+    set_running_job(schedule_id, job_id)
     future = run_transfer_async(job_id, request)
     future.add_done_callback(
         lambda _f, sid=schedule_id, jid=job_id, a=attempt, ts=started_at: _finalize_run(sid, jid, a, ts)
@@ -460,7 +537,9 @@ def _run_schedule(schedule_id: str) -> str | None:
         logger.info("Schedule %s skipped — a run is already in progress", schedule_id)
         return None
 
-    job_id = _dispatch_transfer(schedule_id, attempt=0)
+    # A parked retry resumes its own attempt count; the budget is per run, not
+    # per beat, or a schedule that fails every time retries forever.
+    job_id = _dispatch_transfer(schedule_id, attempt=sched.retry_attempt if sched.retry_at else 0)
     if job_id is None:
         # Fail-closed paths (missing connector / contract) already call
         # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
