@@ -26,10 +26,12 @@ append-into-existing, incremental append, upsert, overwrite — are proven live 
 four engines. **Warehouse and SaaS routes (Snowflake, BigQuery, S3, Salesforce)
 are not live-proven** because no credentials have been provisioned to this
 environment; they remain Planned/unproven regardless of the code that exists for
-them. **Pipelines, Transforms and the UI have not been audited to the same bar**
-— they are implemented and unit-tested, not matrix-proven. Jobs and Schedules
-are audited for retry, overlap, cancellation and cadence (see §4); backfill and
-multi-instance failover are not.
+them. **The UI has not been audited to the same bar** — it is implemented and
+unit-tested, not matrix-proven. Jobs and Schedules are audited for retry,
+overlap, cancellation and cadence (see §4); backfill and multi-instance failover
+are not. Transforms are audited for load correctness (33/33 live on three
+engines, `docs/TRANSFORM_LAYER_AUDIT.md`); a per-row ledger and quarantine inside
+a transform do not exist yet.
 
 Recommended handover posture: hand over the **relational migration-assurance
 workflow** now, with warehouse/SaaS and the operations surfaces explicitly
@@ -59,6 +61,7 @@ Emitted DDL is never accepted as proof.
 | Schema drift, same 12 scenarios | MySQL, SQL Server, Oracle | 36 | 36 recorded, 0 violations | `drift_live_multi_results.json` |
 | Destination privilege probe | PG, MySQL, SQL Server, Oracle | 7 | 7 ok | `grants_live_results.json` |
 | Oracle catalog identity (quoted/case-folded tables, duplicate probe) | Oracle | 10 | 10 ok | `oracle_live_results.json` |
+| Incremental transform loads (column order, omitted/extra columns, required columns, `unique_key`, case, first-run duplication) | PG, MySQL, SQL Server | 33 | 33 ok (18 broken before the fix) | `transform_live_results.json`, `transform_live_base_results.json`, `docs/TRANSFORM_LAYER_AUDIT.md` |
 | Excel/CSV blank-row defect, before/after | Excel → PostgreSQL | — | 95 phantom rows → 0 | `excel_phantom_rows_live_results.json` |
 | 30-source-column → 20-column destination scenario matrix | PG, MySQL, Oracle | 12 scenarios × 3 | see §3 | `migration_scenario_matrix_results.json`, `docs/MIGRATION_SCENARIO_MATRIX.md` |
 
@@ -200,7 +203,9 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
 | Schedule retry durability, overlap, missed windows | **Proven** — a parked retry survives a restart, waits out its backoff, and suppresses the cadence until it runs; a second beat cannot claim a running schedule; skipped windows are counted | `schedule_live_results.json` |
 | Jobs surface (cancellation, checkpoints, leases beyond the above) | **Partly audited** | retry/resume/cancel-retry paths audited; worker leases and claim-queue coordination not yet at this bar |
 | Schedules — backfill, multi-instance lock under a real Mongo failover | **Unaudited** | single-instance and file-backed paths proven; no backfill API exists yet |
-| Pipelines / Transforms | **Unaudited** | implemented, not examined at this bar |
+| Transforms — incremental load correctness | **Proven** — the executed load names both column lists, matched to the target by name; a column the target lacks, an unfilled required column, or a `unique_key` missing from either side stops the load before it writes | `transform_live_results.json` (33/33 live PG/MySQL/SQL Server), `transform_live_base_results.json` (18/33 broken before), `docs/TRANSFORM_LAYER_AUDIT.md` |
+| Transforms — row ledger, quarantine, type fidelity through a model | **Unaudited** | `rows_affected` is a driver rowcount, not a read/written/quarantined account |
+| Transforms on Snowflake / BigQuery / Databricks / Trino | **Unproven** | unit-covered statements only; no credentials for a live run |
 | Operations / Contracts / Proofs pages | **Unaudited** | — |
 | Web UI | **Builds clean**; not audited | `npm run build` exit 0 |
 | Connector catalog | 44 unique drivers with PRODUCTION_SKU evidence across 77 routes | `apps/api/data/proofs/transfer_ready_matrix.json`; tile count is explicitly **not** a live-capability claim |
@@ -226,9 +231,12 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
    invented.
 7. **Transfer Studio has no cursor-column field**, so an incremental append is
    configured through the API/contract rather than the UI.
-8. **Operations surfaces (Pipelines, Transforms, UI) have not been audited** at
-   the migration-assurance bar. Jobs/Schedules are audited for retry, overlap,
-   cancellation and cadence only.
+8. **The UI has not been audited** at the migration-assurance bar.
+   Jobs/Schedules are audited for retry, overlap, cancellation and cadence only;
+   Transforms are audited for load correctness only — a transform failure is
+   surfaced but is not replayable per row, and it does not veto the landed
+   transfer's own proof. Incremental transforms are refused on Oracle, which has
+   no `CREATE TABLE IF NOT EXISTS` to seed them idempotently.
 9. **Schedules have no backfill.** A historical window must be run as an
    explicit transfer; there is no scheduled catch-up that replays skipped
    windows — they are counted (`missed_window_count`) and surfaced, not replayed.
@@ -252,8 +260,9 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
     `tests/test_retry_duplicate_guard.py`, 22 cases)
   - sparse-document + type-contract + tracked-execute selection — 1144 passed, 7 skipped
 - Frontend: `npm run build` exit 0.
-- **Full backend suite: 13233 passed, 0 failed, 1515 skipped** (sharded run,
-  `/home/ubuntu/repro/shards5/summary.txt`). The 55 failures carried by the base
+- **Full backend suite: 13244 passed, 0 failed, 1515 skipped** (single run,
+  23m21s, after the transform alignment wave; the 13233 before it were a sharded
+  run, `/home/ubuntu/repro/shards5/summary.txt`). The 55 failures carried by the base
   branch are now closed; none were closed by weakening an assertion. The three
   classes they fell into:
   - shared product defects — the resume posture reading an unreadable committed
@@ -281,7 +290,7 @@ credentials.
 | # | Work | Sessions | Blocked on |
 |---|---|---|---|
 | 3 | ~~Jobs + Schedules retry / overlap / cancellation / missed windows~~ — done, `schedule_live_results.json`; remaining: backfill + multi-instance Mongo failover | 1 | — |
-| 4 | Pipelines + Transforms audit | 1 | — |
+| 4 | ~~Pipelines + Transforms audit~~ — done, `transform_live_results.json`; remaining: transform row ledger/quarantine and warehouse dialects | 1 | credentials for warehouse dialects |
 | 5 | UI/UX audit against the engine: one primary action per root cause, cursor field in Transfer Studio, no claim the engine does not support | 1–2 | — |
 | 6 | Warehouse certification (Snowflake, BigQuery, S3) | 1–2 | credentials |
 | 7 | SaaS certification starting with Salesforce | 1–2 | integration user / Connected App |

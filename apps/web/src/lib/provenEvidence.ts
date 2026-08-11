@@ -108,11 +108,18 @@ export const PROVEN_EVIDENCE: EvidenceRow[] = [
     result: "7 ok",
     artifact: "grants_live_results.json",
   },
+  {
+    claim: "Incremental transforms load by column name, refusing unmatched columns",
+    engines: "PostgreSQL, MySQL, SQL Server",
+    cases: 33,
+    result: "33 ok",
+    artifact: "transform_live_results.json",
+  },
 ];
 
 /** Backend suite as last measured — see the readiness report for the shard log. */
 export const BACKEND_SUITE = {
-  passed: 13233,
+  passed: 13244,
   failed: 0,
   skipped: 1515,
 } as const;
@@ -150,7 +157,13 @@ export const NOT_PROVEN: UnprovenRow[] = [
     reason: "Same-schedule and connector-pair overlap are proven; conditional claims under real replica failover are not.",
   },
   {
-    area: "Pipelines, Transforms, Contracts and Proofs surfaces",
+    area: "Transform row ledger and quarantine",
+    status: "planned",
+    reason:
+      "Transform loads are proven column-correct on three engines; a per-row read/written/quarantined account inside a transform does not exist yet.",
+  },
+  {
+    area: "Contracts and Proofs surfaces",
     status: "unaudited",
     reason: "Implemented and unit-tested, not yet examined at the live-matrix bar.",
   },
