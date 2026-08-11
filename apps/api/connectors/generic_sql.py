@@ -1022,6 +1022,69 @@ def _resolve_physical_table_ident(
     return folded, folded_schema
 
 
+def _resolve_physical_column_idents(
+    engine: Any, table: str, schema: str | None, columns: list[str]
+) -> dict[str, str]:
+    """Stored spelling of each destination column on case-folding engines.
+
+    Every statement here quotes its identifiers, so on Oracle/Snowflake/DB2 a
+    mapped ``label`` is asked for as ``"label"`` — a *different* column from the
+    ``LABEL`` an ordinary ``CREATE TABLE`` produced. Appending into a table the
+    client created therefore failed with ORA-00904 on a column that is plainly
+    there, and drift widening emitted ``MODIFY ("name" CLOB)`` against ``NAME``.
+
+    Only columns whose stored spelling actually differs are returned; a column
+    the catalog does not have is left alone so ADD COLUMN still creates it.
+    """
+    dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "").lower()
+    if dialect not in _FOLDING_DIALECTS or not columns:
+        return {}
+    stored = _stored_column_spellings(engine, engine, table, schema)
+    if not stored:
+        return {}
+    from services.dialect_profiles import fold_identifier
+
+    # A column drift is about to add must follow the convention of the table it
+    # joins: adding a quoted lower-case column beside folded ones leaves a
+    # column the client's own SELECT cannot see.
+    folded_table = all(name == name.upper() for name in stored.values())
+    renames: dict[str, str] = {}
+    for col in columns:
+        hit = stored.get(str(col).casefold())
+        if hit is None and folded_table:
+            hit = fold_identifier(dialect, col)
+        if hit and hit != col:
+            renames[col] = hit
+    return renames
+
+
+def _stored_column_spellings(
+    engine: Any, bind: Any, table: str, schema: str | None
+) -> dict[str, str]:
+    """``{folded name: spelling the catalog stores}`` for one table.
+
+    Reflection hands back *normalised* names (Oracle's ``LABEL`` arrives as
+    ``label``), so comparing or quoting them directly addresses a column that
+    does not exist. ``denormalize_name`` is the dialect's own inverse and keeps
+    a deliberately quoted lower-case column quoted.
+    """
+    try:
+        cols = inspect(bind).get_columns(table, schema=schema)
+    except Exception as exc:  # noqa: BLE001 — unreadable catalog: keep Map names
+        logger.debug("column spelling probe failed for %s: %s", table, exc)
+        return {}
+    denormalize = getattr(
+        getattr(engine, "dialect", None), "denormalize_name", lambda n: n
+    )
+    out: dict[str, str] = {}
+    for col in cols:
+        name = col.get("name")
+        if not name:
+            continue
+        out[str(name).casefold()] = str(denormalize(name) or name)
+    return out
+
+
 def _is_oracle_wire(dialect_name: str, db_type: str) -> bool:
     """True when DDL compiles through the Oracle dialect."""
     if oracle is None:
@@ -2147,11 +2210,22 @@ def _widen_existing_columns_sa(
         logger.debug("Could not reflect columns for widen: %s", exc, exc_info=exc)
         return []
 
+    from connectors.schema_drift import existing_column_index
+
+    catalog_names = existing_column_index(
+        dialect_name, (c["name"] for c in existing_cols)
+    )
     log: list[str] = []
     for col in target_cols:
         if col in skip_cols:
             continue
-        existing = next((c for c in existing_cols if c["name"] == col), None)
+        # Reflection normalises Oracle's ``LABEL`` to ``label``; an exact match
+        # skipped the widen and the row it was needed for was truncated or
+        # refused with no ALTER ever attempted.
+        catalog_name = catalog_names.get(col) or catalog_names.get(col.casefold())
+        existing = next(
+            (c for c in existing_cols if c["name"] == catalog_name), None
+        )
         if not existing:
             continue
         existing_type = str(existing["type"].compile(dialect=engine.dialect))
@@ -3894,6 +3968,20 @@ def write_mapped_rows(
     target_cols, logical_types = resolve_target_columns(
         mappings, column_types, preserve_case=True
     )
+    # Bind every downstream statement to the spelling the destination stores,
+    # before mapped rows, types and the Table object are keyed by these names.
+    _stored_names = _resolve_physical_column_idents(
+        engine, table_name, schema_name, list(target_cols)
+    )
+    if _stored_names:
+        target_cols = [_stored_names.get(c, c) for c in target_cols]
+        mappings = [
+            ({**m, "target": _stored_names[str(m.get("target"))]}
+             if str(m.get("target")) in _stored_names else m)
+            for m in (mappings or [])
+        ]
+        if conflict_columns:
+            conflict_columns = [_stored_names.get(c, c) for c in conflict_columns]
     if conflict_columns:
         try:
             from connectors.writer_common import resolve_conflict_targets

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
@@ -256,6 +257,55 @@ def _information_schema_type_to_str(
     if upper == "MEDIUMINT":
         return "MEDIUMINT"
     return upper
+
+
+_CASE_FOLDING_DIALECTS: frozenset[str] = frozenset(
+    {"oracle", "snowflake", "db2", "ibm_db_sa", "mysql", "mariadb", "mssql", "sqlserver"}
+)
+
+
+def _quote_added_columns(dialect: Any, existing_names: list[str]) -> bool | None:
+    """Whether ADD COLUMN must force-quote, following the table's own convention.
+
+    Force-quoting a lower-case name on Oracle adds ``"extra"``, a case-sensitive
+    column the client's own ``SELECT extra`` cannot see, sitting beside the
+    folded ``EXTRA`` columns of the table it was added to. ``None`` lets the
+    dialect quote only when the name requires it, which is what an ordinary
+    ``CREATE TABLE`` does — but a table whose columns really are stored
+    lower-case keeps force-quoting, so drift matches what is already there.
+    """
+    denormalize = getattr(dialect, "denormalize_name", None)
+    if (
+        not callable(denormalize)
+        or not existing_names
+        or not getattr(dialect, "requires_name_normalize", False)
+    ):
+        # A dialect that does not fold reports names as they are stored, so the
+        # quoted Map spelling is already the right one.
+        return True
+    stored = [str(denormalize(name) or name) for name in existing_names]
+    return None if all(s == s.upper() for s in stored) else True
+
+
+def existing_column_index(
+    dialect: str, existing_names: Iterable[str]
+) -> dict[str, str]:
+    """``{lookup key: catalog name}`` for matching a target against a table.
+
+    Reflection normalises an Oracle ``LABEL`` to ``label``, so an exact-match
+    lookup missed the column and drift either re-added it or skipped a widen
+    the row needed. Engines that fold or compare case-insensitively get a
+    folded key as well; PostgreSQL does not, because ``"Foo"`` and ``"foo"``
+    are two different columns there and guessing would alter the wrong one.
+    """
+    index: dict[str, str] = {}
+    fold = (dialect or "").lower() in _CASE_FOLDING_DIALECTS
+    for name in existing_names:
+        text = str(name)
+        index.setdefault(text, text)
+        if fold:
+            index.setdefault(text.casefold(), text)
+    return index
 
 
 def _quote_col(dialect: str, name: str) -> str:
@@ -690,13 +740,17 @@ def add_missing_columns(
     if not inspector.has_table(table_name, schema=schema):
         return []
 
-    existing = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
-    missing = [c for c in target_cols if c not in existing]
+    dialect = engine.dialect
+    dialect_name = getattr(dialect, "name", "")
+    existing_names = [
+        c["name"] for c in inspector.get_columns(table_name, schema=schema)
+    ]
+    existing = existing_column_index(dialect_name, existing_names)
+    quote_new_columns = _quote_added_columns(dialect, existing_names)
+    missing = [c for c in target_cols if c not in existing and c.casefold() not in existing]
     if not missing:
         return []
 
-    dialect = engine.dialect
-    dialect_name = getattr(dialect, "name", "")
     keyword = (
         "ADD COLUMN" if dialect_name not in ("mssql", "oracle", "sybase") else "ADD"
     )
@@ -728,7 +782,7 @@ def add_missing_columns(
         table_name,
         sa.MetaData(),
         *[
-            sa.Column(col, sa_col_types[col], quote=True)
+            sa.Column(col, sa_col_types[col], quote=quote_new_columns)
             for col in missing
             if sa_col_types.get(col) is not None
         ],

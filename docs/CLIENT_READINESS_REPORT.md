@@ -54,6 +54,7 @@ Emitted DDL is never accepted as proof.
 | Identity / sequence generator carry on create-new (destination catalog re-read + post-cutover client insert without a key) | PG, MySQL, SQL Server, Oracle | 16 routes | 14 carried, 2 declared unsupported | `identity_live_results.json` |
 | Non-default key sequence `IDENTITY(1000,10)` carried (seed, increment, and the progression the next client key lands on) | SQL Server → SQL Server / PG / Oracle | 3 | 3 ok | `identity_seed_live_results.json` |
 | Schema drift (widen, narrow-refuse, NOT NULL, defaults, concurrency, resume, case variants) | PostgreSQL | 12 | 12 recorded, 0 violations | `drift_live_results.json` |
+| Schema drift, same 12 scenarios | MySQL, SQL Server, Oracle | 36 | 36 recorded, 0 violations | `drift_live_multi_results.json` |
 | Destination privilege probe | PG, MySQL, SQL Server, Oracle | 7 | 7 ok | `grants_live_results.json` |
 | Oracle catalog identity (quoted/case-folded tables, duplicate probe) | Oracle | 10 | 10 ok | `oracle_live_results.json` |
 | Excel/CSV blank-row defect, before/after | Excel → PostgreSQL | — | 95 phantom rows → 0 | `excel_phantom_rows_live_results.json` |
@@ -153,6 +154,18 @@ signature: the run reported success while the destination was wrong.
     tables in the SYSTEM/SYSAUX tablespaces, so the watermark probe reported
     "column is not a GENERATED AS IDENTITY column" for a column that was one.
     One shared catalog fallback now serves the watermark and RI probes.
+18. **Every write into a client-created Oracle table failed with `ORA-00904` on
+    a column that is plainly there.** Reflection normalises Oracle's stored
+    `LABEL` to `label`, and every statement here quotes its identifiers, so the
+    writer asked for `"label"` — a different, case-sensitive column. Appends and
+    upserts into any table created by ordinary Oracle DDL were refused, drift
+    widening emitted `MODIFY ("name" CLOB)` against `NAME`, and `ADD COLUMN`
+    added a quoted lower-case `"extra"` beside the folded columns, invisible to
+    the client's own `SELECT extra`. Column identity is now resolved from the
+    catalog through the dialect's own `denormalize_name`, and an added column
+    follows the convention of the table it joins. Only tables our own earlier
+    create-new produced (quoted lower-case) kept the route working, which is why
+    the create-new matrices stayed green.
 
 ---
 
@@ -173,7 +186,7 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
 | Quarantine + replay | **Tested**, exercised in every live matrix | DLQ durability tests |
 | Gate-8 reconciliation (row count + checksum + destination re-read) | **Proven** | ddl_identity and drift matrices |
 | Migration certificate / audit PDF / signed proof pack | **Tested**; verdict veto newly added | `tests/test_migration_certificate.py`, `tests/test_certificate_pdf.py` |
-| Schema drift | **Proven on PostgreSQL** (12 scenarios) | not yet re-run on MySQL/SQL Server/Oracle |
+| Schema drift | **Proven** on PG, MySQL, SQL Server, Oracle (12 scenarios each) | `drift_live_results.json`, `drift_live_multi_results.json` |
 | Identity / sequence generator carry + high-water marks | **Proven** on PG / MySQL / SQL Server / Oracle (16 routes, catalog re-read, post-cutover insert); SQLite refused explicitly | `identity_live_results.json`, `identity_seed_live_results.json` |
 | MongoDB / DynamoDB (sparse documents) | **Tested**; Mongo→Snowflake focused path passes | no live matrix |
 | DuckDB / Iceberg / lakehouse MERGE | **Tested** | backfill widening regression is live-proven on DuckDB |
@@ -197,8 +210,10 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
    dedicated least-privilege integration user or Connected App.
 2. **CDC is at-least-once.** Resume and replay upsert; exactly-once is not
    claimed.
-3. **Schema drift is proven on PostgreSQL only.** The MySQL / SQL Server /
-   Oracle drift matrix has not been re-run since the VM restart.
+3. **Oracle concurrent drift can lose one writer's ALTER to a DML lock**
+   (`ORA-00054`). The refused writer fails loudly with the lock named and
+   nothing is written, so no column is silently lost, but two writers evolving
+   the same table concurrently need a retry policy.
 4. **FK cycles are refused, not resolved.** No deferred-constraint strategy.
 5. **Triggers, stored procedures and views are not migrated.** Reported as
    advisory in the physical-state section; recreate them before cutover.
@@ -253,7 +268,6 @@ credentials.
 
 | # | Work | Sessions | Blocked on |
 |---|---|---|---|
-| 1 | Re-run the drift matrix on MySQL / SQL Server / Oracle; close whatever it finds | 1 | — |
 | 3 | Jobs + Schedules audit at this bar (retry, concurrency, multi-instance, missed windows, backfill) | 1–2 | — |
 | 4 | Pipelines + Transforms audit | 1 | — |
 | 5 | UI/UX audit against the engine: one primary action per root cause, cursor field in Transfer Studio, no claim the engine does not support | 1–2 | — |
