@@ -130,11 +130,10 @@ import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from 
 import { needsMappingReview } from "../lib/columnWorkbench";
 import {
   buildStreamContracts,
+  firstStreamContractIssue,
   seedStreamFieldsFromCandidates,
-  streamContractsNeedReview,
   type StreamFieldContract,
 } from "../lib/streamContracts";
-import { evaluateCursorSemantics } from "../lib/cursorSemantics";
 import type { TransferPageProps } from "./transfer/TransferPageProps";
 import {
   ACCEPTED_UPLOAD_EXTENSIONS,
@@ -847,7 +846,7 @@ export function TransferPage({
         }
       : undefined,
   });
-  const streamNeedsReview = streamContractsNeedReview({
+  const streamContractIssue = firstStreamContractIssue({
     streamNames: advancedStreamNames,
     sourceColumns: currentSourceColumns,
     sourceColumnsByStream,
@@ -860,6 +859,7 @@ export function TransferPage({
     syncMode,
     validationMode,
   });
+  const streamNeedsReview = streamContractIssue !== null;
   const syncModeLabel =
     routeSyncModes.find((m) => m.id === syncMode)?.label
     ?? SYNC_MODES.find((m) => m.id === syncMode)?.label
@@ -2080,26 +2080,12 @@ export function TransferPage({
       setStep(STEP_DESTINATION);
       return true;
     }
-    if (streamNeedsReview) {
-      // One cause, one action: name the single thing to change rather than
-      // listing everything the contract could be missing.
-      const semanticsVerdict = evaluateCursorSemantics({
-        syncMode,
-        cursorField,
-        declared: cursorSemantics,
-        validationMode,
-      });
-      const action =
-        requiresCursor && !cursorField
-          ? "Select a cursor field."
-          : semanticsVerdict.status === "block"
-            ? `${semanticsVerdict.reason} ${semanticsVerdict.primaryAction}.`
-            : requiresPrimaryKey && !primaryKeyField
-              ? "Select a primary key."
-              : "Open Advanced settings to complete the stream contract.";
+    if (streamContractIssue) {
+      // One cause, one action, and the stream it belongs to — the engine refuses
+      // per stream, so a generic "contract incomplete" would hide which one.
       toast({
         title: "Stream contract needs review",
-        message: action,
+        message: `${streamContractIssue.reason} ${streamContractIssue.action}`,
         tone: "warning",
       });
       setStep(STEP_DESTINATION);

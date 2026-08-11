@@ -155,13 +155,3 @@ export function evaluateCursorSemantics(input: {
     monotonicOnInsert: false,
   };
 }
-
-/** True when this stream's cursor contract is not yet safe for the sync mode. */
-export function cursorContractNeedsReview(input: {
-  syncMode: string;
-  cursorField: string;
-  declared: string;
-  validationMode?: string;
-}): boolean {
-  return evaluateCursorSemantics(input).status === "block";
-}
