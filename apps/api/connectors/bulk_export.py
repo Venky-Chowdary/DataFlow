@@ -161,11 +161,20 @@ def iter_postgresql_copy_batches(
 
 
 def _copy_cell(raw: str) -> str:
-    """Map COPY CSV field to transfer wire string (NULL → empty with sentinel)."""
+    """Map a COPY CSV field to the transfer wire string.
+
+    The keyset/OFFSET readers emit ``SQL_NULL_SENTINEL`` for SQL NULL via
+    ``cell_to_string(preserve_sql_null=True)``, so returning ``""`` here made
+    enabling ``DATAFLOW_BULK_EXPORT`` quietly change what a NULL means: the
+    destination saw an empty string, wrote one into a nullable column, and the
+    checksum diverged from a keyset read of the same table. COPY CSV writes the
+    unquoted token ``\\N`` for NULL and ``""`` for an empty string, so the two
+    stay distinguishable here.
+    """
+    from services.value_serializer import SQL_NULL_SENTINEL
+
     if raw == r"\N":
-        # Match cell_to_string(preserve_sql_null=True) empty/NULL convention used
-        # by readers — empty string; Missing is not used on the read path.
-        return ""
+        return SQL_NULL_SENTINEL
     return raw
 
 

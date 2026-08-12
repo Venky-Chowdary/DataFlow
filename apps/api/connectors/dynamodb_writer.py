@@ -347,11 +347,25 @@ def _sparse_update_item(
     """UpdateItem SET present attrs only — PutItem would wipe omitted fields."""
     if not set_attrs:
         # Key-only sparse image: ensure the item exists without clearing attrs.
-        # UpdateItem with no UpdateExpression already creates the item from its
-        # key alone, so there is nothing to SET. Writing a synthetic marker here
-        # instead left a ``__df_touch`` attribute on the customer's item that no
-        # mapping asked for and nothing ever removes.
-        client.update_item(TableName=table, Key=key_attrs)
+        # UpdateItem needs an expression, and inventing one wrote a synthetic
+        # ``__df_touch`` attribute onto the customer's item that no mapping asked
+        # for and nothing removes. A conditional PutItem of the key alone creates
+        # the row when it is missing and fails its own condition when it is not,
+        # which is exactly the no-op wanted for an existing row.
+        from botocore.exceptions import ClientError
+
+        names = {f"#k{i}": name for i, name in enumerate(key_attrs)}
+        condition = " AND ".join(f"attribute_not_exists({alias})" for alias in names)
+        try:
+            client.put_item(
+                TableName=table,
+                Item=dict(key_attrs),
+                ConditionExpression=condition,
+                ExpressionAttributeNames=names,
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
         return
     names: dict[str, str] = {}
     values: dict[str, Any] = {}
