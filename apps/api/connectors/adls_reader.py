@@ -26,4 +26,11 @@ def read_object(
 def list_objects(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[str]:
     client = blob_service_client(cfg)
     container = client.get_container_client(bucket)
-    return [b.name for b in itertools.islice(container.list_blobs(prefix=prefix or ""), 2000)]
+    # Azure names this filter ``name_starts_with``; ``prefix`` is a hard error
+    # rather than a no-op, which took Gate-8 read-back on ADLS down to an
+    # unverified warning. The parameter stays ``prefix`` here so the object-store
+    # readers keep one shared signature.
+    return [
+        b.name
+        for b in itertools.islice(container.list_blobs(name_starts_with=prefix or ""), 2000)
+    ]
