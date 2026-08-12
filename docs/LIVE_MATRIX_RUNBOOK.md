@@ -96,7 +96,7 @@ Total 1,156. `PRODUCTION_SKU` commits 75 of these to CI proof.
 ## Measured state (2026-08-12, this runner)
 
 ```
-13575 passed, 12 failed, 1062 skipped
+13576 passed, 11 failed, 1062 skipped
 ```
 
 A fifteenth, `test_live_cross_engine_confirm_moves_every_row_intact[postgres_to_mysql]`,
@@ -109,7 +109,7 @@ reported, not regressions:
 
 | Cluster | Tests | Note |
 |---------|------:|------|
-| Document / vector destinations | 7 | Mongo and Redis cross-schema mapping, Mongo→Snowflake ×2, pgvector read-back ×2, Redis overwrite |
+| Document / vector destinations | 6 | Mongo and Redis cross-schema mapping, Mongo→Snowflake ×2, pgvector read-back ×2 |
 | `test_typed_fidelity_transfer_matrix_e2e` | 2 | PG → Snowflake (fakesnow has no `SHOW GRANTS`), PG → MySQL TZ collapse |
 | Single-test clusters | 3 | PG→MySQL SKU, PG/MySQL/Mongo matrix, Pilot→Mongo confirm |
 
@@ -132,6 +132,27 @@ reported, not regressions:
   The remaining Pilot → Mongo confirm failure is this, and it wants a signed
   Risk Contract rather than a code change. (`DECIMAL(p,s)` into Mongo is no
   longer flagged — see the Decimal128 fix below.)
+* **PostgreSQL bare `NUMERIC` → MySQL** is refused for the same reason. The
+  matrix seeds `amount` as an unqualified `DECIMAL`, which PostgreSQL creates as
+  `numeric` with no precision — unbounded to 131072 digits — while MySQL tops
+  out at `DECIMAL(65,30)` and the invent is `DECIMAL(38,15)`. Passing this would
+  mean sizing the carrier from sampled values, which is exactly the invent the
+  declared-domain rule forbids, so the honest outcome is a Risk Contract.
+
+### Open: auto-map does not align to a discovered document schema
+
+`test_intelligent_cross_schema_mapping[mongodb|redis]` pre-creates the
+destination with different column names (`salary` → `compensation`) and expects
+the auto-mapper to align to them. It does for SQL destinations; for MongoDB and
+Redis the mapping stays identity, so the write is refused with "physical DDL
+missing for mapped column(s) salary".
+
+The fields are discoverable — `introspect_schema("mongodb", …)` against the
+seeded collection returns `id`, `name`, `compensation`, `active` with inferred
+types — so this is a document destination's schema not reaching the mapper
+rather than a missing capability. Same shape as the pgvector introspect and the
+Pilot existence gaps already fixed, and the likely fix is plumbing rather than
+new logic.
 
 Anything quoted from this file must name the runner and date: these counts are
 environment-specific, and the docs set already contains several stale ones.
