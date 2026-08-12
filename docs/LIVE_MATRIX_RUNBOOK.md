@@ -96,7 +96,7 @@ Total 1,156. `PRODUCTION_SKU` commits 75 of these to CI proof.
 ## Measured state (2026-08-12, this runner)
 
 ```
-13551 passed, 14 failed, 1062 skipped
+13575 passed, 12 failed, 1062 skipped
 ```
 
 A fifteenth, `test_live_cross_engine_confirm_moves_every_row_intact[postgres_to_mysql]`,
@@ -109,9 +109,9 @@ reported, not regressions:
 
 | Cluster | Tests | Note |
 |---------|------:|------|
-| Document / vector destinations | 6 | Mongo and Redis cross-schema mapping, Mongo→Snowflake, pgvector per-column read-back |
+| Document / vector destinations | 7 | Mongo and Redis cross-schema mapping, Mongo→Snowflake ×2, pgvector read-back ×2, Redis overwrite |
 | `test_typed_fidelity_transfer_matrix_e2e` | 2 | PG → Snowflake (fakesnow has no `SHOW GRANTS`), PG → MySQL TZ collapse |
-| Single-test clusters | 6 | PG→MySQL SKU, MySQL widen, locale dates, PG/MySQL/Mongo matrix, Redis overwrite, Pilot→Mongo confirm |
+| Single-test clusters | 3 | PG→MySQL SKU, PG/MySQL/Mongo matrix, Pilot→Mongo confirm |
 
 ### Where the engine is right and the expectation is not
 
@@ -127,19 +127,11 @@ reported, not regressions:
   JSONB payload rather than columns to select. A vector sink's honest assurance
   is `writer_ack`.
 
-### Known false positive: Decimal128 is read as unparameterized
-
-`classify_conversion` flags `DECIMAL(p,s) → decimal` as
-`needs_user_approval` / lossy on the rule that a target declaring no precision
-invents capacity. That is right for a bare SQL `DECIMAL`, whose width is an
-engine default, but MongoDB's `decimal` is **Decimal128** — IEEE 754-2008, 34
-significant digits, fully specified. `DECIMAL(12,2)` lands in it exactly, so
-several PG → Mongo routes are blocked for a collapse that does not happen.
-`DECIMAL(40,2)` must keep failing, so the fix is a capacity comparison against
-34 rather than removing the rule. `classify_conversion` takes no destination
-argument today, which is why this is written down rather than patched by
-case-testing the token — `decimal` versus `DECIMAL` is exactly the
-spelling-sensitive branch Property 1 forbids.
+* **PostgreSQL `TIMESTAMP` → Mongo `date`** is a real collapse: BSON `date` is
+  milliseconds since epoch, so a microsecond-precision source cannot round-trip.
+  The remaining Pilot → Mongo confirm failure is this, and it wants a signed
+  Risk Contract rather than a code change. (`DECIMAL(p,s)` into Mongo is no
+  longer flagged — see the Decimal128 fix below.)
 
 Anything quoted from this file must name the runner and date: these counts are
 environment-specific, and the docs set already contains several stale ones.
