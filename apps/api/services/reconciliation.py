@@ -19,7 +19,7 @@ from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import time as _time
 from datetime import timezone
-from decimal import Decimal, InvalidOperation, Overflow
+from decimal import Decimal, InvalidOperation, Overflow, localcontext
 from functools import lru_cache
 from typing import Any, Callable, Final, Iterable, Iterator
 
@@ -3856,10 +3856,52 @@ def _decimal_from_ieee_float(value: float) -> Decimal | None:
     return Decimal(format(value, ".15g"))
 
 
+def _normalize_exact(d: Decimal) -> Decimal:
+    """Strip trailing zeros without the 28-digit rounding of the default context.
+
+    ``Decimal.normalize`` honours the ambient context precision, so a value
+    carrying more than 28 significant digits is quietly rounded. Inside a
+    checksum that is a correctness bug in both directions: it can fail a clean
+    transfer, and it can map two genuinely different decimals onto one digest,
+    reporting corrupted data as verified.
+    """
+    if not d.is_finite():
+        return d
+    with localcontext() as ctx:
+        ctx.prec = max(len(d.as_tuple().digits), 28)
+        return d.normalize()
+
+
+def _is_exact_double(d: Decimal) -> bool:
+    """True when ``d`` is precisely the value of some IEEE double.
+
+    This is the licence to round a mantissa down to 15 significant digits. When
+    it holds, the long tail is the double's own decimal expansion and dropping it
+    recovers the human value (``106.60000000000001`` → ``106.6``). When it fails,
+    the digits carry information no double can hold — ``12345678901234567890.123``
+    or ``-999999999999999999.999999`` — and rounding would corrupt the very value
+    Gate-8 is comparing, either failing a clean transfer or, worse, letting two
+    genuinely different decimals collapse onto one checksum.
+    """
+    import math
+
+    try:
+        f = float(d)
+    except (OverflowError, ValueError):
+        return False
+    if not math.isfinite(f):
+        return False
+    try:
+        return Decimal(repr(f)) == _normalize_exact(d)
+    except (InvalidOperation, Overflow, ValueError):
+        return False
+
+
 def _canonicalize_number(value: Any) -> str | None:
     """Return a canonical string for numeric values so 9.5 == 9.5000000000.
 
-    Also collapses IEEE float residue so Excel/JSON floats match DECIMAL sinks.
+    Also collapses IEEE float residue so Excel/JSON floats match DECIMAL sinks,
+    but only where that collapse is provably information-free.
     """
     try:
         if isinstance(value, float):
@@ -3872,7 +3914,9 @@ def _canonicalize_number(value: Any) -> str | None:
             if d.is_finite():
                 digits = d.as_tuple().digits
                 exp = d.as_tuple().exponent
-                if len(digits) > 15 or (isinstance(exp, int) and exp < -12):
+                if (
+                    len(digits) > 15 or (isinstance(exp, int) and exp < -12)
+                ) and _is_exact_double(d):
                     try:
                         d = _decimal_from_ieee_float(float(d)) or d
                     except (OverflowError, ValueError):
@@ -3886,7 +3930,7 @@ def _canonicalize_number(value: Any) -> str | None:
             if d.is_finite() and ("." in text or "e" in text.lower()):
                 head = text.split("e")[0].split("E")[0]
                 frac = head.split(".")[-1] if "." in head else ""
-                if len(frac.rstrip("0")) > 12:
+                if len(frac.rstrip("0")) > 12 and _is_exact_double(d):
                     try:
                         d = _decimal_from_ieee_float(float(d)) or d
                     except (OverflowError, ValueError):
@@ -3895,7 +3939,7 @@ def _canonicalize_number(value: Any) -> str | None:
             return None
         from services.value_serializer import safe_decimal_text
 
-        s = safe_decimal_text(d.normalize() if d.is_finite() else d)
+        s = safe_decimal_text(_normalize_exact(d) if d.is_finite() else d)
         if s is None:
             return None
         if "." in s and "e" not in s.lower():
