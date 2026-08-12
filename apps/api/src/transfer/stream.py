@@ -638,7 +638,11 @@ def _write_batch(
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
-    from .connector_dispatch import has_writer, write_via_registry
+    from .connector_dispatch import (
+        has_writer,
+        write_via_registry,
+        writer_extra_kwargs,
+    )
 
     if has_writer(dest_type):
         mode = write_mode
@@ -669,30 +673,8 @@ def _write_batch(
                 else None
             ),
         }
-        extra = {}
-        if dest_type == "sftp":
-            from connectors.sftp_common import host_key_settings
-
-            # Host-key trust must ride every path that opens an SFTP connection.
-            # Dropping it here downgraded the write to "no pinned key" while
-            # Validate had just verified against the pinned one, so a route the
-            # operator pinned passed preflight and then failed at write.
-            extra.update(host_key_settings(cfg))
-            extra["private_key"] = str(cfg.get("private_key") or "")
-        if dest_type == "kafka":
-            extra["schema_registry_url"] = str(
-                (getattr(dest, "extra", None) or {}).get("schema_registry_url")
-                or cfg.get("schema_registry_url")
-                or ""
-            )
+        extra = writer_extra_kwargs(dest_type, cfg=cfg, dest=dest, common=common)
         if dest_type == "iceberg":
-            # Forward catalog properties (warehouse, region, catalog_type, token, rest.*,
-            # glue.*, etc.) that are not already part of the common writer kwargs.
-            extra = {
-                k: v
-                for k, v in cfg.items()
-                if k not in common and v not in (None, "")
-            }
             # Iceberg full-refresh overwrite must truncate once per job, not per chunk.
             common["sync_mode"] = sync_mode
             common["file_batch_idx"] = chunk_idx
