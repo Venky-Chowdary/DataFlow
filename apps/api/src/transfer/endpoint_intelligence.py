@@ -72,7 +72,12 @@ def introspect_endpoint(
     fmt = (resolved_fmt or "").lower()
     out["format"] = resolved_fmt
 
-    if fmt == "postgresql":
+    # pgvector is an extension, not a separate engine: the destination is an
+    # ordinary PostgreSQL table with a vector column, reached through the same
+    # connection config. Leaving it out of this branch meant existence and
+    # column types were never measured, so Validate refused create-new and
+    # overwrite for lack of facts one catalog query answers.
+    if fmt in {"postgresql", "pgvector"}:
         from connectors.postgresql import test_postgresql
 
         probe = test_postgresql(

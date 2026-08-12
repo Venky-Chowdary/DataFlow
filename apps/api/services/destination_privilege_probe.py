@@ -426,7 +426,7 @@ def _probe_postgres_family(
     username: str,
     password: str,
     connection_string: str,
-    table_exists: bool,
+    table_exists: bool | None,
     need_update: bool,
 ) -> PrivilegeProbeResult:
     from connectors.postgresql_conn import get_connection
@@ -454,6 +454,21 @@ def _probe_postgres_family(
     }
     try:
         with conn.cursor() as cur:
+            if table_exists is None and table:
+                # The caller could not say — drivers that declare no introspect
+                # (pgvector is PostgreSQL underneath) never learn it. Reporting
+                # "existence unknown" from here would refuse a route this very
+                # connection can answer authoritatively in one statement.
+                try:
+                    cur.execute(
+                        "SELECT to_regclass(format('%%I.%%I', %s::text, %s::text)) IS NOT NULL",
+                        (schema, table),
+                    )
+                    table_exists = bool(cur.fetchone()[0])
+                except Exception as exc:
+                    # Leave it unknown rather than claim absence: a blocked
+                    # catalog lookup is not evidence the table is missing.
+                    logger.debug("Catalog existence lookup unavailable: %s", exc)
             # ``has_*_privilege`` parses its name argument as an SQL identifier,
             # so an unquoted "s.MixedCase" is folded to lower case and raises
             # undefined_table. format('%I.%I') quotes what the operator named.
