@@ -26,6 +26,19 @@ from services.reconciliation import (
 logger = logging.getLogger(__name__)
 
 
+def _is_operand_type_mismatch(exc: Exception) -> bool:
+    """True when PostgreSQL refused a comparison for want of a cast.
+
+    The keyed read binds source key values, whose Python type follows the
+    *source* column. When the destination stores that key as text — routine for
+    create-new on vector and document targets — PostgreSQL rejects
+    ``text = integer`` outright instead of coercing, and a clean write is
+    reported as an unreadable sample.
+    """
+    text = str(exc).lower()
+    return "operator does not exist" in text or "could not identify an equality operator" in text
+
+
 def read_target_sample(
     db_type: str,
     dest: dict[str, Any],
@@ -74,6 +87,12 @@ def read_target_sample(
         return bool(dest.get("ssl", default))
 
     try:
+        # pgvector is deliberately absent: it is PostgreSQL underneath, but its
+        # table is a fixed vector schema (id / content / embedding / metadata),
+        # so the mapped source columns are payload inside JSONB rather than
+        # columns to select. Reading it here would ask for columns that do not
+        # exist; a vector sink's honest assurance is writer_ack, not a per-cell
+        # compare it cannot support.
         if db_type in ("postgresql", "redshift"):
             # Redshift speaks the Postgres wire protocol; local CI and many
             # managed endpoints use the PG driver. Checksum verify already
@@ -117,12 +136,27 @@ def read_target_sample(
                                 require_safe_identifier(sort_key, preserve_case=True)
                             )
                             placeholders = ",".join(["%s"] * len(keys))
-                            cur.execute(
-                                f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                                f"WHERE {key_col} IN ({placeholders}) "
-                                f"ORDER BY {order_sql} LIMIT %s",
-                                (*keys, int(limit)),
-                            )
+                            try:
+                                cur.execute(
+                                    f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
+                                    f"WHERE {key_col} IN ({placeholders}) "
+                                    f"ORDER BY {order_sql} LIMIT %s",
+                                    (*keys, int(limit)),
+                                )
+                            except Exception as key_exc:
+                                if not _is_operand_type_mismatch(key_exc):
+                                    raise
+                                # Compare as text instead. This is tried second
+                                # so the typed form keeps the key index in the
+                                # common case; the cast only pays a scan on the
+                                # bounded sample that would otherwise be lost.
+                                conn.rollback()
+                                cur.execute(
+                                    f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
+                                    f"WHERE {key_col}::text IN ({placeholders}) "
+                                    f"ORDER BY {order_sql} LIMIT %s",
+                                    (*[str(k) for k in keys], int(limit)),
+                                )
                         else:
                             cur.execute(
                                 f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",  # nosec B608
