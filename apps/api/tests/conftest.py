@@ -31,6 +31,18 @@ import services as _canonical_services  # noqa: E402,F401
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
+# fakesnow keeps the emulated warehouse in a DuckDB file, and DuckDB allows a
+# single writer per file. Under `pytest -n` every worker would open the same
+# default path and all but one would die on "Conflicting lock is held", so the
+# Snowflake matrices only pass when the suite runs serially. Give each xdist
+# worker its own catalog; the product already reads this override.
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER")
+if _xdist_worker:
+    os.environ.setdefault(
+        "FAKESNOW_DB_PATH",
+        str(_api_root / "data" / f"fakesnow_data_{_xdist_worker}"),
+    )
+
 # Slim CI images omit sentence-transformers; use a deterministic hash embedder
 # so vector destination matrices still exercise the write path.
 try:
