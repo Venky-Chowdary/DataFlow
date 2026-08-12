@@ -96,20 +96,30 @@ Total 1,156. `PRODUCTION_SKU` commits 75 of these to CI proof.
 ## Measured state (2026-08-12, this runner)
 
 ```
-13535 passed, 27 failed, 1063 skipped
+13545 passed, 18 failed, 1062 skipped
 ```
 
-The remaining failures cluster as follows. They are live-path defects that the
-skipping suite never reported, not regressions:
+The remaining failures are live-path defects that the skipping suite never
+reported, not regressions:
 
 | Cluster | Tests | Note |
 |---------|------:|------|
-| `test_pilot_transfer_wave92` / `wave93` | 10 | Pilot NL plan/confirm against live PG, MySQL, Mongo |
-| `test_typed_fidelity_transfer_matrix_e2e` | 3 | PG → Snowflake / MySQL / DuckDB typed carry |
-| `test_source_duplicate_probe_live` | 2 | MySQL duplicate-key preflight |
+| `test_pilot_transfer_matrix_wave93` | 4 | Pilot cross-engine plan/confirm to MySQL and Mongo |
+| `test_typed_fidelity_transfer_matrix_e2e` | 2 | PG → Snowflake (fakesnow has no `SHOW GRANTS`), PG → MySQL TZ collapse |
 | `test_production_sku_matrix` | 2 | PG → MySQL, PG → pgvector |
 | `test_execute_tracked_schema_mapping_matrix` | 2 | Mongo, Redis cross-schema mapping |
 | single-test clusters | 8 | Redis overwrite, Mongo→Snowflake, MySQL widen, locale dates, emulator pgvector |
+
+Two of these are worth calling out because the engine is arguably right and the
+test encodes an older expectation:
+
+* **PG → MySQL typed fidelity** fails on `timestamptz → DATETIME(6)`. MySQL has
+  no timezone-aware type, so the conversion contract classes it
+  `needs_user_approval` and Execute demands a signed Risk Contract. That is
+  `MIGRATION_SCENARIO_MATRIX` GAP-7, not a defect in the write path.
+* **PG → Snowflake** fails because fakesnow does not implement `SHOW GRANTS`,
+  so the privilege probe cannot prove CREATE and fails closed. Relaxing that
+  would weaken a real check on real Snowflake for an emulator's convenience.
 
 Anything quoted from this file must name the runner and date: these counts are
 environment-specific, and the docs set already contains several stale ones.
