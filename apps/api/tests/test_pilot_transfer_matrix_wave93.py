@@ -430,9 +430,13 @@ def test_live_cross_engine_plan_preserves_declared_types(matrix_env, dest_engine
         c["source_column"]: c["from_type"] for c in plan["type_conversions"]
     }
     # The source side of every conversion is the declared Postgres type, never
-    # a re-guess from the sampled values.
-    assert from_types.get("amount", "DECIMAL(12,2)") == "DECIMAL(12,2)"
-    assert from_types.get("ratio", "FLOAT") == "FLOAT"
+    # a re-guess from the sampled values. The defaults are deliberately absent:
+    # with one, a plan that reported no conversion at all satisfied this by
+    # falling back to the expected string.
+    assert from_types["amount"] == "DECIMAL(12,2)"
+    # _SOURCE_DDL declares `ratio DOUBLE PRECISION`, and that is what must be
+    # carried — 1.5 and 2.25 would sample as a narrow DECIMAL.
+    assert from_types["ratio"] == "DOUBLE PRECISION"
 
     gate_ids = {g["id"] for g in plan["preflight"]["gates"]}
     assert len(gate_ids) >= 8, f"expected the full gate suite, got {sorted(gate_ids)}"

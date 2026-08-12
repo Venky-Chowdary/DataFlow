@@ -237,16 +237,46 @@ def introspect_connector_table(
         auth_source=str(cfg.get("auth_source") or ""),
     )
     ok = bool(info.get("ok"))
+    columns = _normalize_columns(info) if ok else []
     return {
         "ok": ok,
         "error": str(info.get("error") or ""),
         "db_type": db_type,
-        "columns": _normalize_columns(info) if ok else [],
+        "columns": columns,
         "tables": info.get("tables") or [],
         "config": cfg,
         "endpoint": endpoint,
         "raw": info,
+        "table_exists": _measured_table_exists(endpoint, ok=ok, has_columns=bool(columns)),
     }
+
+
+def _measured_table_exists(endpoint: Any, *, ok: bool, has_columns: bool) -> bool | None:
+    """Ask the catalog whether the table is there, rather than read an error string.
+
+    ``introspect_schema`` answers "what are this table's columns", so an absent
+    table and a table whose metadata could not be loaded both come back as a
+    successful call with none. Callers were left inferring the difference from
+    error text, which no engine promises to phrase any particular way, and a
+    destination that was simply missing came back as ``None`` — neither
+    create-new nor a failure, so Validate had nothing to approve.
+
+    Only the ambiguous case pays for the extra look: columns already prove the
+    table exists.
+    """
+    if has_columns:
+        return True
+    if not ok:
+        return None
+    try:
+        from src.transfer.endpoint_intelligence import introspect_endpoint
+
+        probed = introspect_endpoint(endpoint)
+    except Exception as exc:
+        logging.getLogger(__name__).info("table existence probe unavailable: %s", exc)
+        return None
+    exists = probed.get("table_exists")
+    return exists if isinstance(exists, bool) else None
 
 
 def _normalize_columns(info: dict[str, Any]) -> list[dict[str, Any]]:
