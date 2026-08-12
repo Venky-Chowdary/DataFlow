@@ -2031,7 +2031,12 @@ def _stream_database_transfer_impl(
                 destination_pk_columns=list(pk_target_cols or []) or None,
             )
             if mapped_fp:
-                inline_fps = row_fingerprints(mapped_fp, target_cols)
+                inline_fps = row_fingerprints(
+                    mapped_fp,
+                    target_cols,
+                    dest_db_type=dest_type,
+                    dest_types=fingerprint_dest_types,
+                )
         except Exception as exc:
             logger.warning("Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc)
 
@@ -2423,7 +2428,14 @@ def _stream_database_transfer_impl(
                 destination_pk_columns=list(pk_target_cols or []) or None,
             )
             if mapped:
-                fp_accumulator.add_many(row_fingerprints(mapped, target_cols))
+                fp_accumulator.add_many(
+                    row_fingerprints(
+                        mapped,
+                        target_cols,
+                        dest_db_type=dest_type,
+                        dest_types=fingerprint_dest_types,
+                    )
+                )
             checksum_rows_read += len(batch.rows)
             if limit > 0 and checksum_rows_read >= limit:
                 break

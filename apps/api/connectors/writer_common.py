@@ -696,14 +696,36 @@ def filter_stale_lsn_rows(
     return to_write, skipped
 
 
-def row_fingerprints(rows: list[Any], columns: list[str] | None = None, *, sort_key: str | None = None) -> list[tuple[str, str]]:
+def row_fingerprints(
+    rows: list[Any],
+    columns: list[str] | None = None,
+    *,
+    sort_key: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
     """Return the unsorted (row_key, fingerprint) tuples for a list of rows.
 
     Streaming producers can accumulate these tuples across batches and then call
     ``services.reconciliation.fingerprint_checksum`` once at the end, avoiding a
     full materialization of every row as a dict/list.
+
+    ``dest_db_type`` / ``dest_types`` must match what the read-back side passes.
+    Without them a text cell is folded defensively, because a CHAR(n) column pads
+    with spaces that carry no meaning; with them a TEXT cell keeps the spaces it
+    was given. Computing the write pass one way and the read-back the other made
+    every trailing space look like a Gate-8 mismatch on data that had landed
+    exactly as sent.
     """
-    return list(_iter_fingerprints(rows, columns, sort_key=sort_key))
+    return list(
+        _iter_fingerprints(
+            rows,
+            columns,
+            sort_key=sort_key,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
+    )
 
 
 def dedupe_rows(
