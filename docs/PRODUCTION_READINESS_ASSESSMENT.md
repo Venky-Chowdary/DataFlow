@@ -133,14 +133,28 @@ on amounts, no date filtering, no numeric constraints — and reports success
 while doing it. That is exactly the class of defect that only appears when a
 route actually runs, and it is why the skip count above is the headline number.
 
-**Half fixed.** `read_object_from_store` now infers column types from the
-object's own rows and returns them in `meta["native_types"]`, the channel
-readers already use, so `peek_stream_source` returns
-`{'id': 'INTEGER', 'amount': 'DECIMAL(9,4)', 'ts': 'DATE'}` where it previously
-returned strings. Preflight and mapping now see real types. The create-table
-stamp still emits `text`, so the destination DDL is unchanged pending a fix in
-the create-new stamping path for object-store sources — that step is the
-remaining work, and it is tracked here rather than claimed as done.
+**Fixed, both halves.** It took two changes because two layers had thrown the
+types away:
+
+1. `read_object_from_store` now infers column types from the rows it already
+   parsed and returns them in `meta["native_types"]`, the channel readers
+   already carry types on.
+2. The introspect built `{col: "string"}` per header as a placeholder, and that
+   placeholder travelled as a *declared* schema through
+   `endpoint_source_column_types` → `reconcile_source_types`, which is designed
+   to let a declaration outrank the reader's sampled shape. Correct for a
+   relational catalog — a declared `NUMBER(12,2)` should beat a sampled
+   `DECIMAL(8,4)` — and wrong for a store with no catalog, so the placeholder
+   overwrote the real types the reader had just supplied.
+
+The five sites that built that placeholder now prefer reader-declared types and
+fall back per column, so readers that cannot type their rows are untouched.
+Identical bytes now produce identical DDL:
+
+```
+file → PG : id bigint, amount numeric, ts date
+S3   → PG : id bigint, amount numeric, ts date
+```
 
 ## What would move the needle
 

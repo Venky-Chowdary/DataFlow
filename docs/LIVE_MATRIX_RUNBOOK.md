@@ -65,6 +65,32 @@ confusion it prevents.
 Parallel is safe: each xdist worker gets its own fakesnow DuckDB catalog through
 `FAKESNOW_DB_PATH`, since DuckDB permits a single writer per file.
 
+## Object stores without a cloud account
+
+S3 routes are provable locally. `moto` in server mode listens on a port, which
+satisfies the matrix's reachability check, and the S3 connector already accepts
+a custom endpoint through `resolve_endpoint_url`:
+
+```bash
+python -m moto.server -p 5000 &
+```
+
+Point the endpoint at it — `connection_string` carries the URL, `database` the
+bucket, `table` the object key:
+
+```python
+EndpointConfig(kind="database", format="s3", host="127.0.0.1", port=5000,
+               database="dfbucket", table="path/to/object.csv",
+               username="test", password="test",
+               connection_string="http://127.0.0.1:5000")
+```
+
+Both directions run today (`CSV file → S3` and `S3 → PostgreSQL`). This is how
+the all-text schema defect below was found: object-store routes had never
+executed, so nothing reported that the same CSV typed differently depending on
+where it was read from. Azurite and fake-gcs-server give ADLS and GCS the same
+treatment and are the next-largest block of unexecuted routes.
+
 ## Reading a skip
 
 A skip is an unproven combination, not a passing one. Aggregate the reasons
@@ -96,7 +122,7 @@ Total 1,156. `PRODUCTION_SKU` commits 75 of these to CI proof.
 ## Measured state (2026-08-12, this runner)
 
 ```
-13585 passed, 11 failed, 1062 skipped
+13589 passed, 12 failed, 1062 skipped
 ```
 
 A fifteenth, `test_live_cross_engine_confirm_moves_every_row_intact[postgres_to_mysql]`,
