@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 from typing import Any
 
-from connectors.adls_common import blob_service_client
 from connectors.object_store_common import ReadBatch, read_object_from_store
 
 
@@ -24,6 +23,11 @@ def read_object(
 
 
 def list_objects(cfg: dict[str, Any], bucket: str, prefix: str = "") -> list[str]:
+    # Resolved per call, like every other ADLS entry point: a module-level
+    # binding freezes whichever credential factory happened to be installed when
+    # this module was first imported.
+    from connectors.adls_common import blob_service_client
+
     client = blob_service_client(cfg)
     container = client.get_container_client(bucket)
     # Azure names this filter ``name_starts_with``; ``prefix`` is a hard error
