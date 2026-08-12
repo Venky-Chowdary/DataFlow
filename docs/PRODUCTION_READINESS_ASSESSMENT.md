@@ -174,6 +174,55 @@ and pointing routes at it without that provisioning surfaced a crash rather than
 a transfer. That is the next increment, and it is left undone rather than
 half-wired.
 
+## Found by running PostgreSQL → MySQL with a `timestamptz` column
+
+The route did not move a single row. Create-new invented `DATETIME(6)` for the
+aware source, and the engine then correctly refused the transfer, because an
+instant landing in a zoneless wall clock is a fidelity loss it will not sign off
+on. So the most ordinary timestamp column in the most ordinary route was a hard
+block.
+
+MySQL has no offset-label carrier, so the label is unstorable whichever type is
+chosen and the only real question is which one keeps the *instant*. `TIMESTAMP`
+is UTC on disk and converted with the session `time_zone` the writer already
+pins to UTC; `DATETIME` holds the same digits with no polarity marker and is an
+instant only by writer convention, which is why it needs a UTC-normalize
+contract. `_TZ_AWARE_DDL` had said `TIMESTAMP(6)` all along, with the reasoning
+written out; the LTZ and offset maps contradicted it, so aware sources never
+reached it.
+
+Chasing the write path turned up a second, independent defect. The writer
+resolved destination carriers through the *foreign-token* rematerializer, which
+rewrites MySQL `TIMESTAMP` to `DATETIME(6)` — correct for a PostgreSQL or Oracle
+source token, wrong for MySQL's own. That rewrite also hit types read straight
+back from `INFORMATION_SCHEMA`, so an **existing** `created_at TIMESTAMP` column
+— the most common audit column in MySQL — was retyped as wall-clock, and the
+NTZ guard then quarantined every offset-bearing row the column was built to
+hold. One token, two roles, one resolver: `TIMESTAMP(p)` is now a physical
+destination stamp, while bare `TIMESTAMP` stays foreign and still lands
+`DATETIME(6)`. Both roles are pinned by tests, and out-of-range instants keep
+the existing epoch guard (flagged at Validate, quarantined at write, never
+silently zeroed).
+
+## Unbounded `NUMERIC` into MySQL is a policy block, not a bug
+
+`PRODUCTION_SKU` PostgreSQL → MySQL still fails, and the cause is worth stating
+precisely rather than fixing by loosening a gate. The matrix seeds `amount` as
+bare `DECIMAL`, which in PostgreSQL is unbounded. MySQL has no unbounded decimal
+(the cap is `DECIMAL(65,30)`), so *every* bounded target is formally a narrowing,
+and the rule refuses to invent "a capacity the source never proved" — the same
+reason the DynamoDB route refuses.
+
+The sample-observing invention already does the right thing when it is given
+rows (`DECIMAL` + `["1000.00","2000.50"]` → `DECIMAL(9,4)`; wide values → `TEXT`),
+and the writer already quarantines any cell that does not fit, so silent
+truncation is not the exposure here. What is unresolved is a policy question:
+whether an *undeclared* source precision should be treated as provable narrowing
+(today: yes, block) or as unknown capacity that observation may size, with the
+residual risk surfaced and enforced at write. Deciding that by weakening the
+gate mid-audit would trade a real honesty property for a green test, so it is
+left blocked and named here instead.
+
 ## What would move the needle
 
 In order of how much unproven surface each closes:
