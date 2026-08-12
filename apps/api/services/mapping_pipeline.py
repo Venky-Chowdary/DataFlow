@@ -74,9 +74,9 @@ def _stamp_create_new_type_risks(
     Competitors often hide create-new type loss until write time. We surface it
     on the mapping so Map / Validate / Pilot all see the same risk chip.
     """
-    from services.semantic_mapper import _apply_create_new_risk_stamps
+    from services.create_new_risk_stamp import apply_create_new_risk_stamps
 
-    return _apply_create_new_risk_stamps(
+    return apply_create_new_risk_stamps(
         mappings, destination_db_type, dest_table_exists=dest_table_exists
     )
 

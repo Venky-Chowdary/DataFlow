@@ -29,6 +29,7 @@ half-skips:
 | PostgreSQL | `dataflow` / `dataflow` | `docker-compose.yml` defaults |
 | PostgreSQL | `postgres` / `admin` | `P2_PG_*` test defaults |
 | MySQL | `dataflow` / `dataflow` | both |
+| MySQL | `root` / `dataflow` | duplicate-key probe suites |
 
 ```bash
 sudo -u postgres psql -c "CREATE USER dataflow WITH PASSWORD 'dataflow' SUPERUSER;"
@@ -36,7 +37,10 @@ sudo -u postgres psql -c "CREATE DATABASE dataflow OWNER dataflow;"
 sudo -u postgres psql -c "ALTER USER postgres WITH PASSWORD 'admin';"
 sudo mysql -e "CREATE DATABASE IF NOT EXISTS dataflow;
   CREATE USER IF NOT EXISTS 'dataflow'@'localhost' IDENTIFIED BY 'dataflow';
-  GRANT ALL PRIVILEGES ON *.* TO 'dataflow'@'localhost' WITH GRANT OPTION; FLUSH PRIVILEGES;"
+  GRANT ALL PRIVILEGES ON *.* TO 'dataflow'@'localhost' WITH GRANT OPTION;
+  -- Ubuntu's root authenticates over the unix socket, which pymysql cannot use.
+  ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY 'dataflow';
+  FLUSH PRIVILEGES;"
 ```
 
 ## Run it

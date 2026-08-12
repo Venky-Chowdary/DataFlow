@@ -71,6 +71,18 @@ name (quoted vs folded are different tables): the read side must resolve the
 stored spelling through `services/sql_object_identity.py`, the same resolver the
 writer and introspection use.
 
+## ADR — extract 2026-08-12 (create-new risk stamp)
+
+| Module | Change | Why |
+|--------|--------|-----|
+| `services/semantic_mapper.py` | 2103 → 1922, budget 2100 → 1980 | Projected-carrier → physical-DDL risk stamping → `services/create_new_risk_stamp.py` |
+| `services/create_new_risk_stamp.py` | new | One owner for "what does adopting the destination's physical type cost" |
+
+The stamp was already written to avoid importing `mapping_pipeline` so the two
+would not cycle; giving it a module states that boundary instead of relying on a
+comment. `semantic_mapper` keeps a private alias, so its own two call sites and
+the pipeline read unchanged.
+
 ## ADR — extract 2026-08-12 (streaming foreign-key carry)
 
 | Module | Change | Why |
