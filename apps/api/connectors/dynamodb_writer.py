@@ -347,13 +347,11 @@ def _sparse_update_item(
     """UpdateItem SET present attrs only — PutItem would wipe omitted fields."""
     if not set_attrs:
         # Key-only sparse image: ensure the item exists without clearing attrs.
-        client.update_item(
-            TableName=table,
-            Key=key_attrs,
-            UpdateExpression="SET #df_touch = if_not_exists(#df_touch, :z)",
-            ExpressionAttributeNames={"#df_touch": "__df_touch"},
-            ExpressionAttributeValues={":z": {"N": "0"}},
-        )
+        # UpdateItem with no UpdateExpression already creates the item from its
+        # key alone, so there is nothing to SET. Writing a synthetic marker here
+        # instead left a ``__df_touch`` attribute on the customer's item that no
+        # mapping asked for and nothing ever removes.
+        client.update_item(TableName=table, Key=key_attrs)
         return
     names: dict[str, str] = {}
     values: dict[str, Any] = {}

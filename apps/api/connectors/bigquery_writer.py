@@ -1149,6 +1149,11 @@ def write_mapped_rows(
                 dialect_label="BigQuery",
                 mappings=mappings,
             )
+        # Re-derive after binding: bind_sql_mapped_rows_with_quarantine drops the
+        # rows it quarantines, so the pre-bind snapshot would let the append path
+        # acknowledge a checksum covering values BigQuery never received. The
+        # MERGE branch rebuilds this again from its own partitioned row sets.
+        rows_for_checksum = list(mapped_rows) + list(sparse_rows)
         rejected_rows = _rejected_row_count(
             data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
         )
