@@ -110,18 +110,25 @@ def iter_postgresql_copy_batches(
     )
     try:
         with conn.cursor() as cur:
-            if columns:
-                col_sql = sql.SQL(", ").join(sql.Identifier(c) for c in columns)
-                select = sql.SQL("SELECT {cols} FROM {sch}.{tbl}").format(
-                    cols=col_sql,
-                    sch=sql.Identifier(schema),
-                    tbl=sql.Identifier(table),
+            if not columns:
+                # COPY leaves cur.description empty, and TEXT format carries no
+                # header line, so the column names have to be settled before the
+                # copy runs or every batch ships headerless and the mapping and
+                # checksum downstream line up against nothing. A zero-row SELECT
+                # names them in the same order COPY will emit.
+                cur.execute(
+                    sql.SQL("SELECT * FROM {sch}.{tbl} LIMIT 0").format(
+                        sch=sql.Identifier(schema), tbl=sql.Identifier(table)
+                    )
                 )
-            else:
-                select = sql.SQL("SELECT * FROM {sch}.{tbl}").format(
-                    sch=sql.Identifier(schema),
-                    tbl=sql.Identifier(table),
-                )
+                columns = [str(d[0]) for d in (cur.description or [])]
+
+            col_sql = sql.SQL(", ").join(sql.Identifier(c) for c in columns)
+            select = sql.SQL("SELECT {cols} FROM {sch}.{tbl}").format(
+                cols=col_sql,
+                sch=sql.Identifier(schema),
+                tbl=sql.Identifier(table),
+            )
             # TEXT rather than CSV. In CSV, PostgreSQL writes SQL NULL as a bare
             # \N and a literal "\N" string quoted — but csv.reader strips the
             # quoting, so both arrive here as the same characters and a real \N
@@ -146,11 +153,8 @@ def iter_postgresql_copy_batches(
                 cur.copy_expert(copy_sql.as_string(cur), raw)
                 raw.seek(0)
                 buf = io.TextIOWrapper(raw, encoding="utf-8", newline="\n")
-                # TEXT format has no header line; the SELECT already fixed the
-                # column order, so use the caller's names.
-                headers = list(columns or [])
-                if not headers:
-                    headers = [d[0] for d in (cur.description or [])]
+                # The SELECT above fixed both the names and their order.
+                headers = list(columns)
 
                 page: list[list[str]] = []
                 offset = 0

@@ -93,6 +93,7 @@ def test_copy_export_round_trips_nulls_and_escapes():
         finally:
             conn.close()
 
+    assert pages[0].headers == ["id", "name"]
     got = {r[0]: r[1] for page in pages for r in page.rows}
     assert got == {
         "1": SQL_NULL_SENTINEL,
@@ -102,3 +103,41 @@ def test_copy_export_round_trips_nulls_and_escapes():
         "5": "C:\\temp",
         "6": "",
     }
+
+
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable on localhost:5432")
+def test_headers_resolve_when_no_column_list_is_given():
+    """COPY leaves ``cur.description`` empty and TEXT carries no header line.
+
+    Without settling the names before the copy, every batch shipped headerless
+    and the mapping and checksum downstream lined up against nothing.
+    """
+    import psycopg2
+
+    from connectors.bulk_export import iter_postgresql_copy_batches
+
+    table = "bulk_hdr_" + uuid.uuid4().hex[:8]
+    conn = psycopg2.connect(
+        host="localhost", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+    )
+    conn.autocommit = True
+    try:
+        cur = conn.cursor()
+        cur.execute(f'CREATE TABLE public."{table}" (id int, name text, amount numeric)')
+        cur.execute(f"""INSERT INTO public."{table}" VALUES (1, NULL, 1.5)""")
+        pages = list(
+            iter_postgresql_copy_batches(
+                host="localhost", port=5432, database="dataflow",
+                username="dataflow", password="dataflow", schema="public",
+                connection_string="", ssl=False, table=table,
+                columns=None, batch_rows=10,
+            )
+        )
+    finally:
+        try:
+            conn.cursor().execute(f'DROP TABLE IF EXISTS public."{table}"')
+        finally:
+            conn.close()
+
+    assert pages[0].headers == ["id", "name", "amount"]
+    assert pages[0].rows[0][1] == SQL_NULL_SENTINEL
