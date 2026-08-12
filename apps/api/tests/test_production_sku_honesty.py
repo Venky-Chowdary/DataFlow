@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from src.transfer.connector_capabilities import driver_available, resolve_driver_type
-from src.transfer.registry import PRODUCTION_SKU, validate_transfer
+from src.transfer.registry import LIVE_MATRIX, PRODUCTION_SKU, validate_transfer
 
 # Destinations that require optional packages; skip (not fail) when absent.
 _OPTIONAL_DRIVERS = {
@@ -84,6 +84,29 @@ def test_production_sku_validate_or_explicit_skip(route: tuple[str, str, str, st
         pytest.skip(skip)
     assert ok, f"PRODUCTION_SKU route must validate when drivers present: {route} → {msg}"
     assert "Planned" not in msg, f"PRODUCTION_SKU must not include Planned brands: {route} → {msg}"
+
+
+def test_production_sku_routes_are_reachable() -> None:
+    """Every committed SKU route must be declared live — no driver probe involved.
+
+    ``test_production_sku_validate_or_explicit_skip`` skips whenever an optional
+    DBAPI is absent, so a route that is unreachable for a *non-driver* reason
+    (a destination declaring ``preflight: False`` / ``introspect: False``, say)
+    stays invisible on hosts that lack the package. LIVE_MATRIX membership is a
+    static declaration, so this invariant cannot be skipped into silence and
+    fails the moment PRODUCTION_SKU advertises a route Validate would refuse.
+    """
+    unreachable = [route for route in PRODUCTION_SKU if route not in LIVE_MATRIX]
+    assert not unreachable, (
+        "PRODUCTION_SKU advertises routes absent from LIVE_MATRIX, so validate_sku "
+        f"can never pass them: {unreachable}"
+    )
+
+
+def test_production_sku_has_no_duplicate_routes() -> None:
+    """A duplicated route inflates the committed-route count we quote to buyers."""
+    duplicates = sorted({route for route in PRODUCTION_SKU if PRODUCTION_SKU.count(route) > 1})
+    assert not duplicates, f"PRODUCTION_SKU contains duplicate routes: {duplicates}"
 
 
 def test_production_sku_has_no_planned_rest_stubs() -> None:

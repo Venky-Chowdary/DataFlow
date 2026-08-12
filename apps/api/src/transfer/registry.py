@@ -223,11 +223,13 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("database", "postgresql", "database", "redis"),
     ("database", "postgresql", "database", "gcs"),
     ("file", "json", "database", "gcs"),
-    # Unlocked enterprise / object / vector destinations
-    ("database", "postgresql", "database", "sftp"),
+    # Unlocked enterprise / object / vector destinations.
+    # SFTP is deliberately absent: it declares ``preflight: False`` / ``introspect:
+    # False``, so ``validate_transfer`` refuses it and no SFTP route can pass a
+    # Validate gate. Re-add only once SFTP earns a Validate-class preflight and a
+    # live proof run — see ``test_production_sku_routes_are_reachable``.
     ("database", "mysql", "database", "adls"),
     ("file", "csv", "database", "adls"),
-    ("file", "csv", "database", "sftp"),
     ("database", "sqlserver", "database", "postgresql"),
     ("database", "oracle", "database", "postgresql"),
     ("database", "postgresql", "database", "pgvector"),
