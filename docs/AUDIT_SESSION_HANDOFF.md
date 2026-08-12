@@ -93,7 +93,8 @@ regression:
 **a. `PRODUCTION_SKU` vs capability tiering disagree about `sftp` / `email` (5 tests).**
 `transfer_ready()` in `src/transfer/connector_capabilities.py:591` now refuses any
 driver declaring `preflight: False`, which demotes `sftp` and `email` to Planned. But
-`sftp` routes are still listed in `PRODUCTION_SKU`, and three test files still encode
+exactly 2 `sftp` routes are still listed in `PRODUCTION_SKU` (77 routes total, measured
+via `len(PRODUCTION_SKU)`), and three test files still encode
 the older three-way taxonomy (`transfer_ready` | `source_only` | `certified is False`)
 with no branch for the newer `preflight: False` category. Two sources of truth now
 disagree about the same driver.
