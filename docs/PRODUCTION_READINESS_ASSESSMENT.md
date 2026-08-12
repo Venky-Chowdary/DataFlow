@@ -29,14 +29,14 @@ Running the universal matrix — one live transfer per declared route:
 
 ```
 tests/test_execute_tracked_universal_matrix.py
-  305 passed, 850 skipped, 1 failed
+  341 passed, 814 skipped, 1 failed
 ```
 
-**26% of the declared live matrix actually executes here.** The remaining 74%
-skips for want of SQL Server, Oracle, BigQuery, S3/GCS/ADLS, Kafka,
-Elasticsearch, the vector stores, and the SaaS tenants. Of the 75 committed SKU
-routes, **40 are provable on this host and 35 are credential- or
-infrastructure-gated**.
+**30% of the declared live matrix actually executes here**, up from 26% once the
+object-store routes were given an endpoint (see below). The remaining 70% skips
+for want of SQL Server, Oracle, BigQuery, GCS/ADLS, Kafka, Elasticsearch, the
+vector stores, and the SaaS tenants. Of the 75 committed SKU routes, **42 are
+provable on this host and 33 are credential- or infrastructure-gated**.
 
 Whole suite, same engines:
 
@@ -155,6 +155,24 @@ Identical bytes now produce identical DDL:
 file → PG : id bigint, amount numeric, ts date
 S3   → PG : id bigint, amount numeric, ts date
 ```
+
+## Object-store routes now execute in the suite
+
+The recipe above is wired in rather than left as a note. A session fixture
+(`local_object_store`) starts `moto` in-process on an OS-assigned port, creates
+the matrix bucket, and hands the endpoint to the universal and SKU matrices; an
+externally supplied `DATAFLOW_TEST_S3_ENDPOINT` (MinIO, a real account) wins over
+it, and without moto the value is empty and the routes skip honestly.
+
+**36 routes moved from skipped to passing**, including 2 committed SKU routes.
+The port is OS-assigned so parallel workers do not collide, and no cloud
+credentials are involved.
+
+DynamoDB is *not* wired to the same endpoint yet, though moto answers its API.
+A table has to exist with a declared key schema before the writer can seed one,
+and pointing routes at it without that provisioning surfaced a crash rather than
+a transfer. That is the next increment, and it is left undone rather than
+half-wired.
 
 ## What would move the needle
 

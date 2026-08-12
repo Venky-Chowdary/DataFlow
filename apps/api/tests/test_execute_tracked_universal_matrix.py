@@ -15,6 +15,7 @@ from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 
@@ -133,8 +134,35 @@ for _param in EMULATOR_CASES:
         _DB_TEMPLATES[_fmt] = _ep
 
 
-def _build_db_endpoint(driver: str, tmp_path: Path, role: str, suffix: str) -> EndpointConfig:
+def _build_db_endpoint(
+    driver: str, tmp_path: Path, role: str, suffix: str, *, object_store: str = ""
+) -> EndpointConfig:
     """Return a database EndpointConfig for a live driver with a unique table/key."""
+    if driver == "s3":
+        # ``local_object_store`` supplies moto (or a MinIO / real endpoint the
+        # operator points at). Without one there is nothing to talk to, and a
+        # skip is the honest answer.
+        if not object_store:
+            pytest.skip("no local object store endpoint (install moto or set DATAFLOW_TEST_S3_ENDPOINT)")
+        from tests.conftest import LOCAL_OBJECT_STORE_BUCKET
+
+        parsed = urlparse(object_store)
+        return EndpointConfig(
+            kind="database",
+            format="s3",
+            host=parsed.hostname or "127.0.0.1",
+            port=parsed.port or 443,
+            database=LOCAL_OBJECT_STORE_BUCKET,
+            username="test",
+            password="test",
+            connection_string=object_store,
+            table=f"matrix/payments_s3_{role}_{suffix}.json",
+        )
+    # DynamoDB is deliberately not wired to the same endpoint yet. moto answers
+    # its API, but a table has to exist with a declared key schema before the
+    # writer can seed it, and pointing routes at it without that provisioning
+    # surfaced a crash rather than a transfer. Worth doing next — with the table
+    # created up front — rather than half-wired here.
     # SFTP, email, and Qdrant require external network services; the universal
     # matrix test cannot stand up a real server here, so these routes are skipped.
     if driver in {"sftp", "email", "qdrant", "rest_api", "salesforce", "hubspot", "kafka"}:
@@ -336,17 +364,21 @@ _NO_INDEPENDENT_VERIFIER = frozenset({
 })
 
 
-def _build_source(kind: str, fmt: str, tmp_path: Path, suffix: str) -> tuple[EndpointConfig, bytes, str]:
+def _build_source(
+    kind: str, fmt: str, tmp_path: Path, suffix: str, *, object_store: str = ""
+) -> tuple[EndpointConfig, bytes, str]:
     if kind == "file":
         content, filename = _file_content(fmt)
         return EndpointConfig(kind="file", format=fmt), content, filename
-    return _build_db_endpoint(fmt, tmp_path, "src", suffix), b"", ""
+    return _build_db_endpoint(fmt, tmp_path, "src", suffix, object_store=object_store), b"", ""
 
 
-def _build_destination(kind: str, fmt: str, tmp_path: Path, suffix: str) -> EndpointConfig:
+def _build_destination(
+    kind: str, fmt: str, tmp_path: Path, suffix: str, *, object_store: str = ""
+) -> EndpointConfig:
     if kind == "file_export":
         return EndpointConfig(kind="file_export", format=fmt)
-    return _build_db_endpoint(fmt, tmp_path, "dst", suffix)
+    return _build_db_endpoint(fmt, tmp_path, "dst", suffix, object_store=object_store)
 
 
 def _uses_snowflake(*endpoints: EndpointConfig) -> bool:
@@ -372,12 +404,18 @@ ROUTES = sorted(LIVE_MATRIX)
     ROUTES,
     ids=lambda r: f"{r[0]}_{r[1]}_to_{r[2]}_{r[3]}",
 )
-def test_live_transfer_route(route: tuple[str, str, str, str], tmp_path: Path) -> None:
+def test_live_transfer_route(
+    route: tuple[str, str, str, str], tmp_path: Path, local_object_store: str
+) -> None:
     src_kind, src_fmt, dst_kind, dst_fmt = route
     suffix = uuid.uuid4().hex[:12]
 
-    source, source_content, source_filename = _build_source(src_kind, src_fmt, tmp_path, suffix)
-    destination = _build_destination(dst_kind, dst_fmt, tmp_path, suffix)
+    source, source_content, source_filename = _build_source(
+        src_kind, src_fmt, tmp_path, suffix, object_store=local_object_store
+    )
+    destination = _build_destination(
+        dst_kind, dst_fmt, tmp_path, suffix, object_store=local_object_store
+    )
 
     if not _endpoint_reachable(source):
         pytest.skip(f"source {src_kind}/{src_fmt} not reachable")
