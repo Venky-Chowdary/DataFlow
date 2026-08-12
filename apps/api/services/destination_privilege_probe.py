@@ -13,6 +13,7 @@ Implemented engines
 * SQL Server — ``HAS_PERMS_BY_NAME``
 * Oracle — ``SESSION_PRIVS`` / ``ALL_TAB_PRIVS``
 * SQLite — filesystem ``os.access`` + ``sqlite_master``
+* DuckDB — filesystem ``os.access`` + ``information_schema`` (embedded: no GRANTs)
 * MongoDB — ``connectionStatus.showPrivileges`` (never insert)
 * Redis — ``ACL WHOAMI`` / ``ACL GETUSER`` (never SET/DEL)
 * Kafka — AdminClient ``describe_acls`` (never produce)
@@ -51,6 +52,7 @@ _SUPPORTED = frozenset({
     "mssql",
     "oracle",
     "sqlite",
+    "duckdb",
     "mongodb",
     "redis",
     "kafka",
@@ -313,6 +315,14 @@ def probe_destination_privileges(
                 ssl=ssl,
                 table_exists=table_exists,
                 need_update=need_update,
+            )
+        if engine == "duckdb":
+            return _probe_duckdb(
+                database=database,
+                connection_string=connection_string,
+                host=host,
+                table=tbl,
+                table_exists=bool(table_exists),
             )
         if engine == "sqlite":
             return _probe_sqlite(
@@ -1226,6 +1236,105 @@ def _probe_sqlite(
     parent_ok = os.path.isdir(parent) and os.access(parent, os.W_OK)
     return _finalize(
         engine="sqlite",
+        can_write=parent_ok,
+        can_create=parent_ok,
+        table_exists=False,
+        table=table,
+        schema="main",
+        need_update=False,
+        method="os.access",
+    )
+
+
+# ── DuckDB ───────────────────────────────────────────────────────────────────
+
+def _probe_duckdb(
+    *,
+    database: str,
+    connection_string: str,
+    host: str,
+    table: str,
+    table_exists: bool,
+) -> PrivilegeProbeResult:
+    """Filesystem probe — DuckDB is embedded and has no GRANT catalog.
+
+    Asking an embedded engine for grants and reporting ``unavailable`` when it
+    has none blocked create-new on a destination the process can plainly write.
+    Whoever can write the file holds every privilege there is, so the file is
+    the authority. MotherDuck is a hosted service reached through the same
+    driver, and no local path can speak for it, so it stays unavailable.
+    """
+    raw = (connection_string or database or host or "").strip()
+    lowered = raw.lower()
+    for prefix in ("duckdb:///", "duckdb://", "duckdb:"):
+        if lowered.startswith(prefix):
+            raw = raw[len(prefix) :]
+            lowered = raw.lower()
+            break
+    raw = raw.lstrip("/") if lowered.startswith("//") else raw
+
+    if lowered.startswith("md:") or lowered.startswith("motherduck:"):
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail=(
+                "MotherDuck is a hosted catalog — a local filesystem check "
+                "cannot prove its grants"
+            ),
+            engine="duckdb",
+        )
+
+    if not raw or raw == ":memory:":
+        return PrivilegeProbeResult(
+            can_write=True,
+            can_create_table=True,
+            status="ok",
+            detail="DuckDB in-memory database is always writable in-process",
+            engine="duckdb",
+            method="in_memory",
+        )
+
+    path = raw
+    exists = bool(table_exists)
+    if os.path.exists(path):
+        can_write_fs = os.access(path, os.W_OK)
+        parent = os.path.dirname(path) or "."
+        parent_ok = os.access(parent, os.W_OK)
+        if table:
+            try:
+                import duckdb
+
+                con = duckdb.connect(path, read_only=True)
+                try:
+                    row = con.execute(
+                        "SELECT count(*) FROM information_schema.tables "
+                        "WHERE table_name = ?",
+                        [table],
+                    ).fetchone()
+                    exists = bool(row and row[0])
+                finally:
+                    con.close()
+            except Exception as exc:  # noqa: BLE001 — existence stays as given
+                logging.getLogger(__name__).info(
+                    "duckdb table existence probe unavailable: %s", exc
+                )
+        can_create = can_write_fs and parent_ok
+        return _finalize(
+            engine="duckdb",
+            can_write=can_write_fs if exists else can_create,
+            can_create=can_create,
+            table_exists=exists,
+            table=table,
+            schema="main",
+            need_update=False,
+            method="os.access+information_schema",
+        )
+
+    parent = os.path.dirname(path) or "."
+    parent_ok = os.path.isdir(parent) and os.access(parent, os.W_OK)
+    return _finalize(
+        engine="duckdb",
         can_write=parent_ok,
         can_create=parent_ok,
         table_exists=False,
