@@ -2916,7 +2916,11 @@ _TZ_LTZ_DDL: Final[dict[str, str]] = {
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "sqlserver": "DATETIMEOFFSET",
-    "mysql": "DATETIME(6)",
+    # MySQL is deliberately absent so this falls through to _TZ_AWARE_DDL.
+    # A session-relative instant (PostgreSQL TIMESTAMPTZ, Snowflake
+    # TIMESTAMP_LTZ) is exactly what MySQL TIMESTAMP is: UTC on disk, converted
+    # with the session time_zone, no offset label on either side. See
+    # _TZ_AWARE_DDL for why TIMESTAMP(6) rather than DATETIME(6).
     "bigquery": "TIMESTAMP",
     "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
@@ -2932,7 +2936,14 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "sqlserver": "DATETIMEOFFSET",
-    "mysql": "DATETIME(6)",
+    # MySQL is deliberately absent so this falls through to _TZ_AWARE_DDL.
+    # MySQL has no offset-label carrier, so the label is unstorable either way
+    # and the only open question is which carrier keeps the *instant*. That
+    # answer belongs in one place (_TZ_AWARE_DDL: TIMESTAMP(6)). Naming
+    # DATETIME(6) here chose the strictly worse of the two — same digits, no
+    # polarity marker, instant recoverable only by writer convention — which
+    # made every aware→MySQL create-new demand a UTC-normalize contract for a
+    # route that needs none.
     "bigquery": "TIMESTAMP",
     "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",

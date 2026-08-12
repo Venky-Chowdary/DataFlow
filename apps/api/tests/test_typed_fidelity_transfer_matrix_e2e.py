@@ -223,6 +223,55 @@ def test_postgresql_to_mysql_typed_preflight_on():
         drop_mysql_table(dst)
 
 
+def test_postgresql_into_existing_mysql_timestamp_column():
+    """An existing ``TIMESTAMP`` sink is an instant carrier — not a wall clock.
+
+    ``created_at TIMESTAMP`` is the most common MySQL audit column. The writer
+    resolved its catalog spelling through the foreign-token rematerializer,
+    retyped it as ``DATETIME(6)``, and the NTZ guard then quarantined every
+    offset-bearing row — a total write failure against a column that stores
+    exactly those instants.
+    """
+    require_ports(5432, 3306)
+    import pymysql
+
+    src = uniq("tf_pg_myts_src")
+    dst = uniq("tf_pg_myts_dst")
+    seed_postgresql_typed(src)
+    conn = pymysql.connect(
+        host="localhost",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            CREATE TABLE `{dst}` (
+              id INT PRIMARY KEY,
+              amt_dec DECIMAL(12,4) NOT NULL,
+              amt_float DOUBLE NOT NULL,
+              note_null TEXT,
+              note_empty VARCHAR(64) NOT NULL,
+              ts_utc TIMESTAMP(6) NOT NULL,
+              flag TINYINT(1) NOT NULL
+            )
+            """
+        )
+    conn.close()
+    try:
+        result = run_typed_transfer(pg_endpoint(src), mysql_endpoint(dst))
+        assert result.success is True, result.error
+        assert result.records_transferred == 2
+        assert (result.reconciliation or {}).get("rejected_rows", 0) == 0
+        assert_mysql_typed_fidelity(dst)
+    finally:
+        drop_pg_table(src)
+        drop_mysql_table(dst)
+
+
 def test_mysql_to_mysql_typed_preflight_on():
     require_ports(3306)
     src = uniq("tf_my_my_src")
