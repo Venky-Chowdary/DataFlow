@@ -96,7 +96,7 @@ Total 1,156. `PRODUCTION_SKU` commits 75 of these to CI proof.
 ## Measured state (2026-08-12, this runner)
 
 ```
-13545 passed, 18 failed, 1062 skipped
+13551 passed, 14 failed, 1062 skipped
 ```
 
 The remaining failures are live-path defects that the skipping suite never
@@ -104,14 +104,11 @@ reported, not regressions:
 
 | Cluster | Tests | Note |
 |---------|------:|------|
-| `test_pilot_transfer_matrix_wave93` | 4 | Pilot cross-engine plan/confirm to MySQL and Mongo |
+| Document / vector destinations | 6 | Mongo and Redis cross-schema mapping, Mongo→Snowflake, pgvector per-column read-back |
 | `test_typed_fidelity_transfer_matrix_e2e` | 2 | PG → Snowflake (fakesnow has no `SHOW GRANTS`), PG → MySQL TZ collapse |
-| `test_production_sku_matrix` | 2 | PG → MySQL, PG → pgvector |
-| `test_execute_tracked_schema_mapping_matrix` | 2 | Mongo, Redis cross-schema mapping |
-| single-test clusters | 8 | Redis overwrite, Mongo→Snowflake, MySQL widen, locale dates, emulator pgvector |
+| Single-test clusters | 6 | PG→MySQL SKU, MySQL widen, locale dates, PG/MySQL/Mongo matrix, Redis overwrite, Pilot→Mongo confirm |
 
-Two of these are worth calling out because the engine is arguably right and the
-test encodes an older expectation:
+### Where the engine is right and the expectation is not
 
 * **PG → MySQL typed fidelity** fails on `timestamptz → DATETIME(6)`. MySQL has
   no timezone-aware type, so the conversion contract classes it
@@ -120,6 +117,24 @@ test encodes an older expectation:
 * **PG → Snowflake** fails because fakesnow does not implement `SHOW GRANTS`,
   so the privilege probe cannot prove CREATE and fails closed. Relaxing that
   would weaken a real check on real Snowflake for an emulator's convenience.
+* **pgvector per-column read-back** cannot exist: the table is a fixed vector
+  schema (`id` / `content` / `embedding` / `metadata`), so mapped columns are
+  JSONB payload rather than columns to select. A vector sink's honest assurance
+  is `writer_ack`.
+
+### Known false positive: Decimal128 is read as unparameterized
+
+`classify_conversion` flags `DECIMAL(p,s) → decimal` as
+`needs_user_approval` / lossy on the rule that a target declaring no precision
+invents capacity. That is right for a bare SQL `DECIMAL`, whose width is an
+engine default, but MongoDB's `decimal` is **Decimal128** — IEEE 754-2008, 34
+significant digits, fully specified. `DECIMAL(12,2)` lands in it exactly, so
+several PG → Mongo routes are blocked for a collapse that does not happen.
+`DECIMAL(40,2)` must keep failing, so the fix is a capacity comparison against
+34 rather than removing the rule. `classify_conversion` takes no destination
+argument today, which is why this is written down rather than patched by
+case-testing the token — `decimal` versus `DECIMAL` is exactly the
+spelling-sensitive branch Property 1 forbids.
 
 Anything quoted from this file must name the runner and date: these counts are
 environment-specific, and the docs set already contains several stale ones.
