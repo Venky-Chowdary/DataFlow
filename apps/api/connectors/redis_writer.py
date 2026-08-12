@@ -387,6 +387,17 @@ def write_mapped_rows(
         product="Redis",
     )
 
+    # A full refresh deletes every key under the prefix before writing, so the
+    # shapes currently there are not a schema this write has to respect — unlike
+    # a SQL TRUNCATE, which keeps the columns and their declared types. Binding
+    # against them refused overwrites onto a prefix whose old documents simply
+    # held different fields.
+    replaces_keyspace = is_overwrite_sync(sync_mode) or write_mode in {
+        "overwrite",
+        "replace",
+        "truncate",
+    }
+
     # Connect before Map bind — sample existing JSON docs under prefix so live
     # INTEGER/BOOL carriers win over Map VARCHAR (empty→null invent cliff).
     client = _redis_client(cfg)
@@ -443,7 +454,7 @@ def write_mapped_rows(
             )
         # Partial JSON sample: Studio may fill gaps; else require_physical
         # (same bar as Mongo/Dynamo — never soft-bind Map VARCHAR on missing fields).
-        if mapped_data_cols and docs_sampled > 0:
+        if mapped_data_cols and docs_sampled > 0 and not replaces_keyspace:
             from connectors.writer_common import require_physical_types_for_existing_table
 
             effective_physical = dict(physical)
@@ -628,9 +639,7 @@ def write_mapped_rows(
     try:
         # Full-refresh overwrite must replace the destination keyspace once per job,
         # not once per chunk. Only the first chunk clears stale keys.
-        if file_batch_idx in (0, 1) and (
-            is_overwrite_sync(sync_mode) or write_mode in {"overwrite", "replace", "truncate"}
-        ):
+        if file_batch_idx in (0, 1) and replaces_keyspace:
             _clear_redis_prefix(client, prefix)
 
         written = 0
@@ -751,8 +760,7 @@ def write_mapped_rows(
                 # Sparse STOP_COLUMN / CDC / NULL omit: merge onto existing JSON so
                 # omitted fields are not wiped by a full-key SET.
                 needs_merge = (
-                    write_mode not in {"overwrite", "replace", "truncate"}
-                    and not is_overwrite_sync(sync_mode)
+                    not replaces_keyspace
                     and (
                         row_has_missing_sentinel(row)
                         or len(doc) < len(target_cols)
