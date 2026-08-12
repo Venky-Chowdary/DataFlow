@@ -72,7 +72,58 @@ tests before the temp dir is torn down. Test hygiene only — no product impact.
 
 ---
 
-## 4. One-line honesty summary
+## 4. Measured baseline (Linux, 2026-08-12)
+
+Re-measured on a clean Ubuntu 24.04 / Python 3.12.3 checkout of `41fd8a33`, so the
+numbers below are observed, not carried forward.
+
+```
+cd apps/api && python -m pytest tests --collect-only -q   → 14609 collected, 0 errors
+cd apps/api && python -m pytest tests -q -n 4 --dist loadfile
+  → 10 failed, 12622 passed, 1978 skipped in 185.39s
+npm run build                                             → clean (tsc + vite)
+```
+
+**None of the four Windows teardown flakes in §1.5 failed here**, which confirms they
+are platform-specific rather than logic defects.
+
+Triage of the 10 failures — three distinct causes, only one of which is an engine
+regression:
+
+**a. `PRODUCTION_SKU` vs capability tiering disagree about `sftp` / `email` (5 tests).**
+`transfer_ready()` in `src/transfer/connector_capabilities.py:591` now refuses any
+driver declaring `preflight: False`, which demotes `sftp` and `email` to Planned. But
+`sftp` routes are still listed in `PRODUCTION_SKU`, and three test files still encode
+the older three-way taxonomy (`transfer_ready` | `source_only` | `certified is False`)
+with no branch for the newer `preflight: False` category. Two sources of truth now
+disagree about the same driver.
+
+- `test_cross_type_accuracy.py::test_every_db_driver_has_probe_read_write[sftp|email]`
+- `test_production_sku_honesty.py::test_production_sku_validate_or_explicit_skip[database_postgresql_to_database_sftp|file_csv_to_database_sftp]`
+- `test_unlocked_enterprise_drivers.py::test_unlocked_enterprise_drivers_available_when_packages_present`
+
+**b. Gate-8 got stricter than its own tests (2 tests).** Both failures are the engine
+refusing something the older test contract permitted, so the tests are the stale side:
+
+- `test_strict_g8_writer_ack_for_dest_only` asserts `passed is True`; HEAD now returns
+  `False` with "Gate-8 refuses conservation invented from writer acknowledgements
+  alone." This is limitation #3 being enforced — do not "fix" it by relaxing the gate.
+- `test_strict_g8_fails_without_verifier_non_dest_only` still fails closed as intended;
+  only the message changed, because the unmeasured-source-count guard now fires before
+  the read-back/verifier guard the assertion greps for.
+
+**c. Genuine budget regression (1 test).** `test_module_size_budgets_f8.py` —
+`src/transfer/stream.py` is 3418 lines against its 3400 budget. Every other budgeted
+module is under. See [GOD_MODULE_DECOMPOSITION.md](GOD_MODULE_DECOMPOSITION.md).
+
+Two further failures in the parallel run were **not** reproducible and are cross-file
+contamination under `-n 4 --dist loadfile`, passing at file scope serially:
+`test_production_sku_matrix.py::test_production_sku_transfer[file_parquet_to_database_snowflake]`
+and `test_adls_databricks_gate8_verify.py::test_verify_adls_blob_parses_json`.
+
+---
+
+## 5. One-line honesty summary
 
 A green run on this branch now means: the reader counted the source, every row was
 delivered or quarantined-and-surfaced (including across resume), and PK/NN/DEFAULT/
@@ -81,7 +132,7 @@ UNIQUE/CHECK were re-read from the destination catalog — with the remaining ed
 
 ---
 
-## Provenance
+## 6. Provenance
 
 Sections 3–5 of §1 and all of §2–§4 are the verbatim carry-forward from the audit
 session that produced `41fd8a33`. Limitations #1 and #2 were referenced by number in
