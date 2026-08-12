@@ -1303,6 +1303,24 @@ def bare_decimal_is_unbounded(*, dest_db: str = "") -> bool:
     return db in {"postgresql", "oracle", "oracledb"}
 
 
+#: IEEE 754-2008 decimal128 carries 34 significant decimal digits (exponent
+#: −6143..+6144). MongoDB's BSON ``decimal`` is exactly this type.
+DECIMAL128_SIGNIFICANT_DIGITS = 34
+
+
+def dest_decimal_is_decimal128(*, dest_db: str = "") -> bool:
+    """True when the dialect's bare decimal is IEEE decimal128, not a default.
+
+    A bare SQL ``DECIMAL`` is a promise the engine fills in with a platform
+    default that is usually narrower than the source, which is why an unresolved
+    one is treated as narrowing. BSON ``decimal`` is not that: it is one fully
+    specified carrier holding 34 significant digits at any in-range scale, so
+    ``DECIMAL(12,2)`` lands in it exactly. Treating it as unresolved refused
+    PostgreSQL → MongoDB routes for a collapse that does not occur.
+    """
+    return (_normalize_dest_db(dest_db) if dest_db else "") in {"mongodb"}
+
+
 def bare_decimal_platform_default(
     target_type: str = "",
     *,
@@ -1370,6 +1388,11 @@ def decimal_params_would_narrow(
         # other engines invent platform defaults — resolve then compare.
         if bare_decimal_is_unbounded(dest_db=dest_db):
             return False
+        if dest_decimal_is_decimal128(dest_db=dest_db):
+            # decimal128 keeps the source scale and narrows only when the source
+            # needs more significant digits than it holds. A single (p, s) pair
+            # cannot say that, since the scale it preserves is the source's own.
+            return (sp if sp is not None else 0) > DECIMAL128_SIGNIFICANT_DIGITS
         defaults = bare_decimal_platform_default(target_type, dest_db=dest_db)
         if defaults is None:
             return True
