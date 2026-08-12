@@ -85,11 +85,16 @@ EndpointConfig(kind="database", format="s3", host="127.0.0.1", port=5000,
                connection_string="http://127.0.0.1:5000")
 ```
 
-Both directions run today (`CSV file → S3` and `S3 → PostgreSQL`). This is how
-the all-text schema defect below was found: object-store routes had never
+The matrices no longer need this started by hand: the `local_object_store`
+session fixture runs `moto` in-process on an OS-assigned port and creates the
+bucket, so S3 routes execute by default and skip honestly when moto is absent.
+Set `DATAFLOW_TEST_S3_ENDPOINT` to point at MinIO or a real account instead.
+
+This is how the all-text schema defect was found — object-store routes had never
 executed, so nothing reported that the same CSV typed differently depending on
-where it was read from. Azurite and fake-gcs-server give ADLS and GCS the same
-treatment and are the next-largest block of unexecuted routes.
+where it was read from. Azurite and fake-gcs-server would give ADLS and GCS the
+same treatment, and DynamoDB needs its table provisioned with a key schema
+before moto can serve it.
 
 ## Reading a skip
 
@@ -122,7 +127,7 @@ Total 1,156. `PRODUCTION_SKU` commits 75 of these to CI proof.
 ## Measured state (2026-08-12, this runner)
 
 ```
-13594 passed, 11 failed, 1062 skipped
+13632 passed, 11 failed, 1024 skipped
 ```
 
 A fifteenth, `test_live_cross_engine_confirm_moves_every_row_intact[postgres_to_mysql]`,
