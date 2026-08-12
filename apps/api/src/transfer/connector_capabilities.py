@@ -35,7 +35,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sqlserver": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "oracle": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "sftp": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
+    "sftp": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "email": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
     "iceberg": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "kafka": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -159,7 +159,10 @@ _TRANSFER_READY_CORE = frozenset({
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
     "salesforce", "hubspot",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
-    # sftp/email: RW caps but preflight:False — demoted until Validate gates exist.
+    # SFTP earns this with introspect (typed schema off the remote payload),
+    # Validate gates and a Gate-8 read-back, proven against a real SFTP server
+    # in test_sftp_live_transfer.py. email stays out: write-only, no read-back.
+    "sftp",
     "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
 })
 

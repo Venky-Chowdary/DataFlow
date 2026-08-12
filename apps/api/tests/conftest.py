@@ -111,6 +111,44 @@ def local_object_store() -> str:
             logging.getLogger(__name__).info("object store stop failed: %s", exc)
 
 
+@pytest.fixture(scope="session")
+def local_sftp():
+    """A real local SFTP server, or ``None`` when paramiko is unavailable.
+
+    SFTP was the one named connector with no live route: it could read and
+    write but declared ``introspect: False`` / ``preflight: False``, so every
+    test it had patched ``connect_sftp`` and asserted on the mock. paramiko
+    ships the server half of the protocol, so the routes run for real here —
+    with the generated host key pinned, which exercises the verification path
+    instead of the ``insecure_ignore`` escape.
+    """
+    import tempfile
+
+    try:
+        from tests.sftp_test_server import start_sftp_server
+    except ImportError:
+        try:
+            from sftp_test_server import start_sftp_server
+        except ImportError:
+            yield None
+            return
+
+    root = tempfile.mkdtemp(prefix="df_sftp_")
+    try:
+        details, runner = start_sftp_server(root)
+    except Exception as exc:  # noqa: BLE001 — an unstartable server is a skip
+        logging.getLogger(__name__).info("local sftp unavailable: %s", exc)
+        yield None
+        return
+    try:
+        yield details
+    finally:
+        try:
+            runner.stop()
+        except Exception as exc:  # noqa: BLE001 — teardown must not fail a run
+            logging.getLogger(__name__).info("sftp stop failed: %s", exc)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_cdc_leases(monkeypatch):
     """Isolate CDC leases per test (memory backend — no shared file/Redis bleed).

@@ -670,6 +670,15 @@ def _write_batch(
             ),
         }
         extra = {}
+        if dest_type == "sftp":
+            from connectors.sftp_common import host_key_settings
+
+            # Host-key trust must ride every path that opens an SFTP connection.
+            # Dropping it here downgraded the write to "no pinned key" while
+            # Validate had just verified against the pinned one, so a route the
+            # operator pinned passed preflight and then failed at write.
+            extra.update(host_key_settings(cfg))
+            extra["private_key"] = str(cfg.get("private_key") or "")
         if dest_type == "kafka":
             extra["schema_registry_url"] = str(
                 (getattr(dest, "extra", None) or {}).get("schema_registry_url")

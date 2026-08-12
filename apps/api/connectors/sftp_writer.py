@@ -46,6 +46,47 @@ class WriteResult(_WriteResult):
     driver: str = "paramiko"
 
 
+def _replace_remote(sftp: Any, temp_path: str, final_path: str) -> None:
+    """Move the staged upload onto the final path, atomically where possible.
+
+    ``posix-rename@openssh.com`` replaces the target in one step, so a consumer
+    polling the directory never sees a truncated file and never sees it vanish.
+    Only OpenSSH-derived servers implement it: paramiko always exposes the
+    client method, so testing ``hasattr`` asked the wrong side and every managed
+    file-transfer appliance without the extension failed the write outright
+    with "Operation unsupported" after the bytes had already landed.
+
+    The fallback is the portable two-step. It is not atomic — there is a window
+    where the destination does not exist — so it is only used when the server
+    has actually refused the atomic form.
+    """
+    import errno
+
+    try:
+        sftp.posix_rename(temp_path, final_path)
+        return
+    except (AttributeError, OSError) as exc:
+        code = getattr(exc, "errno", None)
+        # Anything other than "this server will not do that" is a real failure
+        # (permissions, quota, missing directory) and must not be retried as a
+        # delete-then-rename, which would destroy the existing file first.
+        if isinstance(exc, OSError) and code not in (
+            None,
+            errno.EOPNOTSUPP,
+            errno.ENOSYS,
+        ):
+            raise
+        logger.info(
+            "SFTP posix_rename unavailable (%s); falling back to remove+rename", exc
+        )
+
+    try:
+        sftp.remove(final_path)
+    except OSError as exc:
+        logger.debug("No existing %s to remove before rename: %s", final_path, exc)
+    sftp.rename(temp_path, final_path)
+
+
 def write_mapped_rows(
     *,
     connection_string: str = "",
@@ -205,14 +246,7 @@ def write_mapped_rows(
                 with sftp.file(temp_path, "wb") as f:
                     f.write(body)
                     f.flush()
-                if hasattr(sftp, "posix_rename"):
-                    sftp.posix_rename(temp_path, cfg.path)
-                else:
-                    try:
-                        sftp.remove(cfg.path)
-                    except Exception as exc:
-                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-                    sftp.rename(temp_path, cfg.path)
+                _replace_remote(sftp, temp_path, cfg.path)
             except Exception:
                 try:
                     sftp.remove(temp_path)

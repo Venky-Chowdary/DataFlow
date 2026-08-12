@@ -260,6 +260,10 @@ def _read_batch_impl(
         from connectors.adls_reader import read_object
 
         return read_object(cfg=cfg, bucket=cfg["database"], key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
+    if src_type == "sftp":
+        from connectors.sftp_reader import read_object
+
+        return read_object(cfg=cfg, bucket=cfg.get("database", ""), key=table, offset=offset, limit=limit, known_total_rows=known_total_rows)
     if src_type == "dynamodb":
         from connectors.dynamodb_reader import read_table_batch
 

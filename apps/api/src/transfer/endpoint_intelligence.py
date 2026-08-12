@@ -299,6 +299,34 @@ def introspect_endpoint(
             _attach_db_sample(out, endpoint)
         return out
 
+    if fmt == "sftp":
+        from connectors.sftp_common import test_sftp
+        from connectors.sftp_reader import list_files
+
+        ok, message = test_sftp(**cfg)
+        out["connected"] = ok
+        out["message"] = message
+        if not ok:
+            return out
+        directory = str(cfg.get("database") or "") or "/"
+        key = endpoint.table or endpoint.collection or ""
+        try:
+            names = list_files(cfg=cfg, directory=directory)
+        except Exception as exc:
+            # A directory we cannot list is unknown, never "the file is absent"
+            # — that answer would flip Map into create-new over a live file and
+            # overwrite it.
+            out["objects"] = []
+            out["sample_error"] = f"SFTP directory listing unavailable: {exc}"
+            return out
+        out["objects"] = [{"name": n, "type": "object"} for n in names[:200]]
+        if key:
+            # Existence is decided against the whole listing, not the 200 shown.
+            out["table_exists"] = key in set(names)
+            if out["table_exists"]:
+                _attach_db_sample(out, endpoint)
+        return out
+
     if fmt == "dynamodb":
         from connectors.dynamodb import test_dynamodb
 
@@ -623,6 +651,22 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 out["columns"] = batch.headers
                 out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
+                out["table_exists"] = True
+                _attach_batch_sample_rows(out, batch)
+            return
+
+        if fmt == "sftp":
+            from connectors.sftp_reader import read_object
+
+            directory = str(cfg.get("database") or "") or "/"
+            key = endpoint.table or endpoint.collection or ""
+            if key:
+                batch = read_object(
+                    cfg=cfg, bucket=directory, key=key, offset=0, limit=sample_limit
+                )
+                out["columns"] = batch.headers
+                out["schema"] = _schema_from_batch(batch)
+                out["row_estimate"] = batch.total_rows or 0
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
             return

@@ -912,6 +912,7 @@ def _execute_preflight_parity_kwargs(
             dest_api_key=getattr(dest, "api_key", None) or None,
             dest_service_account=getattr(dest, "service_account", None) or None,
             dest_kind=dest.kind or "database",
+            dest_extra=dict(getattr(dest, "extra", None) or {}),
         )
     except Exception as exc:
         logger.warning(

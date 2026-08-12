@@ -316,11 +316,11 @@ def read_object_from_store(
         rows=rows,
         offset=offset,
         total_rows=total,
-        meta={"native_types": _inferred_native_types(headers, rows)},
+        meta={"native_types": inferred_native_types(headers, rows)},
     )
 
 
-def _inferred_native_types(headers: list[str], rows: list[list[Any]]) -> dict[str, str]:
+def inferred_native_types(headers: list[str], rows: list[list[Any]]) -> dict[str, str]:
     """Column types read from the object's own rows.
 
     An object store holds the same CSV/JSON/Parquet payload an upload does, but
@@ -332,7 +332,9 @@ def _inferred_native_types(headers: list[str], rows: list[list[Any]]) -> dict[st
 
     This is the same ``infer_columns_from_rows`` the file parser uses, so both
     paths reach one answer instead of two, and readers already carry types to
-    the engine through ``meta['native_types']``.
+    the engine through ``meta['native_types']``. Every reader that parses rows
+    out of an opaque payload shares it — object stores and SFTP alike — so a
+    payload cannot land typed over one transport and all-text over another.
     """
     if not headers or not rows:
         return {}
@@ -346,7 +348,7 @@ def _inferred_native_types(headers: list[str], rows: list[list[Any]]) -> dict[st
         }
     except Exception as exc:  # noqa: BLE001 — types are an enrichment, not a gate
         logging.getLogger(__name__).info(
-            "object store type inference unavailable for %s: %s", key, exc
+            "object payload type inference unavailable: %s", exc
         )
         return {}
 

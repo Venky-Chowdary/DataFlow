@@ -23,7 +23,7 @@ import pytest
 boto3 = pytest.importorskip("boto3")
 moto = pytest.importorskip("moto")
 
-from connectors.object_store_common import _inferred_native_types  # noqa: E402
+from connectors.object_store_common import inferred_native_types  # noqa: E402
 from src.transfer.endpoint_intelligence import _schema_from_batch  # noqa: E402
 
 _CSV = b"id,amount,ts\n1,1000.00,2024-01-05\n2,2000.50,2024-02-11\n"
@@ -36,7 +36,7 @@ class _Batch:
 
 
 def test_reader_infers_types_from_the_object_rows():
-    got = _inferred_native_types(
+    got = inferred_native_types(
         ["id", "amount", "ts"],
         [["1", "1000.00", "2024-01-05"], ["2", "2000.50", "2024-02-11"]],
     )
