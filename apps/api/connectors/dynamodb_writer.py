@@ -35,11 +35,12 @@ def _fetch_dynamo_physical_types(
     sample was required and Scan failed — callers must fail-closed on populated
     tables rather than Map-VARCHAR bind inventing empty→NULL on live N/BOOL.
     """
-    from connectors.dynamodb_reader import _ddb_attr_type
-    from services.schema_introspect import (
-        _finalize_mongodb_type,
-        _sample_logical_type,
+    from connectors.dynamodb_reader import (
+        _ddb_attr_type,
+        infer_logical_from_native,
+        widen_logical_votes,
     )
+    from services.schema_introspect import _sample_logical_type
 
     wanted = {str(c) for c in target_cols if c}
     if not wanted:
@@ -87,12 +88,15 @@ def _fetch_dynamo_physical_types(
                         continue
                     if val is None:
                         continue
-                    if isinstance(val, Decimal):
-                        inferred = "DECIMAL"
-                    elif isinstance(val, set):
+                    if isinstance(val, set):
                         inferred = "ARRAY"
                     else:
-                        inferred = _sample_logical_type(val, key)
+                        # Same classifier the reader uses, so one value cannot be
+                        # a DECIMAL to the writer and an INTEGER to the reader on
+                        # a Dynamo-to-Dynamo route.
+                        inferred = infer_logical_from_native(val) or _sample_logical_type(
+                            val, key
+                        )
                     if not inferred:
                         continue
                     tc = type_counts[key]
@@ -104,7 +108,11 @@ def _fetch_dynamo_physical_types(
     for col, counts in type_counts.items():
         if not counts:
             continue
-        carrier = _finalize_mongodb_type(counts)
+        # Widen to cover every sampled value rather than taking the majority:
+        # 90 integers and 10 floats resolved to INTEGER, a narrower carrier than
+        # the reader emits for the same items, so a populated table probed by
+        # scan bound writes against a type its own data does not fit.
+        carrier = widen_logical_votes(counts)
         if carrier:
             physical[col] = carrier
             physical.setdefault(col.lower(), carrier)

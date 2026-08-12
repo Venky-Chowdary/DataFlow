@@ -545,9 +545,12 @@ jobs:
           trm="${{ steps.transfer_ready_matrix.outcome }}"
           fe="${{ steps.frontend_tests.outcome }}"
           web="${{ steps.web_build.outcome }}"
-          echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web"
+          # A budget that cannot fail the job is not a budget: chunk_budgets ran
+          # but its outcome was never read, so an oversized bundle merged green.
+          chunks="${{ steps.chunk_budgets.outcome }}"
+          echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks"
           fail=0
-          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web"; do
+          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks"; do
             name="${name_out%%:*}"
             out="${name_out##*:}"
             # skipped only acceptable when job cancelled mid-flight; otherwise require success
@@ -562,11 +565,12 @@ jobs:
           echo "- transfer_ready_matrix: \`$trm\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- frontend_tests: \`$fe\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- web_build: \`$web\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- chunk_budgets: \`$chunks\`" >> "$GITHUB_STEP_SUMMARY"
           if [ "$fail" -ne 0 ]; then
             echo "Red CI blocks merge — fix failing gates before claiming production readiness." >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          echo "- All required gates green (api + CDC + warehouse SKU + TRANSFER_READY matrix + frontend + web build)." >> "$GITHUB_STEP_SUMMARY"
+          echo "- All required gates green (api + CDC + warehouse SKU + TRANSFER_READY matrix + frontend + web build + chunk budgets)." >> "$GITHUB_STEP_SUMMARY"
 
   # Separate job: SQL Server image is large/slow; keep main CI lean.
   cdc-sqlserver:
