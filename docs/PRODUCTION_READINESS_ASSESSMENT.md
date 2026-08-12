@@ -108,6 +108,40 @@ transform can distinguish those from correct ones. **This needs curation of the
 synonym data, with the mapping golden set as the regression gate — not an
 algorithmic closure.**
 
+## Found by finally running an object-store route
+
+The 850 unexecuted routes are not hypothetical risk. `moto` in server mode
+(`python -m moto.server -p 5000`) satisfies the matrix's endpoint check, and the
+S3 connector already accepts a custom endpoint through `resolve_endpoint_url`,
+so these routes are provable here today:
+
+```
+CSV file      → S3   : 2 rows, object written
+S3            → PG   : 2 rows, landed
+```
+
+Both succeed. But the first S3 → PostgreSQL run exposed a defect no unit test
+covers, with the same CSV bytes on both sides:
+
+| Source of the identical CSV | Destination DDL |
+|-----------------------------|-----------------|
+| file upload | `id bigint, amount numeric, ts date` |
+| S3 object | `id text, amount text, ts text` |
+
+Every object-store → database transfer lands an all-text schema — no arithmetic
+on amounts, no date filtering, no numeric constraints — and reports success
+while doing it. That is exactly the class of defect that only appears when a
+route actually runs, and it is why the skip count above is the headline number.
+
+**Half fixed.** `read_object_from_store` now infers column types from the
+object's own rows and returns them in `meta["native_types"]`, the channel
+readers already use, so `peek_stream_source` returns
+`{'id': 'INTEGER', 'amount': 'DECIMAL(9,4)', 'ts': 'DATE'}` where it previously
+returned strings. Preflight and mapping now see real types. The create-table
+stamp still emits `text`, so the destination DDL is unchanged pending a fix in
+the create-new stamping path for object-store sources — that step is the
+remaining work, and it is tracked here rather than claimed as done.
+
 ## What would move the needle
 
 In order of how much unproven surface each closes:
