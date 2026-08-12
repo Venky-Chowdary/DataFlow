@@ -223,6 +223,82 @@ residual risk surfaced and enforced at write. Deciding that by weakening the
 gate mid-audit would trade a real honesty property for a green test, so it is
 left blocked and named here instead.
 
+## SFTP was a catalog tile, not a connector
+
+SFTP declared `introspect: False` / `preflight: False`, so `transfer_ready()`
+refused it and `validate_transfer` answered "sftp is Planned" for every route.
+It could move bytes and could not pass Validate. Every SFTP test in the
+repository patched `connect_sftp` and asserted on the mock, which proves the
+call site and nothing about whether a row survives — and mocks were the entire
+evidence base behind a driver the catalog offered.
+
+paramiko ships the server half of the protocol, so `tests/sftp_test_server.py`
+now runs a real SFTP server in-process, rooted at a temp directory with path
+confinement and a per-run host key that the client **pins**. The transfers
+therefore exercise real host-key verification rather than the
+`insecure_ignore` escape.
+
+Closing the gap took five pieces, four of which were missing capability rather
+than missing wiring:
+
+| Gap | What it does now |
+|---|---|
+| Introspect | Lists the remote directory and types the payload; existence is decided against the whole listing, not the 200 shown |
+| Typed schema | Returns `meta['native_types']` through the same helper the object stores use |
+| G2 privilege | Creates and removes a uniquely named hidden file — SFTP has no privilege catalog, and POSIX mode bits cannot say what *this* session may do |
+| G9 uniqueness | Full-population payload scan, shared with the object stores |
+| Streaming read | The dispatch simply had no `sftp` branch |
+
+The typed-schema piece is the object-store defect one transport later: without
+it, the identical file landed `bigint`/`numeric`/`date` over an upload and three
+`text` columns over SFTP.
+
+Host-key trust turned out to be dropped by **three** separate paths that
+rebuild a connection — the preflight destination inspect, the registry write
+path, and the source duplicate probe. Each silently downgraded to "no pinned
+key", which is precisely the mismatch `host_key_settings()` was written to
+prevent, so a route the operator pinned would verify at Validate and fail at
+write.
+
+One real writer bug surfaced on the way: the atomic replace gated
+`posix_rename` on `hasattr` of the paramiko *client*, which is always true. The
+OpenSSH extension is not universal, so managed file-transfer appliances
+answered "Operation unsupported" and the write failed *after* the bytes had
+landed. The fallback is now taken only when the server actually refused —
+paramiko maps just `ENOENT` and `EACCES` onto errno and raises a bare
+`IOError(text)` for everything else, so an unrecognised error stays fatal
+rather than being read as permission to delete the destination and retry.
+
+**Three SKU routes and 39 universal matrix routes now execute.** `email` stays
+demoted: it writes and can never be read back, so nothing it sends is
+verifiable.
+
+## DynamoDB could not be read at all
+
+Every DynamoDB *source* route was skipped because the transfer raised before
+moving a row. Three separate defects were in the way, and none of them are
+DynamoDB-specific — they hit any source that cannot cheaply count itself, which
+includes Kafka topics and search indexes:
+
+1. `run_file_preflight` compared `row_count <= 0` against the `None` those
+   sources honestly report, so "we do not know yet" crashed before gate one.
+2. Progress messages formatted the same count with `{total_rows:,}`, which
+   raises on `None`. `stream.py` already had the "unknown" wording; the label
+   now lives beside the progress percentage, which had solved this already.
+3. Column types were resolved by **majority vote** over the values in a page. A
+   column of 999 integers and one `2000.50` typed as INTEGER, and that row then
+   failed the write with "Invalid integer". The larger the table, the more
+   certain it was that the minority value would be mistyped. Types now widen to
+   cover every value observed, and mixed families land on text rather than
+   narrowing. Relatedly `Decimal("1000.00")` is integral in value but carries a
+   scale, so calling it INTEGER dropped the scale a money column depends on.
+
+Uniqueness is proven rather than skipped: DynamoDB cannot hold two items with
+one primary key, so a table-key identity is structural proof, while a non-key
+identity is counted across a real scan.
+
+**40 DynamoDB matrix routes now execute, up from 18.**
+
 ## What would move the needle
 
 In order of how much unproven surface each closes:
