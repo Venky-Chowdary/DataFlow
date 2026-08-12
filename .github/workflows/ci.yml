@@ -142,6 +142,14 @@ jobs:
         image: public.ecr.aws/docker/library/mongo:7
         ports:
           - 27017:27017
+        # Without a healthcheck the step can start before mongod accepts
+        # connections; the Mongo routes then skip, and the no-skip guard fails
+        # the job for an image that was configured correctly.
+        options: >-
+          --health-cmd="mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -275,6 +283,14 @@ jobs:
         image: public.ecr.aws/docker/library/mongo:7
         ports:
           - 27017:27017
+        # Without a healthcheck the step can start before mongod accepts
+        # connections; the Mongo routes then skip, and the no-skip guard fails
+        # the job for an image that was configured correctly.
+        options: >-
+          --health-cmd="mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
       # MySQL 8 enables ROW-based binlog by default, so MySQL matrix + binlog
       # CDC tests run here instead of silently skipping.
       mysql:

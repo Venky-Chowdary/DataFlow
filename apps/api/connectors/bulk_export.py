@@ -18,9 +18,14 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import tempfile
 from typing import Any, Iterator
 
 from connectors.base import ReadBatch
+
+#: COPY output stays in memory up to this size, then spills to disk. Matches the
+#: bound the PostgreSQL COPY writer applies to its own buffer.
+_COPY_SPILL_BYTES = 1 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -121,38 +126,47 @@ def iter_postgresql_copy_batches(
                 "COPY ({select}) TO STDOUT WITH (FORMAT csv, HEADER true, NULL '\\N')"
             ).format(select=select)
 
-            buf = io.StringIO()
-            cur.copy_expert(copy_sql.as_string(cur), buf)
-            buf.seek(0)
-            reader = csv.reader(buf)
-            try:
-                headers = next(reader)
-            except StopIteration:
-                yield ReadBatch(headers=columns or [], rows=[], offset=0, total_rows=0)
-                return
+            # psycopg2's copy_expert writes the whole result into the file object
+            # before returning, so this cannot page the wire. A StringIO made
+            # that the worker's heap: the point of bulk export is warehouse-scale
+            # tables, and the first page used to arrive only after the last row
+            # was already resident. Spool to disk past a threshold instead —
+            # the same bound the COPY writer uses on the way in.
+            # Binary spool: copy_expert writes the raw wire bytes, so the text
+            # decode belongs on the read side.
+            with tempfile.SpooledTemporaryFile(max_size=_COPY_SPILL_BYTES) as raw:
+                cur.copy_expert(copy_sql.as_string(cur), raw)
+                raw.seek(0)
+                buf = io.TextIOWrapper(raw, encoding="utf-8", newline="")
+                reader = csv.reader(buf)
+                try:
+                    headers = next(reader)
+                except StopIteration:
+                    yield ReadBatch(headers=columns or [], rows=[], offset=0, total_rows=0)
+                    return
 
-            page: list[list[str]] = []
-            offset = 0
-            total = 0
-            for row in reader:
-                page.append([_copy_cell(c) for c in row])
-                total += 1
-                if len(page) >= batch_rows:
+                page: list[list[str]] = []
+                offset = 0
+                total = 0
+                for row in reader:
+                    page.append([_copy_cell(c) for c in row])
+                    total += 1
+                    if len(page) >= batch_rows:
+                        yield ReadBatch(
+                            headers=list(headers),
+                            rows=page,
+                            offset=offset,
+                            total_rows=None,
+                        )
+                        offset += len(page)
+                        page = []
+                if page or offset == 0:
                     yield ReadBatch(
                         headers=list(headers),
                         rows=page,
                         offset=offset,
-                        total_rows=None,
+                        total_rows=total,
                     )
-                    offset += len(page)
-                    page = []
-            if page or offset == 0:
-                yield ReadBatch(
-                    headers=list(headers),
-                    rows=page,
-                    offset=offset,
-                    total_rows=total,
-                )
     finally:
         try:
             conn.close()
