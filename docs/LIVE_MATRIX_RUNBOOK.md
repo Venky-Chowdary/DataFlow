@@ -17,8 +17,12 @@ sudo apt-get install -y postgresql postgresql-16-pgvector mysql-server redis-ser
 sudo service postgresql start && sudo service mysql start && sudo service redis-server start
 
 # MongoDB ships outside the Ubuntu archive; mongod runs fine without systemd.
-sudo -u mongodb /usr/bin/mongod --dbpath /var/lib/mongodb \
-  --logpath /var/log/mongodb/mongod.log --bind_ip 127.0.0.1 --port 27017 --fork
+# Raise the descriptor limit first: MongoDB asks for 64000, and started from a
+# shell with the default 1024 the server accepts connections for a while and
+# then dies mid-suite with "Too many open files". That surfaces as a wave of
+# Mongo failures plus a jump in skips, which reads like an engine regression.
+sudo -u mongodb bash -c 'ulimit -n 64000; /usr/bin/mongod --dbpath /var/lib/mongodb \
+  --logpath /var/log/mongodb/mongod.log --bind_ip 127.0.0.1 --port 27017 --fork'
 ```
 
 Two credential conventions are both in use, so provision both or the suite
@@ -46,8 +50,17 @@ sudo mysql -e "CREATE DATABASE IF NOT EXISTS dataflow;
 ## Run it
 
 ```bash
+redis-cli flushall          # see below
 cd apps/api && python -m pytest tests -q -n 4 --dist loadfile
 ```
+
+The suite does not isolate Redis between runs, and the destination keyspace
+probe refuses to bind Map types against a prefix left over from an earlier run
+rather than guess at their JSON types. After a few runs that surfaces as a wave
+of `keyspace probe failed` errors on every `* → redis` route, which look like
+engine regressions and are not. Flushing first is deliberate rather than
+automatic: a conftest that wiped a developer's Redis would be worse than the
+confusion it prevents.
 
 Parallel is safe: each xdist worker gets its own fakesnow DuckDB catalog through
 `FAKESNOW_DB_PATH`, since DuckDB permits a single writer per file.
