@@ -96,7 +96,7 @@ Total 1,156. `PRODUCTION_SKU` commits 75 of these to CI proof.
 ## Measured state (2026-08-12, this runner)
 
 ```
-13576 passed, 11 failed, 1062 skipped
+13585 passed, 11 failed, 1062 skipped
 ```
 
 A fifteenth, `test_live_cross_engine_confirm_moves_every_row_intact[postgres_to_mysql]`,
