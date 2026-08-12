@@ -427,6 +427,9 @@ def introspect_endpoint(
             pass
         return out
 
+    if fmt in _SAAS_INTROSPECT_DRIVERS:
+        return _saas_introspect(out, endpoint, cfg, fmt)
+
     out["message"] = f"Introspection for `{fmt}` not yet implemented"
     return out
 
@@ -893,6 +896,80 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         logger.warning(
             "schema probe failed for %s table=%s: %s", fmt, endpoint.table, e, exc_info=e
         )
+
+
+#: SaaS drivers whose Describe is already modelled in ``schema_introspect``.
+#: They declared ``introspect: True`` and answered "not yet implemented" here,
+#: so a Salesforce or HubSpot *destination* could never prove its object exists
+#: and every route into one failed G2 on unknown existence. The metadata was
+#: written and reachable; only this dispatch was missing.
+_SAAS_INTROSPECT_DRIVERS = frozenset({"salesforce", "hubspot"})
+
+
+def _saas_introspect(
+    out: dict, endpoint: EndpointConfig, cfg: dict, fmt: str
+) -> dict:
+    """Describe-backed introspect for SaaS objects, via the canonical helper."""
+    from services.schema_introspect import introspect_schema
+
+    obj = endpoint.table or endpoint.collection or endpoint.database or ""
+    try:
+        info = introspect_schema(
+            fmt,
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 443),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+            api_key=str(cfg.get("api_key") or ""),
+            table=obj,
+        )
+    except Exception as exc:
+        out["message"] = f"{fmt.title()} introspect failed: {exc}"
+        return out
+
+    objects = [str(t) for t in (info.get("tables") or []) if t]
+    if not info.get("ok"):
+        error = str(info.get("error") or f"{fmt.title()} introspect failed")
+        # Describe failing because the object is absent is a different answer
+        # from Describe failing because the session cannot read it. Only the
+        # first is proof, and neither means "create it" — a SaaS object cannot
+        # be created by a transfer.
+        if objects and obj and obj not in set(objects):
+            out["connected"] = True
+            out["table_exists"] = False
+            out["objects"] = [{"name": name, "type": "object"} for name in objects[:200]]
+            out["message"] = (
+                f"`{obj}` is not an object on this {fmt.title()} org. "
+                "Check the API name — objects cannot be created by a transfer."
+            )
+            return out
+        out["connected"] = bool(objects)
+        out["message"] = error
+        return out
+
+    out["connected"] = True
+    out["objects"] = [{"name": name, "type": "object"} for name in objects[:200]]
+    out["message"] = f"{fmt.title()} connected — {len(objects)} object(s)"
+    if not obj:
+        return out
+
+    columns = [c for c in (info.get("columns") or []) if c.get("name")]
+    # Existence is decided by the object list, not by whether Describe returned
+    # columns: an object that exists but describes empty is still not create-new.
+    out["table_exists"] = bool(columns) or obj in set(objects)
+    out["columns"] = [str(c["name"]) for c in columns]
+    out["schema"] = {
+        str(c["name"]): str(c.get("inferred_type") or "VARCHAR") for c in columns
+    }
+    out["column_nullability"] = {
+        str(c["name"]): bool(c.get("nullable", True)) for c in columns
+    }
+    for key in ("primary_key_columns", "unique_keys"):
+        if info.get(key):
+            out[key] = info[key]
+    return out
 
 
 def _schema_from_batch(batch: Any) -> dict[str, str]:

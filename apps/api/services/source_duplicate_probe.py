@@ -52,7 +52,9 @@ OBJECT_PAYLOAD_SOURCE_TYPES = frozenset({
 
 PROBED_SOURCE_TYPES = (
     SQLISH_SOURCE_TYPES
-    | frozenset({"mongodb", "mongodb_atlas", "dynamodb", "amazon_dynamodb"})
+    | frozenset(
+        {"mongodb", "mongodb_atlas", "dynamodb", "amazon_dynamodb", "salesforce"}
+    )
     | OBJECT_PAYLOAD_SOURCE_TYPES
 )
 
@@ -279,6 +281,76 @@ def _object_payload_duplicates(
     return _counter_findings(counts, pk_columns, limit), scanned, True
 
 
+def _salesforce_duplicates(
+    cfg: dict[str, Any],
+    sobject: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], ProbeStatus, str]:
+    """Prove identity uniqueness for a Salesforce object.
+
+    ``Id`` is assigned by the platform and is unique by construction, so an
+    identity of ``Id`` needs no query — that is stronger evidence than any
+    sample, which is why it is reported as having run rather than skipped.
+
+    Any other field, including one flagged ``externalId``, can repeat, so it is
+    counted with a SOQL aggregate. Aggregating in the org rather than reading
+    the object back is what keeps this usable against a real tenant, where the
+    object may hold millions of rows and OFFSET is capped at 2000.
+    """
+    from connectors.salesforce import API_VERSION, _access, _validate_api_name
+    from connectors.saas_common import request
+
+    if [c.strip().lower() for c in pk_columns] == ["id"]:
+        return [], "ran", "Salesforce assigns Id; uniqueness is guaranteed by the platform"
+
+    if len(pk_columns) != 1:
+        # SOQL GROUP BY takes multiple fields, but COUNT() over a composite key
+        # cannot be read back to a single value without ambiguity here. Say so
+        # rather than approve a key this probe did not check.
+        return (
+            [],
+            "skipped_unsupported",
+            "Composite identity uniqueness is not probed against Salesforce — "
+            f"({', '.join(pk_columns)}) is unproven",
+        )
+
+    field = _validate_api_name(pk_columns[0].strip(), "field")
+    obj = _validate_api_name(sobject.strip(), "object")
+    access_token, url_base = _access(cfg)
+    soql = (
+        f"SELECT {field}, COUNT(Id) dupes FROM {obj} "  # nosec B608 — identifiers validated above
+        f"GROUP BY {field} HAVING COUNT(Id) > 1"
+    )
+    response = request(
+        method="GET",
+        url=f"{url_base}/services/data/{API_VERSION}/query",
+        token=access_token,
+        params={"q": soql},
+        timeout=60,
+    )
+    response.raise_for_status()
+    findings: list[dict[str, Any]] = []
+    for record in (response.json().get("records") or [])[: max(1, int(limit))]:
+        if not isinstance(record, dict):
+            continue
+        value = record.get(field)
+        findings.append(
+            {
+                "value": _finding_value(pk_columns, [value]),
+                "values": [value],
+                "columns": list(pk_columns),
+                "count": int(record.get("dupes") or 0),
+            }
+        )
+    return (
+        findings,
+        "ran",
+        f"Salesforce aggregate uniqueness probe on {obj}.({field})",
+    )
+
+
 def _dynamodb_duplicates(
     cfg: dict[str, Any],
     table: str,
@@ -459,6 +531,26 @@ def probe_source_duplicate_keys_result(
                 findings=findings,
                 status="ran",
                 message=f"Mongo uniqueness probe on {coll}.({pk_label})",
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
+
+        if db_type == "salesforce":
+            sobject = source_table or source_collection
+            if not sobject:
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="Salesforce source missing object for uniqueness probe",
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            findings, status, message = _salesforce_duplicates(
+                cfg, sobject, pk_columns, limit=limit
+            )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status=status,
+                message=message,
                 db_type=db_type,
                 primary_key_columns=pk_columns,
             )
