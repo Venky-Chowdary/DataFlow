@@ -70,3 +70,17 @@ Oracle moved first because its object identity is not derivable from the typed
 name (quoted vs folded are different tables): the read side must resolve the
 stored spelling through `services/sql_object_identity.py`, the same resolver the
 writer and introspection use.
+
+## ADR — extract 2026-08-12 (streaming foreign-key carry)
+
+| Module | Change | Why |
+|--------|--------|-----|
+| `src/transfer/stream.py` | 3418 → 3335, budget 3400 → 3350 | Source FK measurement, parents-first ordering, and post-load constraint carry → `src/transfer/stream_foreign_keys.py` |
+| `src/transfer/stream_foreign_keys.py` | new | One owner for "referential constraints cannot be created alongside the rows" |
+
+`stream.py` had drifted 18 lines past its freeze. Foreign-key carry moved rather
+than the budget rising: it is a self-contained concern with a single reason to
+change (constraints are measured on the source, then re-added once every table
+has landed), it was used nowhere outside `stream.py`, and it depends only on
+endpoint resolution plus a lazy `services.foreign_key_orchestration` import.
+`stream.py` keeps private aliases so the streaming call sites read unchanged.
