@@ -1,0 +1,27 @@
+---
+description: Carry-forward audit state — honesty locks that must not be flipped green without the named proof artifact
+alwaysApply: true
+---
+
+# Audit Handoff Memory
+
+Canonical state: [docs/AUDIT_SESSION_HANDOFF.md](../../docs/AUDIT_SESSION_HANDOFF.md).
+Read it before touching reconcile coverage, CDC posture, schema fidelity, or resume.
+
+## Honesty locks (do not flip green by editing wording)
+- **File/object exports are `unproven`** — operational pass only. Writer checksum proves
+  bytes/count, never per-cell fidelity. Requires a destination cell read-back to change.
+- **CDC/resume delivery is at-least-once upsert** — requires an integration fixture that
+  measures exactly-once to change. `EXACTLY_ONCE_CLAIMED` stays `False` until then.
+- **CHECK predicate AST equivalence** is not proven per dialect; carry/loss is certified,
+  not rewritten.
+- **Resume with no `job_id`** has no durable checkpoint identity — open decision, not a
+  silent success path.
+
+Flipping any lock means attaching the artifact (test node ids, run_id, reconcile
+checksum), not rephrasing the label.
+
+## Known non-product noise
+4 Windows-only teardown flakes (`PermissionError: [WinError 32]` in `tempfile.py`) are
+test hygiene, not logic. Fix by disposing the SQLite engine before temp-dir teardown —
+do not chase them as engine bugs.
