@@ -135,9 +135,34 @@ for _param in EMULATOR_CASES:
 
 
 def _build_db_endpoint(
-    driver: str, tmp_path: Path, role: str, suffix: str, *, object_store: str = ""
+    driver: str,
+    tmp_path: Path,
+    role: str,
+    suffix: str,
+    *,
+    object_store: str = "",
+    sftp_server: Any = None,
 ) -> EndpointConfig:
     """Return a database EndpointConfig for a live driver with a unique table/key."""
+    if driver == "sftp":
+        # ``local_sftp`` runs paramiko's server half in-process. The generated
+        # host key is pinned so the matrix exercises real verification rather
+        # than the insecure_ignore escape.
+        if sftp_server is None:
+            pytest.skip("no local SFTP server (paramiko unavailable)")
+        remote = f"/matrix_payments_{role}_{suffix}.json"
+        cfg = sftp_server.endpoint_config(remote)
+        return EndpointConfig(
+            kind="database",
+            format="sftp",
+            host=cfg["host"],
+            port=cfg["port"],
+            username=cfg["username"],
+            password=cfg["password"],
+            database=cfg["database"],
+            table=cfg["table"],
+            extra={"host_key": cfg["host_key"]},
+        )
     if driver == "s3":
         # ``local_object_store`` supplies moto (or a MinIO / real endpoint the
         # operator points at). Without one there is nothing to talk to, and a
@@ -408,20 +433,45 @@ _NO_INDEPENDENT_VERIFIER = frozenset({
 
 
 def _build_source(
-    kind: str, fmt: str, tmp_path: Path, suffix: str, *, object_store: str = ""
+    kind: str,
+    fmt: str,
+    tmp_path: Path,
+    suffix: str,
+    *,
+    object_store: str = "",
+    sftp_server: Any = None,
 ) -> tuple[EndpointConfig, bytes, str]:
     if kind == "file":
         content, filename = _file_content(fmt)
         return EndpointConfig(kind="file", format=fmt), content, filename
-    return _build_db_endpoint(fmt, tmp_path, "src", suffix, object_store=object_store), b"", ""
+    return (
+        _build_db_endpoint(
+            fmt,
+            tmp_path,
+            "src",
+            suffix,
+            object_store=object_store,
+            sftp_server=sftp_server,
+        ),
+        b"",
+        "",
+    )
 
 
 def _build_destination(
-    kind: str, fmt: str, tmp_path: Path, suffix: str, *, object_store: str = ""
+    kind: str,
+    fmt: str,
+    tmp_path: Path,
+    suffix: str,
+    *,
+    object_store: str = "",
+    sftp_server: Any = None,
 ) -> EndpointConfig:
     if kind == "file_export":
         return EndpointConfig(kind="file_export", format=fmt)
-    return _build_db_endpoint(fmt, tmp_path, "dst", suffix, object_store=object_store)
+    return _build_db_endpoint(
+        fmt, tmp_path, "dst", suffix, object_store=object_store, sftp_server=sftp_server
+    )
 
 
 def _uses_snowflake(*endpoints: EndpointConfig) -> bool:
@@ -448,16 +498,29 @@ ROUTES = sorted(LIVE_MATRIX)
     ids=lambda r: f"{r[0]}_{r[1]}_to_{r[2]}_{r[3]}",
 )
 def test_live_transfer_route(
-    route: tuple[str, str, str, str], tmp_path: Path, local_object_store: str
+    route: tuple[str, str, str, str],
+    tmp_path: Path,
+    local_object_store: str,
+    local_sftp: Any,
 ) -> None:
     src_kind, src_fmt, dst_kind, dst_fmt = route
     suffix = uuid.uuid4().hex[:12]
 
     source, source_content, source_filename = _build_source(
-        src_kind, src_fmt, tmp_path, suffix, object_store=local_object_store
+        src_kind,
+        src_fmt,
+        tmp_path,
+        suffix,
+        object_store=local_object_store,
+        sftp_server=local_sftp,
     )
     destination = _build_destination(
-        dst_kind, dst_fmt, tmp_path, suffix, object_store=local_object_store
+        dst_kind,
+        dst_fmt,
+        tmp_path,
+        suffix,
+        object_store=local_object_store,
+        sftp_server=local_sftp,
     )
 
     if not _endpoint_reachable(source):

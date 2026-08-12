@@ -126,11 +126,13 @@ export const BACKEND_SUITE = {
 
 /**
  * Unique duplex/source drivers from `transfer_live_driver_types()` after the
- * honesty filter (preflight required except file_source; sftp/email demoted).
+ * honesty filter (preflight required except file_source; email stays demoted
+ * as write-only with no read-back, SFTP earned its place in
+ * test_sftp_live_transfer.py against a real server).
  * Regenerate by: `python -c "from src.transfer.connector_capabilities import transfer_live_driver_types; print(len(transfer_live_driver_types()))"`
  * Catalog tiles are a larger number and are never presented as live capability.
  */
-export const TRANSFER_READY_DRIVERS = 42;
+export const TRANSFER_READY_DRIVERS = 43;
 
 export const NOT_PROVEN: UnprovenRow[] = [
   {

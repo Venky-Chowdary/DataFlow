@@ -57,8 +57,16 @@ def _replace_remote(sftp: Any, temp_path: str, final_path: str) -> None:
     with "Operation unsupported" after the bytes had already landed.
 
     The fallback is the portable two-step. It is not atomic — there is a window
-    where the destination does not exist — so it is only used when the server
-    has actually refused the atomic form.
+    where the destination does not exist — so it is only taken when the server
+    actually refused the atomic form. Any other failure (permission, quota,
+    missing directory) must propagate: retrying it as delete-then-rename would
+    destroy the operator's existing file first and then fail the same way.
+
+    paramiko maps only a few SFTP status codes onto errno (``ENOENT`` for
+    missing, ``EACCES`` for denied) and raises a bare ``IOError(text)`` for
+    everything else, including ``SFTP_OP_UNSUPPORTED``. So "the server will not
+    do this" is identified by errno *and* message, and an unrecognised error
+    with no errno stays fatal rather than being read as permission to fall back.
     """
     import errno
 
@@ -66,15 +74,7 @@ def _replace_remote(sftp: Any, temp_path: str, final_path: str) -> None:
         sftp.posix_rename(temp_path, final_path)
         return
     except (AttributeError, OSError) as exc:
-        code = getattr(exc, "errno", None)
-        # Anything other than "this server will not do that" is a real failure
-        # (permissions, quota, missing directory) and must not be retried as a
-        # delete-then-rename, which would destroy the existing file first.
-        if isinstance(exc, OSError) and code not in (
-            None,
-            errno.EOPNOTSUPP,
-            errno.ENOSYS,
-        ):
+        if isinstance(exc, OSError) and not _is_unsupported_operation(exc):
             raise
         logger.info(
             "SFTP posix_rename unavailable (%s); falling back to remove+rename", exc
@@ -85,6 +85,19 @@ def _replace_remote(sftp: Any, temp_path: str, final_path: str) -> None:
     except OSError as exc:
         logger.debug("No existing %s to remove before rename: %s", final_path, exc)
     sftp.rename(temp_path, final_path)
+
+
+def _is_unsupported_operation(exc: OSError) -> bool:
+    """True only when the server said it does not implement the request."""
+    import errno
+
+    code = getattr(exc, "errno", None)
+    if code in (errno.EOPNOTSUPP, errno.ENOSYS):
+        return True
+    if code is not None:
+        return False
+    text = str(exc).lower()
+    return "unsupported" in text or "not supported" in text or "not implemented" in text
 
 
 def write_mapped_rows(

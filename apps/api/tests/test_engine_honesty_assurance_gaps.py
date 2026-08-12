@@ -52,22 +52,28 @@ from src.transfer.reconcile_step import _compute_source_checksum, run_reconcilia
 # ---------------------------------------------------------------------------
 
 
-def test_sftp_and_email_are_not_transfer_ready_without_preflight():
-    for cid in ("sftp", "email"):
-        caps = get_capabilities(cid)
-        assert caps.get("preflight") is False
-        assert transfer_ready(caps) is False
-        enriched = enrich_catalog_entry({"id": cid, "status": "live"})
-        assert enriched.get("transfer_ready") is False
-        assert enriched.get("certification_tier") != "certified"
+def test_email_is_not_transfer_ready_without_preflight():
+    """Write-only with no read-back cannot claim a transfer tier.
+
+    SFTP used to share this test. It earned preflight, introspect and a Gate-8
+    read-back (test_sftp_live_transfer.py, against a real server), so it is no
+    longer an example of the lie this guards. email still is: it writes and can
+    never be read back, so nothing it sends is verifiable.
+    """
+    caps = get_capabilities("email")
+    assert caps.get("preflight") is False
+    assert transfer_ready(caps) is False
+    enriched = enrich_catalog_entry({"id": "email", "status": "live"})
+    assert enriched.get("transfer_ready") is False
+    assert enriched.get("certification_tier") != "certified"
 
 
-def test_transfer_live_driver_count_excludes_sftp_email_and_matches_fe_constant():
+def test_transfer_live_driver_count_excludes_email_and_matches_fe_constant():
     live = transfer_live_driver_types()
-    assert "sftp" not in live
     assert "email" not in live
+    assert "sftp" in live
     # Keep FE marketing constant honest — regenerate provenEvidence.ts together.
-    assert len(live) == 42
+    assert len(live) == 43
 
 
 def test_mongodb_registry_does_not_claim_sql_merge():
