@@ -3285,8 +3285,44 @@ def bind_sql_mapped_rows_with_quarantine(
     engine: str,
     dialect_label: str = "SQL",
     mappings: list[dict[str, Any]] | None = None,
+    row_numbers: list[int] | None = None,
 ) -> list[tuple]:
+    """Bind cells and quarantine refusals; see :func:`bind_rows_keeping_numbers`.
+
+    Callers that need to keep track of *which* rows survived — because they will
+    report on the survivors later — should use that variant instead.
+    """
+    bound, _kept = bind_rows_keeping_numbers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        engine=engine,
+        dialect_label=dialect_label,
+        mappings=mappings,
+        row_numbers=row_numbers,
+    )
+    return bound
+
+
+def bind_rows_keeping_numbers(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    engine: str,
+    dialect_label: str = "SQL",
+    mappings: list[dict[str, Any]] | None = None,
+    row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int]]:
     """Bind cells via ``normalize_sql_bind_value``; quarantine refusals (no crash invent).
+
+    Returns ``(bound_rows, surviving_row_numbers)``. Binding drops the rows it
+    quarantines, so a caller that later reports on the survivors cannot use the
+    numbers it started with — it would name rows that are no longer there.
 
     Physical DDL can be INT/FLOAT/DECIMAL after Map stamped VARCHAR — empty ``\"\"``
     must not become SQL NULL on upsert (destination wipe). Raise from sql_bind is
@@ -3300,9 +3336,10 @@ def bind_sql_mapped_rows_with_quarantine(
     )
 
     if not mapped_rows:
-        return mapped_rows
+        return mapped_rows, []
 
     out: list[tuple] = []
+    kept: list[int] = []
     for row_idx, row in enumerate(mapped_rows):
         cells = list(row)
         hold_out = False
@@ -3321,7 +3358,7 @@ def bind_sql_mapped_rows_with_quarantine(
                 append_write_quarantine_detail(
                     rejected_details,
                     {
-                        "row": row_idx + 1,
+                        "row": resolve_row_number(row_numbers, row_idx),
                         "column": col,
                         "target": col,
                         "value": sample,
@@ -3346,7 +3383,8 @@ def bind_sql_mapped_rows_with_quarantine(
         if hold_out:
             continue
         out.append(tuple(cells))
-    return out
+        kept.append(resolve_row_number(row_numbers, row_idx))
+    return out, kept
 
 
 def quarantine_unfit_strings(
@@ -4295,11 +4333,53 @@ def split_dense_sparse_rows(
     mapped_rows: list[tuple],
 ) -> tuple[list[tuple], list[tuple]]:
     """Partition mapped rows for bulk vs per-row sparse CDC upsert."""
+    dense, sparse, _dense_rows, _sparse_rows = split_dense_sparse_rows_with_numbers(
+        mapped_rows
+    )
+    return dense, sparse
+
+
+def split_dense_sparse_rows_with_numbers(
+    mapped_rows: list[tuple],
+    *,
+    row_offset: int = 0,
+) -> tuple[list[tuple], list[tuple], list[int], list[int]]:
+    """Partition rows *and* keep where each came from.
+
+    Returns ``(dense, sparse, dense_row_numbers, sparse_row_numbers)`` where the
+    numbers are 1-based positions in the source batch, matching every other
+    quarantine record.
+
+    Splitting without them meant a rejected sparse row was reported by its index
+    inside the sparse list, so an operator replaying the dead-letter queue was
+    pointed at a different row than the one that failed — the same misattribution
+    that made Airtable name records which never left.
+    """
     dense: list[tuple] = []
     sparse: list[tuple] = []
-    for row in mapped_rows:
-        (sparse if row_has_missing_sentinel(row) else dense).append(row)
-    return dense, sparse
+    dense_rows: list[int] = []
+    sparse_rows: list[int] = []
+    for index, row in enumerate(mapped_rows):
+        number = row_offset + index + 1
+        if row_has_missing_sentinel(row):
+            sparse.append(row)
+            sparse_rows.append(number)
+        else:
+            dense.append(row)
+            dense_rows.append(number)
+    return dense, sparse, dense_rows, sparse_rows
+
+
+def resolve_row_number(row_numbers: list[int] | None, index: int) -> int:
+    """Source row number for a list position, or the position itself.
+
+    Callers that hold a whole batch can let the position stand in. Callers
+    holding a *subset* — sparse rows, a post-bind survivor list — must pass the
+    numbers they kept, or the record will name the wrong row.
+    """
+    if row_numbers is not None and 0 <= index < len(row_numbers):
+        return int(row_numbers[index])
+    return index + 1
 
 
 def combined_mapped_rows_for_checksum(
