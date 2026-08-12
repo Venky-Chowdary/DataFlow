@@ -52,7 +52,7 @@ OBJECT_PAYLOAD_SOURCE_TYPES = frozenset({
 
 PROBED_SOURCE_TYPES = (
     SQLISH_SOURCE_TYPES
-    | frozenset({"mongodb", "mongodb_atlas"})
+    | frozenset({"mongodb", "mongodb_atlas", "dynamodb", "amazon_dynamodb"})
     | OBJECT_PAYLOAD_SOURCE_TYPES
 )
 
@@ -279,6 +279,62 @@ def _object_payload_duplicates(
     return _counter_findings(counts, pk_columns, limit), scanned, True
 
 
+def _dynamodb_duplicates(
+    cfg: dict[str, Any],
+    table: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], ProbeStatus, str]:
+    """Prove identity uniqueness for a DynamoDB source.
+
+    When the identity is the table's own key, DynamoDB has already enforced it:
+    two items cannot share a primary key, so the answer is structural and needs
+    no scan. That is stronger evidence than any sample, and it is why this is
+    reported as ``ran`` rather than skipped.
+
+    A non-key identity carries no such guarantee — a GSI does not enforce
+    uniqueness either — so those are counted across a real scan.
+    """
+    from collections import Counter
+
+    from connectors.dynamodb_reader import describe_key_schema, read_all_paginated
+
+    key_names = [
+        str(k.get("name") or "")
+        for k in describe_key_schema(cfg, table)
+        if k.get("name")
+    ]
+    wanted = [c.strip().lower() for c in pk_columns]
+    if key_names and wanted == [k.lower() for k in key_names]:
+        return (
+            [],
+            "ran",
+            f"DynamoDB enforces uniqueness on the table key ({', '.join(key_names)})",
+        )
+
+    batch = read_all_paginated(cfg, table, limit=_PAYLOAD_SCAN_CAP)
+    headers = [str(h) for h in (batch.headers or [])]
+    missing = [c for c in pk_columns if c not in headers]
+    if missing:
+        raise ValueError(
+            f"identity column(s) {', '.join(missing)} are not present in {table}"
+        )
+    idx = [headers.index(c) for c in pk_columns]
+    counts: Counter[tuple[str, ...]] = Counter()
+    for row in batch.rows or []:
+        counts[
+            tuple(_normalize_key_cell(row[i] if i < len(row) else None) for i in idx)
+        ] += 1
+    scanned = len(batch.rows or [])
+    return (
+        _counter_findings(counts, pk_columns, limit),
+        "ran",
+        f"DynamoDB scan uniqueness probe on {table}.({','.join(pk_columns)}) "
+        f"over {scanned:,} item(s)",
+    )
+
+
 def _normalize_key_cell(value: Any) -> str:
     """Render one identity cell the way the destination key would compare it.
 
@@ -403,6 +459,26 @@ def probe_source_duplicate_keys_result(
                 findings=findings,
                 status="ran",
                 message=f"Mongo uniqueness probe on {coll}.({pk_label})",
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
+
+        if db_type in ("dynamodb", "amazon_dynamodb"):
+            tbl = source_table or source_collection
+            if not tbl:
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="DynamoDB source missing table for uniqueness probe",
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            findings, status, message = _dynamodb_duplicates(
+                cfg, tbl, pk_columns, limit=limit
+            )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status=status,
+                message=message,
                 db_type=db_type,
                 primary_key_columns=pk_columns,
             )

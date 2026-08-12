@@ -157,6 +157,7 @@ from services.batch_progress import (
     ThrottledCheckpoint,
     compute_transfer_progress_pct,
     effective_backfill_new_fields,
+    row_count_label,
 )
 
 try:
@@ -2729,7 +2730,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Writing {total_rows:,} rows…",
+                message=f"Writing {row_count_label(total_rows)} rows…",
             )
 
             def _check_cancelled() -> None:
@@ -3860,7 +3861,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {total_rows:,} rows in batches…",
+                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
             )
 
             is_streaming = True
@@ -4616,7 +4617,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {total_rows:,} rows in batches…",
+                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
             )
 
             is_streaming = True

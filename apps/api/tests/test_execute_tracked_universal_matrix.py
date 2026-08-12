@@ -189,13 +189,6 @@ def _build_db_endpoint(
         # writer refuses identity it cannot see. The matrix keys on ``id``.
         if not object_store:
             pytest.skip("no local AWS endpoint (install moto or set DATAFLOW_TEST_S3_ENDPOINT)")
-        if role == "src":
-            # Reading DynamoDB as a source fails with "unsupported format string
-            # passed to NoneType.__format__" before any row moves. The write and
-            # the standalone read both work, so the defect is in the route rather
-            # than the driver; it is left failing-visible here as a skip until
-            # the None that reaches a numeric format specifier is found.
-            pytest.skip("dynamodb source route raises on a None row count — see runbook")
         import boto3
 
         table = f"payments_dynamodb_{role}_{suffix}"

@@ -603,7 +603,7 @@ def run_file_preflight(
     *,
     columns: list[str],
     column_types: dict[str, str],
-    row_count: int,
+    row_count: int | None,
     mappings: list[dict[str, Any]],
     column_nullability: dict[str, bool] | None = None,
     destination_connected: bool = False,
@@ -665,8 +665,15 @@ def run_file_preflight(
     except Exception:
         sync_mode = (sync_mode or "").strip().lower() or "full_refresh_append"
 
-    if row_count <= 0 and sample_rows:
-        row_count = len(sample_rows)
+    # Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a
+    # search index — report ``None`` rather than inventing a total, which is the
+    # honest answer and used to crash this comparison before a single gate ran.
+    # Unknown and zero are handled the same way here (size from the sample);
+    # the distinction stays visible downstream, where an unmeasured source count
+    # is already reported as such rather than as a measured zero.
+    row_count_known = isinstance(row_count, int) and row_count > 0
+    if not row_count_known:
+        row_count = len(sample_rows or [])
 
     # Preflight is a sample-based safety check, not a full table scan.  Cap the
     # sample size so very large file previews or database samples cannot make the
