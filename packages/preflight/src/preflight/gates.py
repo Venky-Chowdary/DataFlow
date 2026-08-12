@@ -439,6 +439,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     source_col.inferred_type,
                     target.inferred_type,
                     dest_db=dest_kind,
+                    dest_table_exists=getattr(
+                        ctx.plan.destination, "table_exists", None
+                    ),
                 )
             )
         else:
@@ -492,6 +495,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             pair = (source_col.inferred_type.upper(), f"{target.inferred_type.upper()} [vector dim unknown]")
         # Both sides may normalize to the same logical family (datetime) while
         # still collapsing TZ polarity / IEEE precision — treat as lossy.
+        _dest_exists = getattr(ctx.plan.destination, "table_exists", None)
         if (
             not lossy
             and is_precision_collapse_coercion
@@ -503,7 +507,8 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     or getattr(getattr(ctx.plan, "destination", None), "kind", "")
                     or ""
                 ),
-                    )
+                dest_table_exists=_dest_exists,
+            )
         ):
             lossy = True
         # Nested STRUCT/MAP field contract or nested→document collapse.
@@ -563,10 +568,11 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     source_col.inferred_type,
                     target.inferred_type,
                     dest_db=str(
-                        getattr(getattr(ctx.plan, 'destination', None), 'db_type', '')
-                        or getattr(getattr(ctx.plan, 'destination', None), 'kind', '')
-                        or ''
+                        getattr(getattr(ctx.plan, "destination", None), "db_type", "")
+                        or getattr(getattr(ctx.plan, "destination", None), "kind", "")
+                        or ""
                     ),
+                    dest_table_exists=_dest_exists,
                 )
             )
             or platform_decimal_trunc

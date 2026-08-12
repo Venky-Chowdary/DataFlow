@@ -1357,8 +1357,14 @@ def _stream_database_transfer_impl(
     last_checksum = ""
     # Phase F1 — accumulate fingerprints during the write pass (avoids double source I/O).
     write_pass_fp = FingerprintAccumulator()
-    rejected_total = 0
-    coerced_null_total = 0
+    # Restore cumulative quarantine counts on resume — Gate-8 conservation is
+    # source - (rejected - coerced_null) - skipped. committed_offset already spans
+    # the full population on resume, so these counters must be cumulative too or a
+    # correct resumed load that quarantined rows in the first pass fails Gate-8.
+    rejected_total = int(getattr(checkpoint, "rejected_rows", 0) or 0) if resumed_pass else 0
+    coerced_null_total = (
+        int(getattr(checkpoint, "coerced_null_rows", 0) or 0) if resumed_pass else 0
+    )
     # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
     # Threaded to every writer so the streaming path matches the buffered path.
     stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
@@ -2119,6 +2125,11 @@ def _stream_database_transfer_impl(
             # GA: keep full rejected_details across batches — never drop for a
             # UI sample cap (sample is stamped separately at finalize).
             merged_details = prev_details + new_details
+            # Drop the writer's per-batch source_row_count stamp: it counts only
+            # this batch's mapped rows and would clobber the aggregate. The full
+            # reader-side population is committed_offset, applied at finalize.
+            incoming.pop("source_row_count", None)
+            incoming.pop("source_row_count_source", None)
             dest_summary = {
                 **prev,
                 **incoming,
@@ -2164,6 +2175,10 @@ def _stream_database_transfer_impl(
         checkpoint.chunk_index = idx
         checkpoint.offset = committed_offset
         checkpoint.rows_processed = written
+        # Persist cumulative quarantine counts so a crash-resume restores them and
+        # Gate-8 conservation balances across passes.
+        checkpoint.rejected_rows = rejected_total
+        checkpoint.coerced_null_rows = coerced_null_total
         checkpoint.cursor_value = running_cursor or committed_keyset or ""
         checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
         checkpoint.es_search_after = es_search_after
@@ -2525,9 +2540,21 @@ def _stream_database_transfer_impl(
     dest_summary["chunk_size"] = chunk_size
     dest_summary["chunk_policy"] = chunk_policy
     dest_summary["batches"] = batches_completed
-    if not isinstance(dest_summary.get("source_row_count"), int) or dest_summary.get("source_row_count", 0) <= 0:
-        held_out = max(int(rejected_total or 0) - int(coerced_null_total or 0), 0)
-        dest_summary["source_row_count"] = int(written or 0) + held_out
+    # Gate-8 conservation must come from the *reader*, never written+held_out.
+    # Inventing source_row_count from writer ack circularly balances short reads.
+    # committed_offset is the authoritative full-stream population (sum of every
+    # committed batch's source rows), so it overrides any per-batch writer stamp
+    # that may have merged into the summary — the last batch's mapped-row count is
+    # not the population.
+    reader_count = int(committed_offset or 0)
+    if reader_count > 0:
+        dest_summary["source_row_count"] = reader_count
+        dest_summary["source_row_count_source"] = "committed_offset"
+    elif not isinstance(dest_summary.get("source_row_count"), int) or int(
+        dest_summary.get("source_row_count") or 0
+    ) <= 0:
+        dest_summary["source_row_count_source"] = "unmeasured"
+        dest_summary.pop("source_row_count", None)
     if reconcile_sample:
         dest_summary["reconcile_sample"] = reconcile_sample[:_RECONCILE_SAMPLE_CAP]
     if load_methods_seen:

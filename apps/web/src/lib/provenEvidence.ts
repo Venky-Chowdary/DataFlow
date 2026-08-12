@@ -125,10 +125,12 @@ export const BACKEND_SUITE = {
 } as const;
 
 /**
- * Drivers with `PRODUCTION_SKU` evidence. Catalog tiles are a larger number and
- * are never presented as live capability.
+ * Unique duplex/source drivers from `transfer_live_driver_types()` after the
+ * honesty filter (preflight required except file_source; sftp/email demoted).
+ * Regenerate by: `python -c "from src.transfer.connector_capabilities import transfer_live_driver_types; print(len(transfer_live_driver_types()))"`
+ * Catalog tiles are a larger number and are never presented as live capability.
  */
-export const TRANSFER_READY_DRIVERS = 44;
+export const TRANSFER_READY_DRIVERS = 42;
 
 export const NOT_PROVEN: UnprovenRow[] = [
   {

@@ -2811,9 +2811,10 @@ class UniversalTransferEngine:
             resume_skipped_rows = 0
 
             if request.destination.kind == "database":
-                # Buffered path reloads the in-memory source; slice past committed
-                # rows so Resume does not re-write (or duplicate) progress. Still
-                # skip destructive full-refresh DROP when a durable checkpoint exists.
+                # Buffered path reloads the in-memory source. Positional
+                # ``records[skip_n:]`` is unsafe under source reorder — silent
+                # wrong-row skip. Idempotent resume re-applies the full
+                # population via upsert when a key exists (MERGE-class).
                 checkpoint_has_progress = _checkpoint_has_progress(checkpoint)
                 should_drop_full_refresh = should_drop_destination_for_sync(
                     request_sync_mode=request.sync_mode,
@@ -2848,25 +2849,28 @@ class UniversalTransferEngine:
                                     "note": "checkpoint ahead of or equal to source size",
                                 },
                             )
-                        resume_full_records = records
-                        resume_skipped_rows = skip_n
-                        records = records[skip_n:]
+                        if write_mode == "insert" and not conflict_columns:
+                            raise ValueError(
+                                "Cannot safely resume a buffered insert without primary key; "
+                                "use upsert sync mode or restart with full_refresh_overwrite"
+                            )
+                        # Force upsert so re-applying prior rows is idempotent.
+                        if conflict_columns:
+                            write_mode = "upsert"
+                        # Keep full population — no positional slice.
+                        resume_full_records = list(records)
+                        resume_skipped_rows = 0
+                        dest_summary_resume_note = (
+                            f"Idempotent resume after {skip_n:,} prior row(s) — "
+                            "re-applying full population via upsert (key-addressed)."
+                        )
                         total_rows = len(records)
                         mongo.update_job_status(
                             job_id,
                             "running",
                             total_rows=total_rows,
                             records_processed=0,
-                            message=f"Resuming after {skip_n:,} committed row(s)…",
-                        )
-                if resume and checkpoint_has_progress and write_mode == "insert":
-                    # Non-idempotent resume would duplicate; force upsert when PK known.
-                    if conflict_columns:
-                        write_mode = "upsert"
-                    else:
-                        raise ValueError(
-                            "Cannot safely resume a buffered insert without primary key; "
-                            "use upsert sync mode or restart with full_refresh_overwrite"
+                            message=dest_summary_resume_note,
                         )
 
                 def _write_destination_with_drop():

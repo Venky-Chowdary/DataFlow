@@ -187,3 +187,101 @@ def test_stream_file_resume_recomputes_full_checksum(monkeypatch):
     # 10 rows / chunk size 2 = 5 chunks; skip first chunk, write 4 => 8 rows
     assert sum(c["rows"] for c in calls) == 8
     assert dest_summary.get("checksum") is not None
+    # Gate-8 conservation: the reader-side source count must be the FULL source
+    # population (10), not the resumed tail (8) — comparing a tail count against a
+    # full-table read-back would mis-account an otherwise correct resumed load.
+    assert dest_summary.get("source_row_count") == 10
+    assert dest_summary.get("source_row_count_source") == "full_rescan_rows"
+
+
+def test_stream_file_resume_full_rescan_respects_source_filter(monkeypatch):
+    """A filtered resume must count/hash the FILTERED population — the full-file
+    re-scan applies source_filter exactly like the main write path, or Gate-8
+    overstates source_row_count and fails conservation on a correct load."""
+    from transfer.file_stream import stream_file_to_database
+    from transfer.models import EndpointConfig
+
+    def fake_write_batch(*args, **kwargs):
+        data_rows = kwargs.get("data_rows") or args[5]
+        return len(data_rows), "checksum", {"rejected_rows": 0}
+
+    monkeypatch.setattr("transfer.file_stream._write_batch", fake_write_batch)
+    monkeypatch.setattr("transfer.file_stream.CHUNK_SIZE", 2)
+
+    destination = EndpointConfig(
+        kind="database", format="sqlite",
+        connection_string="sqlite:///:memory:", table="import",
+    )
+    content = _csv_bytes(10)  # ids 0..9
+    checkpoint = Checkpoint(job_id="resume-filter", chunk_index=1, rows_processed=2)
+
+    _, _, dest_summary, _ = stream_file_to_database(
+        content=content,
+        filename="rows.csv",
+        destination=destination,
+        mappings=[{"source": "id", "target": "id"}, {"source": "name", "target": "name"}],
+        schema={},
+        job_id="resume-filter",
+        checkpoint=checkpoint,
+        checkpoint_service=_MemoryCheckpointService(),
+        stream_contracts=[{"selected": True, "primary_key": ["id"], "sync_mode": "full_refresh_append"}],
+        sync_mode="full_refresh_append",
+        source_filter={"column": "id", "operator": "lt", "value": 6},  # keep 0..5 => 6 rows
+    )
+
+    # Full population after the filter is 6, not the unfiltered 10.
+    assert dest_summary.get("source_row_count") == 6
+    assert dest_summary.get("source_row_count_source") == "full_rescan_rows"
+
+
+def test_checkpoint_roundtrips_cumulative_quarantine_counts():
+    """rejected_rows AND coerced_null_rows must survive persist/reload so a
+    resume can restore cumulative quarantine for Gate-8 conservation."""
+    cp = Checkpoint(job_id="j", chunk_index=2, rows_processed=5,
+                    rejected_rows=7, coerced_null_rows=3)
+    reloaded = Checkpoint.from_dict(cp.to_dict())
+    assert reloaded.rejected_rows == 7
+    assert reloaded.coerced_null_rows == 3
+
+
+def test_resume_restores_first_pass_quarantine_for_conservation(monkeypatch):
+    """Gate-8 hole: a resumed pass that starts rejected/coerced at 0 forgets the
+    rows the first pass quarantined, so source - dropped over-expects delivery and
+    a correct load fails. The counts must be restored from the checkpoint."""
+    from transfer.file_stream import stream_file_to_database
+    from transfer.models import EndpointConfig
+
+    def fake_write_batch(*args, **kwargs):
+        data_rows = kwargs.get("data_rows") or args[5]
+        return len(data_rows), "checksum", {"rejected_rows": 0}  # this pass is clean
+
+    monkeypatch.setattr("transfer.file_stream._write_batch", fake_write_batch)
+    monkeypatch.setattr("transfer.file_stream.CHUNK_SIZE", 2)
+
+    destination = EndpointConfig(
+        kind="database", format="sqlite",
+        connection_string="sqlite:///:memory:", table="import",
+    )
+    content = _csv_bytes(10)
+    # First pass committed chunk 0 (2 rows) and quarantined 3, coerced 1.
+    checkpoint = Checkpoint(
+        job_id="resume-q", chunk_index=1, rows_processed=2,
+        rejected_rows=3, coerced_null_rows=1,
+    )
+
+    _, _, dest_summary, _ = stream_file_to_database(
+        content=content,
+        filename="rows.csv",
+        destination=destination,
+        mappings=[{"source": "id", "target": "id"}, {"source": "name", "target": "name"}],
+        schema={},
+        job_id="resume-q",
+        checkpoint=checkpoint,
+        checkpoint_service=_MemoryCheckpointService(),
+        stream_contracts=[{"selected": True, "primary_key": ["id"], "sync_mode": "full_refresh_append"}],
+        sync_mode="full_refresh_append",
+    )
+
+    # Cumulative quarantine from the first pass is restored, not reset to 0.
+    assert dest_summary.get("rejected_rows") == 3
+    assert dest_summary.get("coerced_null_rows") == 1

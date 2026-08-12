@@ -257,6 +257,29 @@ def read_physical_state(
     )
 
 
+def _strip_outer_parens(text: str) -> str:
+    """Remove a single *matching* outermost paren pair, never a false wrapper.
+
+    ``(qty>0)`` -> ``qty>0`` but ``(a>0)or(b>0)`` is left intact (its first ``(``
+    closes mid-string, so the outer parens are not a wrapper)."""
+    while len(text) >= 2 and text[0] == "(" and text[-1] == ")":
+        depth = 0
+        wraps = True
+        for i, ch in enumerate(text):
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i != len(text) - 1:
+                    wraps = False
+                    break
+        if wraps:
+            text = text[1:-1]
+        else:
+            break
+    return text
+
+
 def _normalize_predicate(sqltext: Any) -> str:
     """Strip the dialect's punctuation so ``("qty" > 0)`` and ``qty>0`` match.
 
@@ -264,13 +287,59 @@ def _normalize_predicate(sqltext: Any) -> str:
     report every constraint as missing. Whitespace, quoting styles and wrapping
     parentheses carry no meaning, so they go.
     """
-    text = str(sqltext or "").strip().casefold()
+    raw = str(sqltext or "").strip().casefold()
+    if not raw:
+        return ""
+    # Single pass: keep string-literal CONTENTS verbatim (so ``<> 'a'`` and
+    # ``<> 'b'`` stay distinct and real CHECK drift is not hidden), but neutralize
+    # parentheses *inside* literals to sentinels so a ``)`` in a literal cannot
+    # skew the paren balancer. Insignificant punctuation outside literals is
+    # stripped. ``'` -> ``\x01`` open / ``\x02`` close sentinels are consistent on
+    # both sides, so equivalent predicates still compare equal.
+    chars: list[str] = []
+    i = 0
+    n = len(raw)
+    in_str = False
+    while i < n:
+        ch = raw[i]
+        if in_str:
+            if ch == "'":
+                if i + 1 < n and raw[i + 1] == "'":
+                    chars.append("''")
+                    i += 2
+                    continue
+                chars.append("'")
+                in_str = False
+                i += 1
+                continue
+            if ch == "(":
+                chars.append("\x01")
+            elif ch == ")":
+                chars.append("\x02")
+            else:
+                chars.append(ch)
+            i += 1
+            continue
+        if ch == "'":
+            chars.append("'")
+            in_str = True
+            i += 1
+            continue
+        if ch in '"`[] \t\n\r':
+            i += 1
+            continue
+        chars.append(ch)
+        i += 1
+    text = "".join(chars)
     if not text:
         return ""
-    for ch in ('"', "`", "[", "]", " ", "\t", "\n", "\r"):
-        text = text.replace(ch, "")
-    while text.startswith("(") and text.endswith(")"):
-        text = text[1:-1]
+    # Balance stray parens (unmatched trailing ``)`` from the CREATE TABLE tail on
+    # some SQLite/ODBC reflections); literal parens are sentinels and excluded.
+    while text.endswith(")") and text.count(")") > text.count("("):
+        text = text[:-1]
+    while text.startswith("(") and text.count("(") > text.count(")"):
+        text = text[1:]
+    text = _strip_outer_parens(text)
     # ``("qty")>0`` and ``qty>0`` are the same rule; parentheses around a bare
     # identifier are the engine's own echo, not part of the predicate.
     text = _BARE_PARENS.sub(r"\1", text)

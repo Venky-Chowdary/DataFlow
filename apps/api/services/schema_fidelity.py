@@ -611,7 +611,10 @@ def plan_create_new_fidelity(
                 aspect="primary_key",
                 name=",".join(pk_dest),
                 status="carried",
-                reason="PRIMARY KEY emitted on CREATE TABLE.",
+                reason=(
+                    "PRIMARY KEY emitted on CREATE TABLE (provisional until "
+                    "destination catalog re-read)."
+                ),
                 source_detail=",".join(catalog.primary_key),
                 dest_ddl=f"PRIMARY KEY ({quoted})",
             )
@@ -1016,6 +1019,814 @@ def certify_identity_on_destination(
             plan.identity_insert_columns = [
                 c for c in plan.identity_insert_columns if c != item.name
             ]
+
+
+# --------------------------------------------------------------------------
+# Structure verification (PK / NOT NULL / DEFAULT / UNIQUE)
+# --------------------------------------------------------------------------
+# Emitting CONSTRAINT / NOT NULL / DEFAULT in CREATE TABLE is a claim. Engines
+# may ignore or rewrite clauses; the certificate may only say "carried" after
+# the destination catalog reports the same structure.
+_STRUCTURE_PK_QUERY: dict[str, str] = {
+    "postgresql": (
+        "SELECT kcu.column_name FROM information_schema.table_constraints tc "
+        "JOIN information_schema.key_column_usage kcu "
+        "  ON tc.constraint_schema = kcu.constraint_schema "
+        " AND tc.constraint_name = kcu.constraint_name "
+        " AND tc.table_schema = kcu.table_schema "
+        " AND tc.table_name = kcu.table_name "
+        "WHERE tc.table_schema = COALESCE(?, 'public') AND tc.table_name = ? "
+        "AND tc.constraint_type = 'PRIMARY KEY' "
+        "ORDER BY kcu.ordinal_position"
+    ),
+    "mysql": (
+        "SELECT column_name FROM information_schema.key_column_usage "
+        "WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? "
+        "AND constraint_name = 'PRIMARY' ORDER BY ordinal_position"
+    ),
+    "sqlserver": (
+        "SELECT c.name FROM sys.indexes i "
+        "JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id "
+        "JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+        "JOIN sys.tables t ON t.object_id = i.object_id "
+        "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+        "WHERE i.is_primary_key = 1 AND t.name = ? AND s.name = COALESCE(?, SCHEMA_NAME()) "
+        "ORDER BY ic.key_ordinal"
+    ),
+    "oracle": (
+        "SELECT cols.column_name FROM all_constraints cons "
+        "JOIN all_cons_columns cols ON cons.constraint_name = cols.constraint_name "
+        " AND cons.owner = cols.owner "
+        "WHERE cons.constraint_type = 'P' AND cons.table_name = ? "
+        "AND cons.owner = COALESCE(?, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA')) "
+        "ORDER BY cols.position"
+    ),
+    "sqlite": (
+        "SELECT name FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk"
+    ),
+}
+_STRUCTURE_PK_QUERY["mariadb"] = _STRUCTURE_PK_QUERY["mysql"]
+
+_STRUCTURE_NULLABLE_QUERY: dict[str, str] = {
+    "postgresql": (
+        "SELECT column_name, is_nullable FROM information_schema.columns "
+        "WHERE table_schema = COALESCE(?, 'public') AND table_name = ?"
+    ),
+    "mysql": (
+        "SELECT column_name, is_nullable FROM information_schema.columns "
+        "WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ?"
+    ),
+    "sqlserver": (
+        "SELECT c.name, CASE WHEN c.is_nullable = 1 THEN 'YES' ELSE 'NO' END "
+        "FROM sys.columns c "
+        "JOIN sys.tables t ON t.object_id = c.object_id "
+        "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+        "WHERE t.name = ? AND s.name = COALESCE(?, SCHEMA_NAME())"
+    ),
+    "oracle": (
+        "SELECT column_name, nullable FROM all_tab_columns "
+        "WHERE table_name = ? AND owner = COALESCE(?, SYS_CONTEXT('USERENV', "
+        "'CURRENT_SCHEMA'))"
+    ),
+    "sqlite": (
+        "SELECT name, CASE WHEN \"notnull\" = 1 THEN 'NO' ELSE 'YES' END "
+        "FROM pragma_table_info(?)"
+    ),
+}
+_STRUCTURE_NULLABLE_QUERY["mariadb"] = _STRUCTURE_NULLABLE_QUERY["mysql"]
+
+_STRUCTURE_DEFAULT_QUERY: dict[str, str] = {
+    "postgresql": (
+        "SELECT column_name, column_default FROM information_schema.columns "
+        "WHERE table_schema = COALESCE(?, 'public') AND table_name = ? "
+        "AND column_default IS NOT NULL"
+    ),
+    "mysql": (
+        "SELECT column_name, column_default FROM information_schema.columns "
+        "WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? "
+        "AND column_default IS NOT NULL"
+    ),
+    "sqlserver": (
+        "SELECT c.name, dc.definition FROM sys.columns c "
+        "JOIN sys.tables t ON t.object_id = c.object_id "
+        "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+        "LEFT JOIN sys.default_constraints dc ON dc.object_id = c.default_object_id "
+        "WHERE t.name = ? AND s.name = COALESCE(?, SCHEMA_NAME()) "
+        "AND c.default_object_id <> 0"
+    ),
+    "oracle": (
+        "SELECT column_name, data_default FROM all_tab_columns "
+        "WHERE table_name = ? AND owner = COALESCE(?, SYS_CONTEXT('USERENV', "
+        "'CURRENT_SCHEMA')) AND data_default IS NOT NULL"
+    ),
+    "sqlite": (
+        "SELECT name, dflt_value FROM pragma_table_info(?) WHERE dflt_value IS NOT NULL"
+    ),
+}
+_STRUCTURE_DEFAULT_QUERY["mariadb"] = _STRUCTURE_DEFAULT_QUERY["mysql"]
+
+# UNIQUE probes return (constraint/index identifier, column) so composite keys can
+# be grouped and matched as exact column sets — a single-column claim must not be
+# certified merely because the column appears inside a wider composite unique key,
+# and a real composite must not be falsely downgraded.
+_STRUCTURE_UNIQUE_QUERY: dict[str, str] = {
+    "postgresql": (
+        "SELECT tc.constraint_name, kcu.column_name "
+        "FROM information_schema.table_constraints tc "
+        "JOIN information_schema.key_column_usage kcu "
+        "  ON tc.constraint_schema = kcu.constraint_schema "
+        " AND tc.constraint_name = kcu.constraint_name "
+        " AND tc.table_schema = kcu.table_schema "
+        " AND tc.table_name = kcu.table_name "
+        "WHERE tc.table_schema = COALESCE(?, 'public') AND tc.table_name = ? "
+        "AND tc.constraint_type = 'UNIQUE'"
+    ),
+    "mysql": (
+        "SELECT index_name, column_name FROM information_schema.statistics "
+        "WHERE table_schema = COALESCE(?, DATABASE()) AND table_name = ? "
+        "AND non_unique = 0 AND index_name <> 'PRIMARY'"
+    ),
+    "sqlserver": (
+        "SELECT i.name, c.name FROM sys.indexes i "
+        "JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id "
+        " AND ic.is_included_column = 0 "
+        "JOIN sys.columns c ON c.object_id = ic.object_id AND c.column_id = ic.column_id "
+        "JOIN sys.tables t ON t.object_id = i.object_id "
+        "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+        "WHERE i.is_unique = 1 AND i.is_primary_key = 0 "
+        "AND t.name = ? AND s.name = COALESCE(?, SCHEMA_NAME())"
+    ),
+    "oracle": (
+        "SELECT cons.constraint_name, cols.column_name FROM all_constraints cons "
+        "JOIN all_cons_columns cols ON cons.constraint_name = cols.constraint_name "
+        " AND cons.owner = cols.owner "
+        "WHERE cons.constraint_type = 'U' AND cons.table_name = ? "
+        "AND cons.owner = COALESCE(?, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))"
+    ),
+    "sqlite": (
+        "SELECT il.name, ii.name FROM pragma_index_list(?) il "
+        "JOIN pragma_index_info(il.name) ii "
+        "WHERE il.\"unique\" = 1 AND il.origin <> 'pk'"
+    ),
+}
+_STRUCTURE_UNIQUE_QUERY["mariadb"] = _STRUCTURE_UNIQUE_QUERY["mysql"]
+
+# CHECK clause texts on the destination table. Engines rewrite predicates
+# aggressively (``x IN ('a','b')`` -> ``x = ANY(ARRAY[...])``), so certification
+# matches by destination COLUMN COVERAGE (identifiers survive rewrites), never by
+# brittle predicate-string equality. NOT NULL system checks are excluded — they
+# are certified by the nullability probe, not here.
+_STRUCTURE_CHECK_QUERY: dict[str, str] = {
+    "postgresql": (
+        "SELECT cc.check_clause FROM information_schema.check_constraints cc "
+        "JOIN information_schema.table_constraints tc "
+        "  ON cc.constraint_schema = tc.constraint_schema "
+        " AND cc.constraint_name = tc.constraint_name "
+        "WHERE tc.table_schema = COALESCE(?, 'public') AND tc.table_name = ? "
+        "AND tc.constraint_type = 'CHECK'"
+    ),
+    "mysql": (
+        "SELECT cc.check_clause FROM information_schema.check_constraints cc "
+        "JOIN information_schema.table_constraints tc "
+        "  ON cc.constraint_schema = tc.constraint_schema "
+        " AND cc.constraint_name = tc.constraint_name "
+        "WHERE tc.table_schema = COALESCE(?, DATABASE()) AND tc.table_name = ? "
+        "AND tc.constraint_type = 'CHECK'"
+    ),
+    "sqlserver": (
+        "SELECT cc.definition FROM sys.check_constraints cc "
+        "JOIN sys.tables t ON t.object_id = cc.parent_object_id "
+        "JOIN sys.schemas s ON s.schema_id = t.schema_id "
+        "WHERE t.name = ? AND s.name = COALESCE(?, SCHEMA_NAME())"
+    ),
+    "oracle": (
+        "SELECT search_condition_vc FROM all_constraints "
+        "WHERE constraint_type = 'C' AND table_name = ? "
+        "AND owner = COALESCE(?, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))"
+    ),
+}
+_STRUCTURE_CHECK_QUERY["mariadb"] = _STRUCTURE_CHECK_QUERY["mysql"]
+
+
+def _structure_norm_dialect(dialect: str) -> str:
+    d = (dialect or "").lower().strip()
+    if d in {"postgres", "pg"}:
+        return "postgresql"
+    if d in {"mssql", "sql_server"}:
+        return "sqlserver"
+    if d == "mariadb":
+        return "mariadb"
+    return d
+
+
+def _structure_args(dialect: str, schema: str, table: str) -> tuple[Any, ...]:
+    dest = _structure_norm_dialect(dialect)
+    unquoted = str(table).strip().strip('"').strip("`").strip("[").strip("]")
+    schema_arg = (schema or "").strip() or None
+    if dest == "oracle":
+        unquoted = unquoted if unquoted != unquoted.lower() else unquoted.upper()
+        schema_arg = (schema_arg or "").upper() or None
+        return (unquoted, schema_arg)
+    if dest == "sqlite":
+        return (unquoted,)
+    if dest == "sqlserver":
+        return (unquoted, schema_arg)
+    # postgresql / mysql / mariadb: schema first, then table
+    return (schema_arg, unquoted)
+
+
+def _fetch_structure_set(
+    query_map: dict[str, str],
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> set[str] | None:
+    dest = _structure_norm_dialect(dialect)
+    query = query_map.get(dest)
+    if not query:
+        return None
+    try:
+        rows = fetchall(query, _structure_args(dialect, schema, table))
+    except Exception as exc:  # noqa: BLE001 — unknown keeps claim as unverified
+        logger.debug("structure catalog probe failed (%s): %s", dest, exc)
+        return None
+    out: set[str] = set()
+    for row in rows or []:
+        try:
+            name = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+        except Exception:
+            continue
+        if name is not None and str(name).strip():
+            out.add(str(name))
+    return out
+
+
+def _fetch_not_null_columns(
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> set[str] | None:
+    dest = _structure_norm_dialect(dialect)
+    query = _STRUCTURE_NULLABLE_QUERY.get(dest)
+    if not query:
+        return None
+    try:
+        rows = fetchall(query, _structure_args(dialect, schema, table))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("nullability catalog probe failed (%s): %s", dest, exc)
+        return None
+    not_null: set[str] = set()
+    for row in rows or []:
+        try:
+            if isinstance(row, dict):
+                vals = list(row.values())
+                name, flag = vals[0], vals[1]
+            else:
+                name, flag = row[0], row[1]
+        except Exception:
+            continue
+        flag_s = str(flag or "").strip().upper()
+        # Oracle uses Y/N; information_schema uses YES/NO.
+        if flag_s in {"NO", "N", "FALSE", "0"}:
+            not_null.add(str(name))
+    return not_null
+
+
+# Clock/boolean default synonyms treated as equivalent across dialects so a
+# faithfully-carried default is not falsely downgraded on cosmetic differences.
+_CLOCK_DEFAULTS = {
+    "current_timestamp", "current_timestamp()", "now()", "now", "getdate()",
+    "getutcdate()", "sysdate", "systimestamp", "localtimestamp",
+    "localtimestamp()", "statement_timestamp()", "transaction_timestamp()",
+    "clock_timestamp()", "sysdatetime()",
+}
+_TRUE_DEFAULTS = {"true", "t", "1", "b'1'"}
+_FALSE_DEFAULTS = {"false", "f", "0", "b'0'"}
+
+
+def _normalize_default_expr(expr: Any) -> str:
+    """Fold a catalog/planned default into a comparable literal.
+
+    Iteratively strips wrapping parens, trailing type casts (``'x'::text``,
+    ``'x'::character varying``), national/escape/bit/hex string-literal prefixes
+    (``N'x'``, ``E'x'``, ``B'1'``), and surrounding quotes to a fixed point — so
+    ``('active'::character varying)``, ``N'active'`` and ``active`` all unify —
+    then collapses clock precision (``current_timestamp(6)`` -> ``()``) and
+    casefolds.
+    """
+    s = str(expr if expr is not None else "").strip()
+    prev: str | None = None
+    while s and s != prev:
+        prev = s
+        if len(s) >= 2 and s[0] == "(" and s[-1] == ")":
+            s = s[1:-1].strip()
+            continue
+        stripped_cast = re.sub(r"::\s*[A-Za-z0-9_ \"\.\[\]]+\s*$", "", s).strip()
+        if stripped_cast != s:
+            s = stripped_cast
+            continue
+        prefix = re.match(r"^(?:[NnEeBbXx]|[Uu]&)(['\"].*)$", s)
+        if prefix:
+            s = prefix.group(1).strip()
+            continue
+        if len(s) >= 2 and s[0] in "'\"" and s[-1] == s[0]:
+            s = s[1:-1].strip()
+            continue
+    # current_timestamp(6) / localtimestamp(3) → drop precision for clock compare.
+    s = re.sub(r"\(\s*\d+\s*\)", "()", s)
+    return s.casefold()
+
+
+def _default_exprs_equivalent(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    if a in _CLOCK_DEFAULTS and b in _CLOCK_DEFAULTS:
+        return True
+    if a in _TRUE_DEFAULTS and b in _TRUE_DEFAULTS:
+        return True
+    if a in _FALSE_DEFAULTS and b in _FALSE_DEFAULTS:
+        return True
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return False
+
+
+def _claimed_default_literal(item: Any) -> str:
+    """Extract the planned default literal from an item's emitted DDL clause."""
+    ddl = str(getattr(item, "dest_ddl", "") or "")
+    m = re.search(r"default\s+(.+)$", ddl, re.IGNORECASE | re.DOTALL)
+    return _normalize_default_expr(m.group(1)) if m else ""
+
+
+def _fetch_default_exprs(
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> dict[str, str] | None:
+    """Map casefolded column name -> normalized default expression (or ""). ``None``
+    means the catalog could not be read (unverified, not proven absent)."""
+    dest = _structure_norm_dialect(dialect)
+    query = _STRUCTURE_DEFAULT_QUERY.get(dest)
+    if not query:
+        return None
+    try:
+        rows = fetchall(query, _structure_args(dialect, schema, table))
+    except Exception as exc:  # noqa: BLE001 — unknown keeps claim as unverified
+        logger.debug("default catalog probe failed (%s): %s", dest, exc)
+        return None
+    out: dict[str, str] = {}
+    for row in rows or []:
+        try:
+            if isinstance(row, dict):
+                vals = list(row.values())
+                name = vals[0]
+                expr = vals[1] if len(vals) > 1 else None
+            else:
+                name = row[0]
+                expr = row[1] if len(row) > 1 else None
+        except Exception:
+            continue
+        if name is None or not str(name).strip():
+            continue
+        out[str(name).strip().casefold()] = _normalize_default_expr(expr)
+    return out
+
+
+def _fetch_grouped_columns(
+    query_map: dict[str, str],
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> list[set[str]] | None:
+    """Group a (constraint/index-id, column) probe into per-constraint column
+    sets (casefolded). ``None`` means the catalog could not be read."""
+    dest = _structure_norm_dialect(dialect)
+    query = query_map.get(dest)
+    if not query:
+        return None
+    try:
+        rows = fetchall(query, _structure_args(dialect, schema, table))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("grouped structure probe failed (%s): %s", dest, exc)
+        return None
+    groups: dict[str, set[str]] = {}
+    for row in rows or []:
+        try:
+            if isinstance(row, dict):
+                vals = list(row.values())
+                gkey, col = vals[0], (vals[1] if len(vals) > 1 else None)
+            else:
+                gkey, col = row[0], (row[1] if len(row) > 1 else None)
+        except Exception:
+            continue
+        if col is None or not str(col).strip():
+            continue
+        groups.setdefault(str(gkey), set()).add(str(col).strip().casefold())
+    return list(groups.values())
+
+
+def _extract_sqlite_checks(ddl: str) -> list[str]:
+    """Pull balanced ``CHECK (...)`` clauses out of a SQLite CREATE TABLE text.
+
+    SQLite exposes no catalog view for CHECKs; ``sqlite_master.sql`` is the only
+    source of truth. Predicates may nest parens (``CHECK (a IN (1,2))``), so a
+    depth counter is used rather than a regex. String literals (and the parens
+    inside them, e.g. ``DEFAULT 'check (1)'``) are skipped so a literal is never
+    mistaken for a CHECK clause.
+    """
+    out: list[str] = []
+    n = len(ddl)
+    i = 0
+    while i < n:
+        ch = ddl[i]
+        if ch == "'":
+            # skip a single-quoted string literal (handles '' escape)
+            i += 1
+            while i < n:
+                if ddl[i] == "'":
+                    if i + 1 < n and ddl[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+            continue
+        if ch == '"':
+            i += 1
+            while i < n and ddl[i] != '"':
+                i += 1
+            i += 1
+            continue
+        if (ch in "cC") and ddl[i : i + 5].lower() == "check":
+            before_ok = i == 0 or not (ddl[i - 1].isalnum() or ddl[i - 1] == "_")
+            k = i + 5
+            while k < n and ddl[k].isspace():
+                k += 1
+            if before_ok and k < n and ddl[k] == "(":
+                depth = 0
+                start = k
+                in_lit = False
+                while k < n:
+                    c = ddl[k]
+                    if in_lit:
+                        if c == "'":
+                            if k + 1 < n and ddl[k + 1] == "'":
+                                k += 2
+                                continue
+                            in_lit = False
+                        k += 1
+                        continue
+                    if c == "'":
+                        in_lit = True
+                    elif c == "(":
+                        depth += 1
+                    elif c == ")":
+                        depth -= 1
+                        if depth == 0:
+                            out.append(ddl[start : k + 1])
+                            k += 1
+                            break
+                    k += 1
+                i = k
+                continue
+        i += 1
+    return out
+
+
+# Tokens engine rewrites inject that are implausible as unquoted column names
+# (``= ANY(ARRAY[...])``, ``CAST(x AS ...)``). Cast *type* names like ``text`` are
+# handled by stripping ``::type`` from the clause blob, so real columns named
+# after a type are still certifiable.
+_CHECK_NOISE_TOKENS = {"any", "all", "array", "cast", "as"}
+
+
+def _pure_not_null_clause(clause: str) -> bool:
+    """A clause that is only ``<col> IS NOT NULL`` — engine NOT NULL echo, owned
+    by the nullability probe, not a real CHECK."""
+    t = re.sub(r"[\"'`\[\]\s()]", "", str(clause or "")).casefold()
+    return bool(re.fullmatch(r"[a-z0-9_.$#]+isnotnull", t))
+
+
+def _strip_check_type_noise(text: str) -> str:
+    """Remove rewrite noise so a column named ``text``/``age`` is not matched by a
+    ``::text`` cast token or by a value inside a string literal.
+
+    Strips ``::type`` and ``CAST(... AS type)`` casts and blanks single-quoted
+    string-literal contents (``note = 'age'`` must not certify a CHECK on ``age``).
+    """
+    s = str(text or "")
+    s = re.sub(r"'(?:[^']|'')*'", " '' ", s)  # blank literal contents
+    s = re.sub(r"::\s*[A-Za-z0-9_ \"\.\[\]]+", " ", s)  # ::type casts
+    s = re.sub(r"\bas\s+[A-Za-z_][A-Za-z0-9_]*", " ", s, flags=re.IGNORECASE)  # CAST(x AS type)
+    return s
+
+
+def _fetch_check_clauses(
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> list[str] | None:
+    """Destination CHECK clause texts. ``None`` means the catalog could not be
+    read (unverified); ``[]`` means the table was read and has no CHECKs."""
+    dest = _structure_norm_dialect(dialect)
+    if dest == "sqlite":
+        try:
+            rows = fetchall(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+                _structure_args(dialect, schema, table),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("sqlite check probe failed: %s", exc)
+            return None
+        ddl = ""
+        for row in rows or []:
+            val = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+            if val:
+                ddl = str(val)
+                break
+        if not ddl:
+            return None  # table not found → unverified, not "no checks"
+        return [c for c in _extract_sqlite_checks(ddl) if not _pure_not_null_clause(c)]
+
+    query = _STRUCTURE_CHECK_QUERY.get(dest)
+    if not query:
+        return None
+    try:
+        rows = fetchall(query, _structure_args(dialect, schema, table))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("check catalog probe failed (%s): %s", dest, exc)
+        return None
+    out: list[str] = []
+    for row in rows or []:
+        try:
+            val = row[0] if not isinstance(row, dict) else next(iter(row.values()))
+        except Exception:
+            continue
+        if val is not None and str(val).strip() and not _pure_not_null_clause(val):
+            out.append(str(val))
+    return out
+
+
+def certify_structure_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> None:
+    """Settle PK / NOT NULL / DEFAULT / UNIQUE from the destination catalog.
+
+    Plan-time ``status=carried`` only means DDL was *emitted*. Client cutover
+    requires the destination itself to report the constraint — same bar as
+    identity and placement certification.
+    """
+    if plan is None or not plan.report.items:
+        return
+
+    aspects = {"primary_key", "not_null", "default", "unique", "check"}
+    claimed = [i for i in plan.report.items if i.aspect in aspects and i.status == "carried"]
+    if not claimed:
+        return
+
+    pk_cols = _fetch_structure_set(
+        _STRUCTURE_PK_QUERY,
+        dialect=dialect,
+        schema=schema,
+        table=table,
+        fetchall=fetchall,
+    )
+    nn_cols = _fetch_not_null_columns(
+        dialect=dialect, schema=schema, table=table, fetchall=fetchall
+    )
+    default_exprs = _fetch_default_exprs(
+        dialect=dialect, schema=schema, table=table, fetchall=fetchall
+    )
+    unique_groups = _fetch_grouped_columns(
+        _STRUCTURE_UNIQUE_QUERY,
+        dialect=dialect,
+        schema=schema,
+        table=table,
+        fetchall=fetchall,
+    )
+    # CHECK certification only runs when a CHECK was actually carried.
+    want_check = any(i.aspect == "check" for i in claimed)
+    check_clauses = (
+        _fetch_check_clauses(dialect=dialect, schema=schema, table=table, fetchall=fetchall)
+        if want_check
+        else None
+    )
+    dest_cols_universe = {
+        str(c).strip().casefold()
+        for c in (getattr(plan, "dest_columns", None) or [])
+        if str(c).strip()
+    }
+
+    for item in claimed:
+        if item.aspect == "primary_key":
+            expected = {
+                c.strip().casefold()
+                for c in str(item.name or "").split(",")
+                if c.strip()
+            }
+            if pk_cols is None:
+                item.status = "unknown"
+                item.reason = (
+                    "The destination catalog could not be read after CREATE, so the "
+                    "PRIMARY KEY is unverified. Emitted DDL is not proof. "
+                    f"Would have: {item.reason}"
+                )
+            else:
+                present_pk = {str(c).strip().casefold() for c in pk_cols}
+                # Exact key shape: a wider or narrower live key is not the claimed
+                # contract (case-insensitive to satisfy folding dialects).
+                if expected and expected != present_pk:
+                    item.status = "unsupported"
+                    item.reason = (
+                        "The destination did not take the exact PRIMARY KEY: "
+                        f"catalog reports {sorted(present_pk) or 'none'}, expected "
+                        f"{sorted(expected)}. Attempted: {item.dest_ddl or 'PRIMARY KEY'}."
+                    )
+                    item.dest_ddl = ""
+                else:
+                    item.reason = (
+                        "PRIMARY KEY verified on the destination catalog after CREATE."
+                    )
+            continue
+
+        folded_name = str(item.name or "").casefold()
+
+        if item.aspect == "default":
+            if default_exprs is None:
+                item.status = "unknown"
+                item.reason = (
+                    "The destination catalog could not be read after CREATE, so "
+                    f"DEFAULT on {item.name!r} is unverified. Emitted DDL is not "
+                    f"proof. Would have: {item.reason}"
+                )
+                continue
+            catalog_expr = default_exprs.get(folded_name)
+            if catalog_expr is None:
+                item.status = "unsupported"
+                item.reason = (
+                    f"The destination did not take a DEFAULT on {item.name!r}. "
+                    f"Attempted: {item.dest_ddl or 'DEFAULT'}."
+                )
+                item.dest_ddl = ""
+                continue
+            claimed_lit = _claimed_default_literal(item)
+            if (
+                claimed_lit
+                and catalog_expr
+                and not _default_exprs_equivalent(claimed_lit, catalog_expr)
+            ):
+                item.status = "unsupported"
+                item.reason = (
+                    f"The destination DEFAULT on {item.name!r} differs from the plan: "
+                    f"catalog has {catalog_expr!r}, planned {claimed_lit!r}."
+                )
+                item.dest_ddl = ""
+            elif claimed_lit and catalog_expr:
+                item.reason = (
+                    "DEFAULT value verified on the destination catalog after CREATE."
+                )
+            else:
+                # A default is present but the exact literal could not be parsed
+                # for value comparison — presence verified, value asserted only.
+                item.reason = (
+                    "A DEFAULT is present on the destination column (value "
+                    "expression not compared)."
+                )
+            continue
+
+        if item.aspect == "unique":
+            if unique_groups is None:
+                item.status = "unknown"
+                item.reason = (
+                    "The destination catalog could not be read after CREATE, so "
+                    f"UNIQUE on {item.name!r} is unverified. Emitted DDL is not "
+                    f"proof. Would have: {item.reason}"
+                )
+                continue
+            want = {
+                c.strip().casefold()
+                for c in str(item.name or "").split(",")
+                if c.strip()
+            }
+            if want and not any(want == g for g in unique_groups):
+                item.status = "unsupported"
+                item.reason = (
+                    f"The destination did not take the UNIQUE key {sorted(want)}. "
+                    f"Attempted: {item.dest_ddl or 'UNIQUE'}."
+                )
+                item.dest_ddl = ""
+            else:
+                item.reason = (
+                    "UNIQUE constraint verified on the destination catalog after CREATE."
+                )
+            continue
+
+        if item.aspect == "check":
+            if check_clauses is None:
+                item.status = "unknown"
+                item.reason = (
+                    "The destination catalog could not be read after CREATE, so the "
+                    f"CHECK {item.name!r} is unverified. Emitted DDL is not proof. "
+                    f"Would have: {item.reason}"
+                )
+                continue
+            if not check_clauses:
+                item.status = "unsupported"
+                item.reason = (
+                    f"The destination did not take the CHECK {item.name!r}: the "
+                    "catalog reports no CHECK constraints on the table. "
+                    f"Attempted: {item.dest_ddl or 'CHECK'}."
+                )
+                item.dest_ddl = ""
+                continue
+            # Column-coverage match: engines rewrite the predicate but preserve
+            # column identifiers. Every destination column the carried predicate
+            # constrains must appear in the union of the live CHECK clauses. Cast
+            # type suffixes and injected keyword tokens are stripped first so a
+            # column named ``text``/``any`` is not matched by rewrite noise.
+            predicate_text = _strip_check_type_noise(
+                f"{item.dest_ddl or ''} {item.source_detail or ''}"
+            ).casefold()
+            referenced = {
+                col
+                for col in dest_cols_universe
+                if col not in _CHECK_NOISE_TOKENS
+                and re.search(rf"(?<![A-Za-z0-9_]){re.escape(col)}(?![A-Za-z0-9_])", predicate_text)
+            }
+            clause_blob = _strip_check_type_noise(" ".join(check_clauses)).casefold()
+            missing = {
+                col
+                for col in referenced
+                if not re.search(
+                    rf"(?<![A-Za-z0-9_]){re.escape(col)}(?![A-Za-z0-9_])", clause_blob
+                )
+            }
+            if referenced and missing:
+                item.status = "unsupported"
+                item.reason = (
+                    f"The destination did not take the CHECK on {sorted(missing)}: "
+                    "no live CHECK constraint references "
+                    f"{'these columns' if len(missing) > 1 else 'this column'}. "
+                    f"Attempted: {item.dest_ddl or 'CHECK'}."
+                )
+                item.dest_ddl = ""
+            elif referenced:
+                item.reason = (
+                    "CHECK verified present on the destination catalog after CREATE "
+                    "(column coverage confirmed; engines may rewrite the predicate "
+                    "text, so exact-expression equivalence is not asserted)."
+                )
+            else:
+                # A CHECK exists on the table, but the carried predicate's columns
+                # could not be resolved against the destination catalog — coverage
+                # is unproven, so this is unknown, never a green carried claim.
+                item.status = "unknown"
+                item.reason = (
+                    "A CHECK constraint is present on the destination table but the "
+                    "carried predicate's columns could not be matched to certify "
+                    "coverage. Emitted DDL is not proof."
+                )
+            continue
+
+        # not_null — single-column membership (casefolded)
+        observed = nn_cols
+        label = "NOT NULL"
+        if observed is None:
+            item.status = "unknown"
+            item.reason = (
+                f"The destination catalog could not be read after CREATE, so {label} "
+                f"on {item.name!r} is unverified. Emitted DDL is not proof. "
+                f"Would have: {item.reason}"
+            )
+            continue
+        present = {c.casefold() for c in observed}
+        if folded_name and folded_name not in present:
+            item.status = "unsupported"
+            item.reason = (
+                f"The destination did not take {label} on {item.name!r}. "
+                f"Attempted: {item.dest_ddl or label}."
+            )
+            item.dest_ddl = ""
+        else:
+            item.reason = (
+                f"{label} verified on the destination catalog after CREATE."
+            )
 
 
 def apply_post_create_sql(

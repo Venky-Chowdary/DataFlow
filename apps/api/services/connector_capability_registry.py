@@ -278,16 +278,24 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_upsert": True,
         "supports_append": True,
         "supports_overwrite": True,
-        "supports_merge": True,
+        # Document $set upsert / bulk_write — not SQL MERGE / Iceberg CoW MERGE.
+        "supports_merge": False,
+        # Application-level `_df_lsn` compare when the column is present — not a
+        # MongoDB server LSN API. CDC delivery remains at-least-once.
         "supports_lsn_guard": True,
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "cdc_prerequisites": "Query-based CDC requires a monotonic cursor field. Log-based CDC uses MongoDB Change Streams; requires a replica set or MongoDB Atlas cluster.",
+        "cdc_prerequisites": (
+            "Query-based CDC requires a monotonic cursor field. Log-based CDC "
+            "uses MongoDB Change Streams (at-least-once); requires a replica set "
+            "or MongoDB Atlas cluster. Exactly-once is not claimed."
+        ),
         "common_issues": [
             "Only the '_id' field is a hard primary key; other identifier fields may repeat.",
             "Decimal128 should be preserved for money; do not cast to float.",
             "ObjectId strings may be mapped as plain strings unless explicitly cast.",
+            "Insert without conflict columns is at-least-once and may duplicate on retry.",
         ],
         "recommended_batch_size": 2000,
     },

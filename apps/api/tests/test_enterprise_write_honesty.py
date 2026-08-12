@@ -15,8 +15,10 @@ from services.migration_risk_contract import (
 from services.primary_key import pick_dynamodb_identity_column, resolve_identity_key
 from src.transfer.connector_capabilities import (
     TRANSFER_READY_CATALOG_IDS,
+    enrich_catalog_entry,
     get_capabilities,
     resolve_driver_type,
+    transfer_ready,
 )
 
 
@@ -321,6 +323,9 @@ def test_transfer_ready_excludes_preflight_false_sftp_email() -> None:
         driver = resolve_driver_type(cid)
         caps = get_capabilities(driver, cid)
         assert caps.get("preflight") is False
+        assert transfer_ready(caps) is False
+        enriched = enrich_catalog_entry({"id": cid, "status": "live"})
+        assert enriched.get("transfer_ready") is False
 
 
 def test_transfer_ready_ids_require_preflight_when_not_file() -> None:
