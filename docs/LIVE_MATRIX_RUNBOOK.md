@@ -163,12 +163,26 @@ reported, not regressions:
   The remaining Pilot → Mongo confirm failure is this, and it wants a signed
   Risk Contract rather than a code change. (`DECIMAL(p,s)` into Mongo is no
   longer flagged — see the Decimal128 fix below.)
+* **PostgreSQL bare `NUMERIC` → DynamoDB** is the same case as the MySQL one
+  below: the matrix source is an unqualified `DECIMAL`, PostgreSQL creates it
+  unbounded, and DynamoDB's `N` holds 38 significant digits. It only became
+  visible once DynamoDB routes were given an endpoint to run against.
 * **PostgreSQL bare `NUMERIC` → MySQL** is refused for the same reason. The
   matrix seeds `amount` as an unqualified `DECIMAL`, which PostgreSQL creates as
   `numeric` with no precision — unbounded to 131072 digits — while MySQL tops
   out at `DECIMAL(65,30)` and the invent is `DECIMAL(38,15)`. Passing this would
   mean sizing the carrier from sampled values, which is exactly the invent the
   declared-domain rule forbids, so the honest outcome is a Risk Contract.
+
+### Open: reading DynamoDB as a source raises before any row moves
+
+`dynamodb → *` routes fail with `unsupported format string passed to
+NoneType.__format__`, recorded against the preflight phase. Writing to DynamoDB
+works, and `read_source_database` against the same table returns rows and types
+when called directly, so the defect is in the route rather than the driver — a
+`None` reaches a numeric format specifier (`{x:,}`) somewhere between them. The
+matrix skips these routes with that reason rather than reporting a red engine
+for a fault nobody has located yet.
 
 ### Open: auto-map does not align to a discovered document schema
 
