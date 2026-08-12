@@ -87,10 +87,14 @@ def introspect_endpoint(
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
             if not _mark_table_listed_if_present(out, endpoint.table):
-                # Explicit missing — Transfer Studio create-new (do not leave null).
+                # Absence from a bounded page is a hint, not proof. The SQL path
+                # below re-checks the specific table and is what Validate trusts;
+                # create-on-write is CREATE IF NOT EXISTS, so guessing "new" here
+                # is recoverable where refusing to answer would strand the run.
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out

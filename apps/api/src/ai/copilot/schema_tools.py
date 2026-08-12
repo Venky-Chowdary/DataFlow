@@ -348,7 +348,8 @@ def list_connector_objects(
                 name = str(obj).strip()
             if name:
                 objects.append(name)
-        objects = objects[: max(1, min(int(limit or 100), 500))]
+        total = len(objects)
+        objects = objects[: max(1, int(limit or 100))]
         return _tool_result(
             "list_connector_objects",
             success=True,
@@ -359,6 +360,13 @@ def list_connector_objects(
                 "connected": bool(info.get("connected")),
                 "objects": objects,
                 "count": len(objects),
+                # Callers that resolve a name against this list need to know the
+                # difference between "not on this connector" and "not in the page
+                # I was shown" — a schema with more objects than the display limit
+                # is ordinary, and treating the window as the whole inventory
+                # reports existing tables as missing.
+                "total": total,
+                "truncated": total > len(objects) or bool(info.get("objects_truncated")),
                 "message": info.get("message") or "",
                 "database": conn.get("database"),
                 "schema": conn.get("schema"),

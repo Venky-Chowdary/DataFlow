@@ -563,6 +563,18 @@ def _run_preflight(
             "blockers": [{"id": "preflight", "message": f"Preflight could not run: {exc}"}],
         }
 
+    # Confirm is gated on the proof bundle's transfer_decision, so the slim
+    # projection has to carry it. Dropping it did not make Confirm stricter, it
+    # made the decision unreadable: _transfer_decision saw nothing and every run
+    # fell back to "review", so no Pilot transfer could ever be confirmed however
+    # clean it was. Only the decision travels; the rest of the bundle stays out
+    # of the chat payload.
+    proof_bundle = result.get("proof_bundle")
+    decision = (
+        (proof_bundle or {}).get("transfer_decision")
+        if isinstance(proof_bundle, dict)
+        else None
+    )
     return {
         "run_id": result.get("run_id"),
         "passed": bool(result.get("passed")),
@@ -578,6 +590,7 @@ def _run_preflight(
             for b in (result.get("blockers") or [])
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
+        "proof_bundle": {"transfer_decision": decision} if isinstance(decision, dict) else {},
     }
 
 
