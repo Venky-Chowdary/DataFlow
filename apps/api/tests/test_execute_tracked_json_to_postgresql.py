@@ -98,15 +98,20 @@ def test_json_to_postgresql_preserves_types(fmt: str, content_fn):
     assert len(rows) == 3
     assert rows[0][0] == 1
     assert rows[0][2] == "hello"
-    assert rows[0][3] == datetime(2024, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
+    # The source wrote "2024-01-15T00:00:00" — no Z, no offset. Landing that as
+    # TIMESTAMPTZ would invent a zone the source never declared and silently
+    # bind the value to the server's clock; see test_json_tz_aware_source_carries
+    # _timestamptz for the paired case where the source does declare one.
+    assert rows[0][3] == datetime(2024, 1, 15, 0, 0, 0)
+    assert rows[0][3].tzinfo is None
     assert rows[0][4] is True
     assert rows[1][0] == 2
     assert rows[1][2] is None
-    assert rows[1][3] == datetime(2024, 2, 28, 14, 30, 0, tzinfo=timezone.utc)
+    assert rows[1][3] == datetime(2024, 2, 28, 14, 30, 0)
     assert rows[1][4] is False
     assert rows[2][0] == 3
     assert rows[2][2] == "null"
-    assert rows[2][3] == datetime(2024, 3, 1, 0, 0, 0, tzinfo=timezone.utc)
+    assert rows[2][3] == datetime(2024, 3, 1, 0, 0, 0)
     assert rows[2][4] is True
     # Postgres returns numeric columns as Decimal; float them for comparison.
     assert float(rows[0][1]) == pytest.approx(1000.0)
@@ -119,3 +124,63 @@ def test_json_to_postgresql_preserves_types(fmt: str, content_fn):
     assert _json(rows[0][6]) == '["a", "b"]'
     assert _json(rows[1][6]) is None
     assert _json(rows[2][6]) == '[]'
+
+
+def test_json_tz_aware_source_carries_timestamptz():
+    """A declared offset must survive; only an undeclared one may not be invented.
+
+    Paired with the naive assertions above: together they pin both directions of
+    TZ polarity, so neither a dropped offset nor an invented UTC can pass.
+    """
+    try:
+        with socket.create_connection(("localhost", 5432), timeout=1):
+            pass
+    except OSError:
+        pytest.skip("PostgreSQL not reachable on localhost:5432")
+
+    table_name = f"json_pg_tz_{uuid.uuid4().hex[:8]}"
+    rows = [
+        {"id": "1", "created": "2024-01-15T00:00:00Z"},
+        {"id": "2", "created": "2024-02-28T14:30:00+05:30"},
+    ]
+
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="json"),
+        source_filename="sample.json",
+        source_content=_json_bytes(rows),
+        destination=_pg_destination(table_name),
+        sync_mode="full_refresh_overwrite",
+        stream_contracts=[{
+            "name": "events",
+            "sync_mode": "full_refresh_overwrite",
+            "primary_key": "id",
+            "selected": True,
+        }],
+        skip_preflight=True,
+    )
+
+    result = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
+    assert result.success is True, result.error
+
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host="localhost", port=5432, database="dataflow",
+        user="dataflow", password="dataflow",
+    )
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_name = %s AND column_name = 'created'",
+        (table_name,),
+    )
+    data_type = (cur.fetchone() or [""])[0]
+    cur.execute(f'SELECT id, created FROM public."{table_name}" ORDER BY id')
+    stored = cur.fetchall()
+    conn.close()
+
+    assert data_type == "timestamp with time zone", data_type
+    assert stored[0][1] == datetime(2024, 1, 15, 0, 0, 0, tzinfo=timezone.utc)
+    # 14:30+05:30 is the same instant as 09:00Z; the offset may be normalized,
+    # the instant may not move.
+    assert stored[1][1] == datetime(2024, 2, 28, 9, 0, 0, tzinfo=timezone.utc)
