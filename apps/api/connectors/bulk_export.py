@@ -122,8 +122,16 @@ def iter_postgresql_copy_batches(
                     sch=sql.Identifier(schema),
                     tbl=sql.Identifier(table),
                 )
+            # TEXT rather than CSV. In CSV, PostgreSQL writes SQL NULL as a bare
+            # \N and a literal "\N" string quoted — but csv.reader strips the
+            # quoting, so both arrive here as the same characters and a real \N
+            # value would be read as NULL. TEXT escapes instead of quoting, so a
+            # literal backslash comes through doubled and the null marker is
+            # unambiguous. It is also the exact inverse of the writer's
+            # _copy_text_value, which keeps one escaping contract for both
+            # directions.
             copy_sql = sql.SQL(
-                "COPY ({select}) TO STDOUT WITH (FORMAT csv, HEADER true, NULL '\\N')"
+                "COPY ({select}) TO STDOUT WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
             ).format(select=select)
 
             # psycopg2's copy_expert writes the whole result into the file object
@@ -137,19 +145,21 @@ def iter_postgresql_copy_batches(
             with tempfile.SpooledTemporaryFile(max_size=_COPY_SPILL_BYTES) as raw:
                 cur.copy_expert(copy_sql.as_string(cur), raw)
                 raw.seek(0)
-                buf = io.TextIOWrapper(raw, encoding="utf-8", newline="")
-                reader = csv.reader(buf)
-                try:
-                    headers = next(reader)
-                except StopIteration:
-                    yield ReadBatch(headers=columns or [], rows=[], offset=0, total_rows=0)
-                    return
+                buf = io.TextIOWrapper(raw, encoding="utf-8", newline="\n")
+                # TEXT format has no header line; the SELECT already fixed the
+                # column order, so use the caller's names.
+                headers = list(columns or [])
+                if not headers:
+                    headers = [d[0] for d in (cur.description or [])]
 
                 page: list[list[str]] = []
                 offset = 0
                 total = 0
-                for row in reader:
-                    page.append([_copy_cell(c) for c in row])
+                for line in buf:
+                    line = line.rstrip("\n")
+                    if not line:
+                        continue
+                    page.append([_copy_cell(c) for c in line.split("\t")])
                     total += 1
                     if len(page) >= batch_rows:
                         yield ReadBatch(
@@ -174,22 +184,52 @@ def iter_postgresql_copy_batches(
             pass
 
 
+#: COPY TEXT backslash escapes, longest first so ``\\`` is consumed before the
+#: single-character forms and a literal backslash cannot start a false escape.
+_COPY_TEXT_UNESCAPES = (
+    ("\\\\", "\\"),
+    ("\\t", "\t"),
+    ("\\n", "\n"),
+    ("\\r", "\r"),
+    ("\\b", "\b"),
+    ("\\f", "\f"),
+    ("\\v", "\v"),
+)
+
+
 def _copy_cell(raw: str) -> str:
-    """Map a COPY CSV field to the transfer wire string.
+    """Map one COPY TEXT field to the transfer wire string.
 
     The keyset/OFFSET readers emit ``SQL_NULL_SENTINEL`` for SQL NULL via
     ``cell_to_string(preserve_sql_null=True)``, so returning ``""`` here made
     enabling ``DATAFLOW_BULK_EXPORT`` quietly change what a NULL means: the
-    destination saw an empty string, wrote one into a nullable column, and the
-    checksum diverged from a keyset read of the same table. COPY CSV writes the
-    unquoted token ``\\N`` for NULL and ``""`` for an empty string, so the two
-    stay distinguishable here.
+    destination wrote an empty string into a nullable column and the checksum
+    diverged from a keyset read of the same table.
+
+    An unescaped ``\\N`` is that NULL. A column holding the literal characters
+    ``\\N`` arrives doubled as ``\\\\N``, which is why this reads TEXT rather
+    than CSV — CSV distinguishes the two by quoting, and ``csv.reader`` strips
+    quoting before anything here could tell them apart.
     """
     from services.value_serializer import SQL_NULL_SENTINEL
 
-    if raw == r"\N":
+    if raw == "\\N":
         return SQL_NULL_SENTINEL
-    return raw
+    if "\\" not in raw:
+        return raw
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        pair = raw[i : i + 2]
+        for token, plain in _COPY_TEXT_UNESCAPES:
+            if pair == token:
+                out.append(plain)
+                i += 2
+                break
+        else:
+            out.append(raw[i])
+            i += 1
+    return "".join(out)
 
 
 def read_snowflake_unload_batch(**_kwargs: Any) -> ReadBatch:
