@@ -299,6 +299,34 @@ identity is counted across a real scan.
 
 **40 DynamoDB matrix routes now execute, up from 18.**
 
+## Still open on the four named connectors
+
+Two of the four are done above. The other two are not, and the reasons differ:
+
+**Snowflake** fails `test_postgresql_to_snowflake_typed_preflight_on` because
+`fakesnow` has no `GRANTS` catalog, so G2 cannot prove CREATE and refuses
+create-new. That refusal is the product being right — against real Snowflake
+`SHOW GRANTS` works — so the gap is proof infrastructure, not engine behaviour.
+The route can be proven locally on the *existing-table* path, where connectivity
+carries write and no CREATE privilege is needed; create-new privilege proof
+needs a real account.
+
+**Salesforce** already declares `introspect` and `preflight` and sits in
+`PRODUCTION_SKU`, but its routes are credential-gated and skip here, so the
+declaration rests on unit tests rather than a live run. The same in-process
+approach used for SFTP applies — a local HTTP double for the REST/Bulk API
+would make the routes executable without a tenant.
+
+**BigQuery sparse upsert attributes quarantine to the wrong row.**
+`_bq_apply_sparse_upsert` numbers rejects by their index inside `sparse_rows`
+(0-based), while every other path reports `row_offset + i + 1` against the
+source batch. The row is still quarantined and surfaced with its reason and a
+value sample, so nothing is lost silently, but an operator replaying the DLQ is
+pointed at the wrong record. Fixing it properly means threading source indices
+through `split_dense_sparse_rows` and the bind helper, both shared by other
+writers — the same shape as the Airtable alignment fix, and deliberately not
+half-done here.
+
 ## What would move the needle
 
 In order of how much unproven surface each closes:
