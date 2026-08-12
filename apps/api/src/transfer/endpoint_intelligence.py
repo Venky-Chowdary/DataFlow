@@ -586,7 +586,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             result = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
             batch = result[0] if isinstance(result, tuple) else result
             out["columns"] = batch.headers
-            out["schema"] = {c: "string" for c in batch.headers}
+            out["schema"] = _schema_from_batch(batch)
             out["row_estimate"] = (batch.total_rows or 0)
             # Redis namespaces are logical key prefixes — an empty SCAN is not
             # proof the destination is missing (would falsely flip Map create-new).
@@ -607,7 +607,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if bucket and key:
                 batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 out["columns"] = batch.headers
-                out["schema"] = {c: "string" for c in batch.headers}
+                out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
@@ -621,7 +621,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if bucket and key:
                 batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 out["columns"] = batch.headers
-                out["schema"] = {c: "string" for c in batch.headers}
+                out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
@@ -668,7 +668,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     if batch.headers:
                         out["columns"] = out.get("columns") or batch.headers
                         if not out.get("schema"):
-                            out["schema"] = {c: "string" for c in batch.headers}
+                            out["schema"] = _schema_from_batch(batch)
                         out["table_exists"] = True
                         if not out.get("row_estimate"):
                             out["row_estimate"] = batch.total_rows or len(batch.rows)
@@ -704,7 +704,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 result = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
                 batch = result[0] if isinstance(result, tuple) else result
                 out["columns"] = batch.headers
-                out["schema"] = {c: "string" for c in batch.headers}
+                out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
                 # Empty indexes still exist — row count must not drive create-new.
                 if exists is True or (batch.headers and exists is not False):
@@ -849,6 +849,28 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         logger.warning(
             "schema probe failed for %s table=%s: %s", fmt, endpoint.table, e, exc_info=e
         )
+
+
+def _schema_from_batch(batch: Any) -> dict[str, str]:
+    """Column types for a source that has no catalog to declare them.
+
+    Object stores, Redis and index sinks answer "what columns are here" from the
+    payload itself, so a bare ``string`` per header is a placeholder, not a
+    declaration. It was treated as one downstream: ``endpoint_source_column_types``
+    hands this to ``reconcile_source_types`` as the *declared* schema, which
+    outranks the reader's own inference by design — right for a relational
+    catalog, wrong here, and the result was that an S3 CSV landed three ``text``
+    columns where the identical upload landed ``bigint``/``numeric``/``date``.
+
+    Readers that can type their rows report it through ``meta['native_types']``.
+    Where a reader cannot, the placeholder stands and nothing changes.
+    """
+    headers = list(getattr(batch, "headers", None) or [])
+    meta = getattr(batch, "meta", None)
+    native = meta.get("native_types") if isinstance(meta, dict) else None
+    if isinstance(native, dict) and native:
+        return {c: str(native.get(c) or "string") for c in headers}
+    return {c: "string" for c in headers}
 
 
 def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 100) -> None:
