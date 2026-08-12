@@ -99,6 +99,11 @@ Total 1,156. `PRODUCTION_SKU` commits 75 of these to CI proof.
 13551 passed, 14 failed, 1062 skipped
 ```
 
+A fifteenth, `test_live_cross_engine_confirm_moves_every_row_intact[postgres_to_mysql]`,
+fails intermittently under `-n 4` and passes in isolation: the Pilot wave93
+fixtures share MySQL table names across workers. Re-run it alone before treating
+it as a defect.
+
 The remaining failures are live-path defects that the skipping suite never
 reported, not regressions:
 
