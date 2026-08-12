@@ -192,36 +192,18 @@ def infer_logical_from_native(value: Any) -> str | None:
     return "VARCHAR"
 
 
-#: Numeric carriers ordered narrow → wide. Mixing any of them is safe: the
-#: widest one holds every value the others could.
-_NUMERIC_WIDENING: Final[tuple[str, ...]] = ("BOOLEAN", "INTEGER", "DECIMAL", "FLOAT")
-
-
 def widen_logical_votes(votes: dict[str, int]) -> str:
     """Resolve one column type from the per-value types observed in a page.
 
     DynamoDB is schemaless past its keys, so a column's type is whatever its
-    items happen to hold. That answer must **widen** to cover every value seen,
-    not pick the most common one: taking the majority typed a column of 999
-    integers and one ``2000.50`` as INTEGER, and the write then failed that row
-    with "Invalid integer" — the more rows a table had, the more certain it was
-    that the minority value would be mistyped.
-
-    Mixed families do not unify, so they land on text, which holds every
-    serialization without loss. That is a widening too, never a narrowing.
+    items happen to hold, and that answer has to hold *every* value rather than
+    the most common one. The lattice in :mod:`services.type_lattice` owns that
+    rule for every schemaless source; this only supplies what Dynamo saw and
+    names the fallback for an attribute whose values were all null.
     """
-    kinds = {k for k, count in votes.items() if count and k}
-    if not kinds:
-        return "VARCHAR"
-    if len(kinds) == 1:
-        return next(iter(kinds))
-    if kinds <= set(_NUMERIC_WIDENING):
-        return max(kinds, key=_NUMERIC_WIDENING.index)
-    if kinds <= {"VARCHAR", "TEXT"}:
-        return "TEXT" if "TEXT" in kinds else "VARCHAR"
-    if kinds <= {"JSON", "ARRAY"}:
-        return "JSON"
-    return "TEXT"
+    from services.type_lattice import resolve_observed_types
+
+    return resolve_observed_types(votes) or "VARCHAR"
 
 
 def _cell(value: Any) -> str:
