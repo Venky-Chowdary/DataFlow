@@ -299,33 +299,101 @@ identity is counted across a real scan.
 
 **40 DynamoDB matrix routes now execute, up from 18.**
 
+## Observed types are a join, not a vote
+
+A column's type in a schemaless source is whatever its values are, and four
+connectors answered that question independently — DynamoDB, MongoDB, Redis and
+the Mongo writer. All of them **voted**, and a vote is the wrong operation: 999
+integers and one `2000.50` resolved to INTEGER, and that row then failed the
+write. The defect scaled the wrong way, because the more rows a table had, the
+more certain it was that the minority value would be mistyped.
+
+`services/type_lattice.py` now owns the rule as disjoint chains under a common
+top, which makes the join commutative, idempotent and associative.
+Associativity is load-bearing rather than decorative: sources are read in pages,
+so the type is folded across batches, and an order-dependent operation would
+answer differently for the same table read in one page or three.
+
+Having one owner fixed two more instances of the same defect:
+
+* Mongo promoted `INTEGER+DECIMAL` and `DATE+TIMESTAMP` but nothing else, so
+  `INTEGER+FLOAT` still went to the majority. That path is shared by the Mongo
+  introspect, the Mongo writer and the Redis writer.
+* The pairwise Mongo helper ranked carriers by "specificity", which is not an
+  ordering that holds values: BINARY outranked INTEGER, so a field with both
+  resolved to BINARY, which holds neither.
+
+Mongo keeps its own policies, because they answer a different question. Whether
+a text value among typed ones is a sentinel (`"N/A"` in a numeric field) is data
+quality, and whether any nested observation keeps a document carrier is Mongo's
+call. Both run *before* the join and hand it only the values in scope.
+
+## Salesforce: every custom field was being renamed
+
+Salesforce routes are credential-gated, so they skipped everywhere and the
+connector's transfer-live declaration rested on unit tests that patched
+`requests`. An in-process REST double now serves the subset the connector uses
+with the contracts it depends on — bearer auth, the 2000-row OFFSET cap,
+per-record composite results, and per-field JSON typing, since a double that
+echoed its input would let a transfer agree with itself about a value the real
+API would have re-typed.
+
+Running it exposed three defects:
+
+1. **`sanitize_identifier` merged distinct columns.** It collapsed runs of
+   underscores and stripped trailing ones, so `ExternalKey__c` landed as
+   `ExternalKey_c` — and every Salesforce custom field ends in `__c`. Underscore
+   runs are legal in every dialect we write to, so this was not making an
+   identifier legal; `first__name` and `first_name` both became `first_name`,
+   which means one source column silently overwrote the other, and `value_`
+   collided with `value` the same way. The security tests kept every property
+   they assert (no quote, no semicolon, no statement break) — only the exact
+   expected strings moved.
+2. **Salesforce declared `introspect: True` and answered "not yet
+   implemented".** The Describe metadata was already modelled with typed
+   carriers, picklist ENUM domains and the identity; only the endpoint dispatch
+   was missing, so a Salesforce *destination* could never prove its object
+   exists and every route into one failed G2 on unknown existence. HubSpot had
+   the same gap and is wired with it.
+3. **Uniqueness was skipped**, which fails a uniqueness-required sync closed.
+   `Id` is assigned by the platform and cannot repeat; any other field is
+   counted with a SOQL aggregate, which keeps it usable against an org where the
+   object holds millions of rows.
+
+Wiring introspect also made a real risk *reportable* that was invisible while
+the source declared no types: a picklist landing in free text loses its domain.
+
+## Quarantine records now name the row that failed
+
+Rejected rows are the dead-letter queue an operator replays, so the row number
+is the only handle they have on the failing record. Helpers that receive a
+subset of a batch numbered rejects by their position in that subset, so the
+BigQuery sparse upsert attributed a reject to a different source row. Nothing
+was lost silently — the row was quarantined with its reason and a value sample,
+under someone else's number. Rows now carry their source position through both
+shared steps, including the bind, which drops what it quarantines and so must
+re-derive the numbers of the survivors.
+
 ## Still open on the four named connectors
 
 Two of the four are done above. The other two are not, and the reasons differ:
 
-**Snowflake** fails `test_postgresql_to_snowflake_typed_preflight_on` because
-`fakesnow` has no `GRANTS` catalog, so G2 cannot prove CREATE and refuses
-create-new. That refusal is the product being right — against real Snowflake
-`SHOW GRANTS` works — so the gap is proof infrastructure, not engine behaviour.
-The route can be proven locally on the *existing-table* path, where connectivity
-carries write and no CREATE privilege is needed; create-new privilege proof
-needs a real account.
+**Snowflake create-new privilege** cannot be proven on `fakesnow`, which is
+DuckDB underneath and has no `GRANTS` catalog. The refusal is the product being
+right — against a real account `SHOW GRANTS` answers — so the typed-fidelity
+route is now proven on the *existing-table* path, where connectivity carries
+write and no CREATE privilege is needed, and it reads the row back rather than
+asserting only that a transfer happened. Create-new privilege proof needs a real
+account.
 
-**Salesforce** already declares `introspect` and `preflight` and sits in
-`PRODUCTION_SKU`, but its routes are credential-gated and skip here, so the
-declaration rests on unit tests rather than a live run. The same in-process
-approach used for SFTP applies — a local HTTP double for the REST/Bulk API
-would make the routes executable without a tenant.
-
-**BigQuery sparse upsert attributes quarantine to the wrong row.**
-`_bq_apply_sparse_upsert` numbers rejects by their index inside `sparse_rows`
-(0-based), while every other path reports `row_offset + i + 1` against the
-source batch. The row is still quarantined and surfaced with its reason and a
-value sample, so nothing is lost silently, but an operator replaying the DLQ is
-pointed at the wrong record. Fixing it properly means threading source indices
-through `split_dense_sparse_rows` and the bind helper, both shared by other
-writers — the same shape as the Airtable alignment fix, and deliberately not
-half-done here.
+**Salesforce as a destination does not reconcile.** The write itself is proven —
+records land with the right values and types, an upsert by External Id updates
+in place on a re-run rather than duplicating, and a refused record is
+quarantined. But Gate-8 compares a destination read-back covering every
+described field against a source covering only the mapped ones, and reverse-ETL
+writes a subset by definition, so the digests cannot agree. That is a
+reconciliation design question for partial-column destinations, not a Salesforce
+bug, and it is left stated rather than papered over with a looser mode.
 
 ## What would move the needle
 
