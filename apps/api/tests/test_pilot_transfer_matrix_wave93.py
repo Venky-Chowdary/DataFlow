@@ -109,6 +109,7 @@ def test_pipeline_preserves_declared_types_end_to_end():
         {"name": "id", "inferred_type": "INTEGER", "samples": ["1", "2"]},
         {"name": "amount", "inferred_type": "DECIMAL(12,2)", "samples": ["10.50", "20.25"]},
         {"name": "ratio", "inferred_type": "FLOAT", "samples": ["1.5", "2.25"]},
+        {"name": "narrow", "inferred_type": "REAL", "samples": ["1.5", "2.25"]},
     ]
     result = run_mapping_pipeline(
         [r["name"] for r in rows],
@@ -126,7 +127,11 @@ def test_pipeline_preserves_declared_types_end_to_end():
     )
     by_source = {m["source"]: m for m in result["mappings"]}
     assert by_source["amount"]["target_type"] == "DECIMAL(12,2)"
-    assert by_source["ratio"]["target_type"] == "FLOAT"
+    # Bare FLOAT does not declare a width, and Property 1 forbids reading one out
+    # of the spelling, so it invents IEEE-64 rather than silently narrowing to a
+    # 24-bit mantissa. A source that means single precision says so.
+    assert by_source["ratio"]["target_type"] == "DOUBLE"
+    assert by_source["narrow"]["target_type"] == "FLOAT"
 
 
 # --------------------------------------------------------------------------

@@ -1973,9 +1973,18 @@ def _apply_create_new_risk_stamps(
             )
             stamp_l = _nlt(stamped)
             src_phys_l = _nlt(physical_from_src or src)
+            if physical_from_src and stamp_l == "float" and _nlt(src) == "float":
+                # Re-inventing a float stamp re-reads a physical token as a
+                # logical one and drops the width it carried: MySQL FLOAT is a
+                # 24-bit mantissa, but fed back through invent it returns DOUBLE
+                # because a bare FLOAT declares no width. Only the source says
+                # whether single precision was ever declared, so it wins here.
+                # Other logical types keep the stamp, which may carry
+                # sample-observed precision the source token does not.
+                tgt = physical_from_src
             # Transform/pipeline may widen VARCHAR→DATETIME(6)/JSONB/UUID wire.
             # Never erase that with source-derived TEXT create-new.
-            if stamp_l not in {"string", "text"} or src_phys_l not in {"string", "text"}:
+            elif stamp_l not in {"string", "text"} or src_phys_l not in {"string", "text"}:
                 tgt = physical_from_stamp or stamped
             else:
                 tgt = physical_from_src or physical_from_stamp or stamped
