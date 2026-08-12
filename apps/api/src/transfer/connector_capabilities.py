@@ -589,7 +589,13 @@ def _source_only_ready(caps: dict[str, bool]) -> bool:
 
 
 def transfer_ready(caps: dict[str, bool]) -> bool:
-    """True when connector supports production read+write transfer."""
+    """True when connector supports production read+write transfer.
+
+    Validate-class preflight is mandatory for duplex / dest-only routes. File
+    sources are the sole exemption (schema arrives with the upload). Drivers
+    that advertise ``preflight: False`` (SFTP, email, …) must not inherit
+    Certified / Full-transfer tiles until Validate gates exist.
+    """
     # ``certified: False`` marks drivers that implement read+write but have not
     # yet passed the live PRODUCTION_SKU matrix; they must not advertise as
     # transfer-ready until they earn certification.
@@ -597,6 +603,9 @@ def transfer_ready(caps: dict[str, bool]) -> bool:
         return False
     if caps.get("file_source"):
         return True
+    # Dest-only / duplex without Validate-class preflight are not transfer-ready.
+    if caps.get("preflight") is False:
+        return False
     if caps.get("dest_only") and caps.get("write"):
         return True
     return bool(caps.get("read") and caps.get("write"))
@@ -709,8 +718,9 @@ def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool])
         return False
     if driver in TRANSFER_READY_CATALOG_IDS:
         return True
-    if driver in _DRIVER_CAPS or driver in _FILE_CAPS:
-        return True
+    # Caps membership alone is not enough — transfer_ready() already enforced
+    # read+write / preflight / certified. Reaching here means the driver is
+    # known but not yet in the SKU frozenset (or was filtered above).
     return False
 
 

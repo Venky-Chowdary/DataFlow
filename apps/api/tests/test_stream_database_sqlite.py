@@ -90,6 +90,45 @@ def test_stream_sqlite_to_sqlite_basic():
         assert count == 250
 
 
+def test_stream_sqlite_multibatch_source_count_is_committed_offset(monkeypatch):
+    """Multi-batch stream: Gate-8 source_row_count must be the full reader-side
+    population (committed_offset), never the last batch's writer-stamped count."""
+    import src.transfer.stream as stream_mod
+
+    monkeypatch.setattr(stream_mod, "CHUNK_SIZE", 40)
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        src = _make_source(213, tmp_path)  # 213 rows / 40 => 6 batches
+        dst = tmp_path / "dst.db"
+
+        source = EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="orders"
+        )
+        destination = EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="orders_out"
+        )
+        mappings = [
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "active", "target": "active"},
+        ]
+        schema = {"id": "integer", "amount": "decimal", "active": "boolean"}
+
+        rows_written, _ddl, summary, _cols = stream_database_transfer(
+            source,
+            destination,
+            mappings,
+            schema,
+            job_id="000000000000000000000001",
+            checkpoint_service=CheckpointService(_FakeMongo()),
+        )
+
+        assert rows_written == 213
+        assert summary.get("batches") and summary["batches"] >= 2
+        assert summary.get("source_row_count") == 213
+        assert summary.get("source_row_count_source") == "committed_offset"
+
+
 def test_stream_sqlite_to_sqlite_resume_from_checkpoint():
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)

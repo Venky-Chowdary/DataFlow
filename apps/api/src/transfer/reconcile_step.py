@@ -65,36 +65,39 @@ def _compute_source_checksum(
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
 ) -> str:
-    """Return the writer checksum, or recompute it from mapped source rows.
+    """Return an independent source digest, or fall back to the writer checksum.
 
-    Remap uses the same error policy / dest_kind / PK kwargs as the write path
-    so Gate-8 cannot invent a different quarantine hold-out set than the load.
+    When source ``records`` are available, always remap and fingerprint them.
+    Preferring the writer checksum first made Gate-8 circular: dest digest was
+    compared to the writer's own ack, not to the remapped source population.
+    Writer checksum remains the fallback when no records were supplied (stream
+    sample-only paths) and is stamped as assurance_level=writer_ack upstream.
     """
-    if writer_checksum:
-        return writer_checksum
-    if not records:
-        return ""
-    _, data_rows = records_to_matrix(records, columns)
-    if target_cols is None:
-        target_cols, _ = resolve_target_columns(mappings, source_schema or {}, preserve_case=True)
-    mapped_rows, _rejected = map_rows_for_fingerprint(
-        headers=columns,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=source_schema or {},
-        error_policy=transform_error_policy_for_validation_mode(validation_mode),
-        dest_types=dest_types or {},
-        preserve_case=True,
-        dest_kind=dest_db_type or "",
-        destination_pk_columns=destination_pk_columns,
-    )
-    return checksum_rows(
-        mapped_rows,
-        target_cols,
-        dest_db_type=dest_db_type,
-        dest_types=dest_types,
-    )
+    if records:
+        _, data_rows = records_to_matrix(records, columns)
+        if target_cols is None:
+            target_cols, _ = resolve_target_columns(
+                mappings, source_schema or {}, preserve_case=True
+            )
+        mapped_rows, _rejected = map_rows_for_fingerprint(
+            headers=columns,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=source_schema or {},
+            error_policy=transform_error_policy_for_validation_mode(validation_mode),
+            dest_types=dest_types or {},
+            preserve_case=True,
+            dest_kind=dest_db_type or "",
+            destination_pk_columns=destination_pk_columns,
+        )
+        return checksum_rows(
+            mapped_rows,
+            target_cols,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
+    return str(writer_checksum or "")
 
 
 def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
@@ -547,8 +550,34 @@ def run_reconciliation(
     source_row_count = dest_summary.get("source_row_count")
     if isinstance(source_row_count, int) and source_row_count >= 0:
         source_rows = source_row_count
+    elif records:
+        source_rows = len(records)
+    elif endpoint.kind != "database":
+        # File/object exports have no cell-fidelity Gate-8; writer ack is enough
+        # for an *unproven* operational pass below. Do not invent conservation.
+        source_rows = int(rows_written or 0) + dropped_rows + rows_skipped
     else:
-        source_rows = len(records) if records else rows_written + dropped_rows + rows_skipped
+        # Never invent source_rows from writer ack on database destinations —
+        # that circularly balances short reads. Fail closed until the reader
+        # stamps a population count.
+        return _finalize({
+            "passed": False,
+            "unproven": True,
+            "migration_proven": False,
+            "message": (
+                "Source row count unmeasured — Gate-8 refuses conservation "
+                "invented from writer acknowledgements alone."
+            ),
+            "source_rows": None,
+            "target_rows": rows_written,
+            "rejected_rows": rejected_rows,
+            "coerced_null_rows": coerced_null_rows,
+            "rows_skipped": rows_skipped,
+            "details": {
+                "reason": "source_row_count_unmeasured",
+                "source_row_count_source": dest_summary.get("source_row_count_source"),
+            },
+        })
     if resume_full_source_rows:
         source_rows = resume_full_source_rows
     elif resumed_from:

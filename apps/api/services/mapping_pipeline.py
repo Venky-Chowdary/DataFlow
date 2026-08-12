@@ -655,7 +655,14 @@ def run_mapping_pipeline(
             tgt_type = ""
         elif not tgt_type:
             src_l = str(src_type).lower()
-            if "unsigned" in src_l and ("bigint" in src_l or normalize_logical_type(src_type) == "decimal"):
+            intentional_create = (
+                strategy in {"identity_passthrough", "create_compatible_new"}
+                or destination_table_exists is False
+                or bool(m.get("create_new"))
+            )
+            if intentional_create and "unsigned" in src_l and (
+                "bigint" in src_l or normalize_logical_type(src_type) == "decimal"
+            ):
                 # Still sample-observe when possible — bare DECIMAL → (38,15) cliff.
                 tgt_type = create_new_mapping_target_type(
                     "DECIMAL",
@@ -663,14 +670,10 @@ def run_mapping_pipeline(
                     samples=col_samples,
                     source_db=source_db_type,
                 ) if destination_db_type or col_samples else "DECIMAL"
-            elif "unsigned" in src_l:
+            elif intentional_create and "unsigned" in src_l:
                 # INT/MEDIUMINT/SMALLINT UNSIGNED → BIGINT create-new (signed INT overflows).
                 tgt_type = "BIGINT"
-            elif destination_db_type and (
-                strategy in {"identity_passthrough", "create_compatible_new"}
-                or destination_table_exists is False
-                or bool(m.get("create_new"))
-            ):
+            elif destination_db_type and intentional_create:
                 # Intentional create-new / ADD COLUMN — Decision Kernel invent.
                 # Distinct from pending_dest_schema (Studio names-only refuse).
                 tgt_type = create_new_mapping_target_type(
@@ -684,13 +687,13 @@ def run_mapping_pipeline(
                 # refuse invent (partial Studio honesty). Backfill + create_new
                 # paths stamp above / via stamp_additive_mapping_types.
                 tgt_type = ""
+            elif destination_db_type and destination_table_exists is None:
+                # Existence unproven — refuse invent. inventing create-new widths
+                # before the destination catalog loads is a false-green cliff.
+                tgt_type = ""
             elif destination_db_type:
-                tgt_type = create_new_mapping_target_type(
-                    src_type,
-                    destination_db_type,
-                    samples=col_samples,
-                    source_db=source_db_type,
-                )
+                # Exhaustive: create-new / exists=False handled above; refuse.
+                tgt_type = ""
             else:
                 # No dest dialect — still stamp observed DECIMAL(p,s) for Map honesty.
                 if col_samples and normalize_logical_type(src_type) in {"decimal", "float"}:

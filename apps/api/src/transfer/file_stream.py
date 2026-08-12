@@ -880,8 +880,13 @@ def stream_file_to_database(
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
     last_checksum = ""
-    rejected_total = 0
-    coerced_null_total = 0
+    # Restore cumulative quarantine counts on resume — Gate-8 conservation is
+    # source - (rejected - coerced_null) - skipped, so a resumed pass that starts
+    # these at 0 forgets first-pass hold-outs and fails a correct load.
+    rejected_total = int(getattr(checkpoint, "rejected_rows", 0) or 0) if resumed else 0
+    coerced_null_total = (
+        int(getattr(checkpoint, "coerced_null_rows", 0) or 0) if resumed else 0
+    )
     # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
     stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
     warning_samples: list[str] = []
@@ -895,6 +900,8 @@ def stream_file_to_database(
         batch_iter = (apply_row_filter(batch, source_filter) for batch in batch_iter)
 
     fp_accumulator = FingerprintAccumulator()
+    # Independent reader cardinality for Gate-8 — never invent from written+held_out.
+    source_rows_seen = 0
     batch_quality_enabled = validation_mode in ("strict", "maximum")
     try:
         from services.data_quality import (
@@ -1115,9 +1122,10 @@ def stream_file_to_database(
     batch_enum = enumerate(batch_iter, start=first_index)
 
     def _apply_file_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, coerced_null_total, last_checksum, dest_summary
+        nonlocal written, rejected_total, coerced_null_total, last_checksum, dest_summary, source_rows_seen
         if result["fingerprints"]:
             fp_accumulator.add_many(result["fingerprints"])
+        source_rows_seen += int(result.get("batch_rows") or 0)
         written += result["batch_written"]
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
@@ -1168,6 +1176,10 @@ def stream_file_to_database(
 
         checkpoint.chunk_index = idx
         checkpoint.rows_processed = written
+        # Persist cumulative quarantine counts so a resume after a crash restores
+        # them and Gate-8 conservation still balances across passes.
+        checkpoint.rejected_rows = rejected_total
+        checkpoint.coerced_null_rows = coerced_null_total
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
         checkpoint.status = "running"
@@ -1217,11 +1229,18 @@ def stream_file_to_database(
     # covers all source rows, not only the ones processed after the checkpoint.
     if resumed and fp_accumulator.total < total_rows:
         full_iter = _batch_iterator_for_type(file_type, content, batch_size)
+        # Match the main write path (source_filter applied at read time): count and
+        # fingerprint the FILTERED population, or a filtered resume overstates the
+        # source count and mis-hashes the checksum against the filtered load.
+        if source_filter:
+            full_iter = (apply_row_filter(batch, source_filter) for batch in full_iter)
         full_accumulator = FingerprintAccumulator()
+        full_source_rows = 0
         for batch in full_iter:
             if not batch:
                 continue
             headers, data_rows = records_to_matrix(batch, columns)
+            full_source_rows += len(data_rows)
             mapped_rows, _ = map_rows_for_fingerprint(
                 headers=headers,
                 data_rows=data_rows,
@@ -1238,6 +1257,7 @@ def stream_file_to_database(
                 full_accumulator.add_many(row_fingerprints(mapped_rows, target_cols))
         final_checksum = full_accumulator.digest() if full_accumulator.total else last_checksum
     else:
+        full_source_rows = 0
         final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
 
     dest_summary["checksum"] = final_checksum or last_checksum
@@ -1272,11 +1292,23 @@ def stream_file_to_database(
                 list(filtered_sample[0].keys()) if filtered_sample else [],
                 pk_target_cols,
             )
-    # Source row count must include quarantined hold-outs so Gate-8 expects
-    # written == source - held_out. Never set this to `written` alone under
-    # quarantine (that double-subtracts rejected and falsely fails reconcile).
-    held_out = max(int(rejected_total or 0) - int(coerced_null_total or 0), 0)
-    dest_summary["source_row_count"] = int(written or 0) + held_out
+    # Reader-side population for Gate-8. Never invent from written + held_out —
+    # that circularly balances short reads and hides silent under-delivery. On a
+    # resumed run ``source_rows_seen`` counts only the tail after the checkpoint,
+    # so the full-file re-scan count (all source rows read) is preferred; using
+    # the tail while ``written`` includes prior progress mis-accounts Gate-8.
+    if resumed and full_source_rows > 0:
+        dest_summary["source_row_count"] = int(full_source_rows)
+        dest_summary["source_row_count_source"] = "full_rescan_rows"
+    elif source_rows_seen > 0:
+        dest_summary["source_row_count"] = int(source_rows_seen)
+        dest_summary["source_row_count_source"] = "batch_rows"
+    elif int(getattr(fp_accumulator, "total", 0) or 0) > 0:
+        dest_summary["source_row_count"] = int(fp_accumulator.total)
+        dest_summary["source_row_count_source"] = "fingerprint_accumulator"
+    else:
+        dest_summary["source_row_count_source"] = "unmeasured"
+        dest_summary.pop("source_row_count", None)
 
     if dest_type in ("postgresql", "mysql", "redshift") and job_id:
         try:

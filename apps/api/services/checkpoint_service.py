@@ -83,6 +83,11 @@ class Checkpoint:
     # Metadata
     updated_at: str = field(default_factory=_now)
     rejected_rows: int = 0
+    #: Cumulative count of rows whose cell(s) were coerced to NULL and KEPT. Gate-8
+    #: conservation is ``source - (rejected - coerced_null) - skipped``; on resume
+    #: both counters must be restored or first-pass quarantine is lost and a
+    #: correct resumed load falsely fails conservation.
+    coerced_null_rows: int = 0
     #: Bounded sample of quarantined rows. ``rejected_rows`` remains the exact
     #: count; this list is evidence for the operator, not the ledger.
     rejected_details: list[dict[str, Any]] = field(default_factory=list)
@@ -146,6 +151,7 @@ class Checkpoint:
             "status": self.status,
             "updated_at": self.updated_at,
             "rejected_rows": self.rejected_rows,
+            "coerced_null_rows": self.coerced_null_rows,
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
         }
