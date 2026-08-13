@@ -98,3 +98,14 @@ change (constraints are measured on the source, then re-added once every table
 has landed), it was used nowhere outside `stream.py`, and it depends only on
 endpoint resolution plus a lazy `services.foreign_key_orchestration` import.
 `stream.py` keeps private aliases so the streaming call sites read unchanged.
+
+### Wave — fast-path routing, source peek, sample selection
+
+| Extracted | From | Why it is a separable concern |
+| --- | --- | --- |
+| `src/transfer/copy_route.py` | `src/transfer/stream.py` | Deciding whether a route qualifies for the server-to-server COPY path, and shaping what that path reports. The decision is conservative by construction: it returns `None` for anything it cannot prove identical, so it never has to know how the row path reconciles differences. |
+| `src/transfer/source_peek.py` | `src/transfer/stream.py` | Reading a source's shape and a sample for preflight, without moving anything. Separable from the streaming loop that later answers the same question by doing the work. |
+| `services/sample_strategy.py` | `services/reconciliation.py` | Choosing which rows a read-back sample looks at. A uniform head sample misses the rare category where mappings are usually wrong, so skewed low-cardinality columns are stratified over — a different question from comparing the rows once chosen. |
+
+Both source modules stayed under budget afterwards without the ceiling being
+raised.

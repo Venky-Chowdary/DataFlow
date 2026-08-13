@@ -799,146 +799,7 @@ def stream_database_transfer(
             logger.warning("source snapshot release failed: %s", exc, exc_info=exc)
 
 
-def _try_copy_fast_path(
-    *,
-    source: EndpointConfig,
-    destination: EndpointConfig,
-    mappings: list[dict],
-    schema: dict[str, str],
-    src_type: str,
-    dest_type: str,
-    src_cfg: dict[str, Any],
-    dest_cfg: dict[str, Any],
-    effective_sync: str,
-    incremental: bool,
-    source_filter: dict[str, Any] | None,
-    limit: int,
-    checkpoint: Checkpoint | None,
-) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
-    """Move the whole table server-to-server, or return ``None`` to stream rows.
-
-    Only taken when nothing in the route can change a value: same engine, a
-    declared type that matches on both sides for every mapped column, a plain
-    carry with no transform or declared omission, a full refresh that replaces
-    the destination, and no filter, limit, incremental scope or resume that
-    would make this a partial read.
-
-    Returning ``None`` rather than raising is deliberate — every route this
-    cannot prove belongs on the row path, which knows how to reconcile the
-    differences this one refuses to guess at.
-    """
-    from services.sync_cursor import is_overwrite_sync
-
-    if (
-        incremental
-        or source_filter
-        or limit
-        or not is_overwrite_sync(effective_sync)
-        or (checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
-    ):
-        return None
-
-    from services.engine_checksum import comparable_column_pairs, engines_comparable
-
-    if not engines_comparable(src_type, dest_type):
-        return None
-
-    source_table = source.table or source.collection or ""
-    dest_table = resolve_dest_table(dest_type, destination, _source_name(source))
-    if not source_table or not dest_table:
-        return None
-
-    from services.copy_fast_path import (
-        FastPathUnavailable,
-        copy_between_postgres,
-        source_column_types,
-    )
-
-    # Both sides are described by the source catalog: the destination is created
-    # from the source's own declarations, so "identical" is true by construction
-    # rather than by comparing two independently resolved spellings.
-    try:
-        conn = _pg_connect_for_probe(src_cfg)
-    except Exception as exc:
-        logger.info("COPY fast path declined (source probe): %s", exc)
-        return None
-    try:
-        with conn.cursor() as cur:
-            declared = source_column_types(
-                cur,
-                source.schema or "public",
-                source_table,
-                [str(m.get("source") or "") for m in mappings if m.get("source")],
-            )
-    except Exception as exc:
-        logger.info("COPY fast path declined (source catalog): %s", exc)
-        return None
-    finally:
-        try:
-            conn.close()
-        except Exception:  # nosec B110 — probe connection only
-            pass
-
-    pairs = comparable_column_pairs(mappings, declared, declared, engine=src_type)
-    if not pairs:
-        return None
-    # ``comparable_column_pairs`` compared the source against itself above, which
-    # proves the mapping is a plain carry but not that the *destination* agrees.
-    # The destination is created from these same declarations, so it does.
-    try:
-        result = copy_between_postgres(
-            source_cfg=src_cfg,
-            source_schema=source.schema or "public",
-            source_table=source_table,
-            dest_cfg=dest_cfg,
-            dest_schema=destination.schema or "public",
-            dest_table=dest_table,
-            pairs=pairs,
-            replace_destination=True,
-        )
-    except FastPathUnavailable as exc:
-        logger.info("COPY fast path declined: %s", exc)
-        return None
-    except Exception as exc:
-        # A refusal here means the copy ran and did not verify, which is a real
-        # finding — never silently retry it on the row path and report success.
-        logger.warning("COPY fast path failed: %s", exc)
-        raise
-
-    columns = [p[1] for p in pairs]
-    dest_summary: dict[str, Any] = {
-        "type": dest_type,
-        "table": dest_table,
-        "rows_written": result.rows_copied,
-        "checksum": result.target_checksum,
-        "load_method": "copy_binary_server_to_server",
-        "source_row_count": result.source_rows,
-        "source_row_count_source": "engine_population_in_snapshot",
-        "engine_source_checksum": result.source_checksum,
-        "engine_target_checksum": result.target_checksum,
-        "sync_mode": effective_sync,
-    }
-    ddl_log = [
-        f"COPY {source_table} → {dest_table} "
-        f"({result.rows_copied:,} rows, binary, server-to-server)",
-        "Gate-8: source digest taken inside the read snapshot; destination "
-        "digest re-read after load — both computed by the engine.",
-    ]
-    return result.rows_copied, ddl_log, dest_summary, columns
-
-
-def _pg_connect_for_probe(cfg: dict[str, Any]) -> Any:
-    from connectors.postgresql_conn import get_connection
-
-    return get_connection(
-        host=cfg.get("host", ""),
-        port=int(cfg.get("port") or 5432),
-        database=cfg.get("database", ""),
-        username=cfg.get("username", ""),
-        password=cfg.get("password", ""),
-        connection_string=cfg.get("connection_string", ""),
-        ssl=bool(cfg.get("ssl", False)),
-    )
+from .copy_route import _try_copy_fast_path  # noqa: E402 — see module docstring
 
 
 def _stream_database_transfer_impl(
@@ -3447,44 +3308,6 @@ def _read_staging_batches(
         release_engine(engine)
 
 
-def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str], int, list[dict]]:
-    """Return columns, schema, row count, and sample rows for preflight."""
-    from .connector_capabilities import resolve_driver_type
-    src_type = resolve_driver_type(source.format or "")
-    src_cfg = resolve_connector_config(source)
-    table = _source_name(source)
-    if not table:
-        raise ValueError("Source table/collection name required for streaming transfer")
-
-    src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
-
-    probe, _ = _unwrap_read(_read_batch(src_type, src_cfg, table, None, 0, CHUNK_SIZE, database=src_db))
-    columns = probe.headers
-    if not columns and probe.total_rows == 0:
-        raise ValueError(f"Source `{table}` has no columns or is empty")
-
-    if src_type in ("s3", "gcs", "adls"):
-        try:
-            from services.object_store_introspect import profile_object_batch
-            profiled = profile_object_batch(columns, probe.rows)
-            schema = profiled.get("schema") or {c: "string" for c in columns}
-        except Exception:
-            schema = {c: "string" for c in columns}
-    elif src_type == "redis":
-        schema = {c: "string" for c in columns}
-    else:
-        probe_meta = getattr(probe, "meta", None) or {}
-        native = probe_meta.get("native_types") or probe_meta.get("schema") or {}
-        if isinstance(native, dict) and native:
-            schema = {c: str(native.get(c) or "string") for c in columns}
-        else:
-            schema = _introspect_table_schema(src_type, src_cfg, table, columns)
-            if not schema:
-                schema = {c: "string" for c in columns}
-    sample_rows = [dict(zip(probe.headers, row)) for row in probe.rows[:100]]
-    return columns, schema, probe.total_rows, sample_rows
-
-
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:
     if source.kind != "database" or destination.kind != "database":
         return False
@@ -3493,3 +3316,8 @@ def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> b
         resolve_driver_type(source.format) in _STREAMING_TYPES
         and resolve_driver_type(destination.format) in _STREAMING_TYPES
     )
+
+
+# Preflight's look-ahead lives in its own module (size budget); re-exported here
+# because callers import it from this module.
+from .source_peek import peek_stream_source  # noqa: E402,F401 — re-export

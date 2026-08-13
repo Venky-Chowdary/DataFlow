@@ -54,6 +54,10 @@ class FastPathResult(NamedTuple):
     source_checksum: str
     target_rows: int
     target_checksum: str
+    #: Evidence for the snapshot the read ran under. The digest is only
+    #: comparable because the rows came from this snapshot, so the claim travels
+    #: with the result rather than being asserted about it.
+    source_snapshot: dict[str, Any] = {}
 
     @property
     def verified(self) -> bool:
@@ -257,6 +261,33 @@ def create_destination_like_source(
     )
 
 
+def _snapshot_evidence(cur: Any) -> dict[str, Any]:
+    """Record which snapshot the read ran under, in the shared shape.
+
+    Taking the WAL position is also what forces the transaction snapshot to be
+    established here rather than at some later statement, so the evidence and
+    the rows it describes cannot drift apart.
+    """
+    lsn = ""
+    try:
+        cur.execute("SELECT pg_current_wal_lsn()::text")
+        row = cur.fetchone()
+        lsn = str(row[0]) if row and row[0] else ""
+    except Exception as exc:
+        logger.debug("snapshot lsn unavailable: %s", exc)
+    return {
+        "engine": "postgresql",
+        "isolation": "repeatable_read",
+        "guarantee": "mvcc_repeatable_read",
+        "snapshot_lsn": lsn,
+        "export_snapshot": "",
+        "note": (
+            "Rows and the source digest were both read under this MVCC "
+            "snapshot, so the digest describes exactly what was copied."
+        ),
+    }
+
+
 def _connect(cfg: dict[str, Any]) -> Any:
     from connectors.postgresql_conn import get_connection
 
@@ -354,6 +385,7 @@ def copy_between_postgres(
             src_cur.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
             )
+            snapshot = _snapshot_evidence(src_cur)
             blocked = unsupported_structure(src_cur, source_schema, source_table)
             if blocked:
                 # Values without the structure that governs them is a different
@@ -406,6 +438,7 @@ def copy_between_postgres(
             source_checksum=source_digest.checksum,
             target_rows=dest_digest.row_count,
             target_checksum=dest_digest.checksum,
+            source_snapshot=snapshot,
         )
         if not result.verified:
             # The destination transaction has not committed, so refusing here
