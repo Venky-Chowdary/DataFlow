@@ -3585,10 +3585,21 @@ def fingerprint_for_reconcile(
     """
     from services.transform_engine import apply_transform
     from services.type_system import instant_date_carrier
-    from services.value_serializer import cell_to_string
+    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     ddl_type = instant_date_carrier(engine, ddl_type)
     wire: Any = value
+    if is_missing_sentinel(value):
+        # An absent field is NULL to every SQL destination — that is what the
+        # writer stores and what the read-back returns. Only the ``Missing``
+        # *object* reached this path untranslated (its string spelling was
+        # already handled downstream), and ``cell_to_string`` renders it as an
+        # empty string. That made a sparse Mongo/DynamoDB/Redis document
+        # fingerprint as ``''`` against a destination NULL, failing Gate-8 on a
+        # correct transfer — and, in the other direction, matching a destination
+        # that really did store an empty string.
+        wire = None
+        value = None
     tname = (transform or "").strip().lower()
     if tname and tname not in {"", "none", "identity", "passthrough"}:
         cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
