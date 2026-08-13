@@ -246,6 +246,28 @@ def _canonical_fingerprint_ddl(engine: str, ddl: str) -> str:
         return ddl.upper()
 
 
+def _column_fingerprint_ddl(
+    column: str, eng: str, types: dict[str, str] | None
+) -> str:
+    """Resolve the canonical DDL that steers one column's fingerprint.
+
+    Everything here depends on the column and the destination catalog, never on
+    the cell, so a row loop must resolve it once per column rather than once per
+    value. Done per cell it cost more than the canonicalization it was steering.
+    """
+    ddl = ""
+    lookup = types or {}
+    if column and lookup:
+        ddl = str(lookup.get(column) or lookup.get(column.lower()) or "")
+        if not ddl:
+            needle = column.lower()
+            for k, v in lookup.items():
+                if str(k).lower() == needle:
+                    ddl = str(v or "")
+                    break
+    return _canonical_fingerprint_ddl(eng, ddl)
+
+
 def _fingerprint_cell(
     value: Any,
     *,
@@ -255,16 +277,12 @@ def _fingerprint_cell(
 ) -> str:
     """Cell fingerprint — bind-aware when destination types are known."""
     eng = (dest_db_type or "").strip().lower()
-    types = dest_types or {}
-    ddl = ""
-    if column and types:
-        ddl = str(types.get(column) or types.get(column.lower()) or "")
-        if not ddl:
-            for k, v in types.items():
-                if str(k).lower() == column.lower():
-                    ddl = str(v or "")
-                    break
-    ddl = _canonical_fingerprint_ddl(eng, ddl)
+    ddl = _column_fingerprint_ddl(column, eng, dest_types)
+    return _fingerprint_with_ddl(value, ddl, eng)
+
+
+def _fingerprint_with_ddl(value: Any, ddl: str, eng: str) -> str:
+    """Fingerprint one cell against an already-resolved column DDL."""
     if eng:
         try:
             # Defined later in this module; resolved at call time.
@@ -290,16 +308,28 @@ def _iter_fingerprints(
     """
     eng = (dest_db_type or "").strip().lower()
     types = dest_types or {}
+    # Column facts resolved once for the whole scan. These depend on the
+    # destination catalog, not on any cell, and resolving them per value cost
+    # more than the canonicalization they steer.
+    _ddl_cache: dict[str, str] = {}
+
+    def _ddl_for(col: str) -> str:
+        ddl = _ddl_cache.get(col)
+        if ddl is None:
+            ddl = _column_fingerprint_ddl(col, eng, types)
+            _ddl_cache[col] = ddl
+        return ddl
 
     def _fp(val: Any, col: str = "") -> str:
-        return _fingerprint_cell(
-            val, column=col, dest_db_type=eng, dest_types=types
-        )
+        return _fingerprint_with_ddl(val, _ddl_for(col), eng)
 
     if columns is not None:
         cols = columns
         sorted_cols = sorted(cols, key=lambda x: x.lower())
         col_index = {c: i for i, c in enumerate(cols)}
+        # Pair each emitted column with its lowered label and resolved DDL so the
+        # row loop does no per-cell lookup at all.
+        emit_plan = [(c, c.lower(), _ddl_for(c)) for c in sorted_cols]
         sort_idx = -1
         if sort_key:
             sort_key_lower = sort_key.lower()
@@ -310,7 +340,8 @@ def _iter_fingerprints(
         for row in rows:
             if isinstance(row, dict):
                 parts = [
-                    f"{c.lower()}={_fp(row.get(c), c)}" for c in sorted_cols
+                    f"{label}={_fingerprint_with_ddl(row.get(c), ddl, eng)}"
+                    for c, label, ddl in emit_plan
                 ]
                 if sort_key:
                     row_key = _fp(row.get(sort_key), sort_key)
@@ -322,9 +353,11 @@ def _iter_fingerprints(
                 else:
                     row_key = ""
             else:
+                n = len(row)
                 parts = [
-                    f"{c.lower()}={_fp(row[col_index[c]] if col_index[c] < len(row) else None, c)}"
-                    for c in sorted_cols
+                    f"{label}="
+                    f"{_fingerprint_with_ddl(row[col_index[c]] if col_index[c] < n else None, ddl, eng)}"
+                    for c, label, ddl in emit_plan
                 ]
                 row_key = (
                     _fp(
