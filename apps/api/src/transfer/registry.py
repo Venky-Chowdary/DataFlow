@@ -252,11 +252,24 @@ def validate_sku(source_kind: str, source_format: str, dest_kind: str, dest_form
 
 
 def _live_catalog_ids() -> list[str]:
-    """Return catalog IDs that are actually live so the UI can select them."""
-    try:
-        from services.catalog_service import search_catalog
+    """Catalog IDs usable on **either** side of a transfer, for the UI pickers.
 
-        return [c["id"] for c in search_catalog(status="live", limit=1000).get("connectors", [])]
+    This used to ask for ``status="live"``, which is the catalog's duplex filter
+    — read *and* write. That is the wrong question for a picker: it dropped every
+    source-only connector, so Couchbase, Neo4j and InfluxDB appeared in neither
+    ``source_databases`` nor ``destination_databases`` and could not be chosen in
+    Transfer Studio at all, despite being read-capable sources. The caller
+    separates the two sides itself with ``source_ready`` / ``dest_ready``, so
+    what it needs here is anything ready for one of them.
+    """
+    try:
+        from services.catalog_service import _enriched_connectors
+
+        return [
+            c["id"]
+            for c in _enriched_connectors()
+            if c.get("source_ready") or c.get("dest_ready")
+        ]
     except Exception:
         return _live_db_drivers()
 

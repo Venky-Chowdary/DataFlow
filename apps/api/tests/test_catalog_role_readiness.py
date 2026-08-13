@@ -113,6 +113,34 @@ def test_side_counts_differ_from_the_transfer_total():
     assert unscoped["role_live"] == unscoped["transfer_live"]
 
 
+def test_transfer_capabilities_splits_the_two_sides():
+    """Transfer Studio builds its pickers from this, so it has the same duty.
+
+    It asked the catalog for ``status="live"``, which is the *duplex* filter, so
+    a source-only connector landed in neither list and could not be chosen at
+    all — Couchbase, Neo4j and InfluxDB were unusable in Transfer Studio despite
+    being read-capable sources.
+    """
+    from src.transfer.registry import get_capabilities
+
+    caps = get_capabilities()
+    sources = set(caps["source_databases"])
+    destinations = set(caps["destination_databases"])
+
+    # Write-only stores are destinations, never sources.
+    for write_only in ("pinecone", "weaviate", "qdrant", "milvus", "pgvector"):
+        assert write_only not in sources, f"{write_only} cannot be read"
+        assert write_only in destinations, f"{write_only} should be offered as a destination"
+
+    # Read-only connectors are sources, never destinations.
+    for read_only in ("couchbase", "neo4j", "influxdb"):
+        assert read_only in sources, f"{read_only} is a readable source"
+        assert read_only not in destinations, f"{read_only} cannot be written to"
+
+    # A duplex engine belongs on both sides.
+    assert "postgresql" in sources and "postgresql" in destinations
+
+
 def test_planned_tiles_are_ready_for_neither_side():
     """A roadmap entry must not be offered on either side of a transfer."""
     for role in ("source", "destination"):
