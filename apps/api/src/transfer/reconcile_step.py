@@ -504,6 +504,24 @@ def _referential_integrity_evidence(
     )
 
 
+def _writer_supplied_engine_digests(
+    dest_summary: dict[str, Any] | None,
+) -> tuple[str, str, int] | None:
+    """Both digests from a writer that computed them in the engine.
+
+    Returns ``(source_checksum, target_checksum, target_rows)``. Only the pair is
+    usable: a run that produced one of them and left the other to be recomputed
+    here would be comparing a numeric engine digest against a Python hex digest.
+    """
+    summary = dest_summary or {}
+    source = str(summary.get("engine_source_checksum") or "").strip()
+    target = str(summary.get("engine_target_checksum") or "").strip()
+    if not source or not target:
+        return None
+    rows = summary.get("rows_written")
+    return source, target, int(rows or 0)
+
+
 def _engine_digest_enabled() -> bool:
     """Operator gate — default **off** until two gaps are closed.
 
@@ -992,7 +1010,14 @@ def run_reconciliation(
     # the same population coverage at a fraction of the cost, since neither side
     # has to bring rows into Python to hash them.
     engine_digests = None
-    if _engine_digest_enabled() and not source_checksum_scope_note:
+    # A server-to-server COPY never brought rows into Python, so it computed both
+    # digests itself — the source one inside the same snapshot it copied. Those
+    # are the only two comparable values for such a run: recomputing either side
+    # here would compare two different algorithms and always disagree.
+    paired = _writer_supplied_engine_digests(dest_summary)
+    if paired is not None and not source_checksum_scope_note:
+        engine_digests = paired
+    elif _engine_digest_enabled() and not source_checksum_scope_note:
         engine_digests = _engine_population_digests(
             source_endpoint=source_endpoint,
             dest_cfg=cfg,
