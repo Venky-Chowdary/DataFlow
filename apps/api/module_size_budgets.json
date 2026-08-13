@@ -10,9 +10,9 @@
     {"path": "connectors/writer_common.py", "max_lines": 5120, "facade": "connectors.writer_common_api"},
     {"path": "src/transfer/engine.py", "max_lines": 5200, "facade": "services.decision_kernel.execute_gate"},
     {"path": "services/schema_introspect.py", "max_lines": 4800, "facade": "services.decision_kernel"},
-    {"path": "src/transfer/stream.py", "max_lines": 3400, "facade": null},
+    {"path": "src/transfer/stream.py", "max_lines": 3350, "facade": "src.transfer.stream_foreign_keys"},
     {"path": "src/transfer/adapters.py", "max_lines": 2450, "facade": null},
-    {"path": "services/semantic_mapper.py", "max_lines": 2100, "facade": "services.decision_kernel"},
+    {"path": "services/semantic_mapper.py", "max_lines": 1980, "facade": "services.create_new_risk_stamp"},
     {"path": "services/preflight_service.py", "max_lines": 2500, "facade": "services.decision_kernel.validation"}
   ]
 }

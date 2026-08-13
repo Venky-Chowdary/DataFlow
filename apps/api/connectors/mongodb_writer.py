@@ -516,8 +516,24 @@ def write_mapped_rows(
             sanitize_identifier(m.get("target") or m.get("source"), preserve_case=True): (m.get("transform") or "")
             for m in mappings
         }
+        # Columns whose operator accepted the UTC-normalize risk. BSON date is an
+        # instant, so a zoneless source has to be stamped with *some* zone; the
+        # refusal below is of a *silent* choice, not of the choice itself.
+        # ``resolve_timezone_policy`` names this POLICY_UTC_INVENT and marks it
+        # requires_contract, so an acknowledged column is exactly the case the
+        # policy says may proceed — and it is recorded on the summary.
+        utc_normalize_ack = {
+            sanitize_identifier(
+                m.get("target") or m.get("source"), preserve_case=True
+            )
+            for m in mappings
+            if m.get("risk_acknowledged") or m.get("riskAcknowledged")
+        }
+        utc_normalized_cols: set[str] = set()
 
-        def _to_bson(value: Any, stype: str, transform: str = "") -> Any:
+        def _to_bson(
+            value: Any, stype: str, transform: str = "", column: str = ""
+        ) -> Any:
             from services.value_serializer import is_missing_sentinel
 
             # Preserve DF_MISSING through coercion so sparse upsert can omit
@@ -632,12 +648,19 @@ def write_mapped_rows(
                     coerced = coerce_sql_temporal(value, "DATETIME")
                 if isinstance(coerced, _datetime):
                     # Never invent UTC on a naive wall-clock (would silently shift
-                    # polarity). Require offset/Z from the wire or prior coerce.
+                    # polarity). Require offset/Z from the wire, a prior coerce, or
+                    # an accepted UTC-normalize risk on this column.
                     if coerced.tzinfo is None:
-                        raise ValueError(
-                            "MongoDB date/time refused naive wall-clock — "
-                            "provide offset/Z (refuse silent UTC invent)"
-                        )
+                        from datetime import timezone as _tzu
+
+                        if column not in utc_normalize_ack:
+                            raise ValueError(
+                                "MongoDB date/time refused naive wall-clock — "
+                                "provide offset/Z, or accept the UTC-normalize "
+                                "risk on this column (refuse silent UTC invent)"
+                            )
+                        utc_normalized_cols.add(column)
+                        coerced = coerced.replace(tzinfo=_tzu.utc)
                     from datetime import timezone as _tz
 
                     return coerced.astimezone(_tz.utc)
@@ -724,7 +747,9 @@ def write_mapped_rows(
             for i, (v, t) in enumerate(zip(row, tgt_types)):
                 col = target_cols[i] if i < len(target_cols) else f"col_{i}"
                 try:
-                    cells.append(_to_bson(v, t, transform_by_col.get(col, "")))
+                    cells.append(
+                        _to_bson(v, t, transform_by_col.get(col, ""), column=col)
+                    )
                 except (ValueError, TypeError, InvalidOperation) as exc:
                     append_write_quarantine_detail(
                         rejected_details,

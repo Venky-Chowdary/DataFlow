@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -68,12 +69,31 @@ _MONGO_OBJECT_ID_OMISSION = {
     PRODUCTION_SKU,
     ids=lambda r: f"{r[0]}_{r[1]}_to_{r[2]}_{r[3]}",
 )
-def test_production_sku_transfer(route: tuple[str, str, str, str], tmp_path: Path) -> None:
+def test_production_sku_transfer(
+    route: tuple[str, str, str, str],
+    tmp_path: Path,
+    local_object_store: str,
+    local_sftp: Any,
+) -> None:
     src_kind, src_fmt, dst_kind, dst_fmt = route
     suffix = uuid.uuid4().hex[:12]
 
-    source, source_content, source_filename = _build_source(src_kind, src_fmt, tmp_path, suffix)
-    destination = _build_destination(dst_kind, dst_fmt, tmp_path, suffix)
+    source, source_content, source_filename = _build_source(
+        src_kind,
+        src_fmt,
+        tmp_path,
+        suffix,
+        object_store=local_object_store,
+        sftp_server=local_sftp,
+    )
+    destination = _build_destination(
+        dst_kind,
+        dst_fmt,
+        tmp_path,
+        suffix,
+        object_store=local_object_store,
+        sftp_server=local_sftp,
+    )
 
     if not _endpoint_reachable(source):
         pytest.skip(f"source {src_kind}/{src_fmt} not reachable")

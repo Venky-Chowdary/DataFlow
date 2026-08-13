@@ -28,7 +28,10 @@ def test_sanitize_strips_injection_payload() -> None:
     assert ";" not in cleaned
     assert "DROP" not in cleaned.upper() or "drop" in cleaned  # may become drop as word fragment
     assert '"' not in cleaned
-    assert cleaned == "orders_drop_table_users"
+    # Underscore runs are preserved: collapsing them merged distinct columns
+    # (first__name onto first_name). The security property is unchanged —
+    # the quote, the semicolon and the statement break are all gone.
+    assert cleaned == "orders___drop_table_users___"
 
 
 def test_quote_table_ref_mysql_never_embeds_raw_payload() -> None:
@@ -37,7 +40,7 @@ def test_quote_table_ref_mysql_never_embeds_raw_payload() -> None:
     assert ";" not in ref
     assert '"' not in ref
     assert ref.startswith("`") and ref.endswith("`")
-    assert "orders_DROP_TABLE_users" in ref
+    assert "orders___DROP_TABLE_users___" in ref
 
 
 def test_quote_table_ref_postgresql_schema_table() -> None:
@@ -102,4 +105,4 @@ def test_malicious_table_not_in_from_clause_shape() -> None:
     sql = f"SELECT COUNT(*) FROM {ref}"
     assert "DROP TABLE" not in sql
     assert ";" not in sql
-    assert sql == 'SELECT COUNT(*) FROM "public"."orders_DROP_TABLE_users"'
+    assert sql == 'SELECT COUNT(*) FROM "public"."orders___DROP_TABLE_users___"'

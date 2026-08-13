@@ -1529,7 +1529,47 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
         if default_expr and "nextval(" not in str(default_expr).lower():
             col_pg["default"] = str(default_expr)
         columns.append(col_pg)
+    _measure_unconstrained_decimals(cur, schema, table, columns)
     return columns
+
+
+def _measure_unconstrained_decimals(
+    cur: Any, schema: str, table: str, columns: list[dict]
+) -> None:
+    """Replace bare ``numeric`` with the capacity its rows actually use.
+
+    An unconstrained ``numeric`` declares no bound, so every comparison against
+    a destination carrier concludes the destination is narrower and refuses the
+    route — true of the type, rarely true of the data. The aggregate covers the
+    whole column, so the substituted ``DECIMAL(p,s)`` is measured rather than
+    invented, and ``decimal_capacity_measured`` marks it as such.
+
+    Anything that stops the probe leaves the bare type in place, which keeps the
+    fail-closed verdict the operator would otherwise have received.
+    """
+    from services.decimal_capacity_probe import (
+        probe_postgresql_decimal_capacity,
+        unconstrained_decimal_columns,
+    )
+
+    targets = unconstrained_decimal_columns(columns)
+    if not targets:
+        return
+    try:
+        measured = probe_postgresql_decimal_capacity(cur, schema, table, targets)
+    except Exception as exc:
+        logging.getLogger(__name__).info(
+            "decimal capacity probe failed for %s.%s: %s", schema, table, exc
+        )
+        return
+    by_name = {str(c.get("name") or ""): c for c in columns}
+    for name, capacity in measured.items():
+        col = by_name.get(name)
+        if col is None:
+            continue
+        col["inferred_type"] = capacity.as_type()
+        col["declared_type"] = "DECIMAL"
+        col["decimal_capacity_measured"] = True
 
 
 def _pg_elem_to_logical(elem: str) -> str:
@@ -3027,49 +3067,26 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
 
 _STRUCTURAL_TYPES = {"OBJECT", "ARRAY", "JSON"}
 _TEXTUAL_TYPES = {"TEXT", "VARCHAR"}
-_MONGO_TYPE_ORDER = {
-    "TEXT": 0,
-    "VARCHAR": 0,
-    "BOOLEAN": 1,
-    "INTEGER": 2,
-    "DECIMAL": 3,
-    "DATE": 4,
-    "UUID": 5,
-    "OBJECTID": 5,
-    "TIMESTAMP": 6,
-    "TIMESTAMP_NTZ": 6,
-    "TIMESTAMPTZ": 6,
-    "BINARY": 7,
-    "ARRAY": 8,
-    "OBJECT": 9,
-    "JSON": 9,
-}
 # Keep a typed inference when ≥85% of non-null samples agree (industry ELT
 # majority vote). Below that, TEXT is safer than a false INTEGER/DATE.
 _MONGO_TYPED_MAJORITY = 0.85
 
 
 def _widen_mongodb_type(current: str, observed: str) -> str:
-    """Widen inferred type across sampled documents; prefer more specific type.
+    """Widen an inferred type across sampled documents, one pair at a time.
 
-    Prefer :func:`_finalize_mongodb_type` with per-type counts for accuracy.
-    This pairwise helper remains for incremental callers.
+    Prefer :func:`_finalize_mongodb_type` with per-type counts, which can also
+    tell a sentinel from a real value. This ranked carriers by "specificity",
+    which is not an ordering that holds values: BINARY outranked INTEGER, so a
+    field with both resolved to BINARY, which holds neither.
     """
-    if not observed:
-        return current
-    if not current:
-        return observed
-    if current in _STRUCTURAL_TYPES or observed in _STRUCTURAL_TYPES:
-        if current in _STRUCTURAL_TYPES and observed in _STRUCTURAL_TYPES:
-            return current if current == observed else "JSON"
-        return current if current in _STRUCTURAL_TYPES else observed
-    if current in _TEXTUAL_TYPES or observed in _TEXTUAL_TYPES:
-        return "TEXT"
-    return observed if _MONGO_TYPE_ORDER.get(observed, 0) > _MONGO_TYPE_ORDER.get(current, 0) else current
+    from services.type_lattice import join_logical_types
+
+    return join_logical_types(current, observed)
 
 
 def _finalize_mongodb_type(type_counts: dict[str, int]) -> str:
-    """Majority-vote Mongo field type — one TEXT sentinel must not demote 49 ints."""
+    """Resolve a Mongo field type — one TEXT sentinel must not demote 49 ints."""
     chosen, _note = _finalize_mongodb_type_with_note(type_counts)
     return chosen
 
@@ -3077,7 +3094,23 @@ def _finalize_mongodb_type(type_counts: dict[str, int]) -> str:
 def _finalize_mongodb_type_with_note(
     type_counts: dict[str, int],
 ) -> tuple[str, str | None]:
-    """Return (majority type, optional mix warning for Validate honesty)."""
+    """Return (resolved type, optional mix warning for Validate honesty).
+
+    Two decisions live here and they are not the same question.
+
+    *Is a textual value among typed ones a sentinel?* That is data quality:
+    ``"N/A"`` in a numeric field should quarantine the outlier rather than widen
+    the whole column to text, so a strong typed majority keeps its type and
+    carries a warning. That policy is Mongo's and stays here.
+
+    *Given the values that really are typed, what holds them all?* That is not a
+    vote — it is a join, and it belongs to :mod:`services.type_lattice` along
+    with every other schemaless source. Resolving it here by majority typed a
+    field of 999 integers and one float as INTEGER, and the float then failed
+    the write.
+    """
+    from services.type_lattice import resolve_observed_types
+
     counts = {str(k).upper(): int(v) for k, v in (type_counts or {}).items() if v and k}
     total = sum(counts.values())
     if total <= 0:
@@ -3086,22 +3119,14 @@ def _finalize_mongodb_type_with_note(
     structural = {k: counts[k] for k in _STRUCTURAL_TYPES if counts.get(k, 0) > 0}
     if structural:
         # Sticky: any nested observation keeps a semi-structured type.
-        if "OBJECT" in structural and "ARRAY" in structural:
-            return "JSON", None
-        return max(structural, key=lambda k: (structural[k], _MONGO_TYPE_ORDER.get(k, 0))), None
+        return resolve_observed_types(structural) or "JSON", None
 
     text_n = counts.get("TEXT", 0) + counts.get("VARCHAR", 0)
     typed = {k: v for k, v in counts.items() if k not in _TEXTUAL_TYPES}
     if not typed:
         return "TEXT", None
 
-    # Promote INTEGER+DECIMAL → DECIMAL, DATE+TIMESTAMP → TIMESTAMP.
-    if "DECIMAL" in typed and "INTEGER" in typed:
-        typed["DECIMAL"] = typed.get("DECIMAL", 0) + typed.pop("INTEGER", 0)
-    if "TIMESTAMP" in typed and "DATE" in typed:
-        typed["TIMESTAMP"] = typed.get("TIMESTAMP", 0) + typed.pop("DATE", 0)
-
-    best = max(typed, key=lambda k: (typed[k], _MONGO_TYPE_ORDER.get(k, 0)))
+    best = resolve_observed_types(typed)
     typed_share = sum(typed.values()) / total
     mix_note: str | None = None
     if typed_share >= _MONGO_TYPED_MAJORITY:

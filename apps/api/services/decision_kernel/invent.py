@@ -197,6 +197,49 @@ def _kernel_invent_is_stale(row: dict[str, Any], src: str) -> bool:
     return changed
 
 
+def _backfill_widened_type(
+    live_type: str,
+    row: dict[str, Any],
+    src_types: dict[str, str],
+    *,
+    dest_db: str,
+    backfill_new_fields: bool,
+) -> str:
+    """The source's type when backfill should widen an existing column, else "".
+
+    Binding an existing column to its live carrier is the right default: the
+    destination's declared type is fact, and inventing over it would silently
+    re-shape a table the operator did not ask to change. ``backfill_new_fields``
+    *is* that request, though, and a source column that has grown — MySQL
+    ``DECIMAL(8,2)`` widened to ``DECIMAL(12,2)`` upstream — otherwise leaves the
+    destination narrow, so the rows that needed the extra digits are quarantined
+    as overflow on every subsequent run.
+
+    Only a strictly wider source passes, so this can never narrow a live column,
+    and the writer's widen pass still applies its own dialect refusals before any
+    ALTER runs.
+    """
+    if not backfill_new_fields:
+        return ""
+    source_type = (
+        str(row.get("source_type") or "").strip()
+        or column_type_or_none(src_types, str(row.get("source") or ""))
+        or ""
+    )
+    if not source_type:
+        return ""
+    try:
+        from connectors.schema_drift import is_wider_type
+    except Exception:
+        return ""
+    try:
+        if is_wider_type(str(live_type), source_type, dest_db=dest_db):
+            return source_type
+    except Exception:
+        return ""
+    return ""
+
+
 def stamp_additive_mapping_types(
     mappings: list[dict[str, Any]] | None,
     *,
@@ -253,9 +296,20 @@ def stamp_additive_mapping_types(
         stamped = str(row.get("target_type") or row.get("dest_type") or "").strip()
         if live_hit:
             # Bind-existing authority — live carrier always wins over Map invent.
-            row["target_type"] = str(live_hit)
+            widened = _backfill_widened_type(
+                live_hit,
+                row,
+                src_types,
+                dest_db=db,
+                backfill_new_fields=backfill_new_fields,
+            )
+            row["target_type"] = widened or str(live_hit)
             row["create_new"] = False
-            if strategy in {"create_compatible_new", "identity_passthrough"}:
+            if widened:
+                # The ALTER is planned, not performed here: the writer's
+                # widen pass owns the DDL and keeps its own refusals.
+                row["assignment_strategy"] = "backfill_widen_existing"
+            elif strategy in {"create_compatible_new", "identity_passthrough"}:
                 row["assignment_strategy"] = "bind_existing"
             continue
         is_create = bool(

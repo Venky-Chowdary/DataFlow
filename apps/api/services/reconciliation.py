@@ -19,7 +19,7 @@ from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import time as _time
 from datetime import timezone
-from decimal import Decimal, InvalidOperation, Overflow
+from decimal import Decimal, InvalidOperation, Overflow, localcontext
 from functools import lru_cache
 from typing import Any, Callable, Final, Iterable, Iterator
 
@@ -884,6 +884,11 @@ KEYED_READBACK_ENGINES: Final[frozenset[str]] = frozenset(
         "databricks",
         "generic_sql",
         "mongodb",
+        # Redis addresses every write by ``prefix:identity``, so re-reading one
+        # batch's keys is exact. Without it an upsert into a keyspace holding
+        # any other key compared whole-prefix digests and reported a correct
+        # write as a mismatch.
+        "redis",
     }
 )
 
@@ -2709,8 +2714,16 @@ def verify_redis_prefix(
     prefix: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Reconcile Redis keys under ``prefix:*`` (writer key layout)."""
+    """Reconcile Redis keys under ``prefix:*`` (writer key layout).
+
+    ``written_ids`` scopes the digest to the keys this batch wrote, the same way
+    the SQL and warehouse read-backs do. An upsert into a keyspace that already
+    holds other keys is otherwise incomparable: the whole-prefix digest includes
+    rows the source never sent. Cardinality stays whole-prefix either way.
+    """
     try:
         from connectors.redis_reader import _decode, _redis_client
 
@@ -2735,6 +2748,14 @@ def verify_redis_prefix(
             if cursor == 0:
                 break
 
+        total = len(keys)
+        scoped_ids, _pk = keyed_readback_scope(written_ids, pk_column)
+        if scoped_ids:
+            from connectors.redis_reader import redis_key_for
+
+            wanted = {redis_key_for(prefix, i) for i in scoped_ids}
+            keys = [k for k in keys if k in wanted]
+
         def _row_iter():
             for key in keys:
                 raw = client.get(key)
@@ -2755,7 +2776,7 @@ def verify_redis_prefix(
             sample = next(_row_iter(), {})
             columns = sorted(sample.keys()) if sample else ["value"]
         checksum = canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
-        return len(keys), checksum
+        return total, checksum
     except Exception as exc:
         logger.warning("Redis reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -3193,6 +3214,8 @@ def verify_target(
             prefix=table_name,
             target_columns=target_columns,
             limit=limit,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type in {"elasticsearch", "opensearch", "elastic"}:
         count, chk = verify_elasticsearch_index(
@@ -3585,10 +3608,21 @@ def fingerprint_for_reconcile(
     """
     from services.transform_engine import apply_transform
     from services.type_system import instant_date_carrier
-    from services.value_serializer import cell_to_string
+    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     ddl_type = instant_date_carrier(engine, ddl_type)
     wire: Any = value
+    if is_missing_sentinel(value):
+        # An absent field is NULL to every SQL destination — that is what the
+        # writer stores and what the read-back returns. Only the ``Missing``
+        # *object* reached this path untranslated (its string spelling was
+        # already handled downstream), and ``cell_to_string`` renders it as an
+        # empty string. That made a sparse Mongo/DynamoDB/Redis document
+        # fingerprint as ``''`` against a destination NULL, failing Gate-8 on a
+        # correct transfer — and, in the other direction, matching a destination
+        # that really did store an empty string.
+        wire = None
+        value = None
     tname = (transform or "").strip().lower()
     if tname and tname not in {"", "none", "identity", "passthrough"}:
         cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
@@ -3856,10 +3890,52 @@ def _decimal_from_ieee_float(value: float) -> Decimal | None:
     return Decimal(format(value, ".15g"))
 
 
+def _normalize_exact(d: Decimal) -> Decimal:
+    """Strip trailing zeros without the 28-digit rounding of the default context.
+
+    ``Decimal.normalize`` honours the ambient context precision, so a value
+    carrying more than 28 significant digits is quietly rounded. Inside a
+    checksum that is a correctness bug in both directions: it can fail a clean
+    transfer, and it can map two genuinely different decimals onto one digest,
+    reporting corrupted data as verified.
+    """
+    if not d.is_finite():
+        return d
+    with localcontext() as ctx:
+        ctx.prec = max(len(d.as_tuple().digits), 28)
+        return d.normalize()
+
+
+def _is_exact_double(d: Decimal) -> bool:
+    """True when ``d`` is precisely the value of some IEEE double.
+
+    This is the licence to round a mantissa down to 15 significant digits. When
+    it holds, the long tail is the double's own decimal expansion and dropping it
+    recovers the human value (``106.60000000000001`` → ``106.6``). When it fails,
+    the digits carry information no double can hold — ``12345678901234567890.123``
+    or ``-999999999999999999.999999`` — and rounding would corrupt the very value
+    Gate-8 is comparing, either failing a clean transfer or, worse, letting two
+    genuinely different decimals collapse onto one checksum.
+    """
+    import math
+
+    try:
+        f = float(d)
+    except (OverflowError, ValueError):
+        return False
+    if not math.isfinite(f):
+        return False
+    try:
+        return Decimal(repr(f)) == _normalize_exact(d)
+    except (InvalidOperation, Overflow, ValueError):
+        return False
+
+
 def _canonicalize_number(value: Any) -> str | None:
     """Return a canonical string for numeric values so 9.5 == 9.5000000000.
 
-    Also collapses IEEE float residue so Excel/JSON floats match DECIMAL sinks.
+    Also collapses IEEE float residue so Excel/JSON floats match DECIMAL sinks,
+    but only where that collapse is provably information-free.
     """
     try:
         if isinstance(value, float):
@@ -3872,7 +3948,9 @@ def _canonicalize_number(value: Any) -> str | None:
             if d.is_finite():
                 digits = d.as_tuple().digits
                 exp = d.as_tuple().exponent
-                if len(digits) > 15 or (isinstance(exp, int) and exp < -12):
+                if (
+                    len(digits) > 15 or (isinstance(exp, int) and exp < -12)
+                ) and _is_exact_double(d):
                     try:
                         d = _decimal_from_ieee_float(float(d)) or d
                     except (OverflowError, ValueError):
@@ -3886,7 +3964,7 @@ def _canonicalize_number(value: Any) -> str | None:
             if d.is_finite() and ("." in text or "e" in text.lower()):
                 head = text.split("e")[0].split("E")[0]
                 frac = head.split(".")[-1] if "." in head else ""
-                if len(frac.rstrip("0")) > 12:
+                if len(frac.rstrip("0")) > 12 and _is_exact_double(d):
                     try:
                         d = _decimal_from_ieee_float(float(d)) or d
                     except (OverflowError, ValueError):
@@ -3895,7 +3973,7 @@ def _canonicalize_number(value: Any) -> str | None:
             return None
         from services.value_serializer import safe_decimal_text
 
-        s = safe_decimal_text(d.normalize() if d.is_finite() else d)
+        s = safe_decimal_text(_normalize_exact(d) if d.is_finite() else d)
         if s is None:
             return None
         if "." in s and "e" not in s.lower():

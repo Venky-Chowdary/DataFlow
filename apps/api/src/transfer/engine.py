@@ -52,6 +52,7 @@ try:
     from services.row_filter import apply_row_filter
     from services.scd2_engine import apply_scd2
     from services.sync_cursor import (
+        destination_exists_for_typing,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -89,6 +90,7 @@ except (
     from src.services.row_filter import apply_row_filter
     from src.services.scd2_engine import apply_scd2
     from src.services.sync_cursor import (
+        destination_exists_for_typing,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -157,6 +159,7 @@ from services.batch_progress import (
     ThrottledCheckpoint,
     compute_transfer_progress_pct,
     effective_backfill_new_fields,
+    row_count_label,
 )
 
 try:
@@ -912,6 +915,7 @@ def _execute_preflight_parity_kwargs(
             dest_api_key=getattr(dest, "api_key", None) or None,
             dest_service_account=getattr(dest, "service_account", None) or None,
             dest_kind=dest.kind or "database",
+            dest_extra=dict(getattr(dest, "extra", None) or {}),
         )
     except Exception as exc:
         logger.warning(
@@ -1593,6 +1597,16 @@ def _auto_map(
             target_schema, dest_exists = _destination_schema_probe(
                 request.destination,
                 sync_mode=sync_mode,
+            )
+            # Overwrite recreates the table, and a keyspace store never has a
+            # column shape at all. Either way there is nothing to bind types to,
+            # so the mapper must invent rather than wait for a stamp that is
+            # never coming — see destination_exists_for_typing.
+            dest_exists = destination_exists_for_typing(
+                sync_mode,
+                dest_exists,
+                has_live_column_types=bool(target_schema),
+                dest_format=str(getattr(request.destination, "format", "") or ""),
             )
             if not target_schema:
                 # Empty columns: only invent identity create-new when the object
@@ -2728,7 +2742,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Writing {total_rows:,} rows…",
+                message=f"Writing {row_count_label(total_rows)} rows…",
             )
 
             def _check_cancelled() -> None:
@@ -3859,7 +3873,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {total_rows:,} rows in batches…",
+                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
             )
 
             is_streaming = True
@@ -4615,7 +4629,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {total_rows:,} rows in batches…",
+                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
             )
 
             is_streaming = True

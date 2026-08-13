@@ -90,4 +90,9 @@ def test_tz_polarity_lakehouse_and_mysql():
     assert "NTZ" in ddl_type("databricks", "TIMESTAMP_NTZ").upper() or "TIMESTAMP_NTZ" in ddl_type(
         "databricks", "TIMESTAMP_NTZ"
     ).upper()
-    assert ddl_type("mysql", "TIMESTAMPTZ").upper().startswith("DATETIME")
+    # MySQL has no offset-label carrier, so the only question an aware source
+    # raises is which carrier keeps the instant. TIMESTAMP(6) is UTC on disk
+    # and self-describing; DATETIME(6) holds the same digits with no polarity
+    # marker and needs a UTC-normalize contract to mean anything.
+    assert ddl_type("mysql", "TIMESTAMPTZ").upper().startswith("TIMESTAMP")
+    assert ddl_type("mysql", "TIMESTAMP").upper().startswith("DATETIME")

@@ -56,6 +56,11 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         # live PRODUCTION_SKU matrix.
         assert not transfer_ready(declared), driver
         pytest.skip(f"{driver} is Planned (certified=False) — not transfer-ready yet")
+    if declared.get("preflight") is False:
+        # Drivers without a Validate-class preflight (SFTP, email) cannot gate a
+        # transfer, so they stay Planned no matter how complete read/write is.
+        assert not transfer_ready(declared), driver
+        pytest.skip(f"{driver} has no Validate-class preflight — not transfer-ready yet")
     if declared.get("source_only"):
         assert declared.get("read"), driver
     else:

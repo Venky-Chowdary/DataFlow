@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -507,6 +508,39 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
     return "VARCHAR"
 
 
+@contextmanager
+def _column_date_locale(samples: list[str]):
+    """Resolve one date ordering for the whole column before classifying cells.
+
+    ``12/31/2024`` is unambiguously MDY, but ``5/8/1967`` beside it is not, and a
+    cell judged on its own becomes VARCHAR. One such cell made the column mixed,
+    so a date column landed as text even though the write path went on to parse
+    every value as MDY correctly — the type and the values disagreed.
+
+    Reading the ordering from the column and classifying under it is what a
+    reader does with a CSV: the unambiguous rows settle the ambiguous ones. An
+    explicit transfer locale still wins, and a column with no unambiguous member
+    resolves to nothing and stays text rather than guessing an ordering.
+    """
+    from services.transform_engine import (
+        _active_date_locale,
+        infer_date_locale,
+        reset_active_date_locale,
+        set_active_date_locale,
+    )
+
+    token = None
+    if not _active_date_locale():
+        resolved = infer_date_locale(samples)
+        if resolved:
+            token = set_active_date_locale(resolved)
+    try:
+        yield
+    finally:
+        if token is not None:
+            reset_active_date_locale(token)
+
+
 def infer_type(
     samples: list[str], *, threshold: float = 0.85, field_name: str | None = None
 ) -> str:
@@ -725,7 +759,10 @@ def infer_column(
                 "samples": non_empty[:8],
             }
 
-    counts: Counter[str] = Counter(_classify_value(s, field_name=field_name) for s in non_empty)
+    with _column_date_locale(non_empty):
+        counts: Counter[str] = Counter(
+            _classify_value(s, field_name=field_name) for s in non_empty
+        )
     types = set(counts.keys())
 
     if types <= {"INTEGER", "DECIMAL"}:

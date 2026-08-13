@@ -10,7 +10,9 @@ from connectors.writer_common import (
 def test_sanitize_identifier_preserves_mongodb_id():
     # MongoDB's primary key must survive normalization.
     assert sanitize_identifier("_id") == "_id"
-    assert sanitize_identifier("_id_") == "_id"
+    # Trailing underscores are kept: stripping them made "_id_" and "_id"
+    # the same destination column.
+    assert sanitize_identifier("_id_") == "_id_"
     assert sanitize_identifier("customer_id") == "customer_id"
     assert sanitize_identifier("NAME") == "name"
 

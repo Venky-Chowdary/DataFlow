@@ -55,6 +55,46 @@ def default_port_for(driver: str) -> int:
     return int(default_port(driver) or 0)
 
 
+def writer_extra_kwargs(
+    driver: str,
+    *,
+    cfg: dict[str, Any],
+    dest: Any = None,
+    common: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Driver-specific writer kwargs that the common batch payload does not carry.
+
+    One owner for "what else does *this* writer need", so a connection setting
+    cannot reach the adapter path and be dropped by the streaming one — which is
+    how SFTP host-key trust came to be verified at Validate and absent at write.
+    """
+    common = common or {}
+    if driver == "sftp":
+        from connectors.sftp_common import host_key_settings
+
+        # Host-key trust must ride every path that opens an SFTP connection.
+        # Dropping it downgraded the write to "no pinned key" while Validate had
+        # just verified against the pinned one.
+        extra = dict(host_key_settings(cfg))
+        extra["private_key"] = str(cfg.get("private_key") or "")
+        return extra
+    if driver == "kafka":
+        return {
+            "schema_registry_url": str(
+                (getattr(dest, "extra", None) or {}).get("schema_registry_url")
+                or cfg.get("schema_registry_url")
+                or ""
+            )
+        }
+    if driver == "iceberg":
+        # Forward catalog properties (warehouse, region, catalog_type, token,
+        # rest.*, glue.*, …) that are not already part of the common kwargs.
+        return {
+            k: v for k, v in cfg.items() if k not in common and v not in (None, "")
+        }
+    return {}
+
+
 def write_via_registry(
     driver: str,
     *,

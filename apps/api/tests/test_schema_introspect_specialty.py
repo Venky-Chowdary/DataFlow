@@ -187,7 +187,10 @@ def test_tz_polarity_introspect_and_ddl():
     assert ddl_type("snowflake", "TIMESTAMPTZ") == "TIMESTAMP_LTZ"
     assert ddl_type("snowflake", "TIMESTAMP_TZ") == "TIMESTAMP_TZ"
     assert ddl_type("snowflake", "TIMESTAMP_NTZ") == "TIMESTAMP_NTZ"
-    assert ddl_type("mysql", "TIMESTAMPTZ").upper().startswith("DATETIME")
+    # MySQL introspect reads its own ``timestamp`` as aware (above), so the
+    # aware carrier must round-trip to TIMESTAMP(6) — landing DATETIME(6) lost
+    # the polarity on a MySQL→MySQL copy of the column it just read.
+    assert ddl_type("mysql", "TIMESTAMPTZ").upper().startswith("TIMESTAMP")
     assert ddl_type("mysql", "TIMESTAMP_NTZ").upper().startswith("DATETIME")
     assert ddl_type("redshift", "TIMESTAMPTZ") == "TIMESTAMPTZ"
     assert ddl_type("redshift", "TIMESTAMP_NTZ") == "TIMESTAMP"

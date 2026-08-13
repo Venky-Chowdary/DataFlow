@@ -1487,6 +1487,17 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         # BIGNUMERIC(p,s) (BQ has no DECIMAL type name).
         if db == "bigquery" and bare_typmod in {"NUMERIC", "BIGNUMERIC"}:
             return True
+        # MySQL ``TIMESTAMP(p)`` is the native instant carrier and the exact
+        # spelling INFORMATION_SCHEMA reports for such a column, so it is a
+        # physical stamp — not a foreign token to rewrite. Only two producers
+        # reach here with it: Map's create-new stamp for a TZ-aware source
+        # (_TZ_AWARE_DDL) and the live catalog. Rewriting it to DATETIME(6)
+        # retyped an instant column as wall-clock, and the write-time NTZ guard
+        # then quarantined every offset-bearing row the column could hold.
+        # Bare ``TIMESTAMP`` stays foreign/ambiguous (PostgreSQL and Oracle
+        # spell wall-clock that way) and still rematerializes to DATETIME(6).
+        if bare_typmod == "TIMESTAMP" and db in {"mysql", "mariadb", "tidb"}:
+            return True
         if bare_typmod in reject:
             return False
         return True

@@ -1037,7 +1037,16 @@ def stream_file_to_database(
             destination_pk_columns=list(pk_target_cols or []) or None,
             empty_cells_as_null=True,
         )
-        fingerprints = row_fingerprints(mapped_rows, target_cols) if mapped_rows else []
+        fingerprints = (
+            row_fingerprints(
+                mapped_rows,
+                target_cols,
+                dest_db_type=dest_type,
+                dest_types=fingerprint_dest_types,
+            )
+            if mapped_rows
+            else []
+        )
 
         write_op = partial(
             _write_batch,
@@ -1254,7 +1263,14 @@ def stream_file_to_database(
                 destination_pk_columns=list(pk_target_cols or []) or None,
             )
             if mapped_rows:
-                full_accumulator.add_many(row_fingerprints(mapped_rows, target_cols))
+                full_accumulator.add_many(
+                    row_fingerprints(
+                        mapped_rows,
+                        target_cols,
+                        dest_db_type=dest_type,
+                        dest_types=fingerprint_dest_types,
+                    )
+                )
         final_checksum = full_accumulator.digest() if full_accumulator.total else last_checksum
     else:
         full_source_rows = 0

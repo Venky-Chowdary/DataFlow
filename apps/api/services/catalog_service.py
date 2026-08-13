@@ -73,17 +73,28 @@ def search_catalog(
     data = load_catalog()
     connectors = _enriched_connectors()
 
-    if transfer_only:
+    # ``transfer_only`` means duplex — read *and* write. That is the right
+    # question only when no side is chosen. Applying it to a role-scoped picker
+    # dropped exactly the connectors that can serve that one side: a source-only
+    # feed could never be picked as a source, which is the only thing it can be.
+    # For a role, the role-readiness filter below *is* the transfer-ready test.
+    if transfer_only and role not in {"source", "destination"}:
         connectors = [c for c in connectors if c.get("transfer_ready")]
 
+    # ``role`` used only to re-sort, so both pickers were handed the same list:
+    # the source picker offered Pinecone, Weaviate, Milvus, Qdrant and pgvector,
+    # none of which can be read, and picking one produced a route that failed at
+    # Execute. A picker must only offer the side a connector can actually take.
     if role == "source":
         suggested_ids = set(SUGGESTED_SOURCES)
+        connectors = [c for c in connectors if c.get("source_ready")]
         connectors = sorted(
             connectors,
             key=lambda c: (c["id"] not in suggested_ids, not c.get("transfer_ready"), c["name"]),
         )
     elif role == "destination":
         suggested_ids = set(SUGGESTED_DESTINATIONS)
+        connectors = [c for c in connectors if c.get("dest_ready")]
         connectors = sorted(
             connectors,
             key=lambda c: (c["id"] not in suggested_ids, not c.get("transfer_ready"), c["name"]),
@@ -104,8 +115,17 @@ def search_catalog(
 
     if status:
         if status == "live":
-            # "Transfer ready" filter: certified full R/W only — not source-only REST.
-            connectors = [c for c in connectors if c.get("transfer_ready")]
+            # "Transfer ready" means duplex — full read *and* write. Asked
+            # without a side that is the right question. Asked *with* one it is
+            # not: a source-only connector is transfer-ready as a source, and
+            # filtering it out left an operator who ticked "Transfer ready" on
+            # the source list unable to find Couchbase or Neo4j at all.
+            if role == "source":
+                connectors = [c for c in connectors if c.get("source_ready")]
+            elif role == "destination":
+                connectors = [c for c in connectors if c.get("dest_ready")]
+            else:
+                connectors = [c for c in connectors if c.get("transfer_ready")]
         elif status == "source_only":
             connectors = [c for c in connectors if c.get("certification_tier") == "source_only"]
         elif status == "connect_only":
@@ -127,8 +147,9 @@ def search_catalog(
     if ids and not q:
         by_id = {c["id"]: c for c in _enriched_connectors()}
         suggested = [by_id[i] for i in ids if i in by_id][:16]
-        if transfer_only:
-            suggested = [s for s in suggested if s.get("transfer_ready")]
+        # A suggestion is still an offer: the same role rule applies to it.
+        role_key = "source_ready" if role == "source" else "dest_ready"
+        suggested = [s for s in suggested if s.get(role_key)]
 
     categories = sorted({c.get("category", "other") for c in data.get("connectors", [])})
     enriched_all = _enriched_connectors()
@@ -143,6 +164,17 @@ def search_catalog(
         unique_drivers = len(transfer_live_driver_types())
     except Exception:
         unique_drivers = sum(1 for c in enriched_all if c.get("transfer_ready"))
+
+    # How many engines the operator can actually pick on each side. A single
+    # "43 drivers" answered both questions and neither: it counts a connector
+    # usable in *a* transfer, which includes write-only stores when asked about
+    # sources and read-only feeds when asked about destinations.
+    source_drivers = len({
+        c.get("driver_type") for c in enriched_all if c.get("source_ready") and c.get("driver_type")
+    })
+    dest_drivers = len({
+        c.get("driver_type") for c in enriched_all if c.get("dest_ready") and c.get("driver_type")
+    })
 
     return {
         "total": total,
@@ -159,6 +191,15 @@ def search_catalog(
         "certified_tiles": certified_tiles,
         "source_only": source_only,
         "planned_count": planned,
+        # Per-side counts, derived the same way the list above is filtered, so
+        # the number always describes the list the operator is looking at.
+        "source_live": source_drivers,
+        "dest_live": dest_drivers,
+        "role_live": (
+            source_drivers if role == "source"
+            else dest_drivers if role == "destination"
+            else unique_drivers
+        ),
     }
 
 
@@ -216,8 +257,19 @@ def catalog_summary() -> dict:
         "certified_tiles": certified_tiles,
         "source_only": source_only,
         "planned_count": planned_tier,
+        # Per-side engine counts. "Usable in a transfer" is not the same question
+        # as "usable as a source", and answering both with one number counted
+        # write-only stores among the sources.
+        "source_live": len({
+            c.get("driver_type") for c in enriched if c.get("source_ready") and c.get("driver_type")
+        }),
+        "dest_live": len({
+            c.get("driver_type") for c in enriched if c.get("dest_ready") and c.get("driver_type")
+        }),
         "honesty_note": (
             "Public live/certified counts are unique engines (unique_drivers). "
+            "source_live / dest_live are the per-side counts, which differ: a "
+            "vector store is a destination only and a REST feed a source only. "
             "catalog_tile_total includes Planned roadmap and hosted aliases."
         ),
     }

@@ -175,6 +175,25 @@ def _qualifier_stems_overlap(a: set[str], b: set[str]) -> bool:
     return False
 
 
+def _qualifiers_synonymous(src_q: set[str], tgt_q: set[str]) -> bool:
+    """True when two qualifier sets name the same thing in different words.
+
+    Compared by canonical form rather than surface token. A synonym pair differs
+    in spelling by definition — ``salary`` against ``compensation`` shares no
+    characters — so a raw token comparison calls every genuine synonym a
+    conflicting entity, which is the opposite of what the dictionary is for.
+    Qualifiers with no canonical entry fall back to their own surface, so
+    ``billing`` against ``shipping`` still conflicts.
+    """
+    if not src_q and not tgt_q:
+        return True
+    if not src_q or not tgt_q:
+        return False
+    left = {lookup_schematic(q) or q for q in src_q}
+    right = {lookup_schematic(q) or q for q in tgt_q}
+    return left == right
+
+
 def qualifiers_compatible(source: str, target: str) -> bool:
     """False when both sides have non-overlapping entity prefixes.
 
@@ -222,10 +241,19 @@ def schematic_match_boost(source: str, target: str) -> float | None:
             return 0.76
         return 0.99 if not src_q else 0.95
 
+    # Same canonical form and qualifiers that mean the same thing: one concept,
+    # two spellings. Checked before the disjoint-token veto below, which would
+    # otherwise reject every synonym pair — differing surface tokens are what
+    # makes them synonyms, so the veto read ``salary`` against ``compensation``
+    # as a conflict between two entities and refused to map them at all.
+    same_canonical = bool(src_canon and tgt_canon and src_canon == tgt_canon)
+    if same_canonical and _qualifiers_synonymous(src_q, tgt_q):
+        return 0.97
+
     if src_q and tgt_q and src_q.isdisjoint(tgt_q):
         return None
 
-    if src_canon and tgt_canon and src_canon == tgt_canon:
+    if same_canonical:
         if not src_q and tgt_q:
             return None
         if src_q and tgt_is_bare_leaf:

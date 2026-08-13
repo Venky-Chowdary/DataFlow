@@ -66,7 +66,7 @@ def _mysql_reachable() -> bool:
 
 
 def test_sanitize_hostile_table_is_deterministic() -> None:
-    assert SAFE_TABLE == "orders_DROP_TABLE_users"
+    assert SAFE_TABLE == "orders___DROP_TABLE_users___"
     assert ";" not in SAFE_TABLE
     assert '"' not in SAFE_TABLE
 
@@ -408,7 +408,7 @@ def test_mysql_writer_insert_sql_never_embeds_injection_payload() -> None:
     joined = "\n".join(captured.get("sql") or [])
     assert "DROP TABLE" not in joined
     assert '";' not in joined
-    assert "`orders_DROP_TABLE_users`" in joined or "orders_DROP_TABLE_users" in joined
+    assert f"`{SAFE_TABLE}`" in joined or SAFE_TABLE in joined
 
 
 def test_pg_change_stream_qualified_table_uses_quote_helpers() -> None:

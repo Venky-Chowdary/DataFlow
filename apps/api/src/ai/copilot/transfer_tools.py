@@ -212,6 +212,11 @@ def _dest_table_exists_tri_state(dst_info: dict[str, Any]) -> bool | None:
     """
     if dst_info.get("columns"):
         return True
+    measured = dst_info.get("table_exists")
+    if isinstance(measured, bool):
+        # The catalog was asked directly. Prefer that over the error-text guess
+        # below, which no engine promises to phrase any particular way.
+        return measured
     if dst_info.get("ok"):
         # Connected but zero columns — incomplete metadata, not create-new.
         return None
@@ -377,6 +382,7 @@ def plan_transfer(
         source_config=_endpoint_dict(src_info.get("endpoint")),
         dest_db_type=str(dst_info.get("db_type") or ""),
         dest_exists=dest_exists,
+        source_primary_key=_source_primary_key(src_info),
         write_via_staging=bool(write_via_staging),
     )
 
@@ -445,6 +451,18 @@ def plan_transfer(
     )
 
 
+def _source_primary_key(src_info: dict[str, Any]) -> str:
+    """The source's declared identity, as a comma-joined composite key.
+
+    Studio collects this on the Map screen; a chat request has no such screen,
+    so the catalog is the only place the Pilot can learn it — and it is the
+    better source anyway, since the source already declared it.
+    """
+    raw = src_info.get("raw") if isinstance(src_info.get("raw"), dict) else {}
+    cols = [str(c).strip() for c in (raw.get("primary_key_columns") or []) if str(c).strip()]
+    return ",".join(cols)
+
+
 def _run_preflight(
     *,
     src_conn: dict[str, Any],
@@ -461,6 +479,7 @@ def _run_preflight(
     source_config: dict[str, Any],
     dest_db_type: str,
     dest_exists: bool | None,
+    source_primary_key: str = "",
     write_via_staging: bool = False,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
@@ -539,6 +558,12 @@ def _run_preflight(
             source_connector_id=str(src_conn.get("id") or ""),
             source_config=source_config,
             confidence_threshold=confidence_threshold_for_mode(validation_mode),
+            # Key-addressed destinations (Mongo, Redis, vector stores) refuse a
+            # write they cannot address. Studio carries the key on a stream
+            # contract; the Pilot has no Map screen to fill one in, so without
+            # this the gate asked the operator to set a key the source catalog
+            # had already declared.
+            contract_primary_key=source_primary_key or None,
         )
         result = apply_policy_gates(
             result,
@@ -563,6 +588,18 @@ def _run_preflight(
             "blockers": [{"id": "preflight", "message": f"Preflight could not run: {exc}"}],
         }
 
+    # Confirm is gated on the proof bundle's transfer_decision, so the slim
+    # projection has to carry it. Dropping it did not make Confirm stricter, it
+    # made the decision unreadable: _transfer_decision saw nothing and every run
+    # fell back to "review", so no Pilot transfer could ever be confirmed however
+    # clean it was. Only the decision travels; the rest of the bundle stays out
+    # of the chat payload.
+    proof_bundle = result.get("proof_bundle")
+    decision = (
+        (proof_bundle or {}).get("transfer_decision")
+        if isinstance(proof_bundle, dict)
+        else None
+    )
     return {
         "run_id": result.get("run_id"),
         "passed": bool(result.get("passed")),
@@ -578,6 +615,7 @@ def _run_preflight(
             for b in (result.get("blockers") or [])
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
+        "proof_bundle": {"transfer_decision": decision} if isinstance(decision, dict) else {},
     }
 
 

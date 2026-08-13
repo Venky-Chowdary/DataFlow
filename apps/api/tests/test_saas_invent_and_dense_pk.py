@@ -25,7 +25,7 @@ def test_assert_dense_upsert_keys_present_refuses_null():
 def test_airtable_update_never_falls_through_to_post():
     from connectors.airtable_writer import _batch_payload
 
-    url, method, payload = _batch_payload(
+    url, method, payload, sources = _batch_payload(
         [{"name": "no-id"}],
         table_name="T",
         base_id="appX",
@@ -34,12 +34,14 @@ def test_airtable_update_never_falls_through_to_post():
     )
     assert method == "PATCH"
     assert payload["records"] == []
+    # No record was sent, so nothing maps back to a source row.
+    assert sources == []
 
 
 def test_airtable_insert_still_posts():
     from connectors.airtable_writer import _batch_payload
 
-    url, method, payload = _batch_payload(
+    url, method, payload, sources = _batch_payload(
         [{"name": "n"}],
         table_name="T",
         base_id="appX",
@@ -48,3 +50,4 @@ def test_airtable_insert_still_posts():
     )
     assert method == "POST"
     assert len(payload["records"]) == 1
+    assert sources == [0]

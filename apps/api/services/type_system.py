@@ -1303,6 +1303,24 @@ def bare_decimal_is_unbounded(*, dest_db: str = "") -> bool:
     return db in {"postgresql", "oracle", "oracledb"}
 
 
+#: IEEE 754-2008 decimal128 carries 34 significant decimal digits (exponent
+#: −6143..+6144). MongoDB's BSON ``decimal`` is exactly this type.
+DECIMAL128_SIGNIFICANT_DIGITS = 34
+
+
+def dest_decimal_is_decimal128(*, dest_db: str = "") -> bool:
+    """True when the dialect's bare decimal is IEEE decimal128, not a default.
+
+    A bare SQL ``DECIMAL`` is a promise the engine fills in with a platform
+    default that is usually narrower than the source, which is why an unresolved
+    one is treated as narrowing. BSON ``decimal`` is not that: it is one fully
+    specified carrier holding 34 significant digits at any in-range scale, so
+    ``DECIMAL(12,2)`` lands in it exactly. Treating it as unresolved refused
+    PostgreSQL → MongoDB routes for a collapse that does not occur.
+    """
+    return (_normalize_dest_db(dest_db) if dest_db else "") in {"mongodb"}
+
+
 def bare_decimal_platform_default(
     target_type: str = "",
     *,
@@ -1360,6 +1378,14 @@ def decimal_params_would_narrow(
         return False
     sp, ss = parse_numeric_precision_scale(source_type)
     tp, ts = parse_numeric_precision_scale(target_type)
+    if dest_decimal_is_decimal128(dest_db=dest_db):
+        # BSON decimal has one capacity — 34 significant digits at any in-range
+        # scale — and no per-field width to narrow. Any ``(p, s)`` on this side
+        # was inferred from sampled documents, so comparing against it treats a
+        # description of the rows that happen to be there as a constraint the
+        # store does not have: a placeholder holding 0.00 made the field look
+        # like DECIMAL(5,4) and refused every real salary that followed.
+        return (sp if sp is not None else 0) > DECIMAL128_SIGNIFICANT_DIGITS
     if sp is None and ss is None:
         # Bare DECIMAL → DECIMAL(p,s) invents a capacity the source never proved.
         if tp is not None or ts is not None:
@@ -1370,6 +1396,11 @@ def decimal_params_would_narrow(
         # other engines invent platform defaults — resolve then compare.
         if bare_decimal_is_unbounded(dest_db=dest_db):
             return False
+        if dest_decimal_is_decimal128(dest_db=dest_db):
+            # decimal128 keeps the source scale and narrows only when the source
+            # needs more significant digits than it holds. A single (p, s) pair
+            # cannot say that, since the scale it preserves is the source's own.
+            return (sp if sp is not None else 0) > DECIMAL128_SIGNIFICANT_DIGITS
         defaults = bare_decimal_platform_default(target_type, dest_db=dest_db)
         if defaults is None:
             return True
@@ -1543,28 +1574,16 @@ def is_dialect_native_document_wire(
     return upper == native_u or bare == re.sub(r"\s*\(\s*\d+\s*\)", "", native_u).strip()
 
 
-# Engines whose "date" token is a UTC-millisecond instant (BSON date,
-# Elasticsearch date), not a calendar date. They have no date-only type, so
-# DDL_TYPES stamps the same token for logical date and datetime; binding it as
-# SQL DATE would truncate time-of-day and hide real clock loss behind a green
-# digest.
-_INSTANT_DATE_TOKEN_ENGINES: Final[frozenset[str]] = frozenset(
-    {"mongodb", "documentdb", "cosmosdb", "elasticsearch", "opensearch"}
+# Document-store ``date`` is an instant carrier, not a calendar date. The rules
+# live in ``services.document_instant`` (size budget); re-exported here because
+# this module is the type SSOT every caller imports from.
+from services.document_instant import (  # noqa: E402
+    DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
+    INSTANT_DATE_TOKEN_ENGINES as _INSTANT_DATE_TOKEN_ENGINES,
+    document_instant_wire_preserved,
+    instant_date_carrier,
+    is_document_instant_token,
 )
-
-
-def instant_date_carrier(engine: str | None, ddl_type_token: str | None) -> str:
-    """Return the carrier to bind/fingerprint ``ddl_type_token`` against.
-
-    Identity for SQL engines. On document stores the bare ``date`` token stores
-    an offset-normalized instant, so it resolves to ``TIMESTAMPTZ`` — an
-    offset-bearing wire keeps its instant instead of the wall clock a bare
-    ``TIMESTAMP`` bind would preserve.
-    """
-    token = (ddl_type_token or "").strip()
-    if (engine or "").strip().lower() not in _INSTANT_DATE_TOKEN_ENGINES:
-        return token
-    return "TIMESTAMPTZ" if token.upper() == "DATE" else token
 
 
 def document_domain_would_collapse(
@@ -2893,7 +2912,11 @@ _TZ_LTZ_DDL: Final[dict[str, str]] = {
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "sqlserver": "DATETIMEOFFSET",
-    "mysql": "DATETIME(6)",
+    # MySQL is deliberately absent so this falls through to _TZ_AWARE_DDL.
+    # A session-relative instant (PostgreSQL TIMESTAMPTZ, Snowflake
+    # TIMESTAMP_LTZ) is exactly what MySQL TIMESTAMP is: UTC on disk, converted
+    # with the session time_zone, no offset label on either side. See
+    # _TZ_AWARE_DDL for why TIMESTAMP(6) rather than DATETIME(6).
     "bigquery": "TIMESTAMP",
     "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
@@ -2909,7 +2932,14 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "duckdb": "TIMESTAMPTZ",
     "timescaledb": "timestamptz",
     "sqlserver": "DATETIMEOFFSET",
-    "mysql": "DATETIME(6)",
+    # MySQL is deliberately absent so this falls through to _TZ_AWARE_DDL.
+    # MySQL has no offset-label carrier, so the label is unstorable either way
+    # and the only open question is which carrier keeps the *instant*. That
+    # answer belongs in one place (_TZ_AWARE_DDL: TIMESTAMP(6)). Naming
+    # DATETIME(6) here chose the strictly worse of the two — same digits, no
+    # polarity marker, instant recoverable only by writer convention — which
+    # made every aware→MySQL create-new demand a UTC-normalize contract for a
+    # route that needs none.
     "bigquery": "TIMESTAMP",
     "spanner": "TIMESTAMP",
     "databricks": "TIMESTAMP",
@@ -5755,6 +5785,12 @@ def temporal_precision_would_narrow(
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
+    if is_document_instant_token(dest_db, target_type):
+        # Millisecond carrier spelled ``date``. Restate it as a datetime of that
+        # precision so the comparison below reports the truncation that actually
+        # happens instead of stopping at the date-family mismatch.
+        target_type = f"DATETIME({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
+        tgt_l = LOGICAL_DATETIME
     if src_l not in {LOGICAL_TIME, LOGICAL_DATETIME} or tgt_l not in {
         LOGICAL_TIME,
         LOGICAL_DATETIME,
@@ -6482,6 +6518,12 @@ def is_precision_collapse_coercion(
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
+    if document_instant_wire_preserved(source_type, target_type, dest_db=dest_db):
+        # A document store's ``date`` keeps the time of day; only sub-millisecond
+        # precision is lost, and a source declaring that much is excluded above
+        # so it still reports below. Without this the (datetime, date) pair read
+        # as dropping the clock and demoted every timestamp mapping.
+        return False
     if (src, tgt) in PRECISION_COLLAPSE_PAIRS:
         return True
     if is_timezone_polarity_loss(source_type, target_type, dest_db=dest_db):
@@ -7068,6 +7110,11 @@ def is_lossy_coercion(
         return False
     # VECTOR(n) â†’ ARRAY<FLOAT> lakehouse create-new wire â€” not embedding invent.
     if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
+        return False
+    # Document store ``date`` is an instant, not a calendar day — the time of
+    # day survives. Sub-millisecond sources are excluded and fall through to
+    # temporal_precision_would_narrow, which names the truncation.
+    if document_instant_wire_preserved(source_type, target_type, dest_db=dest_db):
         return False
     # ARRAY/STRUCT/MAP â†’ dialect create-new JSON/VARIANT/CLOB wire â€” representation.
     if nested_to_native_document_wire_preserved(

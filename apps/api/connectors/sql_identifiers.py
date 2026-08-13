@@ -12,9 +12,23 @@ _IDENT_RE = re.compile(r"[^a-zA-Z0-9_]")
 
 
 def sanitize_identifier(name: str, preserve_case: bool = False, *, max_len: int = 63) -> str:
+    """Make an identifier legal without making two distinct names one.
+
+    Only characters that are actually illegal are replaced. Runs of underscores
+    and trailing underscores are legal in every dialect we write to, and
+    normalizing them away was not cosmetic: it merged distinct columns.
+    ``first__name`` and ``first_name`` both became ``first_name``, so one source
+    column silently overwrote the other in the destination, and ``value_`` and
+    ``value`` collided the same way.
+
+    It also renamed data that needed no renaming. Every Salesforce custom field
+    ends in ``__c``, so ``ExternalKey__c`` landed as ``ExternalKey_c`` — the
+    values transferred, but under a column name the source never had, which is
+    enough for a checksum to disagree with a transfer that in fact moved every
+    row correctly.
+    """
     cleaned = (name or "").strip() if preserve_case else (name or "").strip().lower()
     s = _IDENT_RE.sub("_", cleaned)
-    s = re.sub(r"_+", "_", s).rstrip("_")
     if not s or s[0].isdigit():
         s = f"col_{s or 'field'}"
     return s[:max_len]

@@ -18,7 +18,7 @@ import logging
 import sys
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 from connectors.aws_common import boto3_client
 from connectors.base import ReadBatch
@@ -159,8 +159,17 @@ def infer_logical_from_native(value: Any) -> str | None:
         return "INTEGER"
     if isinstance(value, Decimal):
         # Whole numbers stay INTEGER when within bigint; else DECIMAL (never invent FLOAT).
+        # A declared scale still makes it a decimal: ``Decimal("1000.00")`` is
+        # integral in value but carries two fractional digits, and calling that
+        # column INTEGER drops the scale a money field depends on.
         try:
-            if value == value.to_integral_value() and abs(value) <= Decimal("9223372036854775807"):
+            exponent = value.as_tuple().exponent
+            scaled = isinstance(exponent, int) and exponent < 0
+            if (
+                not scaled
+                and value == value.to_integral_value()
+                and abs(value) <= Decimal("9223372036854775807")
+            ):
                 return "INTEGER"
         except Exception as exc:
             logger.warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -181,6 +190,20 @@ def infer_logical_from_native(value: Any) -> str | None:
     if isinstance(value, str):
         return "VARCHAR" if len(value) <= 255 else "TEXT"
     return "VARCHAR"
+
+
+def widen_logical_votes(votes: dict[str, int]) -> str:
+    """Resolve one column type from the per-value types observed in a page.
+
+    DynamoDB is schemaless past its keys, so a column's type is whatever its
+    items happen to hold, and that answer has to hold *every* value rather than
+    the most common one. The lattice in :mod:`services.type_lattice` owns that
+    rule for every schemaless source; this only supplies what Dynamo saw and
+    names the fallback for an attribute whose values were all null.
+    """
+    from services.type_lattice import resolve_observed_types
+
+    return resolve_observed_types(votes) or "VARCHAR"
 
 
 def _cell(value: Any) -> str:
@@ -334,10 +357,7 @@ def read_table_batch(
             if not lt:
                 continue
             native_votes[h][lt] = native_votes[h].get(lt, 0) + 1
-    native_types = {
-        h: max(votes, key=votes.get) if votes else "VARCHAR"
-        for h, votes in native_votes.items()
-    }
+    native_types = {h: widen_logical_votes(votes) for h, votes in native_votes.items()}
 
     rows = []
     for rec in records:
@@ -420,10 +440,7 @@ def read_all_paginated(cfg: dict[str, Any], table: str, limit: int = 100_000) ->
         if not next_key or not batch.rows:
             break
 
-    native_types = {
-        h: max(votes, key=votes.get) if votes else "VARCHAR"
-        for h, votes in native_acc.items()
-    }
+    native_types = {h: widen_logical_votes(votes) for h, votes in native_acc.items()}
     out = ReadBatch(
         headers=headers,
         rows=all_rows,

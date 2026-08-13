@@ -18,9 +18,14 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import tempfile
 from typing import Any, Iterator
 
 from connectors.base import ReadBatch
+
+#: COPY output stays in memory up to this size, then spills to disk. Matches the
+#: bound the PostgreSQL COPY writer applies to its own buffer.
+_COPY_SPILL_BYTES = 1 * 1024 * 1024
 
 logger = logging.getLogger(__name__)
 
@@ -105,54 +110,77 @@ def iter_postgresql_copy_batches(
     )
     try:
         with conn.cursor() as cur:
-            if columns:
-                col_sql = sql.SQL(", ").join(sql.Identifier(c) for c in columns)
-                select = sql.SQL("SELECT {cols} FROM {sch}.{tbl}").format(
-                    cols=col_sql,
-                    sch=sql.Identifier(schema),
-                    tbl=sql.Identifier(table),
+            if not columns:
+                # COPY leaves cur.description empty, and TEXT format carries no
+                # header line, so the column names have to be settled before the
+                # copy runs or every batch ships headerless and the mapping and
+                # checksum downstream line up against nothing. A zero-row SELECT
+                # names them in the same order COPY will emit.
+                cur.execute(
+                    sql.SQL("SELECT * FROM {sch}.{tbl} LIMIT 0").format(
+                        sch=sql.Identifier(schema), tbl=sql.Identifier(table)
+                    )
                 )
-            else:
-                select = sql.SQL("SELECT * FROM {sch}.{tbl}").format(
-                    sch=sql.Identifier(schema),
-                    tbl=sql.Identifier(table),
-                )
+                columns = [str(d[0]) for d in (cur.description or [])]
+
+            col_sql = sql.SQL(", ").join(sql.Identifier(c) for c in columns)
+            select = sql.SQL("SELECT {cols} FROM {sch}.{tbl}").format(
+                cols=col_sql,
+                sch=sql.Identifier(schema),
+                tbl=sql.Identifier(table),
+            )
+            # TEXT rather than CSV. In CSV, PostgreSQL writes SQL NULL as a bare
+            # \N and a literal "\N" string quoted — but csv.reader strips the
+            # quoting, so both arrive here as the same characters and a real \N
+            # value would be read as NULL. TEXT escapes instead of quoting, so a
+            # literal backslash comes through doubled and the null marker is
+            # unambiguous. It is also the exact inverse of the writer's
+            # _copy_text_value, which keeps one escaping contract for both
+            # directions.
             copy_sql = sql.SQL(
-                "COPY ({select}) TO STDOUT WITH (FORMAT csv, HEADER true, NULL '\\N')"
+                "COPY ({select}) TO STDOUT WITH (FORMAT text, DELIMITER E'\\t', NULL '\\N')"
             ).format(select=select)
 
-            buf = io.StringIO()
-            cur.copy_expert(copy_sql.as_string(cur), buf)
-            buf.seek(0)
-            reader = csv.reader(buf)
-            try:
-                headers = next(reader)
-            except StopIteration:
-                yield ReadBatch(headers=columns or [], rows=[], offset=0, total_rows=0)
-                return
+            # psycopg2's copy_expert writes the whole result into the file object
+            # before returning, so this cannot page the wire. A StringIO made
+            # that the worker's heap: the point of bulk export is warehouse-scale
+            # tables, and the first page used to arrive only after the last row
+            # was already resident. Spool to disk past a threshold instead —
+            # the same bound the COPY writer uses on the way in.
+            # Binary spool: copy_expert writes the raw wire bytes, so the text
+            # decode belongs on the read side.
+            with tempfile.SpooledTemporaryFile(max_size=_COPY_SPILL_BYTES) as raw:
+                cur.copy_expert(copy_sql.as_string(cur), raw)
+                raw.seek(0)
+                buf = io.TextIOWrapper(raw, encoding="utf-8", newline="\n")
+                # The SELECT above fixed both the names and their order.
+                headers = list(columns)
 
-            page: list[list[str]] = []
-            offset = 0
-            total = 0
-            for row in reader:
-                page.append([_copy_cell(c) for c in row])
-                total += 1
-                if len(page) >= batch_rows:
+                page: list[list[str]] = []
+                offset = 0
+                total = 0
+                for line in buf:
+                    line = line.rstrip("\n")
+                    if not line:
+                        continue
+                    page.append([_copy_cell(c) for c in line.split("\t")])
+                    total += 1
+                    if len(page) >= batch_rows:
+                        yield ReadBatch(
+                            headers=list(headers),
+                            rows=page,
+                            offset=offset,
+                            total_rows=None,
+                        )
+                        offset += len(page)
+                        page = []
+                if page or offset == 0:
                     yield ReadBatch(
                         headers=list(headers),
                         rows=page,
                         offset=offset,
-                        total_rows=None,
+                        total_rows=total,
                     )
-                    offset += len(page)
-                    page = []
-            if page or offset == 0:
-                yield ReadBatch(
-                    headers=list(headers),
-                    rows=page,
-                    offset=offset,
-                    total_rows=total,
-                )
     finally:
         try:
             conn.close()
@@ -160,13 +188,52 @@ def iter_postgresql_copy_batches(
             pass
 
 
+#: COPY TEXT backslash escapes, longest first so ``\\`` is consumed before the
+#: single-character forms and a literal backslash cannot start a false escape.
+_COPY_TEXT_UNESCAPES = (
+    ("\\\\", "\\"),
+    ("\\t", "\t"),
+    ("\\n", "\n"),
+    ("\\r", "\r"),
+    ("\\b", "\b"),
+    ("\\f", "\f"),
+    ("\\v", "\v"),
+)
+
+
 def _copy_cell(raw: str) -> str:
-    """Map COPY CSV field to transfer wire string (NULL → empty with sentinel)."""
-    if raw == r"\N":
-        # Match cell_to_string(preserve_sql_null=True) empty/NULL convention used
-        # by readers — empty string; Missing is not used on the read path.
-        return ""
-    return raw
+    """Map one COPY TEXT field to the transfer wire string.
+
+    The keyset/OFFSET readers emit ``SQL_NULL_SENTINEL`` for SQL NULL via
+    ``cell_to_string(preserve_sql_null=True)``, so returning ``""`` here made
+    enabling ``DATAFLOW_BULK_EXPORT`` quietly change what a NULL means: the
+    destination wrote an empty string into a nullable column and the checksum
+    diverged from a keyset read of the same table.
+
+    An unescaped ``\\N`` is that NULL. A column holding the literal characters
+    ``\\N`` arrives doubled as ``\\\\N``, which is why this reads TEXT rather
+    than CSV — CSV distinguishes the two by quoting, and ``csv.reader`` strips
+    quoting before anything here could tell them apart.
+    """
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    if raw == "\\N":
+        return SQL_NULL_SENTINEL
+    if "\\" not in raw:
+        return raw
+    out: list[str] = []
+    i = 0
+    while i < len(raw):
+        pair = raw[i : i + 2]
+        for token, plain in _COPY_TEXT_UNESCAPES:
+            if pair == token:
+                out.append(plain)
+                i += 2
+                break
+        else:
+            out.append(raw[i])
+            i += 1
+    return "".join(out)
 
 
 def read_snowflake_unload_batch(**_kwargs: Any) -> ReadBatch:

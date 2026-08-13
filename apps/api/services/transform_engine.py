@@ -24,7 +24,7 @@ from services.semantic_types import (
     detect_semantic_type,
     normalize_value_for_target,
 )
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
 
 _MONTH_NAME_RE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
 _DATE_LIKE_RE = re.compile(
@@ -701,7 +701,12 @@ def _parse_json(value: Any) -> str | None:
         try:
             # JSONDecodeError subclasses ValueError — catch it first so bare
             # scalars wrap as JSON string literals (Mongo mixed fields → VARIANT).
-            parsed = json.loads(value, parse_constant=_json_reject_nonfinite)
+            # Numbers parse exactly: the stdlib routes every non-integer through
+            # binary64, which silently dropped digits off a DECIMAL landing in a
+            # JSON / JSONB / VARIANT / SUPER column. Values binary64 holds exactly
+            # still serialize as JSON numbers; the rest keep every digit as exact
+            # text, per this codebase's Decimal-to-JSON policy.
+            parsed = json_loads_exact(value, parse_constant=_json_reject_nonfinite)
         except json.JSONDecodeError:
             parsed = value  # wrap the raw scalar as a JSON string literal
         except ValueError:

@@ -13,6 +13,7 @@ Implemented engines
 * SQL Server — ``HAS_PERMS_BY_NAME``
 * Oracle — ``SESSION_PRIVS`` / ``ALL_TAB_PRIVS``
 * SQLite — filesystem ``os.access`` + ``sqlite_master``
+* DuckDB — filesystem ``os.access`` + ``information_schema`` (embedded: no GRANTs)
 * MongoDB — ``connectionStatus.showPrivileges`` (never insert)
 * Redis — ``ACL WHOAMI`` / ``ACL GETUSER`` (never SET/DEL)
 * Kafka — AdminClient ``describe_acls`` (never produce)
@@ -51,6 +52,7 @@ _SUPPORTED = frozenset({
     "mssql",
     "oracle",
     "sqlite",
+    "duckdb",
     "mongodb",
     "redis",
     "kafka",
@@ -58,6 +60,7 @@ _SUPPORTED = frozenset({
     "opensearch",
     "s3",
     "minio",
+    "sftp",
 })
 
 _MONGO_WRITE_ACTIONS = frozenset({
@@ -215,6 +218,12 @@ def probe_destination_privileges(
     location: str = "",
     auth_source: str = "",
     api_key: str = "",
+    private_key: str = "",
+    # SFTP host-key trust must reach the probe: a probe that connected under
+    # looser trust than the transfer would prove the wrong server's directory.
+    host_key: str = "",
+    known_hosts: str = "",
+    host_key_policy: str = "",
 ) -> PrivilegeProbeResult:
     """Probe write/create privileges for a destination without mutating data."""
     engine = _normalize_engine(db_type)
@@ -314,6 +323,14 @@ def probe_destination_privileges(
                 table_exists=table_exists,
                 need_update=need_update,
             )
+        if engine == "duckdb":
+            return _probe_duckdb(
+                database=database,
+                connection_string=connection_string,
+                host=host,
+                table=tbl,
+                table_exists=bool(table_exists),
+            )
         if engine == "sqlite":
             return _probe_sqlite(
                 database=database,
@@ -384,6 +401,23 @@ def probe_destination_privileges(
                 key_prefix=tbl or sch,
                 table_exists=table_exists,
             )
+        if engine == "sftp":
+            return _probe_sftp(
+                host=host,
+                port=port or 22,
+                directory=sch or database,
+                filename=tbl,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                private_key=private_key,
+                service_account=service_account,
+                api_key=api_key,
+                host_key=host_key,
+                known_hosts=known_hosts,
+                host_key_policy=host_key_policy,
+                table_exists=table_exists,
+            )
     except Exception as exc:  # noqa: BLE001 — never flake Validate on probe errors
         logger.info("privilege probe unavailable for %s: %s", engine, exc)
         return PrivilegeProbeResult(
@@ -416,7 +450,7 @@ def _probe_postgres_family(
     username: str,
     password: str,
     connection_string: str,
-    table_exists: bool,
+    table_exists: bool | None,
     need_update: bool,
 ) -> PrivilegeProbeResult:
     from connectors.postgresql_conn import get_connection
@@ -444,6 +478,21 @@ def _probe_postgres_family(
     }
     try:
         with conn.cursor() as cur:
+            if table_exists is None and table:
+                # The caller could not say — drivers that declare no introspect
+                # (pgvector is PostgreSQL underneath) never learn it. Reporting
+                # "existence unknown" from here would refuse a route this very
+                # connection can answer authoritatively in one statement.
+                try:
+                    cur.execute(
+                        "SELECT to_regclass(format('%%I.%%I', %s::text, %s::text)) IS NOT NULL",
+                        (schema, table),
+                    )
+                    table_exists = bool(cur.fetchone()[0])
+                except Exception as exc:
+                    # Leave it unknown rather than claim absence: a blocked
+                    # catalog lookup is not evidence the table is missing.
+                    logger.debug("Catalog existence lookup unavailable: %s", exc)
             # ``has_*_privilege`` parses its name argument as an SQL identifier,
             # so an unquoted "s.MixedCase" is folded to lower case and raises
             # undefined_table. format('%I.%I') quotes what the operator named.
@@ -1226,6 +1275,105 @@ def _probe_sqlite(
     parent_ok = os.path.isdir(parent) and os.access(parent, os.W_OK)
     return _finalize(
         engine="sqlite",
+        can_write=parent_ok,
+        can_create=parent_ok,
+        table_exists=False,
+        table=table,
+        schema="main",
+        need_update=False,
+        method="os.access",
+    )
+
+
+# ── DuckDB ───────────────────────────────────────────────────────────────────
+
+def _probe_duckdb(
+    *,
+    database: str,
+    connection_string: str,
+    host: str,
+    table: str,
+    table_exists: bool,
+) -> PrivilegeProbeResult:
+    """Filesystem probe — DuckDB is embedded and has no GRANT catalog.
+
+    Asking an embedded engine for grants and reporting ``unavailable`` when it
+    has none blocked create-new on a destination the process can plainly write.
+    Whoever can write the file holds every privilege there is, so the file is
+    the authority. MotherDuck is a hosted service reached through the same
+    driver, and no local path can speak for it, so it stays unavailable.
+    """
+    raw = (connection_string or database or host or "").strip()
+    lowered = raw.lower()
+    for prefix in ("duckdb:///", "duckdb://", "duckdb:"):
+        if lowered.startswith(prefix):
+            raw = raw[len(prefix) :]
+            lowered = raw.lower()
+            break
+    raw = raw.lstrip("/") if lowered.startswith("//") else raw
+
+    if lowered.startswith("md:") or lowered.startswith("motherduck:"):
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail=(
+                "MotherDuck is a hosted catalog — a local filesystem check "
+                "cannot prove its grants"
+            ),
+            engine="duckdb",
+        )
+
+    if not raw or raw == ":memory:":
+        return PrivilegeProbeResult(
+            can_write=True,
+            can_create_table=True,
+            status="ok",
+            detail="DuckDB in-memory database is always writable in-process",
+            engine="duckdb",
+            method="in_memory",
+        )
+
+    path = raw
+    exists = bool(table_exists)
+    if os.path.exists(path):
+        can_write_fs = os.access(path, os.W_OK)
+        parent = os.path.dirname(path) or "."
+        parent_ok = os.access(parent, os.W_OK)
+        if table:
+            try:
+                import duckdb
+
+                con = duckdb.connect(path, read_only=True)
+                try:
+                    row = con.execute(
+                        "SELECT count(*) FROM information_schema.tables "
+                        "WHERE table_name = ?",
+                        [table],
+                    ).fetchone()
+                    exists = bool(row and row[0])
+                finally:
+                    con.close()
+            except Exception as exc:  # noqa: BLE001 — existence stays as given
+                logging.getLogger(__name__).info(
+                    "duckdb table existence probe unavailable: %s", exc
+                )
+        can_create = can_write_fs and parent_ok
+        return _finalize(
+            engine="duckdb",
+            can_write=can_write_fs if exists else can_create,
+            can_create=can_create,
+            table_exists=exists,
+            table=table,
+            schema="main",
+            need_update=False,
+            method="os.access+information_schema",
+        )
+
+    parent = os.path.dirname(path) or "."
+    parent_ok = os.path.isdir(parent) and os.access(parent, os.W_OK)
+    return _finalize(
+        engine="duckdb",
         can_write=parent_ok,
         can_create=parent_ok,
         table_exists=False,
@@ -2103,3 +2251,130 @@ def resolve_write_flags(
     can_create = bool(probe.can_create_table)
     meta["privilege_verified"] = True
     return can_write, can_create, meta
+
+
+def _probe_sftp(
+    *,
+    host: str,
+    port: int,
+    directory: str,
+    filename: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    private_key: str,
+    service_account: str,
+    api_key: str,
+    host_key: str,
+    known_hosts: str,
+    host_key_policy: str,
+    table_exists: bool | None,
+) -> PrivilegeProbeResult:
+    """Measure whether the landing directory accepts a new file.
+
+    SFTP has no privilege catalog to read, and leaving it unmeasured made every
+    create-new SFTP route fail G2 for want of proof — the connector could write
+    perfectly and still never pass Validate.
+
+    POSIX mode bits cannot answer this over SFTP: the protocol reports the
+    remote uid/gid but not which of them the authenticated session maps to, so
+    ``0o755`` says nothing about *this* user. The only honest measurement is the
+    operation itself, so a uniquely named hidden file is created and removed.
+    That is not operator data: it is a new dotfile no reader is watching, and it
+    is deleted on every exit path including failure. ``.`` keeps it out of the
+    directory listings that drop-zone automation polls.
+    """
+    import uuid
+
+    from connectors.sftp_common import connect_sftp, parse_sftp_config
+
+    target_dir = (directory or "").strip() or "/"
+    cfg = parse_sftp_config(
+        connection_string=connection_string,
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        database=target_dir,
+        private_key=private_key,
+        service_account=service_account,
+        api_key=api_key,
+        host_key=host_key,
+        known_hosts=known_hosts,
+        host_key_policy=host_key_policy,
+    )
+    if not cfg.host:
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail="SFTP host required for privilege probe",
+            engine="sftp",
+        )
+
+    transport, sftp = connect_sftp(cfg)
+    probe_name = f"{target_dir.rstrip('/')}/.dataflow-preflight-{uuid.uuid4().hex}.tmp"
+    signals: dict[str, bool | None] = {}
+    try:
+        try:
+            sftp.stat(target_dir)
+            signals["directory_exists"] = True
+        except OSError as exc:
+            return PrivilegeProbeResult(
+                can_write=False,
+                can_create_table=False,
+                status="denied",
+                detail=(
+                    f"SFTP directory `{target_dir}` is not reachable for "
+                    f"'{cfg.username}': {exc}"
+                ),
+                engine="sftp",
+                method="stat",
+                signals={"directory_exists": False},
+            )
+
+        try:
+            with sftp.file(probe_name, "wb") as handle:
+                handle.write(b"")
+            signals["directory_write"] = True
+        except OSError as exc:
+            return PrivilegeProbeResult(
+                can_write=False,
+                can_create_table=False,
+                status="denied",
+                detail=(
+                    f"SFTP user '{cfg.username}' cannot create files in "
+                    f"`{target_dir}`: {exc}"
+                ),
+                engine="sftp",
+                method="create probe file",
+                signals={"directory_exists": True, "directory_write": False},
+            )
+        finally:
+            try:
+                sftp.remove(probe_name)
+            except OSError as exc:
+                # A probe file we cannot remove is litter in an operator's
+                # landing directory — name it rather than leave it silent.
+                logger.warning(
+                    "SFTP preflight probe file left behind at %s: %s", probe_name, exc
+                )
+
+        return _finalize(
+            engine="sftp",
+            can_write=True,
+            can_create=True,
+            table_exists=table_exists,
+            table=filename,
+            schema=target_dir,
+            need_update=False,
+            method="create/remove probe file",
+            signals=signals,
+            write_action="WRITE",
+            create_action="CREATE FILE",
+        )
+    finally:
+        try:
+            sftp.close()
+        finally:
+            transport.close()

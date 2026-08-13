@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, NamedTuple, Callable
 
 from connectors.aws_common import boto3_client
 from connectors.writer_common import WriteResult as _WriteResult
@@ -22,34 +22,54 @@ from connectors.writer_common import (
 logger = logging.getLogger(__name__)
 
 
+class DynamoLiveTypes(NamedTuple):
+    """What a live Dynamo table told us about its own carriers.
+
+    ``sample_ok`` is False when a non-key sample was required and Scan failed —
+    callers must fail closed on populated tables rather than Map-VARCHAR bind
+    inventing empty→NULL on live N/BOOL.
+
+    ``items_seen`` is the direct evidence of whether the table holds anything,
+    and ``scanned`` says whether that evidence was gathered at all — no Scan runs
+    when every mapped column is already a declared key attribute, and zero items
+    seen without a Scan proves nothing.
+
+    ``ItemCount`` cannot answer the question in either direction on its own: AWS
+    documents it as refreshed roughly every six hours, so a table loaded minutes
+    ago reports zero while full, and one emptied minutes ago reports full while
+    empty. An unfiltered Scan that came back with nothing outranks it.
+    """
+
+    physical: dict[str, str]
+    sample_ok: bool
+    items_seen: int
+    scanned: bool
+
+
 def _fetch_dynamo_physical_types(
     client: Any,
     table: str,
     target_cols: list[str],
     *,
     sample_limit: int = 50,
-) -> tuple[dict[str, str], bool]:
-    """Live carriers from AttributeDefinitions + item sample (majority vote).
-
-    Returns ``(physical, sample_ok)``. ``sample_ok`` is False when a non-key
-    sample was required and Scan failed — callers must fail-closed on populated
-    tables rather than Map-VARCHAR bind inventing empty→NULL on live N/BOOL.
-    """
-    from connectors.dynamodb_reader import _ddb_attr_type
-    from services.schema_introspect import (
-        _finalize_mongodb_type,
-        _sample_logical_type,
+) -> DynamoLiveTypes:
+    """Live carriers from AttributeDefinitions + an item sample."""
+    from connectors.dynamodb_reader import (
+        _ddb_attr_type,
+        infer_logical_from_native,
+        widen_logical_votes,
     )
+    from services.schema_introspect import _sample_logical_type
 
     wanted = {str(c) for c in target_cols if c}
     if not wanted:
-        return {}, True
+        return DynamoLiveTypes({}, True, 0)
     physical: dict[str, str] = {}
     try:
         info = client.describe_table(TableName=table)["Table"]
     except Exception:
         logger.debug("Dynamo describe_table failed for physical types", exc_info=True)
-        return {}, False
+        return DynamoLiveTypes({}, False, 0)
 
     for attr in info.get("AttributeDefinitions") or []:
         name = str(attr.get("AttributeName") or "")
@@ -64,15 +84,21 @@ def _fetch_dynamo_physical_types(
         c: {} for c in wanted if c not in physical
     }
     sample_ok = True
+    items_seen = 0
+    scanned = False
     if type_counts:
         try:
             from boto3.dynamodb.types import TypeDeserializer
 
             deser = TypeDeserializer()
             resp = client.scan(TableName=table, Limit=int(sample_limit))
+            # An unfiltered Scan that completed is the observation; whether it
+            # returned rows is what ``items_seen`` then records.
+            scanned = True
             for raw in resp.get("Items") or []:
                 if not isinstance(raw, dict):
                     continue
+                items_seen += 1
                 for key, wire in raw.items():
                     if key not in type_counts:
                         continue
@@ -87,12 +113,15 @@ def _fetch_dynamo_physical_types(
                         continue
                     if val is None:
                         continue
-                    if isinstance(val, Decimal):
-                        inferred = "DECIMAL"
-                    elif isinstance(val, set):
+                    if isinstance(val, set):
                         inferred = "ARRAY"
                     else:
-                        inferred = _sample_logical_type(val, key)
+                        # Same classifier the reader uses, so one value cannot be
+                        # a DECIMAL to the writer and an INTEGER to the reader on
+                        # a Dynamo-to-Dynamo route.
+                        inferred = infer_logical_from_native(val) or _sample_logical_type(
+                            val, key
+                        )
                     if not inferred:
                         continue
                     tc = type_counts[key]
@@ -104,12 +133,16 @@ def _fetch_dynamo_physical_types(
     for col, counts in type_counts.items():
         if not counts:
             continue
-        carrier = _finalize_mongodb_type(counts)
+        # Widen to cover every sampled value rather than taking the majority:
+        # 90 integers and 10 floats resolved to INTEGER, a narrower carrier than
+        # the reader emits for the same items, so a populated table probed by
+        # scan bound writes against a type its own data does not fit.
+        carrier = widen_logical_votes(counts)
         if carrier:
             physical[col] = carrier
             physical.setdefault(col.lower(), carrier)
             physical.setdefault(col.upper(), carrier)
-    return physical, sample_ok
+    return DynamoLiveTypes(physical, sample_ok, items_seen, scanned)
 
 
 def _dynamo_rematerialize_if_physical_differs(
@@ -347,13 +380,25 @@ def _sparse_update_item(
     """UpdateItem SET present attrs only — PutItem would wipe omitted fields."""
     if not set_attrs:
         # Key-only sparse image: ensure the item exists without clearing attrs.
-        client.update_item(
-            TableName=table,
-            Key=key_attrs,
-            UpdateExpression="SET #df_touch = if_not_exists(#df_touch, :z)",
-            ExpressionAttributeNames={"#df_touch": "__df_touch"},
-            ExpressionAttributeValues={":z": {"N": "0"}},
-        )
+        # UpdateItem needs an expression, and inventing one wrote a synthetic
+        # ``__df_touch`` attribute onto the customer's item that no mapping asked
+        # for and nothing removes. A conditional PutItem of the key alone creates
+        # the row when it is missing and fails its own condition when it is not,
+        # which is exactly the no-op wanted for an existing row.
+        from botocore.exceptions import ClientError
+
+        names = {f"#k{i}": name for i, name in enumerate(key_attrs)}
+        condition = " AND ".join(f"attribute_not_exists({alias})" for alias in names)
+        try:
+            client.put_item(
+                TableName=table,
+                Item=dict(key_attrs),
+                ConditionExpression=condition,
+                ExpressionAttributeNames=names,
+            )
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") != "ConditionalCheckFailedException":
+                raise
         return
     names: dict[str, str] = {}
     values: dict[str, Any] = {}
@@ -453,13 +498,26 @@ def write_mapped_rows(
 
     # Always probe live carriers after KeySchema is confirmed (do not gate on a
     # prior describe blip — create-new still rematerializes from AttrDefs).
-    physical, sample_ok = _fetch_dynamo_physical_types(client, table, target_cols)
+    physical, sample_ok, items_seen, scanned = _fetch_dynamo_physical_types(
+        client, table, target_cols
+    )
     try:
         item_count = int(
             client.describe_table(TableName=table)["Table"].get("ItemCount", 0) or 0
         )
     except Exception:
         item_count = -1
+    # Emptiness is known only from an unfiltered Scan that ran and came back
+    # with nothing. ``sample_ok`` alone does not say that: no Scan runs when every
+    # mapped column is already a declared key attribute.
+    emptiness_proven = scanned and sample_ok and items_seen == 0
+    # A table is proven populated by *seeing* an item, or by a positive ItemCount
+    # when nothing was observed directly. ItemCount cannot overrule the Scan in
+    # either direction: AWS refreshes it roughly every six hours, so it reads
+    # zero for a table loaded minutes ago and stays positive for one emptied
+    # minutes ago — which forced live-DDL proof on an empty table and rejected a
+    # legitimate Map-only first load.
+    holds_data = items_seen > 0 or (item_count > 0 and not emptiness_proven)
     mapped_data_cols = [c for c in target_cols if c]
     studio_live = isinstance(live_dest, dict) and all(
         str(live_dest.get(c) or "").strip() for c in mapped_data_cols
@@ -476,9 +534,10 @@ def write_mapped_rows(
             chunks_completed=0,
             error=studio_err,
         )
-    # Populated / unknown item count + failed non-key sample → refuse Map-only.
+    # Populated, or emptiness unproven, plus a failed non-key sample → refuse
+    # Map-only bind.
     if (
-        (item_count > 0 or item_count < 0)
+        (holds_data or not emptiness_proven)
         and mapped_data_cols
         and not studio_live
         and (not sample_ok or not physical)
@@ -498,12 +557,10 @@ def write_mapped_rows(
         )
 
     # Partial AttrDef/sample coverage: Studio may fill gaps; else require_physical.
-    # Also when ItemCount reads 0 but partial Studio + AttrDefs exist (stale count
-    # or empty table with keys) — rematerialize / fail-closed, never Map invent.
-    # Map-only create-new (no studio_err, ItemCount 0) must skip require_physical
-    # so non-key Map columns are not refused against key-only AttrDefs.
+    # A table proven empty by a successful scan is the one case that may skip
+    # this, so Map-only create-new is not refused against key-only AttrDefs.
     if mapped_data_cols and (
-        item_count > 0 or item_count < 0 or (bool(studio_err) and bool(physical))
+        holds_data or not emptiness_proven or (bool(studio_err) and bool(physical))
     ):
         from connectors.writer_common import require_physical_types_for_existing_table
 

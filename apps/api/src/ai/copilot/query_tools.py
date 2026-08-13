@@ -20,6 +20,10 @@ _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*){0,2
 _DEFAULT_SAMPLE = 25
 _MAX_SAMPLE = 100
 _MAX_QUERY_ROWS = 200
+# Name resolution reads the inventory to decide whether a table exists, so it
+# asks for far more than a chat reply would ever print. Enterprise schemas with
+# thousands of objects are ordinary.
+_RESOLVE_INVENTORY_LIMIT = 100_000
 _BOOL_TRUE = {"true", "t", "yes", "y", "1"}
 _BOOL_FALSE = {"false", "f", "no", "n", "0"}
 _DATE_HINTS = (
@@ -70,13 +74,17 @@ def resolve_table_name(
     wanted = (table or "").strip()
     if not wanted:
         return None, None, []
+    # Resolution is not a display concern: ask for the whole inventory rather
+    # than the page size a chat reply would render.
     listed = list_connector_objects(
         connector_id=str(conn.get("id") or conn.get("_id") or ""),
         connector_name=str(conn.get("name") or connector_name or ""),
+        limit=_RESOLVE_INVENTORY_LIMIT,
     )
     names = _object_names_from_list(listed)
     if not names:
         return wanted, None, []
+    truncated = bool((getattr(listed, "output", None) or {}).get("truncated"))
     lower_map = {n.lower(): n for n in names}
     if wanted in names:
         return wanted, None, names
@@ -95,6 +103,11 @@ def resolve_table_name(
         return resolved, f"Using `{resolved}` (closest match to `{wanted}`).", names
     if close:
         return None, None, [lower_map[c] for c in close]
+    if truncated:
+        # An incomplete inventory is not evidence of absence. Hand the operator's
+        # name straight through and let the read itself be the authority, the
+        # same way an unlistable connector is treated above.
+        return wanted, None, []
     return None, None, names[:12]
 
 

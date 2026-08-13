@@ -1,5 +1,6 @@
 """Pytest configuration — isolate tests from live infrastructure."""
 
+import logging
 import os
 import socket
 import sys
@@ -31,12 +32,121 @@ import services as _canonical_services  # noqa: E402,F401
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
+# fakesnow keeps the emulated warehouse in a DuckDB file, and DuckDB allows a
+# single writer per file. Under `pytest -n` every worker would open the same
+# default path and all but one would die on "Conflicting lock is held", so the
+# Snowflake matrices only pass when the suite runs serially. Give each xdist
+# worker its own catalog; the product already reads this override.
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER")
+if _xdist_worker:
+    os.environ.setdefault(
+        "FAKESNOW_DB_PATH",
+        str(_api_root / "data" / f"fakesnow_data_{_xdist_worker}"),
+    )
+
 # Slim CI images omit sentence-transformers; use a deterministic hash embedder
 # so vector destination matrices still exercise the write path.
 try:
     import sentence_transformers  # noqa: F401
 except ImportError:
     os.environ.setdefault("DATAFLOW_EMBEDDING_MODEL", "hash/32")
+
+
+#: Bucket the object-store matrix routes read and write.
+LOCAL_OBJECT_STORE_BUCKET = "dataflow-matrix"
+
+
+@pytest.fixture(scope="session")
+def local_object_store() -> str:
+    """Endpoint URL of a local S3, or ``""`` when one cannot be started.
+
+    Object-store routes were the largest block of never-executed transfers —
+    they need an endpoint to be reachable, and no cloud account exists here, so
+    the matrix skipped them and nothing reported what they did. That is how an
+    S3 source came to land three ``text`` columns where the identical file
+    upload landed ``bigint``/``numeric``/``date``.
+
+    ``moto`` answers the S3 API in-process, and the connectors already accept a
+    custom endpoint, so the routes become executable without credentials. An
+    externally provided ``DATAFLOW_TEST_S3_ENDPOINT`` (MinIO, a real account)
+    wins; without moto the value is empty and callers skip honestly rather than
+    reporting a pass nothing proved.
+    """
+    external = os.environ.get("DATAFLOW_TEST_S3_ENDPOINT", "").strip()
+    if external:
+        yield external
+        return
+
+    try:
+        import boto3
+        from moto.server import ThreadedMotoServer
+    except ImportError:
+        yield ""
+        return
+
+    # Port 0 lets the OS assign, so parallel workers never collide.
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+    try:
+        server.start()
+    except Exception as exc:  # noqa: BLE001 — an unstartable emulator is a skip
+        logging.getLogger(__name__).info("local object store unavailable: %s", exc)
+        yield ""
+        return
+
+    host, port = server.get_host_and_port()
+    endpoint = f"http://{host}:{port}"
+    try:
+        boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+            region_name="us-east-1",
+        ).create_bucket(Bucket=LOCAL_OBJECT_STORE_BUCKET)
+        yield endpoint
+    finally:
+        try:
+            server.stop()
+        except Exception as exc:  # noqa: BLE001 — teardown must not fail a run
+            logging.getLogger(__name__).info("object store stop failed: %s", exc)
+
+
+@pytest.fixture(scope="session")
+def local_sftp():
+    """A real local SFTP server, or ``None`` when paramiko is unavailable.
+
+    SFTP was the one named connector with no live route: it could read and
+    write but declared ``introspect: False`` / ``preflight: False``, so every
+    test it had patched ``connect_sftp`` and asserted on the mock. paramiko
+    ships the server half of the protocol, so the routes run for real here —
+    with the generated host key pinned, which exercises the verification path
+    instead of the ``insecure_ignore`` escape.
+    """
+    import tempfile
+
+    try:
+        from tests.sftp_test_server import start_sftp_server
+    except ImportError:
+        try:
+            from sftp_test_server import start_sftp_server
+        except ImportError:
+            yield None
+            return
+
+    root = tempfile.mkdtemp(prefix="df_sftp_")
+    try:
+        details, runner = start_sftp_server(root)
+    except Exception as exc:  # noqa: BLE001 — an unstartable server is a skip
+        logging.getLogger(__name__).info("local sftp unavailable: %s", exc)
+        yield None
+        return
+    try:
+        yield details
+    finally:
+        try:
+            runner.stop()
+        except Exception as exc:  # noqa: BLE001 — teardown must not fail a run
+            logging.getLogger(__name__).info("sftp stop failed: %s", exc)
 
 
 @pytest.fixture(autouse=True)

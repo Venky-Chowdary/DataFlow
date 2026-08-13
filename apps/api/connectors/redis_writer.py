@@ -16,7 +16,7 @@ from services.primary_key import (
 from services.sync_cursor import is_overwrite_sync
 from services.value_serializer import json_default, sanitize_json_value
 
-from connectors.redis_reader import _redis_client
+from connectors.redis_reader import _redis_client, redis_key_for
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
@@ -160,15 +160,35 @@ def _redis_rematerialize_if_physical_differs(
     )
 
 
-def _redis_prefix_key_count_hint(client: Any, prefix: str, *, probe: int = 8) -> int:
-    """Return >0 when any ``prefix:*`` key exists; 0 if empty; -1 on probe failure.
+#: Keys asked for per SCAN call. Redis treats COUNT as a hint about how much
+#: work to do per call, not a page size, so this bounds latency per round trip
+#: rather than the answer.
+_SCAN_COUNT = 1000
+#: SCAN calls before the probe gives up. With the count above this covers a
+#: keyspace of roughly ten million keys before reporting "unknown".
+_SCAN_MAX_CALLS = 10_000
 
-    Redis SCAN may return a non-zero cursor with an empty key batch — loop until
-    cursor wraps or a key is found so we never treat a populated keyspace as empty.
+
+def _redis_prefix_key_count_hint(
+    client: Any, prefix: str, *, probe: int = _SCAN_COUNT
+) -> int:
+    """Return >0 when any ``prefix:*`` key exists; 0 if empty; -1 if unknown.
+
+    Redis SCAN may return a non-zero cursor with an empty key batch, so proving
+    a prefix is *absent* means walking the cursor until it wraps. Proving it is
+    present stops at the first match.
+
+    The budget used to be 64 calls of 8 keys, which cannot complete a pass over
+    more than about 512 keys — so on any Redis holding more than that, the probe
+    reported "unknown", the writer fail-closed, and every Redis destination
+    refused. It only ever passed because a test instance was nearly empty. The
+    budget is now sized for a real keyspace, and exhausting it still reports
+    unknown rather than guessing empty: reading "no keys" off an incomplete scan
+    would bind Map VARCHAR over live typed documents.
     """
     try:
         cursor = 0
-        for _ in range(64):
+        for _ in range(_SCAN_MAX_CALLS):
             cursor, keys = client.scan(
                 cursor=cursor, match=f"{prefix}:*", count=int(probe)
             )
@@ -245,7 +265,12 @@ def _normalize_redis_typed_doc(
             "MONEY",
             "SMALLMONEY",
         } or upper.startswith(("DECIMAL(", "NUMERIC(", "NUMBER(")):
-            out[col] = coerce_decimal_wire(out[col], ddl_type=upper or "DECIMAL")
+            # Name the engine so the bind checks Redis capacity — JSON text,
+            # with no width — rather than a DECIMAL(p,s) that was inferred from
+            # whichever documents happened to be sampled.
+            out[col] = coerce_decimal_wire(
+                out[col], ddl_type=upper or "DECIMAL", engine="redis"
+            )
         elif upper in {
             "INTEGER",
             "INT",
@@ -387,6 +412,17 @@ def write_mapped_rows(
         product="Redis",
     )
 
+    # A full refresh deletes every key under the prefix before writing, so the
+    # shapes currently there are not a schema this write has to respect — unlike
+    # a SQL TRUNCATE, which keeps the columns and their declared types. Binding
+    # against them refused overwrites onto a prefix whose old documents simply
+    # held different fields.
+    replaces_keyspace = is_overwrite_sync(sync_mode) or write_mode in {
+        "overwrite",
+        "replace",
+        "truncate",
+    }
+
     # Connect before Map bind — sample existing JSON docs under prefix so live
     # INTEGER/BOOL carriers win over Map VARCHAR (empty→null invent cliff).
     client = _redis_client(cfg)
@@ -443,7 +479,7 @@ def write_mapped_rows(
             )
         # Partial JSON sample: Studio may fill gaps; else require_physical
         # (same bar as Mongo/Dynamo — never soft-bind Map VARCHAR on missing fields).
-        if mapped_data_cols and docs_sampled > 0:
+        if mapped_data_cols and docs_sampled > 0 and not replaces_keyspace:
             from connectors.writer_common import require_physical_types_for_existing_table
 
             effective_physical = dict(physical)
@@ -628,9 +664,7 @@ def write_mapped_rows(
     try:
         # Full-refresh overwrite must replace the destination keyspace once per job,
         # not once per chunk. Only the first chunk clears stale keys.
-        if file_batch_idx in (0, 1) and (
-            is_overwrite_sync(sync_mode) or write_mode in {"overwrite", "replace", "truncate"}
-        ):
+        if file_batch_idx in (0, 1) and replaces_keyspace:
             _clear_redis_prefix(client, prefix)
 
         written = 0
@@ -723,7 +757,7 @@ def write_mapped_rows(
                 )
                 continue
 
-            key = f"{prefix}:{sanitize_identifier(str(key_id), preserve_case=True)}"
+            key = redis_key_for(prefix, key_id)
             if key in seen_keys:
                 prev = seen_keys[key]
                 msg = (
@@ -751,8 +785,7 @@ def write_mapped_rows(
                 # Sparse STOP_COLUMN / CDC / NULL omit: merge onto existing JSON so
                 # omitted fields are not wiped by a full-key SET.
                 needs_merge = (
-                    write_mode not in {"overwrite", "replace", "truncate"}
-                    and not is_overwrite_sync(sync_mode)
+                    not replaces_keyspace
                     and (
                         row_has_missing_sentinel(row)
                         or len(doc) < len(target_cols)
@@ -840,7 +873,14 @@ def write_mapped_rows(
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
-            meta=gate8_writer_meta(mapped_rows, target_cols),
+            # Record the identities written so Gate-8 can re-read this batch.
+            # Without them an upsert into a populated keyspace compared the
+            # whole prefix against the source and reported every pre-existing
+            # key as a mismatch — the same keyed scope every other identity
+            # destination already uses.
+            meta=gate8_writer_meta(
+                mapped_rows, target_cols, conflict_columns=list(conflict or [])
+            ),
         )
     except Exception as exc:
         return WriteResult(

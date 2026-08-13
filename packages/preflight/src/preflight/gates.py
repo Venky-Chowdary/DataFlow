@@ -256,6 +256,46 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     )
 
 
+def _document_instant_reason(
+    source_type: str, target_type: str, dest_db: str
+) -> str:
+    """Why a temporal column will not survive a document store's ``date``.
+
+    That token is an instant, not a calendar day, so the generic
+    "datetime→date, time-of-day truncation" wording is wrong here — the clock
+    survives. Only two things do not, and an operator cannot act on the finding
+    without being told which.
+    """
+    try:
+        from services.type_system import (
+            DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
+            is_document_instant_token,
+            parse_temporal_fractional_precision,
+        )
+        from services.type_system import (
+            datetime_timezone_polarity as _polarity,
+        )
+    except Exception:
+        return ""
+    if not is_document_instant_token(dest_db, target_type):
+        return ""
+    if _polarity(source_type) == "ntz":
+        return (
+            "zoneless source into a UTC instant carrier — this store has no "
+            "wall-clock type, so the instant is stamped rather than carried. "
+            "Declare the source zone, or sign a Migration Risk Contract to "
+            "accept UTC"
+        )
+    src_p = parse_temporal_fractional_precision(source_type)
+    if src_p is not None and int(src_p) > DOCUMENT_INSTANT_FRACTIONAL_DIGITS:
+        return (
+            f"sub-millisecond truncation — the carrier counts milliseconds "
+            f"({DOCUMENT_INSTANT_FRACTIONAL_DIGITS} fractional digits) and the "
+            f"source declares {int(src_p)}"
+        )
+    return ""
+
+
 def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     dest_by_name = {c.name.lower(): c for c in ctx.plan.destination.target_columns}
@@ -561,17 +601,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
 
         # IEEE→fixed, datetime→date, timestamptz→NTZ, DECIMAL(p,s) narrow,
         # platform DECIMAL caps: never sample soft-pass.
+        _dest_db = str(
+            getattr(getattr(ctx.plan, "destination", None), "db_type", "")
+            or getattr(getattr(ctx.plan, "destination", None), "kind", "")
+            or ""
+        )
         fidelity_collapse = bool(
             (
                 is_precision_collapse_coercion
                 and is_precision_collapse_coercion(
                     source_col.inferred_type,
                     target.inferred_type,
-                    dest_db=str(
-                        getattr(getattr(ctx.plan, "destination", None), "db_type", "")
-                        or getattr(getattr(ctx.plan, "destination", None), "kind", "")
-                        or ""
-                    ),
+                    dest_db=_dest_db,
                     dest_table_exists=_dest_exists,
                 )
             )
@@ -588,6 +629,15 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 label = (
                     f"{label} — decimal→float (IEEE magnitude/scale loss; "
                     "not soft-passed by samples)"
+                )
+            elif _document_instant_reason(
+                source_col.inferred_type, target.inferred_type, _dest_db
+            ):
+                label = (
+                    f"{label} — "
+                    + _document_instant_reason(
+                        source_col.inferred_type, target.inferred_type, _dest_db
+                    )
                 )
             elif normalize_logical_type and normalize_logical_type(
                 target.inferred_type
@@ -1619,9 +1669,9 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         else:
             # Key-addressed / upsert destinations must resolve an identity key.
             try:
-                from services.primary_key import sync_requires_unique_identity
+                from services.primary_key import missing_identity_blocks
 
-                if sync_requires_unique_identity(
+                if missing_identity_blocks(
                     getattr(ctx.plan, "sync_mode", "") or "",
                     dest_kind=dest_kind,
                 ):

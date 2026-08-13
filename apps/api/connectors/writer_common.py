@@ -9,12 +9,13 @@ from services.brand_env import getenv_brand
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
 from services.transform_resolver import LiveDestTypes, resolve_transform
-from services.value_serializer import SQL_NULL_SENTINEL
+from services.value_serializer import SQL_NULL_SENTINEL, json_loads_exact
 
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
     quote_column_list,
@@ -462,7 +463,7 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
                 def _reject(name: str) -> None:
                     raise ValueError(f"non-finite JSON constant: {name}")
 
-                return json.loads(text, parse_constant=_reject)
+                return json_loads_exact(text, parse_constant=_reject)
             except ValueError:
                 return value  # leave raw; transform path should have rejected
             except json.JSONDecodeError:
@@ -497,10 +498,12 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
                 def _reject_num(name: str) -> None:
                     raise ValueError(f"non-finite JSON constant: {name}")
 
-                parsed = json.loads(text, parse_constant=_reject_num)
+                parsed = json_loads_exact(text, parse_constant=_reject_num)
             except (json.JSONDecodeError, ValueError):
                 return value
-            if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+            if isinstance(parsed, (int, float, Decimal)) and not isinstance(
+                parsed, bool
+            ):
                 return parsed
             return value
         # Unknown typed column: leave text — refuse schema invent.
@@ -696,14 +699,36 @@ def filter_stale_lsn_rows(
     return to_write, skipped
 
 
-def row_fingerprints(rows: list[Any], columns: list[str] | None = None, *, sort_key: str | None = None) -> list[tuple[str, str]]:
+def row_fingerprints(
+    rows: list[Any],
+    columns: list[str] | None = None,
+    *,
+    sort_key: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> list[tuple[str, str]]:
     """Return the unsorted (row_key, fingerprint) tuples for a list of rows.
 
     Streaming producers can accumulate these tuples across batches and then call
     ``services.reconciliation.fingerprint_checksum`` once at the end, avoiding a
     full materialization of every row as a dict/list.
+
+    ``dest_db_type`` / ``dest_types`` must match what the read-back side passes.
+    Without them a text cell is folded defensively, because a CHAR(n) column pads
+    with spaces that carry no meaning; with them a TEXT cell keeps the spaces it
+    was given. Computing the write pass one way and the read-back the other made
+    every trailing space look like a Gate-8 mismatch on data that had landed
+    exactly as sent.
     """
-    return list(_iter_fingerprints(rows, columns, sort_key=sort_key))
+    return list(
+        _iter_fingerprints(
+            rows,
+            columns,
+            sort_key=sort_key,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
+    )
 
 
 def dedupe_rows(
@@ -716,17 +741,38 @@ def dedupe_rows(
     Conflict names are resolved case-insensitively (strict). Partial composite
     PKs raise — never silently dedupe on a weaker key and drop sibling rows.
     """
+    kept, _numbers = dedupe_rows_keeping_numbers(rows, conflict_columns, target_cols)
+    return kept
+
+
+def dedupe_rows_keeping_numbers(
+    rows: list[tuple],
+    conflict_columns: list[str],
+    target_cols: list[str],
+    row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int] | None]:
+    """Dedupe, and report which source row each survivor came from.
+
+    Deduping changes both membership and order, so a parallel list of source row
+    numbers taken before it is stale afterwards. Carrying a stale list forward is
+    worse than carrying none: every later quarantine record then names a
+    confidently wrong row.
+    """
     if not conflict_columns or not rows:
-        return rows
+        return rows, row_numbers
     conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
-        return rows
+        return rows, row_numbers
     indices = [target_cols.index(c) for c in conflict]
     seen: dict[tuple, tuple] = {}
-    for row in rows:
+    seen_numbers: dict[tuple, int] = {}
+    for position, row in enumerate(rows):
         key = tuple(row[i] for i in indices)
         seen[key] = row
-    return list(seen.values())
+        seen_numbers[key] = resolve_row_number(row_numbers, position)
+    if row_numbers is None:
+        return list(seen.values()), None
+    return list(seen.values()), [seen_numbers[k] for k in seen]
 
 
 # Destination metadata column for CDC monotonic apply — owned by lsn_guards.
@@ -867,6 +913,7 @@ from connectors.lsn_guards import (  # noqa: E402,F401 — re-export
     bigquery_lsn_match_predicate,
     compare_lsn,
     dedupe_rows_by_pk_and_lsn,
+    dedupe_rows_by_pk_and_lsn_keeping_numbers,
     extract_cdc_lsn,
     gtid_set_contains,
     gtid_watermark_window_closed,
@@ -2256,6 +2303,36 @@ PG_DECIMAL_ROUND_DIALECTS = frozenset({
 _PG_DECIMAL_ROUND_DIALECTS = PG_DECIMAL_ROUND_DIALECTS
 
 
+def _schemaless_decimal_capacity_holds(value: Any, *, dest_db: str = "") -> bool:
+    """True when the destination has no per-field decimal width to overflow.
+
+    A document or key-value store declares no column type. Any ``DECIMAL(p,s)``
+    attached to one of its fields was inferred from the documents that happen to
+    be there, so enforcing it quarantines rows against a limit the store does
+    not have: a Redis placeholder holding ``0.00`` typed the field
+    ``DECIMAL(5,4)`` and every real salary after it was held out as overflow.
+
+    The capacity that does exist is the carrier's. MongoDB stores BSON decimal —
+    34 significant digits — and is checked against that. Redis and DynamoDB
+    serialize to JSON text, which has no digit limit.
+    """
+    from services.db_type_utils import normalize_dest_kind
+
+    kind = normalize_dest_kind(dest_db) if dest_db else ""
+    if kind not in {"mongodb", "redis"}:
+        return False
+    if kind == "redis":
+        # JSON text — every finite decimal round-trips.
+        return True
+    from services.decimal_observe import significant_digit_count
+    from services.type_system import DECIMAL128_SIGNIFICANT_DIGITS
+
+    try:
+        return significant_digit_count(value) <= DECIMAL128_SIGNIFICANT_DIGITS
+    except Exception:
+        return False
+
+
 def fits_decimal(
     value: Any,
     precision: int,
@@ -2292,6 +2369,8 @@ def fits_decimal(
     from services.transform_engine import boolean_carrier_numeric_value
 
     if boolean_carrier_numeric_value(value, precision, scale) is not None:
+        return True
+    if _schemaless_decimal_capacity_holds(value, dest_db=dest_db):
         return True
     try:
         text = str(value).strip()
@@ -3263,8 +3342,44 @@ def bind_sql_mapped_rows_with_quarantine(
     engine: str,
     dialect_label: str = "SQL",
     mappings: list[dict[str, Any]] | None = None,
+    row_numbers: list[int] | None = None,
 ) -> list[tuple]:
+    """Bind cells and quarantine refusals; see :func:`bind_rows_keeping_numbers`.
+
+    Callers that need to keep track of *which* rows survived — because they will
+    report on the survivors later — should use that variant instead.
+    """
+    bound, _kept = bind_rows_keeping_numbers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        engine=engine,
+        dialect_label=dialect_label,
+        mappings=mappings,
+        row_numbers=row_numbers,
+    )
+    return bound
+
+
+def bind_rows_keeping_numbers(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    engine: str,
+    dialect_label: str = "SQL",
+    mappings: list[dict[str, Any]] | None = None,
+    row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int]]:
     """Bind cells via ``normalize_sql_bind_value``; quarantine refusals (no crash invent).
+
+    Returns ``(bound_rows, surviving_row_numbers)``. Binding drops the rows it
+    quarantines, so a caller that later reports on the survivors cannot use the
+    numbers it started with — it would name rows that are no longer there.
 
     Physical DDL can be INT/FLOAT/DECIMAL after Map stamped VARCHAR — empty ``\"\"``
     must not become SQL NULL on upsert (destination wipe). Raise from sql_bind is
@@ -3278,9 +3393,10 @@ def bind_sql_mapped_rows_with_quarantine(
     )
 
     if not mapped_rows:
-        return mapped_rows
+        return mapped_rows, []
 
     out: list[tuple] = []
+    kept: list[int] = []
     for row_idx, row in enumerate(mapped_rows):
         cells = list(row)
         hold_out = False
@@ -3299,7 +3415,7 @@ def bind_sql_mapped_rows_with_quarantine(
                 append_write_quarantine_detail(
                     rejected_details,
                     {
-                        "row": row_idx + 1,
+                        "row": resolve_row_number(row_numbers, row_idx),
                         "column": col,
                         "target": col,
                         "value": sample,
@@ -3324,7 +3440,8 @@ def bind_sql_mapped_rows_with_quarantine(
         if hold_out:
             continue
         out.append(tuple(cells))
-    return out
+        kept.append(resolve_row_number(row_numbers, row_idx))
+    return out, kept
 
 
 def quarantine_unfit_strings(
@@ -4273,11 +4390,53 @@ def split_dense_sparse_rows(
     mapped_rows: list[tuple],
 ) -> tuple[list[tuple], list[tuple]]:
     """Partition mapped rows for bulk vs per-row sparse CDC upsert."""
+    dense, sparse, _dense_rows, _sparse_rows = split_dense_sparse_rows_with_numbers(
+        mapped_rows
+    )
+    return dense, sparse
+
+
+def split_dense_sparse_rows_with_numbers(
+    mapped_rows: list[tuple],
+    *,
+    row_offset: int = 0,
+) -> tuple[list[tuple], list[tuple], list[int], list[int]]:
+    """Partition rows *and* keep where each came from.
+
+    Returns ``(dense, sparse, dense_row_numbers, sparse_row_numbers)`` where the
+    numbers are 1-based positions in the source batch, matching every other
+    quarantine record.
+
+    Splitting without them meant a rejected sparse row was reported by its index
+    inside the sparse list, so an operator replaying the dead-letter queue was
+    pointed at a different row than the one that failed — the same misattribution
+    that made Airtable name records which never left.
+    """
     dense: list[tuple] = []
     sparse: list[tuple] = []
-    for row in mapped_rows:
-        (sparse if row_has_missing_sentinel(row) else dense).append(row)
-    return dense, sparse
+    dense_rows: list[int] = []
+    sparse_rows: list[int] = []
+    for index, row in enumerate(mapped_rows):
+        number = row_offset + index + 1
+        if row_has_missing_sentinel(row):
+            sparse.append(row)
+            sparse_rows.append(number)
+        else:
+            dense.append(row)
+            dense_rows.append(number)
+    return dense, sparse, dense_rows, sparse_rows
+
+
+def resolve_row_number(row_numbers: list[int] | None, index: int) -> int:
+    """Source row number for a list position, or the position itself.
+
+    Callers that hold a whole batch can let the position stand in. Callers
+    holding a *subset* — sparse rows, a post-bind survivor list — must pass the
+    numbers they kept, or the record will name the wrong row.
+    """
+    if row_numbers is not None and 0 <= index < len(row_numbers):
+        return int(row_numbers[index])
+    return index + 1
 
 
 def combined_mapped_rows_for_checksum(

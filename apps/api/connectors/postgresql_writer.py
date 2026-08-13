@@ -847,6 +847,22 @@ def _pg_materialize_mapped_batch(
     )
 
 
+def _escape_copy_text(text: str) -> str:
+    """Escape one field for ``COPY ... WITH (FORMAT text)``.
+
+    COPY reads backslash sequences in its input, so every backslash a value
+    carries has to be doubled before the delimiter and newline escapes are
+    added. Applying this to *all* field text — rather than per type — is what
+    keeps the rule from being forgotten by whichever branch renders next.
+    """
+    return (
+        text.replace("\\", "\\\\")
+        .replace("\t", "\\t")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+    )
+
+
 def _copy_text_value(value: Any) -> str:
     from services.value_serializer import is_missing_sentinel
 
@@ -856,15 +872,24 @@ def _copy_text_value(value: Any) -> str:
     if isinstance(value, bool):
         return "t" if value else "f"
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
-    if isinstance(value, bytes):
-        return "\\x" + value.hex()
-    if isinstance(value, Decimal):
+        # json.dumps escapes backslashes for JSON; COPY would then eat that
+        # escape and hand jsonb a different string — "C:\\temp" arrives as
+        # "C:\temp", whose \t jsonb reads as a tab. Where the leftover escape is
+        # not valid JSON at all the row is rejected outright.
+        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
+    elif isinstance(value, (bytes, bytearray, memoryview)):
+        # ``\x`` is COPY's hex character escape, so an unescaped
+        # ``\x68656c6c6f`` is consumed as the byte 0x68 plus the literal text
+        # "656c6c6f" and b"hello" lands as b"h656c6c6f". Escaped, COPY emits the
+        # field ``\x68656c6c6f``, which bytea parses as hex.
+        raw = "\\x" + bytes(value).hex()
+    elif isinstance(value, Decimal):
         return str(value)
-    if isinstance(value, (int, float)):
+    elif isinstance(value, (int, float)):
         return str(value)
-    text = str(value)
-    return text.replace("\\", "\\\\").replace("\t", "\\t").replace("\n", "\\n").replace("\r", "\\r")
+    else:
+        raw = str(value)
+    return _escape_copy_text(raw)
 
 
 

@@ -118,7 +118,13 @@ export function ConnectorCatalogPanel({
       setCategories(data.categories || []);
       setFiltered(data.filtered ?? data.connectors?.length ?? 0);
       setTotal(data.total ?? 0);
-      setTransferLive(data.certified ?? data.transfer_live ?? 0);
+      // Per-side count when a role is chosen: "usable in a transfer" counts
+      // write-only stores among the sources, so it cannot label a source list.
+      setTransferLive(
+        role === "all"
+          ? (data.certified ?? data.transfer_live ?? 0)
+          : (data.role_live ?? data.certified ?? data.transfer_live ?? 0),
+      );
       setSourceOnlyCount(data.source_only ?? 0);
       setPlannedCount(data.planned_count ?? data.roadmap ?? 0);
     } catch {
@@ -202,13 +208,19 @@ export function ConnectorCatalogPanel({
           <p className="df2-catalog-meta">
             {filtered.toLocaleString()} shown
             {total > 0 && ` · ${total.toLocaleString()} in catalog`}
-            {transferLive > 0 && ` · ${transferLive.toLocaleString()} transfer-live drivers`}
+            {transferLive > 0 && (
+              role === "all"
+                ? ` · ${transferLive.toLocaleString()} transfer-live drivers`
+                : ` · ${transferLive.toLocaleString()} usable as ${role}`
+            )}
             {sourceOnlyCount > 0 && ` · ${sourceOnlyCount.toLocaleString()} source-only`}
             {plannedCount > 0 && ` · ${plannedCount.toLocaleString()} planned`}
             {role !== "all" && (
               <>
                 {" · "}
-                Filter is catalog browsing only — saved databases stay usable as source and destination
+                {role === "source"
+                  ? "Write-only stores (vector databases) are not listed — they cannot be read"
+                  : "Read-only feeds are not listed — they cannot be written to"}
               </>
             )}
           </p>
