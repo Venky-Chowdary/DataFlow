@@ -2,13 +2,25 @@ import { useCallback, useEffect, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { CopyIdChip } from "../ui/CopyIdChip";
-import { fetchScheduleHistory } from "../../lib/api";
+import { acceptScheduleSourceSchema, fetchScheduleHistory } from "../../lib/api";
+import { Button } from "../ui/Button";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import type { ScheduleRun } from "../../lib/types";
 
 interface ScheduleRunHistoryProps {
   scheduleId: string;
   onOpenJob?: (jobId: string) => void;
+  /** Open this schedule's mapping so a drift finding can be acted on. */
+  onEditMapping?: () => void;
+}
+
+/**
+ * A run refused because the source changed shape is a finding the operator has
+ * to resolve, not just an error to read. Without a control the message asked
+ * for a review that nothing performed.
+ */
+function isSourceDriftError(message: string): boolean {
+  return /source schema changed since the last run/i.test(message);
 }
 
 function formatWhen(iso: string | null | undefined): string {
@@ -33,7 +45,10 @@ function formatDuration(seconds: number | undefined): string {
   return `${mins}m ${secs}s`;
 }
 
-export function ScheduleRunHistory({ scheduleId, onOpenJob }: ScheduleRunHistoryProps) {
+export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: ScheduleRunHistoryProps) {
+  const [accepting, setAccepting] = useState(false);
+  const [accepted, setAccepted] = useState<string | null>(null);
+  const [acceptError, setAcceptError] = useState<string | null>(null);
   const [runs, setRuns] = useState<ScheduleRun[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -130,8 +145,44 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob }: ScheduleRunHistory
             <li key={`${r.job_id}-err-${i}`}>
               <span className={jobStatusBadgeClass(r.status)}>{jobStatusLabel(r.status)}</span>
               <span className="df2-sched-history-error-text" title={r.error}>{r.error}</span>
+              {isSourceDriftError(r.error || "") && (
+                <span className="df2-sched-history-error-actions">
+                  {onEditMapping && (
+                    <Button variant="ghost" size="sm" onClick={onEditMapping}>
+                      Review mapping
+                    </Button>
+                  )}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={accepting}
+                    onClick={async () => {
+                      setAccepting(true);
+                      setAcceptError(null);
+                      try {
+                        const res = await acceptScheduleSourceSchema(scheduleId);
+                        setAccepted(res.message || "Baseline updated.");
+                      } catch (err) {
+                        setAcceptError(
+                          err instanceof Error ? err.message : "Could not update the baseline",
+                        );
+                      } finally {
+                        setAccepting(false);
+                      }
+                    }}
+                  >
+                    {accepting ? "Recording…" : "Accept new source shape"}
+                  </Button>
+                </span>
+              )}
             </li>
           ))}
+          {accepted && (
+            <li role="status" className="df2-sched-history-accepted">{accepted}</li>
+          )}
+          {acceptError && (
+            <li role="alert" className="df2-sched-history-error-text">{acceptError}</li>
+          )}
         </ul>
       )}
     </div>

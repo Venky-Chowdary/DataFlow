@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
+import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
@@ -79,44 +80,6 @@ const PHASE_LABELS: Record<string, string> = {
   reconcile: "Reconcile",
   completed: "Done",
 };
-
-/**
- * Load methods are engine tokens; the metric tile is read by operators. The
- * server-to-server copy in particular is the difference between minutes and
- * hours on a large table, and "copy_binary_server_to_server" does not say that.
- */
-const LOAD_METHOD_LABELS: Record<string, { label: string; description: string }> = {
-  copy_binary_server_to_server: {
-    label: "Server-to-server COPY",
-    description:
-      "Rows streamed directly between the two engines in binary form, never "
-      + "materialised in the transfer process. Taken when every mapped column "
-      + "has the same declared type on both sides, so nothing can change a value.",
-  },
-  copy: {
-    label: "COPY",
-    description: "Bulk COPY into the destination.",
-  },
-  insert: {
-    label: "Insert",
-    description: "Row batches inserted into the destination.",
-  },
-  upsert: {
-    label: "Upsert",
-    description: "Row batches merged on the identity key.",
-  },
-};
-
-function loadMethodLabel(method: string): string {
-  return LOAD_METHOD_LABELS[method]?.label ?? method;
-}
-
-function loadMethodDescription(method: string): string {
-  return (
-    LOAD_METHOD_LABELS[method]?.description
-    ?? `Load path for this job: ${method}.`
-  );
-}
 
 function phaseIndex(phase?: string, status?: string): number {
   if (isJobSuccess(status)) return 5;
@@ -348,9 +311,16 @@ export function JobTheater({
     try {
       const res = await resumeJob(jobId);
       const nextId = res.job_id || jobId;
+      // A full refresh replaces the destination, so the server restarts it
+      // rather than continuing. Saying "continuing from the last checkpoint"
+      // for that run described something that did not happen.
       toast({
-        title: "Resume started",
-        message: "Continuing from the last checkpoint in Transfer Studio.",
+        title: res.restarted ? "Transfer restarted" : "Resume started",
+        message:
+          res.message
+          || (res.restarted
+            ? "Full refresh re-run from the beginning — it replaces the destination, so there is nothing to resume into."
+            : "Continuing from the last checkpoint in Transfer Studio."),
         tone: "success",
       });
       onResumed?.(nextId);
@@ -810,7 +780,7 @@ export function JobTheaterView({
           <div>
             <strong>Low Snowflake throughput on this job</strong>
             <p>
-              ~{displayRps.toLocaleString()} rows/s with load method {loadMethod || "insert"}.
+              ~{displayRps.toLocaleString()} rows/s using {loadMethodLabel(loadMethod || "insert")}.
               Prefer COPY INTO / larger batches (warehouse stream path) after redeploy if you still see INSERT-only loads.
             </p>
           </div>

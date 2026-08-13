@@ -464,7 +464,7 @@ export function PipelineDetailDrawer({
               <h3><DtIcon name="jobs" size={14} /> Run history</h3>
               <span className="df2-drawer-count">{sched.run_count}</span>
             </div>
-            <ScheduleRunHistory scheduleId={sched.id} onOpenJob={onOpenJob} />
+            <ScheduleRunHistory scheduleId={sched.id} onOpenJob={onOpenJob} onEditMapping={onEdit} />
           </section>
         )}
 
