@@ -4265,11 +4265,19 @@ def sample_compare_rows(
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
     stratify_by: str | None = None,
+    rows_are_paired: bool = False,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
-    Rows are aligned by a stable key (e.g. primary key) when available, so upserts
-    and out-of-order writes compare correctly. Falls back to sorted index alignment.
+    Rows are aligned by a unique key, so upserts and out-of-order writes compare
+    correctly. Without one the comparison is declined rather than guessed.
+
+    ``rows_are_paired`` is for the caller that can vouch the two collections are
+    the same rows in the same order — the row at index *i* on each side really is
+    the same row. Gate-8 cannot: its source rows are the batch the pass held and
+    its destination rows are the first N of the table by ``ORDER BY 1``, two
+    independent draws. Pairing those by index reports unrelated rows as
+    corruption, which is why it is opt-in and off by default.
 
     When ``dest_db_type`` / ``dest_types`` are provided, both sides are fingerprinted
     through the same write-path bind helpers as MySQL/Postgres/Snowflake writers
@@ -4499,9 +4507,32 @@ def sample_compare_rows(
         "content_sha256": hashlib.sha256(seed_canon.encode("utf-8")).hexdigest(),
     }
 
+    if not (sort_key and target_by_key) and not rows_are_paired:
+        # Without a key there is nothing to join on, and the two sides are not
+        # the same draw: the source rows are the batch this pass held, while the
+        # destination read is the first N of the whole table by ``ORDER BY 1``.
+        # Lining those up by index compares unrelated rows and calls the
+        # difference corruption. A sample that cannot be aligned proves nothing,
+        # which is a different statement from the data being wrong.
+        return {
+            "passed": True,
+            "compared": 0,
+            "mismatches": [],
+            "skipped": True,
+            "alignment": "declined",
+            "sample_seed": sample_seed,
+            "reason": (
+                "No identity key to align the read-back sample: source rows and "
+                "the destination read are drawn independently, so position does "
+                "not pair them. Map a primary key to enable per-row compare."
+            ),
+        }
+
     mismatches: list[dict[str, str]] = []
     compared = 0
-    target_fallback = sorted(target_dicts, key=lambda d: _sortable(_row_key(d)))
+    keyed = bool(sort_key and target_by_key)
+    # Only reachable when the caller vouched for pairing; see ``rows_are_paired``.
+    target_paired = list(target_dicts) if not keyed else []
 
     def _result(*, passed: bool) -> dict[str, Any]:
         return {
@@ -4509,17 +4540,22 @@ def sample_compare_rows(
             "compared": compared,
             "mismatches": mismatches,
             "sample_seed": sample_seed,
-            "alignment": "keyed" if (sort_key and target_by_key) else "positional",
+            "alignment": "keyed" if keyed else "paired_by_caller",
         }
 
     for idx, src in enumerate(source_sorted):
-        if sort_key and target_by_key:
+        if keyed:
             key = normalize_cell(src.get(source_sort_key) if source_sort_key else None)
             if not key and sort_key:
                 key = normalize_cell(src.get(sort_key))
             tgt = target_by_key.get(key) if key else None
+            if tgt is None:
+                # This key is not in the destination read-back window. That is a
+                # scope miss, not a missing row, and falling back to the row at
+                # the same index would compare two unrelated rows.
+                continue
         else:
-            tgt = target_fallback[idx] if idx < len(target_fallback) else None
+            tgt = target_paired[idx] if idx < len(target_paired) else None
         if tgt is None:
             continue
 
