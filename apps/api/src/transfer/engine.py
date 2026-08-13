@@ -52,6 +52,7 @@ try:
     from services.row_filter import apply_row_filter
     from services.scd2_engine import apply_scd2
     from services.sync_cursor import (
+        destination_exists_for_typing,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -89,6 +90,7 @@ except (
     from src.services.row_filter import apply_row_filter
     from src.services.scd2_engine import apply_scd2
     from src.services.sync_cursor import (
+        destination_exists_for_typing,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -1596,6 +1598,10 @@ def _auto_map(
                 request.destination,
                 sync_mode=sync_mode,
             )
+            # Overwrite recreates the table, so the rows land in a new one every
+            # run. Typing against "it exists" left every target pending from the
+            # second run onward — see destination_exists_for_typing.
+            dest_exists = destination_exists_for_typing(sync_mode, dest_exists)
             if not target_schema:
                 # Empty columns: only invent identity create-new when the object
                 # is confirmed missing. Existing/unknown → pending via mapper.

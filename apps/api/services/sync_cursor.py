@@ -145,6 +145,27 @@ def is_append_sync(mode: str | None) -> bool:
     return normalized in APPEND_SYNC_MODES or normalized == "full_refresh_append"
 
 
+def destination_exists_for_typing(mode: str | None, exists: bool | None) -> bool | None:
+    """Does the table the write will land in exist *at write time*?
+
+    Overwrite drops and recreates, so whatever is there now is not what the rows
+    land in: for typing purposes the destination is create-new every run, not
+    just the first.
+
+    Conflating the two made the second run of an overwrite fail on every
+    destination. Run one created the table and invented types from the source.
+    Run two found the table present but — correctly — carrying no usable column
+    types, since typing against a shape about to be dropped would be wrong. The
+    mapper read "exists, no columns" as "wait for a Studio stamp", left every
+    target type pending, and the schema-contract gate then refused a transfer it
+    had approved minutes earlier. Any schedule on overwrite failed from its
+    second tick onward.
+    """
+    if is_overwrite_sync(mode):
+        return False
+    return exists
+
+
 def resolve_effective_sync_mode(
     request_mode: str | None,
     contract_mode: str | None = None,
