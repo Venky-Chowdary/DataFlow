@@ -789,6 +789,18 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     out["capabilities"] = caps
     out["effective_status"] = eff
     out["transfer_ready"] = ready
+    # Which *side* of a transfer this tile can actually take. ``transfer_ready``
+    # cannot answer that in either direction: a vector store writes but cannot
+    # be read, and a source-only connector reads without being duplex, so gating
+    # on it would drop every source-only driver from the source list while
+    # leaving write-only stores in it. Offering a tile in the wrong picker hands
+    # the operator a route that fails at Execute.
+    #
+    # A Planned tile is ready for neither side regardless of what its declared
+    # capabilities claim.
+    planned = tier == "planned"
+    out["source_ready"] = bool(not planned and source_ready(caps))
+    out["dest_ready"] = bool(not planned and dest_ready(caps))
     out["connect_only"] = is_connect_only
     out["capability_label"] = label
     out["certification_tier"] = tier
