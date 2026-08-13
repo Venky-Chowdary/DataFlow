@@ -1536,11 +1536,27 @@ def read_target_sample(
                             require_safe_identifier(sort_key, preserve_case=True)
                         )
                         placeholders = ",".join(["%s"] * len(keys))
-                        cur.execute(
-                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
-                            f"FROM {table_ref} WHERE {key_col} IN ({placeholders}) LIMIT %s",
-                            (*keys, int(limit or 50)),
+                        select = (
+                            "SELECT id, content, source_id, chunk_index, metadata "
+                            f"FROM {table_ref} WHERE {{key}} IN ({placeholders}) LIMIT %s"
                         )
+                        try:
+                            cur.execute(
+                                select.format(key=key_col),  # nosec B608
+                                (*keys, int(limit or 50)),
+                            )
+                        except Exception as exc:
+                            if not _is_operand_type_mismatch(exc):
+                                raise
+                            # A vector table's id is text while the source key is
+                            # an integer, and PostgreSQL refuses `text = integer`
+                            # rather than coercing. Compare as text so a correct
+                            # write is not reported as an unreadable sample.
+                            conn.rollback()
+                            cur.execute(
+                                select.format(key=f"{key_col}::text"),  # nosec B608
+                                (*[str(k) for k in keys], int(limit or 50)),
+                            )
                     else:
                         cur.execute(
                             f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
