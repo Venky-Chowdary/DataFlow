@@ -80,6 +80,44 @@ const PHASE_LABELS: Record<string, string> = {
   completed: "Done",
 };
 
+/**
+ * Load methods are engine tokens; the metric tile is read by operators. The
+ * server-to-server copy in particular is the difference between minutes and
+ * hours on a large table, and "copy_binary_server_to_server" does not say that.
+ */
+const LOAD_METHOD_LABELS: Record<string, { label: string; description: string }> = {
+  copy_binary_server_to_server: {
+    label: "Server-to-server COPY",
+    description:
+      "Rows streamed directly between the two engines in binary form, never "
+      + "materialised in the transfer process. Taken when every mapped column "
+      + "has the same declared type on both sides, so nothing can change a value.",
+  },
+  copy: {
+    label: "COPY",
+    description: "Bulk COPY into the destination.",
+  },
+  insert: {
+    label: "Insert",
+    description: "Row batches inserted into the destination.",
+  },
+  upsert: {
+    label: "Upsert",
+    description: "Row batches merged on the identity key.",
+  },
+};
+
+function loadMethodLabel(method: string): string {
+  return LOAD_METHOD_LABELS[method]?.label ?? method;
+}
+
+function loadMethodDescription(method: string): string {
+  return (
+    LOAD_METHOD_LABELS[method]?.description
+    ?? `Load path for this job: ${method}.`
+  );
+}
+
 function phaseIndex(phase?: string, status?: string): number {
   if (isJobSuccess(status)) return 5;
   if (status === "failed" || status === "cancelled") return -1;
@@ -874,10 +912,13 @@ export function JobTheaterView({
           </div>
         </article>
         {loadMethod && (
-          <article className="df2-theater-v3-metric" title="Snowflake/warehouse load path for this job">
+          <article
+            className="df2-theater-v3-metric"
+            title={loadMethodDescription(loadMethod)}
+          >
             <DtIcon name="transfer" size={16} />
             <div>
-              <strong>{loadMethod}</strong>
+              <strong>{loadMethodLabel(loadMethod)}</strong>
               <span>Load method</span>
             </div>
           </article>
