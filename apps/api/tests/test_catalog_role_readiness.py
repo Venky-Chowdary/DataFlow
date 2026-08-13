@@ -113,6 +113,35 @@ def test_side_counts_differ_from_the_transfer_total():
     assert unscoped["role_live"] == unscoped["transfer_live"]
 
 
+@pytest.mark.parametrize("connector_id", ["couchbase", "neo4j", "influxdb"])
+def test_transfer_ready_filter_keeps_single_sided_sources(connector_id: str):
+    """"Transfer ready" on a source list must mean ready *as a source*.
+
+    It meant duplex, so ticking that filter on the source picker hid exactly the
+    connectors that can only be sources — an operator searching for Couchbase or
+    Neo4j found nothing.
+    """
+    offered = {
+        c["id"]
+        for c in search_catalog(role="source", status="live", limit=1000)["connectors"]
+    }
+    assert connector_id in offered
+
+    # …and it must still exclude them from the destination list.
+    dest = {
+        c["id"]
+        for c in search_catalog(role="destination", status="live", limit=1000)["connectors"]
+    }
+    assert connector_id not in dest
+
+
+def test_transfer_ready_filter_without_a_role_still_means_duplex():
+    """Unscoped, "transfer ready" keeps its stricter read-and-write meaning."""
+    offered = {c["id"] for c in search_catalog(status="live", limit=1000)["connectors"]}
+    assert "postgresql" in offered
+    assert "couchbase" not in offered
+
+
 def test_transfer_capabilities_splits_the_two_sides():
     """Transfer Studio builds its pickers from this, so it has the same duty.
 

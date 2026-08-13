@@ -115,8 +115,17 @@ def search_catalog(
 
     if status:
         if status == "live":
-            # "Transfer ready" filter: certified full R/W only — not source-only REST.
-            connectors = [c for c in connectors if c.get("transfer_ready")]
+            # "Transfer ready" means duplex — full read *and* write. Asked
+            # without a side that is the right question. Asked *with* one it is
+            # not: a source-only connector is transfer-ready as a source, and
+            # filtering it out left an operator who ticked "Transfer ready" on
+            # the source list unable to find Couchbase or Neo4j at all.
+            if role == "source":
+                connectors = [c for c in connectors if c.get("source_ready")]
+            elif role == "destination":
+                connectors = [c for c in connectors if c.get("dest_ready")]
+            else:
+                connectors = [c for c in connectors if c.get("transfer_ready")]
         elif status == "source_only":
             connectors = [c for c in connectors if c.get("certification_tier") == "source_only"]
         elif status == "connect_only":
