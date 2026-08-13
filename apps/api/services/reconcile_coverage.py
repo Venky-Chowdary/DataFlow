@@ -10,7 +10,7 @@ back" case) so ``reconciliation`` keeps one honesty rule per concern.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final
 
 # Target digest covers rows outside this job's write set.
 WHOLE_TABLE_NOT_COMPARABLE = "whole_table_not_comparable"
@@ -58,8 +58,26 @@ def is_unproven_export(out: dict[str, Any], msg: str) -> bool:
     )
 
 
-def is_writer_ack_only(msg: str, target_checksum: str) -> bool:
-    """True when the only digest we hold came from the writer, not a read-back."""
+#: How the *source* digest was obtained. ``full_checksum`` claims two
+#: independent digests agreed, so a source digest that is really the writer's
+#: own account of what it wrote cannot earn it — that compares a write to
+#: itself. Streaming passes hand no rows to reconcile, so this is the ordinary
+#: case for exactly the large tables where the claim matters most.
+SOURCE_DIGEST_WRITER_ACK: Final[str] = "writer_ack"
+SOURCE_DIGEST_REMAPPED_ROWS: Final[str] = "remapped_source_rows"
+SOURCE_DIGEST_ENGINE_POPULATION: Final[str] = "engine_population"
+
+
+def is_writer_ack_only(
+    msg: str, target_checksum: str, *, source_provenance: str = ""
+) -> bool:
+    """True when the only digest we hold came from the writer, not a read-back.
+
+    ``source_provenance`` is authoritative when the caller supplies it: it knows
+    where the digest came from, whereas the message text can only be guessed at.
+    """
+    if source_provenance == SOURCE_DIGEST_WRITER_ACK:
+        return True
     return bool(
         not target_checksum
         or "verified by writer" in msg

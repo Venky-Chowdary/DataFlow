@@ -11,7 +11,12 @@ from connectors.writer_common import (
     transform_error_policy_for_validation_mode,
 )
 from services.dest_precount import PRECOUNT_KEY
-from services.reconcile_coverage import WRITTEN_BATCH_KEYS
+from services.reconcile_coverage import (
+    SOURCE_DIGEST_ENGINE_POPULATION,
+    SOURCE_DIGEST_REMAPPED_ROWS,
+    SOURCE_DIGEST_WRITER_ACK,
+    WRITTEN_BATCH_KEYS,
+)
 from services.reconciliation import (
     KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
@@ -64,40 +69,47 @@ def _compute_source_checksum(
     dest_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
-) -> str:
-    """Return an independent source digest, or fall back to the writer checksum.
+) -> tuple[str, str]:
+    """Return ``(digest, provenance)`` for the source side of Gate-8.
 
     When source ``records`` are available, always remap and fingerprint them.
     Preferring the writer checksum first made Gate-8 circular: dest digest was
     compared to the writer's own ack, not to the remapped source population.
-    Writer checksum remains the fallback when no records were supplied (stream
-    sample-only paths) and is stamped as assurance_level=writer_ack upstream.
+
+    The writer checksum remains the fallback when no records were supplied, and
+    the provenance is returned with it so the report can say so. That fallback
+    is not a corner case: a streaming pass hands over no rows, which is exactly
+    how the large tables move, and labelling those runs ``full_checksum`` claimed
+    two independent digests had agreed when only one digest existed.
     """
-    if records:
-        _, data_rows = records_to_matrix(records, columns)
-        if target_cols is None:
-            target_cols, _ = resolve_target_columns(
-                mappings, source_schema or {}, preserve_case=True
-            )
-        mapped_rows, _rejected = map_rows_for_fingerprint(
-            headers=columns,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=source_schema or {},
-            error_policy=transform_error_policy_for_validation_mode(validation_mode),
-            dest_types=dest_types or {},
-            preserve_case=True,
-            dest_kind=dest_db_type or "",
-            destination_pk_columns=destination_pk_columns,
+    if not records:
+        return str(writer_checksum or ""), SOURCE_DIGEST_WRITER_ACK
+    _, data_rows = records_to_matrix(records, columns)
+    if target_cols is None:
+        target_cols, _ = resolve_target_columns(
+            mappings, source_schema or {}, preserve_case=True
         )
-        return checksum_rows(
+    mapped_rows, _rejected = map_rows_for_fingerprint(
+        headers=columns,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=source_schema or {},
+        error_policy=transform_error_policy_for_validation_mode(validation_mode),
+        dest_types=dest_types or {},
+        preserve_case=True,
+        dest_kind=dest_db_type or "",
+        destination_pk_columns=destination_pk_columns,
+    )
+    return (
+        checksum_rows(
             mapped_rows,
             target_cols,
             dest_db_type=dest_db_type,
             dest_types=dest_types,
-        )
-    return str(writer_checksum or "")
+        ),
+        SOURCE_DIGEST_REMAPPED_ROWS,
+    )
 
 
 def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
@@ -595,8 +607,17 @@ def run_reconciliation(
     """Verify row counts and checksums against the destination."""
     # Destination facts a row checksum cannot prove (generator watermarks today).
     physical_state: dict[str, Any] = {}
+    # Where the source digest came from. Held in a box because the early-return
+    # paths below run before it is known, and the report must never claim two
+    # independent digests agreed when only the writer's was available.
+    digest_provenance: dict[str, str] = {"source": ""}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
+        if digest_provenance["source"] and "source_checksum_provenance" not in payload:
+            payload = {
+                **payload,
+                "source_checksum_provenance": digest_provenance["source"],
+            }
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
         stamped = _finalize_reconcile(payload, dest_summary=dest_summary)
@@ -833,10 +854,11 @@ def run_reconciliation(
             "digest."
         )
 
+    source_checksum_provenance = ""
     if source_checksum_scope_note:
         source_checksum = ""
     else:
-        source_checksum = _compute_source_checksum(
+        source_checksum, source_checksum_provenance = _compute_source_checksum(
             records,
             columns,
             mapping_dicts,
@@ -850,6 +872,7 @@ def run_reconciliation(
             validation_mode=validation_mode,
             destination_pk_columns=[str(c) for c in pk_cols if c] or None,
         )
+        digest_provenance["source"] = source_checksum_provenance
 
     # Mirror (inferred-delete) and SCD2 transfers already compute an active-row
     # checksum while applying history/soft deletes; use it directly so closed or
@@ -953,6 +976,10 @@ def run_reconciliation(
 
     if engine_digests is not None:
         source_checksum, target_checksum, target_rows = engine_digests
+        # Both sides re-read independently, in full — the strongest source a
+        # digest can have here, and in particular not the writer's own account.
+        source_checksum_provenance = SOURCE_DIGEST_ENGINE_POPULATION
+        digest_provenance["source"] = source_checksum_provenance
     else:
         # Always full-table first for SQL. Keyed batch proof is a fallback when the
         # sink legitimately has extras (upsert/append into non-empty) — never for a

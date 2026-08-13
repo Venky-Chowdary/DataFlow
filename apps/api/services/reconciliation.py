@@ -160,7 +160,9 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["assurance_level"] = "none"
         return out
 
-    writer_only = is_writer_ack_only(msg, tgt)
+    writer_only = is_writer_ack_only(
+        msg, tgt, source_provenance=str(out.get("source_checksum_provenance") or "")
+    )
     sample = out.get("sample_compare") if isinstance(out.get("sample_compare"), dict) else {}
     sample_ok = bool(sample.get("passed")) and int(sample.get("compared") or 0) > 0
     # GA: diverging independent digests never become sample-verified success.
