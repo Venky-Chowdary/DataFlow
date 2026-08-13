@@ -117,7 +117,7 @@ def test_fetch_dynamo_physical_types_attrdefs_and_sample():
             },
         ]
     }
-    physical, sample_ok = _fetch_dynamo_physical_types(
+    physical, sample_ok, _items = _fetch_dynamo_physical_types(
         client, "orders", ["id", "sk", "amount", "flag"]
     )
     assert sample_ok is True
@@ -330,7 +330,7 @@ def test_fetch_dynamo_sample_decimal_carrier():
     client.scan.return_value = {
         "Items": [{"amount": {"N": "99.99"}}],
     }
-    physical, sample_ok = _fetch_dynamo_physical_types(client, "t", ["amount"])
+    physical, sample_ok, _items = _fetch_dynamo_physical_types(client, "t", ["amount"])
     assert sample_ok is True
     assert physical.get("amount") == "DECIMAL"
     assert isinstance(Decimal("99.99"), Decimal)
@@ -359,7 +359,9 @@ def test_dynamo_writer_refuses_partial_physical_coverage():
         ),
         patch(
             "connectors.dynamodb_writer._fetch_dynamo_physical_types",
-            return_value=({"id": "VARCHAR"}, True),
+            # A live table whose scan saw an item: emptiness is not proven, so
+            # the coverage guard must run.
+            return_value=({"id": "VARCHAR"}, True, 1),
         ),
     ):
         result = write_mapped_rows(

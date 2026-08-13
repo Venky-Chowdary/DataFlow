@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, NamedTuple, Callable
 
 from connectors.aws_common import boto3_client
 from connectors.writer_common import WriteResult as _WriteResult
@@ -22,19 +22,32 @@ from connectors.writer_common import (
 logger = logging.getLogger(__name__)
 
 
+class DynamoLiveTypes(NamedTuple):
+    """What a live Dynamo table told us about its own carriers.
+
+    ``sample_ok`` is False when a non-key sample was required and Scan failed —
+    callers must fail closed on populated tables rather than Map-VARCHAR bind
+    inventing empty→NULL on live N/BOOL.
+
+    ``items_seen`` is the direct evidence of whether the table holds anything.
+    ``ItemCount`` cannot answer that: AWS documents it as refreshed roughly
+    every six hours, so a table loaded minutes ago reports zero while full. A
+    positive count still proves *populated*; only its zero means nothing.
+    """
+
+    physical: dict[str, str]
+    sample_ok: bool
+    items_seen: int
+
+
 def _fetch_dynamo_physical_types(
     client: Any,
     table: str,
     target_cols: list[str],
     *,
     sample_limit: int = 50,
-) -> tuple[dict[str, str], bool]:
-    """Live carriers from AttributeDefinitions + item sample (majority vote).
-
-    Returns ``(physical, sample_ok)``. ``sample_ok`` is False when a non-key
-    sample was required and Scan failed — callers must fail-closed on populated
-    tables rather than Map-VARCHAR bind inventing empty→NULL on live N/BOOL.
-    """
+) -> DynamoLiveTypes:
+    """Live carriers from AttributeDefinitions + an item sample."""
     from connectors.dynamodb_reader import (
         _ddb_attr_type,
         infer_logical_from_native,
@@ -44,13 +57,13 @@ def _fetch_dynamo_physical_types(
 
     wanted = {str(c) for c in target_cols if c}
     if not wanted:
-        return {}, True
+        return DynamoLiveTypes({}, True, 0)
     physical: dict[str, str] = {}
     try:
         info = client.describe_table(TableName=table)["Table"]
     except Exception:
         logger.debug("Dynamo describe_table failed for physical types", exc_info=True)
-        return {}, False
+        return DynamoLiveTypes({}, False, 0)
 
     for attr in info.get("AttributeDefinitions") or []:
         name = str(attr.get("AttributeName") or "")
@@ -65,6 +78,7 @@ def _fetch_dynamo_physical_types(
         c: {} for c in wanted if c not in physical
     }
     sample_ok = True
+    items_seen = 0
     if type_counts:
         try:
             from boto3.dynamodb.types import TypeDeserializer
@@ -74,6 +88,7 @@ def _fetch_dynamo_physical_types(
             for raw in resp.get("Items") or []:
                 if not isinstance(raw, dict):
                     continue
+                items_seen += 1
                 for key, wire in raw.items():
                     if key not in type_counts:
                         continue
@@ -117,7 +132,7 @@ def _fetch_dynamo_physical_types(
             physical[col] = carrier
             physical.setdefault(col.lower(), carrier)
             physical.setdefault(col.upper(), carrier)
-    return physical, sample_ok
+    return DynamoLiveTypes(physical, sample_ok, items_seen)
 
 
 def _dynamo_rematerialize_if_physical_differs(
@@ -473,13 +488,23 @@ def write_mapped_rows(
 
     # Always probe live carriers after KeySchema is confirmed (do not gate on a
     # prior describe blip — create-new still rematerializes from AttrDefs).
-    physical, sample_ok = _fetch_dynamo_physical_types(client, table, target_cols)
+    physical, sample_ok, items_seen = _fetch_dynamo_physical_types(
+        client, table, target_cols
+    )
     try:
         item_count = int(
             client.describe_table(TableName=table)["Table"].get("ItemCount", 0) or 0
         )
     except Exception:
         item_count = -1
+    # A table is proven populated by *seeing* an item, or by a positive
+    # ItemCount. It is never proven empty by ItemCount reading zero: AWS
+    # refreshes that metric roughly every six hours, so a table loaded minutes
+    # ago reports zero while full, and trusting it skipped both guards below and
+    # let untyped Map carriers bind against live data.
+    holds_data = items_seen > 0 or item_count > 0
+    # Emptiness is only known when a scan actually ran and came back empty.
+    emptiness_proven = sample_ok and items_seen == 0
     mapped_data_cols = [c for c in target_cols if c]
     studio_live = isinstance(live_dest, dict) and all(
         str(live_dest.get(c) or "").strip() for c in mapped_data_cols
@@ -496,9 +521,10 @@ def write_mapped_rows(
             chunks_completed=0,
             error=studio_err,
         )
-    # Populated / unknown item count + failed non-key sample → refuse Map-only.
+    # Populated, or emptiness unproven, plus a failed non-key sample → refuse
+    # Map-only bind.
     if (
-        (item_count > 0 or item_count < 0)
+        (holds_data or not emptiness_proven)
         and mapped_data_cols
         and not studio_live
         and (not sample_ok or not physical)
@@ -518,12 +544,10 @@ def write_mapped_rows(
         )
 
     # Partial AttrDef/sample coverage: Studio may fill gaps; else require_physical.
-    # Also when ItemCount reads 0 but partial Studio + AttrDefs exist (stale count
-    # or empty table with keys) — rematerialize / fail-closed, never Map invent.
-    # Map-only create-new (no studio_err, ItemCount 0) must skip require_physical
-    # so non-key Map columns are not refused against key-only AttrDefs.
+    # A table proven empty by a successful scan is the one case that may skip
+    # this, so Map-only create-new is not refused against key-only AttrDefs.
     if mapped_data_cols and (
-        item_count > 0 or item_count < 0 or (bool(studio_err) and bool(physical))
+        holds_data or not emptiness_proven or (bool(studio_err) and bool(physical))
     ):
         from connectors.writer_common import require_physical_types_for_existing_table
 
