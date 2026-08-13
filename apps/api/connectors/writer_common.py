@@ -9,12 +9,13 @@ from services.brand_env import getenv_brand
 import re
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Any
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
 from services.transform_resolver import LiveDestTypes, resolve_transform
-from services.value_serializer import SQL_NULL_SENTINEL
+from services.value_serializer import SQL_NULL_SENTINEL, json_loads_exact
 
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
     quote_column_list,
@@ -462,7 +463,7 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
                 def _reject(name: str) -> None:
                     raise ValueError(f"non-finite JSON constant: {name}")
 
-                return json.loads(text, parse_constant=_reject)
+                return json_loads_exact(text, parse_constant=_reject)
             except ValueError:
                 return value  # leave raw; transform path should have rejected
             except json.JSONDecodeError:
@@ -497,10 +498,12 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
                 def _reject_num(name: str) -> None:
                     raise ValueError(f"non-finite JSON constant: {name}")
 
-                parsed = json.loads(text, parse_constant=_reject_num)
+                parsed = json_loads_exact(text, parse_constant=_reject_num)
             except (json.JSONDecodeError, ValueError):
                 return value
-            if isinstance(parsed, (int, float)) and not isinstance(parsed, bool):
+            if isinstance(parsed, (int, float, Decimal)) and not isinstance(
+                parsed, bool
+            ):
                 return parsed
             return value
         # Unknown typed column: leave text — refuse schema invent.

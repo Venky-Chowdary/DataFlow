@@ -234,6 +234,38 @@ def _decimal_to_json(value: Decimal) -> Any:
     return safe_decimal_text(value)
 
 
+def _demote_exactly_representable(value: Any) -> Any:
+    """Return floats where binary64 is exact, Decimals where it is not."""
+    if isinstance(value, Decimal):
+        try:
+            as_float = float(value)
+        except (OverflowError, ValueError, InvalidOperation):
+            return value
+        if math.isfinite(as_float) and Decimal(repr(as_float)) == value:
+            return as_float
+        return value
+    if isinstance(value, list):
+        return [_demote_exactly_representable(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _demote_exactly_representable(v) for k, v in value.items()}
+    return value
+
+
+def json_loads_exact(text: str, *, parse_constant: Any = None) -> Any:
+    """``json.loads`` that does not round numbers off through binary64.
+
+    The stdlib parses every non-integer JSON number into a float, so
+    ``12345678901234567890.123456789`` comes back as ``1.2345678901234567e+19``
+    — digits gone, silently, on a value the source stated exactly. Numbers that
+    binary64 *can* hold exactly are still returned as floats so JSON output
+    keeps its usual shape; only the ones that would lose digits stay ``Decimal``,
+    which ``_decimal_to_json`` then writes as exact text per this module's
+    documented policy.
+    """
+    parsed = json.loads(text, parse_float=Decimal, parse_constant=parse_constant)
+    return _demote_exactly_representable(parsed)
+
+
 def _json_default(value: Any) -> Any:
     """Fallback for values that the stdlib json encoder does not understand.
 
