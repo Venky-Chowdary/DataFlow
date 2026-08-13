@@ -20,7 +20,7 @@ from connectors.writer_common import (
     bind_sql_mapped_rows_with_quarantine,
     build_mapped_rows_with_details,
     dedupe_rows,
-    dedupe_rows_by_pk_and_lsn,
+    dedupe_rows_by_pk_and_lsn_keeping_numbers,
     null_safe_merge_on,
     quarantine_currency_markers_into_numeric,
     quarantine_unfit_arrays,
@@ -42,6 +42,7 @@ from connectors.writer_common import (
     reject_on_strict_policy,
     resolve_conflict_targets,
     resolve_row_number,
+    dedupe_rows_keeping_numbers,
     split_dense_sparse_rows_with_numbers,
     transform_error_policy,
 )
@@ -1112,12 +1113,19 @@ def write_mapped_rows(
                 dense_row_numbers,
                 sparse_row_numbers,
             ) = split_dense_sparse_rows_with_numbers(mapped_rows)
+            # Dedupe changes membership and order, so the numbers taken above
+            # must travel with it — a stale parallel list would name a
+            # confidently wrong source row in every later quarantine record.
             if DF_LSN_COL in target_cols:
-                mapped_rows = dedupe_rows_by_pk_and_lsn(
-                    mapped_rows, conflict, target_cols
+                mapped_rows, dense_row_numbers = (
+                    dedupe_rows_by_pk_and_lsn_keeping_numbers(
+                        mapped_rows, conflict, target_cols, dense_row_numbers
+                    )
                 )
             else:
-                mapped_rows = dedupe_rows(mapped_rows, conflict, target_cols)
+                mapped_rows, dense_row_numbers = dedupe_rows_keeping_numbers(
+                    mapped_rows, conflict, target_cols, dense_row_numbers
+                )
         elif write_mode == "upsert" and conflict_columns and not conflict:
             # Operator supplied PKs that do not resolve onto Map targets — refuse
             # rather than split-and-drop sparse CDC rows on the append path.

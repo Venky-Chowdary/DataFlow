@@ -116,6 +116,43 @@ def test_bind_on_an_empty_batch_returns_no_numbers():
     assert kept == []
 
 
+def test_dedupe_carries_the_surviving_rows_number():
+    """Dedupe changes membership and order, so the numbers must travel with it.
+
+    Keeping the pre-dedupe list is worse than keeping none: every later
+    quarantine record then names a confidently wrong row.
+    """
+    from connectors.writer_common import dedupe_rows_keeping_numbers
+
+    rows = [("a", "1"), ("b", "2"), ("a", "3")]
+    kept, numbers = dedupe_rows_keeping_numbers(
+        rows, ["id"], ["id", "v"], [10, 20, 30]
+    )
+    # Last occurrence wins, so the survivor came from source row 30, not 10.
+    assert kept == [("a", "3"), ("b", "2")]
+    assert numbers == [30, 20]
+
+    # Without numbers the caller gets none back rather than invented positions.
+    _kept, none_numbers = dedupe_rows_keeping_numbers(rows, ["id"], ["id", "v"])
+    assert none_numbers is None
+
+
+def test_lsn_dedupe_keeps_the_winning_rows_number():
+    """The winner is the highest LSN, not the last arrival."""
+    from connectors.lsn_guards import (
+        DF_LSN_COL,
+        dedupe_rows_by_pk_and_lsn_keeping_numbers,
+    )
+
+    cols = ["id", "v", DF_LSN_COL]
+    rows = [("a", "old", "5"), ("a", "new", "9"), ("a", "stale", "1")]
+    kept, numbers = dedupe_rows_by_pk_and_lsn_keeping_numbers(
+        rows, ["id"], cols, [1, 2, 3]
+    )
+    assert [r[1] for r in kept] == ["new"]
+    assert numbers == [2]
+
+
 def test_bigquery_sparse_upsert_names_the_source_row():
     """The reported defect, end to end through the BigQuery sparse path."""
     from unittest.mock import MagicMock

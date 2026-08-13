@@ -738,17 +738,38 @@ def dedupe_rows(
     Conflict names are resolved case-insensitively (strict). Partial composite
     PKs raise — never silently dedupe on a weaker key and drop sibling rows.
     """
+    kept, _numbers = dedupe_rows_keeping_numbers(rows, conflict_columns, target_cols)
+    return kept
+
+
+def dedupe_rows_keeping_numbers(
+    rows: list[tuple],
+    conflict_columns: list[str],
+    target_cols: list[str],
+    row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int] | None]:
+    """Dedupe, and report which source row each survivor came from.
+
+    Deduping changes both membership and order, so a parallel list of source row
+    numbers taken before it is stale afterwards. Carrying a stale list forward is
+    worse than carrying none: every later quarantine record then names a
+    confidently wrong row.
+    """
     if not conflict_columns or not rows:
-        return rows
+        return rows, row_numbers
     conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
-        return rows
+        return rows, row_numbers
     indices = [target_cols.index(c) for c in conflict]
     seen: dict[tuple, tuple] = {}
-    for row in rows:
+    seen_numbers: dict[tuple, int] = {}
+    for position, row in enumerate(rows):
         key = tuple(row[i] for i in indices)
         seen[key] = row
-    return list(seen.values())
+        seen_numbers[key] = resolve_row_number(row_numbers, position)
+    if row_numbers is None:
+        return list(seen.values()), None
+    return list(seen.values()), [seen_numbers[k] for k in seen]
 
 
 # Destination metadata column for CDC monotonic apply — owned by lsn_guards.
@@ -889,6 +910,7 @@ from connectors.lsn_guards import (  # noqa: E402,F401 — re-export
     bigquery_lsn_match_predicate,
     compare_lsn,
     dedupe_rows_by_pk_and_lsn,
+    dedupe_rows_by_pk_and_lsn_keeping_numbers,
     extract_cdc_lsn,
     gtid_set_contains,
     gtid_watermark_window_closed,
