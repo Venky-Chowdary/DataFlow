@@ -15,7 +15,8 @@ import uuid
 
 import pytest
 
-from services.target_sample import _is_operand_type_mismatch, read_target_sample
+from services.keyed_read import is_operand_type_mismatch
+from services.target_sample import read_target_sample
 
 
 def _pg_up() -> bool:
@@ -27,10 +28,10 @@ def _pg_up() -> bool:
 
 
 def test_operand_mismatch_is_recognised():
-    assert _is_operand_type_mismatch(Exception("operator does not exist: text = integer"))
-    assert _is_operand_type_mismatch(Exception("could not identify an equality operator"))
+    assert is_operand_type_mismatch(Exception("operator does not exist: text = integer"))
+    assert is_operand_type_mismatch(Exception("could not identify an equality operator"))
     # An unrelated failure must still propagate rather than trigger a retry.
-    assert not _is_operand_type_mismatch(Exception('relation "orders" does not exist'))
+    assert not is_operand_type_mismatch(Exception('relation "orders" does not exist'))
 
 
 @pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable on localhost:5432")

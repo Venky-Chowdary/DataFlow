@@ -1574,79 +1574,16 @@ def is_dialect_native_document_wire(
     return upper == native_u or bare == re.sub(r"\s*\(\s*\d+\s*\)", "", native_u).strip()
 
 
-# Engines whose "date" token is a UTC-millisecond instant (BSON date,
-# Elasticsearch date), not a calendar date. They have no date-only type, so
-# DDL_TYPES stamps the same token for logical date and datetime; binding it as
-# SQL DATE would truncate time-of-day and hide real clock loss behind a green
-# digest.
-_INSTANT_DATE_TOKEN_ENGINES: Final[frozenset[str]] = frozenset(
-    {"mongodb", "documentdb", "cosmosdb", "elasticsearch", "opensearch"}
+# Document-store ``date`` is an instant carrier, not a calendar date. The rules
+# live in ``services.document_instant`` (size budget); re-exported here because
+# this module is the type SSOT every caller imports from.
+from services.document_instant import (  # noqa: E402
+    DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
+    INSTANT_DATE_TOKEN_ENGINES as _INSTANT_DATE_TOKEN_ENGINES,
+    document_instant_wire_preserved,
+    instant_date_carrier,
+    is_document_instant_token,
 )
-
-
-#: BSON ``date`` (and the Elasticsearch date type) is a 64-bit count of
-#: milliseconds, so anything finer than 3 fractional digits is truncated on
-#: write. Proven by round-trip: a datetime carrying microseconds comes back
-#: without them.
-DOCUMENT_INSTANT_FRACTIONAL_DIGITS: Final[int] = 3
-
-
-def is_document_instant_token(engine: str | None, ddl_type_token: str | None) -> bool:
-    """True for a document store's ``date`` token — an instant, not a calendar day.
-
-    The spelling collides with SQL ``DATE``, which normalizes to the date family
-    and made every ``TIMESTAMP`` into MongoDB read as "drop the time of day".
-    Nothing of the sort happens: the value keeps its wall clock, which is why
-    the reconcile fingerprint already resolves this token as an instant.
-    """
-    if (engine or "").strip().lower() not in _INSTANT_DATE_TOKEN_ENGINES:
-        return False
-    return strip_identity_qualifier(ddl_type_token).upper().strip() == "DATE"
-
-
-def document_instant_wire_preserved(
-    source_type: str,
-    target_type: str,
-    *,
-    dest_db: str = "",
-) -> bool:
-    """True when a date/datetime source lands intact on a document instant.
-
-    The carrier holds an instant, so an offset-bearing source keeps it and the
-    time of day survives — the collapse this used to report, from the token
-    sharing a name with SQL ``DATE``, does not happen.
-
-    Two things are genuinely not preserved and are excluded here so the rules
-    that name them precisely still fire: sub-millisecond precision, which the
-    64-bit millisecond carrier truncates, and a zoneless source, which has no
-    instant to preserve. Stamping one is the UTC invent the MongoDB writer
-    refuses, and ``resolve_timezone_policy`` calls it POLICY_UTC_INVENT and
-    requires an operator contract.
-    """
-    if not is_document_instant_token(dest_db, target_type):
-        return False
-    if normalize_logical_type(source_type) not in {LOGICAL_DATE, LOGICAL_DATETIME}:
-        return False
-    if datetime_timezone_polarity(source_type) == "ntz":
-        return False
-    src_p = parse_temporal_fractional_precision(source_type)
-    if src_p is None:
-        return True
-    return int(src_p) <= DOCUMENT_INSTANT_FRACTIONAL_DIGITS
-
-
-def instant_date_carrier(engine: str | None, ddl_type_token: str | None) -> str:
-    """Return the carrier to bind/fingerprint ``ddl_type_token`` against.
-
-    Identity for SQL engines. On document stores the bare ``date`` token stores
-    an offset-normalized instant, so it resolves to ``TIMESTAMPTZ`` — an
-    offset-bearing wire keeps its instant instead of the wall clock a bare
-    ``TIMESTAMP`` bind would preserve.
-    """
-    token = (ddl_type_token or "").strip()
-    if (engine or "").strip().lower() not in _INSTANT_DATE_TOKEN_ENGINES:
-        return token
-    return "TIMESTAMPTZ" if token.upper() == "DATE" else token
 
 
 def document_domain_would_collapse(

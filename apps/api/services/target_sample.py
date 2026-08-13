@@ -25,18 +25,10 @@ from services.reconciliation import (
 
 logger = logging.getLogger(__name__)
 
-
-def _is_operand_type_mismatch(exc: Exception) -> bool:
-    """True when PostgreSQL refused a comparison for want of a cast.
-
-    The keyed read binds source key values, whose Python type follows the
-    *source* column. When the destination stores that key as text — routine for
-    create-new on vector and document targets — PostgreSQL rejects
-    ``text = integer`` outright instead of coercing, and a clean write is
-    reported as an unreadable sample.
-    """
-    text = str(exc).lower()
-    return "operator does not exist" in text or "could not identify an equality operator" in text
+from services.keyed_read import execute_keyed_read  # noqa: E402
+from services.target_sample_vector import (  # noqa: E402
+    read_pgvector_target_sample,
+)
 
 
 def read_target_sample(
@@ -136,27 +128,16 @@ def read_target_sample(
                                 require_safe_identifier(sort_key, preserve_case=True)
                             )
                             placeholders = ",".join(["%s"] * len(keys))
-                            try:
-                                cur.execute(
-                                    f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                                    f"WHERE {key_col} IN ({placeholders}) "
-                                    f"ORDER BY {order_sql} LIMIT %s",
-                                    (*keys, int(limit)),
-                                )
-                            except Exception as key_exc:
-                                if not _is_operand_type_mismatch(key_exc):
-                                    raise
-                                # Compare as text instead. This is tried second
-                                # so the typed form keeps the key index in the
-                                # common case; the cast only pays a scan on the
-                                # bounded sample that would otherwise be lost.
-                                conn.rollback()
-                                cur.execute(
-                                    f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                                    f"WHERE {key_col}::text IN ({placeholders}) "
-                                    f"ORDER BY {order_sql} LIMIT %s",
-                                    (*[str(k) for k in keys], int(limit)),
-                                )
+                            execute_keyed_read(
+                                conn,
+                                cur,
+                                f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
+                                f"WHERE {{key}} IN ({placeholders}) "
+                                f"ORDER BY {order_sql} LIMIT %s",
+                                key_col,
+                                keys,
+                                (int(limit),),
+                            )
                         else:
                             cur.execute(
                                 f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql} LIMIT %s",  # nosec B608
@@ -1510,84 +1491,15 @@ def read_target_sample(
                 return [dict(zip(names, row)) for row in result.fetchall()]
 
         if db_type == "pgvector":
-            from connectors.postgresql_conn import get_connection
-            from connectors.sql_identifiers import (
-                quote_sql_identifier,
-                quote_table_ref,
-                require_safe_identifier,
+            return read_pgvector_target_sample(
+                dest,
+                schema=schema,
+                table_name=table_name,
+                cols=cols,
+                keys=keys,
+                sort_key=sort_key,
+                limit=limit,
             )
-
-            table_ref = quote_table_ref(
-                table_name, schema or "public", dialect="postgresql"
-            )
-            conn = get_connection(
-                host=dest.get("host", ""),
-                port=dest.get("port", 5432),
-                database=dest.get("database", ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                connection_string=dest.get("connection_string", ""),
-                ssl=bool(dest.get("ssl", False)),
-            )
-            try:
-                with conn.cursor() as cur:
-                    if keys and sort_key:
-                        key_col = quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
-                        placeholders = ",".join(["%s"] * len(keys))
-                        select = (
-                            "SELECT id, content, source_id, chunk_index, metadata "
-                            f"FROM {table_ref} WHERE {{key}} IN ({placeholders}) LIMIT %s"
-                        )
-                        try:
-                            cur.execute(
-                                select.format(key=key_col),  # nosec B608
-                                (*keys, int(limit or 50)),
-                            )
-                        except Exception as exc:
-                            if not _is_operand_type_mismatch(exc):
-                                raise
-                            # A vector table's id is text while the source key is
-                            # an integer, and PostgreSQL refuses `text = integer`
-                            # rather than coercing. Compare as text so a correct
-                            # write is not reported as an unreadable sample.
-                            conn.rollback()
-                            cur.execute(
-                                select.format(key=f"{key_col}::text"),  # nosec B608
-                                (*[str(k) for k in keys], int(limit or 50)),
-                            )
-                    else:
-                        cur.execute(
-                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
-                            f"FROM {table_ref} LIMIT %s",
-                            (int(limit or 50),),
-                        )
-                    names = [d[0] for d in cur.description] if cur.description else []
-                    out_rows = []
-                    for raw in cur.fetchall():
-                        rec = dict(zip(names, raw))
-                        meta = rec.get("metadata") or {}
-                        if isinstance(meta, str):
-                            try:
-                                meta = json.loads(meta)
-                            except Exception:
-                                meta = {}
-                        if not isinstance(meta, dict):
-                            meta = {}
-                        row = {
-                            "id": rec.get("id"),
-                            "content": rec.get("content"),
-                            "source_id": rec.get("source_id"),
-                            "chunk_index": rec.get("chunk_index"),
-                            **meta,
-                        }
-                        if cols and cols != ["*"]:
-                            row = {k: row.get(k) for k in cols}
-                        out_rows.append(row)
-                    return out_rows
-            finally:
-                conn.close()
 
         if db_type == "sftp":
             from connectors.sftp_common import (
