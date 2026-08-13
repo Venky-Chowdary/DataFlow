@@ -312,6 +312,98 @@ def test_no_columns_is_declined_not_attempted(pg):
         tables.drop()
 
 
+def test_primary_key_not_null_and_defaults_travel_with_the_values(pg):
+    """Values without the structure that governs them is a different table."""
+    tables = _Tables(
+        pg,
+        "id bigint PRIMARY KEY, code text NOT NULL, "
+        "status text DEFAULT 'new', note text",
+    )
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a', 'open', NULL)")
+        result = _copy(
+            tables,
+            [("id", "id"), ("code", "code"), ("status", "status"), ("note", "note")],
+        )
+        assert result.verified
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT a.attname, a.attnotnull, pg_get_expr(ad.adbin, ad.adrelid)
+                FROM pg_catalog.pg_attribute a
+                JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+                LEFT JOIN pg_catalog.pg_attrdef ad
+                  ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+                WHERE c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
+                ORDER BY a.attnum
+                """,
+                (tables.dst,),
+            )
+            live = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
+            assert live["id"][0] is True
+            assert live["code"][0] is True
+            assert live["note"][0] is False
+            assert "new" in (live["status"][1] or "")
+
+            cur.execute(
+                """
+                SELECT count(*) FROM pg_catalog.pg_index i
+                JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+                WHERE c.relname = %s AND i.indisprimary
+                """,
+                (tables.dst,),
+            )
+            assert cur.fetchone()[0] == 1
+    finally:
+        tables.drop()
+
+
+@pytest.mark.parametrize(
+    "ddl,structure",
+    [
+        ("id bigint, code text UNIQUE", "unique"),
+        ("id bigint, age int CHECK (age > 0)", "check"),
+        ("id bigint GENERATED ALWAYS AS IDENTITY, note text", "identity"),
+    ],
+)
+def test_structure_this_path_cannot_carry_makes_it_decline(pg, ddl, structure):
+    """Declining sends the route to the path that reproduces it properly."""
+    tables = _Tables(pg, ddl)
+    try:
+        columns = ["id", "code"] if "code" in ddl else (
+            ["id", "age"] if "age" in ddl else ["id", "note"]
+        )
+        with pytest.raises(FastPathUnavailable, match="cannot"):
+            _copy(tables, [(c, c) for c in columns])
+        # Nothing was created: the caller falls back with the destination clean.
+        with pg.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f"public.{tables.dst}",))
+            assert cur.fetchone()[0] is None
+    finally:
+        tables.drop()
+
+
+def test_a_partial_key_is_not_invented(pg):
+    """Copying half a composite key must not declare it a primary key."""
+    tables = _Tables(pg, "org_id bigint, code text, note text, PRIMARY KEY (org_id, code)")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a', 'x')")
+        result = _copy(tables, [("org_id", "org_id"), ("note", "note")])
+        assert result.verified
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT count(*) FROM pg_catalog.pg_index i
+                JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+                WHERE c.relname = %s AND i.indisprimary
+                """,
+                (tables.dst,),
+            )
+            assert cur.fetchone()[0] == 0
+    finally:
+        tables.drop()
+
+
 def test_repeated_runs_replace_rather_than_accumulate(pg):
     tables = _Tables(pg, "id bigint, note text")
     try:

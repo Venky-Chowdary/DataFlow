@@ -105,21 +105,131 @@ def source_column_types(
     return {k: v for k, v in live.items() if k.lower() in wanted}
 
 
+class SourceShape(NamedTuple):
+    """The source table's columns and the structure attached to them."""
+
+    types: dict[str, str]
+    not_null: set[str]
+    defaults: dict[str, str]
+    primary_key: list[str]
+
+
+def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) -> SourceShape:
+    """Read the columns *and* the structure that must travel with them.
+
+    A copy that moved only values would leave the destination without its keys,
+    nullability or defaults — structure the row path carries and Property 6
+    re-reads from the destination catalog. Losing it quietly is worse than being
+    slow, so it is read here and applied at CREATE.
+    """
+    cur.execute(
+        """
+        SELECT a.attname,
+               format_type(a.atttypid, a.atttypmod),
+               a.attnotnull,
+               pg_get_expr(ad.adbin, ad.adrelid)
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+        JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+        LEFT JOIN pg_catalog.pg_attrdef ad
+          ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+        WHERE n.nspname = %s AND c.relname = %s
+          AND a.attnum > 0 AND NOT a.attisdropped
+        ORDER BY a.attnum
+        """,
+        (schema or "public", table),
+    )
+    wanted = {c.lower() for c in columns}
+    types: dict[str, str] = {}
+    not_null: set[str] = set()
+    defaults: dict[str, str] = {}
+    for name, declared, notnull, default in cur.fetchall():
+        if str(name).lower() not in wanted:
+            continue
+        types[str(name)] = str(declared)
+        if notnull:
+            not_null.add(str(name))
+        if default:
+            defaults[str(name)] = str(default)
+
+    cur.execute(
+        """
+        SELECT a.attname
+        FROM pg_catalog.pg_index i
+        JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        JOIN pg_catalog.pg_attribute a
+          ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+        WHERE n.nspname = %s AND c.relname = %s AND i.indisprimary
+        ORDER BY array_position(i.indkey, a.attnum)
+        """,
+        (schema or "public", table),
+    )
+    primary_key = [str(r[0]) for r in cur.fetchall()]
+    return SourceShape(types, not_null, defaults, primary_key)
+
+
+def unsupported_structure(cur: Any, schema: str, table: str) -> str:
+    """Name any structure this path cannot carry, so it can decline instead.
+
+    Unique and check constraints, foreign keys, identity and generated columns
+    all change what the destination table *is*. Carrying values without them
+    would hand back a table that looks right and behaves differently, so a
+    source that has them belongs on the row path, which knows how to reproduce
+    them.
+    """
+    cur.execute(
+        """
+        SELECT DISTINCT con.contype
+        FROM pg_catalog.pg_constraint con
+        JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s AND c.relname = %s AND con.contype <> 'p'
+        """,
+        (schema or "public", table),
+    )
+    kinds = {
+        "u": "unique constraint",
+        "c": "check constraint",
+        "f": "foreign key",
+        "x": "exclusion constraint",
+    }
+    found = [kinds.get(str(r[0]), str(r[0])) for r in cur.fetchall()]
+    cur.execute(
+        """
+        SELECT count(*)
+        FROM pg_catalog.pg_attribute a
+        JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+        JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+        WHERE n.nspname = %s AND c.relname = %s AND a.attnum > 0
+          AND NOT a.attisdropped
+          AND (a.attidentity <> '' OR a.attgenerated <> '')
+        """,
+        (schema or "public", table),
+    )
+    if int(cur.fetchone()[0] or 0):
+        found.append("identity or generated column")
+    return ", ".join(sorted(set(found)))
+
+
 def create_destination_like_source(
     cur: Any,
     schema: str,
     table: str,
     pairs: list[tuple[str, str]],
-    source_types: dict[str, str],
+    shape: SourceShape,
 ) -> None:
-    """Create the destination with the source's own declared types.
+    """Create the destination with the source's types, keys, nullability and defaults.
 
-    The copy is only legal because the two sides agree on every column type, so
-    the destination is built from the source's declaration rather than from an
-    invented mapping. Types are taken from ``format_type`` output, which is
-    already a valid type expression, and column names are quoted identifiers.
+    Built from the source's own declarations rather than an invented mapping,
+    which is what makes "identical" true by construction. ``format_type`` and
+    ``pg_get_expr`` both return valid SQL expressions; identifiers are quoted.
     """
-    lowered = {k.lower(): v for k, v in source_types.items()}
+    lowered = {k.lower(): v for k, v in shape.types.items()}
+    not_null = {c.lower() for c in shape.not_null}
+    defaults = {k.lower(): v for k, v in shape.defaults.items()}
+    rename = {s.lower(): t for s, t in pairs}
+
     cols: list[str] = []
     for source_col, target_col in pairs:
         declared = lowered.get(source_col.lower())
@@ -127,7 +237,21 @@ def create_destination_like_source(
             raise FastPathUnavailable(
                 f"source column {source_col!r} has no declared type"
             )
-        cols.append(f"{_quote(target_col)} {declared}")
+        piece = f"{_quote(target_col)} {declared}"
+        default = defaults.get(source_col.lower())
+        if default:
+            piece += f" DEFAULT {default}"
+        if source_col.lower() in not_null:
+            piece += " NOT NULL"
+        cols.append(piece)
+
+    # The key only carries when every one of its columns is being copied; a
+    # partial key is not the same constraint and must not be invented.
+    pk_targets = [rename.get(c.lower()) for c in shape.primary_key]
+    if shape.primary_key and all(pk_targets):
+        cols.append(
+            "PRIMARY KEY (" + ", ".join(_quote(c) for c in pk_targets if c) + ")"
+        )
     cur.execute(
         f"CREATE TABLE IF NOT EXISTS {_table_ref(schema, table)} ({', '.join(cols)})"  # nosec B608
     )
@@ -230,17 +354,26 @@ def copy_between_postgres(
             src_cur.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
             )
-            declared = source_column_types(
+            blocked = unsupported_structure(src_cur, source_schema, source_table)
+            if blocked:
+                # Values without the structure that governs them is a different
+                # table. Decline so the row path reproduces it properly.
+                raise FastPathUnavailable(
+                    f"source carries structure this path cannot: {blocked}"
+                )
+            shape = source_table_shape(
                 src_cur, source_schema, source_table, source_cols
             )
-            missing = [c for c in source_cols if c.lower() not in
-                       {k.lower() for k in declared}]
+            missing = [
+                c for c in source_cols
+                if c.lower() not in {k.lower() for k in shape.types}
+            ]
             if missing:
                 raise FastPathUnavailable(
                     f"source columns absent from catalog: {', '.join(missing)}"
                 )
             create_destination_like_source(
-                dst_cur, dest_schema, dest_table, pairs, declared
+                dst_cur, dest_schema, dest_table, pairs, shape
             )
             if replace_destination:
                 # A full refresh replaces rather than adds. TRUNCATE rather than
