@@ -141,6 +141,9 @@ def _try_copy_fast_path(
         # The digest is only comparable because it was read in the same snapshot
         # as the rows, so the snapshot claim travels with the result.
         "source_snapshot": dict(result.source_snapshot or {}),
+        # Secondary indexes reproduced after the load — carried, not dropped, so
+        # the destination enforces the same rules and reads at the same cost.
+        "indexes_carried": list(result.indexes_carried or ()),
     }
     ddl_log = [
         f"COPY {source_table} → {dest_table} "
@@ -148,6 +151,11 @@ def _try_copy_fast_path(
         "Gate-8: source digest taken inside the read snapshot; destination "
         "digest re-read after load — both computed by the engine.",
     ]
+    if result.indexes_carried:
+        ddl_log.append(
+            f"Carried {len(result.indexes_carried)} secondary index(es) "
+            f"after load: {', '.join(result.indexes_carried)}"
+        )
     return result.rows_copied, ddl_log, dest_summary, columns
 
 

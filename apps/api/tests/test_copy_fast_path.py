@@ -383,6 +383,137 @@ def test_structure_this_path_cannot_carry_makes_it_decline(pg, ddl, structure):
         tables.drop()
 
 
+def _indexes(conn, table: str):
+    """(is_unique, sorted key columns) for every non-primary index on a table."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT ix.indisunique,
+                   array_agg(a.attname ORDER BY a.attnum)
+            FROM pg_index ix
+            JOIN pg_class c ON c.oid = ix.indrelid
+            JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(ix.indkey)
+            WHERE c.relname = %s AND NOT ix.indisprimary
+            GROUP BY ix.indexrelid, ix.indisunique
+            """,
+            (table,),
+        )
+        return sorted((bool(u), sorted(cols)) for u, cols in cur.fetchall())
+
+
+def test_secondary_indexes_are_carried_not_dropped(pg):
+    """A value copy that left indexes behind hands back a different table.
+
+    A UNIQUE index is a data-integrity guarantee and a plain index is the read
+    cost the operator provisioned for; dropping either silently makes the
+    destination behave differently while Gate-8, which only reads the data,
+    still reports a clean load.
+    """
+    tables = _Tables(pg, "id bigint, email text, status text")
+    try:
+        tables.insert(
+            "INSERT INTO {src} "
+            "SELECT g, 'e'||g, 's'||(g%3) FROM generate_series(1, 200) g"
+        )
+        with pg.cursor() as cur:
+            cur.execute(f'CREATE UNIQUE INDEX ux_email ON "{tables.src}" (email)')
+            cur.execute(f'CREATE INDEX ix_status ON "{tables.src}" (status)')
+
+        result = _copy(
+            tables, [("id", "id"), ("email", "email"), ("status", "status")]
+        )
+        assert result.verified
+        assert len(result.indexes_carried) == 2
+        # Same rules, same columns — the unique flag in particular has to survive.
+        assert _indexes(pg, tables.dst) == [
+            (False, ["status"]),
+            (True, ["email"]),
+        ]
+    finally:
+        tables.drop()
+
+
+def test_a_carried_unique_index_still_enforces_uniqueness(pg):
+    """The carried index is the guarantee, not a decoration."""
+    tables = _Tables(pg, "id bigint, email text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a@x'), (2, 'b@x')")
+        with pg.cursor() as cur:
+            cur.execute(f'CREATE UNIQUE INDEX ux_email ON "{tables.src}" (email)')
+        assert _copy(tables, [("id", "id"), ("email", "email")]).verified
+
+        psycopg2 = pytest.importorskip("psycopg2")
+        with pytest.raises(psycopg2.errors.UniqueViolation):
+            with pg.cursor() as cur:
+                cur.execute(f'INSERT INTO "{tables.dst}" VALUES (3, %s)', ("a@x",))
+    finally:
+        tables.drop()
+
+
+def test_a_renamed_column_carries_its_index_under_the_new_name(pg):
+    tables = _Tables(pg, "id bigint, email text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a@x'), (2, 'b@x')")
+        with pg.cursor() as cur:
+            cur.execute(f'CREATE UNIQUE INDEX ux_email ON "{tables.src}" (email)')
+        result = _copy(tables, [("id", "id"), ("email", "contact")])
+        assert result.verified
+        assert result.indexes_carried
+        # The index follows the value to its new column name.
+        assert _indexes(pg, tables.dst) == [(True, ["contact"])]
+    finally:
+        tables.drop()
+
+
+@pytest.mark.parametrize(
+    "index_sql,why",
+    [
+        ('CREATE INDEX ix_expr ON {src} (lower(email))', "expression"),
+        (
+            "CREATE INDEX ix_part ON {src} (status) WHERE status = 'open'",
+            "partial",
+        ),
+        ('CREATE UNIQUE INDEX ux_expr ON {src} (lower(email))', "unique expression"),
+    ],
+)
+def test_an_index_that_cannot_be_reproduced_declines_the_route(pg, index_sql, why):
+    """Declining sends the whole route to the row path, which reproduces it.
+
+    Carrying the values while quietly dropping a rule the destination cannot
+    express — a case-insensitive UNIQUE, a filtered guarantee — is exactly the
+    silent structure loss this path refuses to commit.
+    """
+    tables = _Tables(pg, "id bigint, email text, status text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a@x', 'open')")
+        with pg.cursor() as cur:
+            cur.execute(index_sql.format(src=f'"{tables.src}"'))
+        with pytest.raises(FastPathUnavailable):
+            _copy(tables, [("id", "id"), ("email", "email"), ("status", "status")])
+        # The destination is left clean for the row path to build properly.
+        with pg.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f"public.{tables.dst}",))
+            assert cur.fetchone()[0] is None
+    finally:
+        tables.drop()
+
+
+def test_an_index_over_a_dropped_column_is_skipped_not_declined(pg):
+    """The rule cannot exist once its column is gone; that is not a decline."""
+    tables = _Tables(pg, "id bigint, email text, note text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a@x', 'hi')")
+        with pg.cursor() as cur:
+            cur.execute(f'CREATE INDEX ix_email ON "{tables.src}" (email)')
+        # email is intentionally not copied, so its index has no column to cover.
+        result = _copy(tables, [("id", "id"), ("note", "note")])
+        assert result.verified
+        assert result.indexes_carried == ()
+        assert _indexes(pg, tables.dst) == []
+    finally:
+        tables.drop()
+
+
 def test_a_partial_key_is_not_invented(pg):
     """Copying half a composite key must not declare it a primary key."""
     tables = _Tables(pg, "org_id bigint, code text, note text, PRIMARY KEY (org_id, code)")

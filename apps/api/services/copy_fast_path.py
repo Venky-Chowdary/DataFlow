@@ -29,6 +29,16 @@ the copied rows are the same population by construction.
 The path declines rather than guesses. Anything it cannot prove — a differing
 type, a transform, a filter, a non-PostgreSQL end — falls back to the row path,
 which knows how to reconcile those cases.
+
+**Structure travels too.** A copy that moved only values would hand back a table
+that enforces fewer rules than its source. The primary key, nullability and
+defaults are applied at CREATE; secondary indexes — including the UNIQUE ones
+that are data-integrity guarantees, not optimisations — are reproduced after the
+bulk load, when building each index once over the finished population is both
+faster and safer than maintaining it per COPYed row. An index this path cannot
+reproduce identically (an expression index, a filtered predicate it cannot
+prove equivalent) declines the whole route rather than shipping a destination
+that quietly enforces a different rule.
 """
 
 from __future__ import annotations
@@ -58,6 +68,11 @@ class FastPathResult(NamedTuple):
     #: comparable because the rows came from this snapshot, so the claim travels
     #: with the result rather than being asserted about it.
     source_snapshot: dict[str, Any] = {}
+    #: Secondary indexes reproduced on the destination after the bulk load. A
+    #: value copy that left these behind would hand back a table that enforces
+    #: fewer rules and reads more slowly than its source, so they travel with the
+    #: result the same way the primary key and defaults do.
+    indexes_carried: tuple[str, ...] = ()
 
     @property
     def verified(self) -> bool:
@@ -261,6 +276,106 @@ def create_destination_like_source(
     )
 
 
+def plan_secondary_index_carry(
+    cur: Any,
+    *,
+    source_schema: str,
+    source_table: str,
+    dest_schema: str,
+    dest_table: str,
+    pairs: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    """Portable ``(index_name, CREATE INDEX …)`` for every source secondary index.
+
+    A secondary index is not only a read optimisation: a UNIQUE index is a
+    data-integrity guarantee and a partial index scopes that guarantee to a
+    subset of rows. Copying the values without it hands back a table that
+    *looks* right and enforces a different rule — the same silent structure loss
+    the primary key, nullability and defaults are carried here to avoid.
+
+    The plan is built from the shared ``services.secondary_indexes`` planner so
+    the fast path and the row path decide index carry the same way. It is read
+    under the caller's snapshot cursor, so the catalog it sees is the one that
+    describes the rows being copied.
+
+    Raises :class:`FastPathUnavailable` — sending the whole route to the row
+    path — whenever an index cannot be reproduced faithfully (an unreadable
+    catalog, an expression index, an unrenderable partial predicate). Declining
+    is deliberate: a fast copy that quietly dropped a UNIQUE guarantee would be
+    worse than a slower one that kept it.
+    """
+    from dataclasses import replace
+
+    from services.secondary_indexes import plan_index_carry, probe_secondary_indexes
+
+    indexes = probe_secondary_indexes(
+        "postgresql", cur, source_schema or "public", source_table
+    )
+    if indexes.status != "measured":
+        # An unreadable catalog is not proof the table has no indexes, so it is
+        # not safe to certify "identical" — hand the route to the row path.
+        raise FastPathUnavailable(
+            f"source index catalog unreadable ({indexes.detail or 'no detail'}); "
+            "cannot prove the destination would carry every index"
+        )
+    if not indexes.items:
+        return []
+
+    column_map = {s: t for s, t in pairs}
+    copied = {s.lower() for s, _ in pairs}
+
+    # Two kinds of index are handled elsewhere and must not reach the planner:
+    #
+    # * A PRIMARY KEY / UNIQUE constraint's backing index — the primary key is
+    #   emitted at CREATE and a unique *constraint* already declined the route in
+    #   ``unsupported_structure``. Carrying it here would either duplicate the
+    #   key or, for a partial key whose columns were not all copied, wrongly
+    #   decline a route the create step deliberately allows without the key.
+    # * A plain-column index over a column the transfer intentionally drops — the
+    #   rule it enforced cannot exist once its column is gone, exactly as a
+    #   partial primary key is not reinvented. Skip it rather than decline.
+    #
+    # An expression index has no plain key columns to check against ``copied``;
+    # it is deliberately *not* filtered out here so the planner sees it and
+    # refuses, which declines the route. Silently skipping it would drop a
+    # case-insensitive UNIQUE guarantee — the very loss this carry exists to
+    # prevent.
+    def _skip(item: Any) -> bool:
+        if item.constraint_backed:
+            return True
+        if item.expression:
+            return False
+        return any(c.name.lower() not in copied for c in item.columns)
+
+    carryable = tuple(item for item in indexes.items if not _skip(item))
+    if not carryable:
+        return []
+
+    decisions = plan_index_carry(
+        replace(indexes, items=carryable),
+        dest_dialect="postgresql",
+        dest_table=dest_table,
+        dest_schema=dest_schema or "public",
+        column_map=column_map,
+        quote=_quote,
+    )
+    carried: list[tuple[str, str]] = []
+    for decision in decisions:
+        if decision.carried and decision.dest_sql:
+            carried.append((decision.dest_name, decision.dest_sql))
+        elif decision.skipped:
+            # Backs the PRIMARY KEY already emitted at CREATE — not carried
+            # twice, and not a reason to decline.
+            continue
+        else:
+            # A refused index means the destination would enforce a different
+            # rule than the source. Decline rather than ship the difference.
+            raise FastPathUnavailable(
+                f"source index cannot be carried identically: {decision.reason}"
+            )
+    return carried
+
+
 def _snapshot_evidence(cur: Any) -> dict[str, Any]:
     """Record which snapshot the read ran under, in the shared shape.
 
@@ -407,6 +522,17 @@ def copy_between_postgres(
             create_destination_like_source(
                 dst_cur, dest_schema, dest_table, pairs, shape
             )
+            # Decide index carry before the load so an index this path cannot
+            # reproduce declines the whole route while the destination is still
+            # empty, rather than after a full table has been copied.
+            index_plan = plan_secondary_index_carry(
+                src_cur,
+                source_schema=source_schema,
+                source_table=source_table,
+                dest_schema=dest_schema,
+                dest_table=dest_table,
+                pairs=pairs,
+            )
             if replace_destination:
                 # A full refresh replaces rather than adds. TRUNCATE rather than
                 # DELETE: this runs in the same transaction as the load, so a
@@ -428,6 +554,17 @@ def copy_between_postgres(
             )
             rows_copied = int(dst_cur.rowcount or 0)
 
+            # Build indexes after the bulk load, not before: on an empty table
+            # each COPYed row would pay index maintenance, and building once over
+            # the finished population is both faster and how a bulk restore does
+            # it. A UNIQUE index that the source satisfied cannot fail here on
+            # rows copied verbatim; if one somehow did, the surrounding
+            # transaction rolls the whole load back rather than half-applying it.
+            indexes_carried: list[str] = []
+            for index_name, index_sql in index_plan:
+                dst_cur.execute(index_sql)  # nosec B608 — identifiers quoted by planner
+                indexes_carried.append(index_name)
+
             dest_digest = postgresql_engine_checksum(dst_cur, dest_ref, target_cols)
             if dest_digest is None:
                 raise FastPathUnavailable("destination digest unavailable")
@@ -439,6 +576,7 @@ def copy_between_postgres(
             target_rows=dest_digest.row_count,
             target_checksum=dest_digest.checksum,
             source_snapshot=snapshot,
+            indexes_carried=tuple(indexes_carried),
         )
         if not result.verified:
             # The destination transaction has not committed, so refusing here
