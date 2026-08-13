@@ -1185,11 +1185,11 @@ def read_source_database(
         return records, batch.headers, schema
 
     if db_type == "redis":
-        from connectors.redis_reader import read_keys_batch
+        from connectors.redis_reader import read_keys_batch, resolve_key_pattern
 
-        pattern = endpoint.table or endpoint.collection or endpoint.schema or "*"
-        if pattern != "*" and "*" not in pattern and "?" not in pattern:
-            pattern = f"{pattern}:*"
+        pattern = resolve_key_pattern(
+            endpoint.table or endpoint.collection or endpoint.schema
+        )
         batch, _ = read_keys_batch(cfg=cfg, pattern=pattern, limit=limit)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, pattern)

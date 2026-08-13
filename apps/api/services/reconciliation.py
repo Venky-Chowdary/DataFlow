@@ -884,6 +884,11 @@ KEYED_READBACK_ENGINES: Final[frozenset[str]] = frozenset(
         "databricks",
         "generic_sql",
         "mongodb",
+        # Redis addresses every write by ``prefix:identity``, so re-reading one
+        # batch's keys is exact. Without it an upsert into a keyspace holding
+        # any other key compared whole-prefix digests and reported a correct
+        # write as a mismatch.
+        "redis",
     }
 )
 
@@ -2709,8 +2714,16 @@ def verify_redis_prefix(
     prefix: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    written_ids: list[str] | None = None,
+    pk_column: str | None = None,
 ) -> tuple[int, str]:
-    """Reconcile Redis keys under ``prefix:*`` (writer key layout)."""
+    """Reconcile Redis keys under ``prefix:*`` (writer key layout).
+
+    ``written_ids`` scopes the digest to the keys this batch wrote, the same way
+    the SQL and warehouse read-backs do. An upsert into a keyspace that already
+    holds other keys is otherwise incomparable: the whole-prefix digest includes
+    rows the source never sent. Cardinality stays whole-prefix either way.
+    """
     try:
         from connectors.redis_reader import _decode, _redis_client
 
@@ -2735,6 +2748,14 @@ def verify_redis_prefix(
             if cursor == 0:
                 break
 
+        total = len(keys)
+        scoped_ids, _pk = keyed_readback_scope(written_ids, pk_column)
+        if scoped_ids:
+            from connectors.redis_reader import redis_key_for
+
+            wanted = {redis_key_for(prefix, i) for i in scoped_ids}
+            keys = [k for k in keys if k in wanted]
+
         def _row_iter():
             for key in keys:
                 raw = client.get(key)
@@ -2755,7 +2776,7 @@ def verify_redis_prefix(
             sample = next(_row_iter(), {})
             columns = sorted(sample.keys()) if sample else ["value"]
         checksum = canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
-        return len(keys), checksum
+        return total, checksum
     except Exception as exc:
         logger.warning("Redis reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -3193,6 +3214,8 @@ def verify_target(
             prefix=table_name,
             target_columns=target_columns,
             limit=limit,
+            written_ids=ids,
+            pk_column=pk,
         )
     elif db_type in {"elasticsearch", "opensearch", "elastic"}:
         count, chk = verify_elasticsearch_index(

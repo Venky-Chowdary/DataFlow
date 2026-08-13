@@ -13,7 +13,7 @@ Migration honesty (Airbyte/Fivetran-class):
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation, Overflow
+from decimal import Decimal, InvalidOperation, Overflow, localcontext
 from typing import Any
 
 # Significant fractional digits beyond this → likely IEEE binary residue.
@@ -98,6 +98,11 @@ def significant_digit_count(value: Any) -> int:
 
     ``Decimal.normalize`` strips the padding an exporter added, so ``100`` and
     ``52.310500000000000`` report 1 and 6 rather than 3 and 17.
+
+    Normalizing under the default 28-digit context *rounds*, so a 40-digit value
+    reported 28 — under-counting precisely in the range where the answer decides
+    whether something fits a 34-digit carrier. The count is taken under a
+    context wide enough to leave the value alone.
     """
     try:
         text = _canonical_numeric_text(value)
@@ -106,7 +111,9 @@ def significant_digit_count(value: Any) -> int:
         d = Decimal(text)
         if not d.is_finite():
             return 0
-        return len(d.normalize().as_tuple().digits)
+        with localcontext() as ctx:
+            ctx.prec = max(len(d.as_tuple().digits) + 1, 28)
+            return len(d.normalize().as_tuple().digits)
     except (InvalidOperation, Overflow, ValueError, TypeError):
         return 0
 

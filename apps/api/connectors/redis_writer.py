@@ -16,7 +16,7 @@ from services.primary_key import (
 from services.sync_cursor import is_overwrite_sync
 from services.value_serializer import json_default, sanitize_json_value
 
-from connectors.redis_reader import _redis_client
+from connectors.redis_reader import _redis_client, redis_key_for
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
@@ -265,7 +265,12 @@ def _normalize_redis_typed_doc(
             "MONEY",
             "SMALLMONEY",
         } or upper.startswith(("DECIMAL(", "NUMERIC(", "NUMBER(")):
-            out[col] = coerce_decimal_wire(out[col], ddl_type=upper or "DECIMAL")
+            # Name the engine so the bind checks Redis capacity — JSON text,
+            # with no width — rather than a DECIMAL(p,s) that was inferred from
+            # whichever documents happened to be sampled.
+            out[col] = coerce_decimal_wire(
+                out[col], ddl_type=upper or "DECIMAL", engine="redis"
+            )
         elif upper in {
             "INTEGER",
             "INT",
@@ -752,7 +757,7 @@ def write_mapped_rows(
                 )
                 continue
 
-            key = f"{prefix}:{sanitize_identifier(str(key_id), preserve_case=True)}"
+            key = redis_key_for(prefix, key_id)
             if key in seen_keys:
                 prev = seen_keys[key]
                 msg = (
@@ -868,7 +873,14 @@ def write_mapped_rows(
             warnings=errors[:10],
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
-            meta=gate8_writer_meta(mapped_rows, target_cols),
+            # Record the identities written so Gate-8 can re-read this batch.
+            # Without them an upsert into a populated keyspace compared the
+            # whole prefix against the source and reported every pre-existing
+            # key as a mismatch — the same keyed scope every other identity
+            # destination already uses.
+            meta=gate8_writer_meta(
+                mapped_rows, target_cols, conflict_columns=list(conflict or [])
+            ),
         )
     except Exception as exc:
         return WriteResult(

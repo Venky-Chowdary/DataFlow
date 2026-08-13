@@ -2303,6 +2303,36 @@ PG_DECIMAL_ROUND_DIALECTS = frozenset({
 _PG_DECIMAL_ROUND_DIALECTS = PG_DECIMAL_ROUND_DIALECTS
 
 
+def _schemaless_decimal_capacity_holds(value: Any, *, dest_db: str = "") -> bool:
+    """True when the destination has no per-field decimal width to overflow.
+
+    A document or key-value store declares no column type. Any ``DECIMAL(p,s)``
+    attached to one of its fields was inferred from the documents that happen to
+    be there, so enforcing it quarantines rows against a limit the store does
+    not have: a Redis placeholder holding ``0.00`` typed the field
+    ``DECIMAL(5,4)`` and every real salary after it was held out as overflow.
+
+    The capacity that does exist is the carrier's. MongoDB stores BSON decimal —
+    34 significant digits — and is checked against that. Redis and DynamoDB
+    serialize to JSON text, which has no digit limit.
+    """
+    from services.db_type_utils import normalize_dest_kind
+
+    kind = normalize_dest_kind(dest_db) if dest_db else ""
+    if kind not in {"mongodb", "redis"}:
+        return False
+    if kind == "redis":
+        # JSON text — every finite decimal round-trips.
+        return True
+    from services.decimal_observe import significant_digit_count
+    from services.type_system import DECIMAL128_SIGNIFICANT_DIGITS
+
+    try:
+        return significant_digit_count(value) <= DECIMAL128_SIGNIFICANT_DIGITS
+    except Exception:
+        return False
+
+
 def fits_decimal(
     value: Any,
     precision: int,
@@ -2339,6 +2369,8 @@ def fits_decimal(
     from services.transform_engine import boolean_carrier_numeric_value
 
     if boolean_carrier_numeric_value(value, precision, scale) is not None:
+        return True
+    if _schemaless_decimal_capacity_holds(value, dest_db=dest_db):
         return True
     try:
         text = str(value).strip()

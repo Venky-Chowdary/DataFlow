@@ -1378,6 +1378,14 @@ def decimal_params_would_narrow(
         return False
     sp, ss = parse_numeric_precision_scale(source_type)
     tp, ts = parse_numeric_precision_scale(target_type)
+    if dest_decimal_is_decimal128(dest_db=dest_db):
+        # BSON decimal has one capacity — 34 significant digits at any in-range
+        # scale — and no per-field width to narrow. Any ``(p, s)`` on this side
+        # was inferred from sampled documents, so comparing against it treats a
+        # description of the rows that happen to be there as a constraint the
+        # store does not have: a placeholder holding 0.00 made the field look
+        # like DECIMAL(5,4) and refused every real salary that followed.
+        return (sp if sp is not None else 0) > DECIMAL128_SIGNIFICANT_DIGITS
     if sp is None and ss is None:
         # Bare DECIMAL → DECIMAL(p,s) invents a capacity the source never proved.
         if tp is not None or ts is not None:

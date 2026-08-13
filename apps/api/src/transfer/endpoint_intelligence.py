@@ -355,6 +355,13 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "keyspace"} for t in probe.tables]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        if probe.ok and (endpoint.table or endpoint.collection):
+            # Sample the prefix for its document fields, as Mongo and
+            # Elasticsearch already do. Without this the auto-mapper saw a
+            # destination with no columns, mapped every source name to itself,
+            # and the write then failed on fields the keyspace does not have —
+            # even though the writer reads exactly these fields to type its bind.
+            _attach_db_sample(out, endpoint)
         return out
 
     if fmt == "elasticsearch":
@@ -611,9 +618,11 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             return
 
         if fmt == "redis":
-            from connectors.redis_reader import read_keys_batch
+            from connectors.redis_reader import read_keys_batch, resolve_key_pattern
 
-            pattern = endpoint.table or endpoint.collection or endpoint.schema or "*"
+            pattern = resolve_key_pattern(
+                endpoint.table or endpoint.collection or endpoint.schema
+            )
             result = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
             batch = result[0] if isinstance(result, tuple) else result
             out["columns"] = batch.headers
