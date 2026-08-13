@@ -1584,6 +1584,57 @@ _INSTANT_DATE_TOKEN_ENGINES: Final[frozenset[str]] = frozenset(
 )
 
 
+#: BSON ``date`` (and the Elasticsearch date type) is a 64-bit count of
+#: milliseconds, so anything finer than 3 fractional digits is truncated on
+#: write. Proven by round-trip: a datetime carrying microseconds comes back
+#: without them.
+DOCUMENT_INSTANT_FRACTIONAL_DIGITS: Final[int] = 3
+
+
+def is_document_instant_token(engine: str | None, ddl_type_token: str | None) -> bool:
+    """True for a document store's ``date`` token — an instant, not a calendar day.
+
+    The spelling collides with SQL ``DATE``, which normalizes to the date family
+    and made every ``TIMESTAMP`` into MongoDB read as "drop the time of day".
+    Nothing of the sort happens: the value keeps its wall clock, which is why
+    the reconcile fingerprint already resolves this token as an instant.
+    """
+    if (engine or "").strip().lower() not in _INSTANT_DATE_TOKEN_ENGINES:
+        return False
+    return strip_identity_qualifier(ddl_type_token).upper().strip() == "DATE"
+
+
+def document_instant_wire_preserved(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when a date/datetime source lands intact on a document instant.
+
+    The carrier holds an instant, so an offset-bearing source keeps it and the
+    time of day survives — the collapse this used to report, from the token
+    sharing a name with SQL ``DATE``, does not happen.
+
+    Two things are genuinely not preserved and are excluded here so the rules
+    that name them precisely still fire: sub-millisecond precision, which the
+    64-bit millisecond carrier truncates, and a zoneless source, which has no
+    instant to preserve. Stamping one is the UTC invent the MongoDB writer
+    refuses, and ``resolve_timezone_policy`` calls it POLICY_UTC_INVENT and
+    requires an operator contract.
+    """
+    if not is_document_instant_token(dest_db, target_type):
+        return False
+    if normalize_logical_type(source_type) not in {LOGICAL_DATE, LOGICAL_DATETIME}:
+        return False
+    if datetime_timezone_polarity(source_type) == "ntz":
+        return False
+    src_p = parse_temporal_fractional_precision(source_type)
+    if src_p is None:
+        return True
+    return int(src_p) <= DOCUMENT_INSTANT_FRACTIONAL_DIGITS
+
+
 def instant_date_carrier(engine: str | None, ddl_type_token: str | None) -> str:
     """Return the carrier to bind/fingerprint ``ddl_type_token`` against.
 
@@ -5797,6 +5848,12 @@ def temporal_precision_would_narrow(
     """
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
+    if is_document_instant_token(dest_db, target_type):
+        # Millisecond carrier spelled ``date``. Restate it as a datetime of that
+        # precision so the comparison below reports the truncation that actually
+        # happens instead of stopping at the date-family mismatch.
+        target_type = f"DATETIME({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
+        tgt_l = LOGICAL_DATETIME
     if src_l not in {LOGICAL_TIME, LOGICAL_DATETIME} or tgt_l not in {
         LOGICAL_TIME,
         LOGICAL_DATETIME,
@@ -6524,6 +6581,12 @@ def is_precision_collapse_coercion(
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
+    if document_instant_wire_preserved(source_type, target_type, dest_db=dest_db):
+        # A document store's ``date`` keeps the time of day; only sub-millisecond
+        # precision is lost, and a source declaring that much is excluded above
+        # so it still reports below. Without this the (datetime, date) pair read
+        # as dropping the clock and demoted every timestamp mapping.
+        return False
     if (src, tgt) in PRECISION_COLLAPSE_PAIRS:
         return True
     if is_timezone_polarity_loss(source_type, target_type, dest_db=dest_db):
@@ -7110,6 +7173,11 @@ def is_lossy_coercion(
         return False
     # VECTOR(n) â†’ ARRAY<FLOAT> lakehouse create-new wire â€” not embedding invent.
     if vector_to_array_wire_preserved(source_type, target_type, dest_db=dest_db):
+        return False
+    # Document store ``date`` is an instant, not a calendar day — the time of
+    # day survives. Sub-millisecond sources are excluded and fall through to
+    # temporal_precision_would_narrow, which names the truncation.
+    if document_instant_wire_preserved(source_type, target_type, dest_db=dest_db):
         return False
     # ARRAY/STRUCT/MAP â†’ dialect create-new JSON/VARIANT/CLOB wire â€” representation.
     if nested_to_native_document_wire_preserved(
