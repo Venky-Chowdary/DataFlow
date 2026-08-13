@@ -29,13 +29,33 @@ MAPPINGS = [
     {"source": "amount", "target": "amount", "confidence": 0.99},
 ]
 
-#: Rows the destination must hold after running the same source twice.
+#: Rows the destination must hold after running the same source twice, for a
+#: row-addressed destination (a SQL table, a collection that mints its own id).
 EXPECTED_AFTER_TWO_RUNS: dict[str, int] = {
     "full_refresh_overwrite": len(RECORDS),
     "full_refresh_append": len(RECORDS) * 2,
     "incremental_append": len(RECORDS),
     "upsert": len(RECORDS),
 }
+
+
+def expected_rows(mode: str, *, key_addressed: bool = False) -> int:
+    """Rows expected after two runs, accounting for how the sink is addressed.
+
+    A **key-addressed** destination — a Redis keyspace, a DynamoDB table, an
+    index keyed on a document id — cannot duplicate under append, because the
+    key *is* the row's identity: writing the same key twice replaces it. Append
+    there lands N, not 2N, and that is the store behaving correctly rather than
+    the mode failing.
+
+    Stating this per destination keeps the difference visible. Asserting 2N
+    everywhere would have reported a correct Redis append as a defect, and
+    asserting N everywhere would have hidden a SQL table that silently
+    deduplicated rows an operator expected to accumulate.
+    """
+    if key_addressed and mode == "full_refresh_append":
+        return len(RECORDS)
+    return EXPECTED_AFTER_TWO_RUNS[mode]
 
 
 @dataclass
@@ -46,10 +66,11 @@ class ModeOutcome:
     second_rows: int
     destination_rows: int | None
     error: str = ""
+    key_addressed: bool = False
 
     @property
     def expected(self) -> int:
-        return EXPECTED_AFTER_TWO_RUNS[self.mode]
+        return expected_rows(self.mode, key_addressed=self.key_addressed)
 
     @property
     def correct(self) -> bool:
@@ -79,6 +100,7 @@ def run_mode(
     stream_name: str,
     count_rows: Any,
     validation_mode: str = "balanced",
+    key_addressed: bool = False,
 ) -> ModeOutcome:
     """Run one mode twice and report what the destination ended up holding."""
     from src.transfer.engine import UniversalTransferEngine
@@ -107,6 +129,7 @@ def run_mode(
             second_rows=results[1].records_transferred if len(results) > 1 else 0,
             destination_rows=None,
             error=str(failed.error or "")[:400],
+            key_addressed=key_addressed,
         )
     try:
         landed = count_rows()
@@ -118,6 +141,7 @@ def run_mode(
             second_rows=results[1].records_transferred,
             destination_rows=None,
             error=f"destination count failed: {exc}"[:400],
+            key_addressed=key_addressed,
         )
     return ModeOutcome(
         mode=mode,
@@ -125,4 +149,5 @@ def run_mode(
         first_rows=results[0].records_transferred,
         second_rows=results[1].records_transferred,
         destination_rows=int(landed),
+        key_addressed=key_addressed,
     )

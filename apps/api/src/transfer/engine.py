@@ -1598,10 +1598,16 @@ def _auto_map(
                 request.destination,
                 sync_mode=sync_mode,
             )
-            # Overwrite recreates the table, so the rows land in a new one every
-            # run. Typing against "it exists" left every target pending from the
-            # second run onward — see destination_exists_for_typing.
-            dest_exists = destination_exists_for_typing(sync_mode, dest_exists)
+            # Overwrite recreates the table, and a keyspace store never has a
+            # column shape at all. Either way there is nothing to bind types to,
+            # so the mapper must invent rather than wait for a stamp that is
+            # never coming — see destination_exists_for_typing.
+            dest_exists = destination_exists_for_typing(
+                sync_mode,
+                dest_exists,
+                has_live_column_types=bool(target_schema),
+                dest_format=str(getattr(request.destination, "format", "") or ""),
+            )
             if not target_schema:
                 # Empty columns: only invent identity create-new when the object
                 # is confirmed missing. Existing/unknown → pending via mapper.

@@ -145,23 +145,46 @@ def is_append_sync(mode: str | None) -> bool:
     return normalized in APPEND_SYNC_MODES or normalized == "full_refresh_append"
 
 
-def destination_exists_for_typing(mode: str | None, exists: bool | None) -> bool | None:
-    """Does the table the write will land in exist *at write time*?
+#: Destinations that have no column catalog to bind types to — ever. A Redis
+#: keyspace and a Kafka topic are not tables: they report no column types on
+#: every run, so waiting for a live shape waits forever.
+SCHEMALESS_DESTINATIONS = frozenset({"redis", "kafka"})
 
-    Overwrite drops and recreates, so whatever is there now is not what the rows
-    land in: for typing purposes the destination is create-new every run, not
-    just the first.
 
-    Conflating the two made the second run of an overwrite fail on every
-    destination. Run one created the table and invented types from the source.
-    Run two found the table present but — correctly — carrying no usable column
-    types, since typing against a shape about to be dropped would be wrong. The
-    mapper read "exists, no columns" as "wait for a Studio stamp", left every
-    target type pending, and the schema-contract gate then refused a transfer it
-    had approved minutes earlier. Any schedule on overwrite failed from its
-    second tick onward.
+def destination_exists_for_typing(
+    mode: str | None,
+    exists: bool | None,
+    *,
+    has_live_column_types: bool = True,
+    dest_format: str = "",
+) -> bool | None:
+    """Is there a live column shape for the write to bind its types to?
+
+    Two situations answer no, and both used to be mistaken for "wait for a
+    Studio stamp", which leaves every target type pending and makes the
+    schema-contract gate refuse a transfer it had approved minutes earlier.
+
+    *Overwrite drops and recreates.* Whatever is there now is not what the rows
+    land in, so for typing the destination is create-new every run, not just the
+    first. Run one created the table and invented types from the source; run two
+    found the table present but carrying no usable column types — correctly,
+    since typing against a shape about to be dropped would be wrong — and
+    failed. Any schedule on overwrite failed from its second tick onward.
+
+    *A destination with no column catalog has nothing to bind to.* Redis is a
+    keyspace, not a table: it reports no column types on any run, so append,
+    incremental and upsert all left their targets unstamped while Validate had
+    invented ``string``, and Execute refused on the divergence.
+
+    Existence that is *unknown* stays unknown. A probe that could not read the
+    destination is not evidence that it has no columns, and inventing create-new
+    there would type against a shape nobody looked at.
     """
     if is_overwrite_sync(mode):
+        return False
+    if (dest_format or "").strip().lower() in SCHEMALESS_DESTINATIONS:
+        return False
+    if exists is True and not has_live_column_types:
         return False
     return exists
 

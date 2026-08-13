@@ -108,7 +108,12 @@ def stamp_additive_mappings_for_write(
         from services.sync_cursor import destination_exists_for_typing
 
         sync = resolve_effective_sync_mode(str(getattr(request, "sync_mode", "") or ""))
-        table_exists = destination_exists_for_typing(sync, table_exists)
+        table_exists = destination_exists_for_typing(
+            sync,
+            table_exists,
+            has_live_column_types=bool(dest_types or {}),
+            dest_format=dest_db,
+        )
     except Exception:
         table_exists = dest_table_exists
     try:
