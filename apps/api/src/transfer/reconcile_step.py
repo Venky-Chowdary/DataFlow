@@ -492,6 +492,93 @@ def _referential_integrity_evidence(
     )
 
 
+def _engine_population_digests(
+    *,
+    source_endpoint: EndpointConfig | None,
+    dest_cfg: dict[str, Any],
+    dest_db_type: str,
+    dest_schema: str,
+    dest_table: str,
+    mappings: list[dict],
+    source_schema: dict[str, str] | None,
+    dest_types: dict[str, str] | None,
+) -> tuple[str, str, int] | None:
+    """Digest both populations in their own engines, or ``None`` to fall back.
+
+    Gate-8 compares the two sides to each other, so when they render values
+    identically the comparison does not need Python to see a single row. That
+    is worth reaching for: per-cell fingerprinting is the largest cost in a
+    transfer by a wide margin.
+
+    Returns ``None`` — leaving today's path untouched — whenever anything is not
+    provably comparable: a different engine, a transform, a declared omission, a
+    type that is only nearly the same, or any error while querying. Falling back
+    costs time; guessing costs correctness.
+    """
+    if source_endpoint is None or source_endpoint.kind != "database":
+        return None
+    from services.engine_checksum import (
+        comparable_column_pairs,
+        engines_comparable,
+        postgresql_engine_checksum,
+    )
+
+    from .connector_capabilities import resolve_driver_type
+
+    source_driver = resolve_driver_type(source_endpoint.format or "")
+    if not engines_comparable(source_driver, dest_db_type):
+        return None
+    pairs = comparable_column_pairs(mappings, source_schema, dest_types)
+    if not pairs:
+        return None
+
+    source_table = source_endpoint.table or source_endpoint.collection or ""
+    if not source_table or not dest_table:
+        return None
+
+    from connectors.postgresql_conn import get_connection
+    from connectors.sql_identifiers import quote_table_ref
+
+    src_cfg = resolve_connector_config(source_endpoint)
+    try:
+        source_ref = quote_table_ref(
+            source_table, source_endpoint.schema or "public", dialect="postgresql"
+        )
+        dest_ref = quote_table_ref(
+            dest_table, dest_schema or "public", dialect="postgresql"
+        )
+    except Exception:
+        return None
+
+    def _digest(cfg: dict[str, Any], table_ref: str, columns: list[str]):
+        conn = get_connection(
+            host=cfg.get("host", ""),
+            port=int(cfg.get("port") or 5432),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+        try:
+            with conn.cursor() as cur:
+                return postgresql_engine_checksum(cur, table_ref, columns)
+        finally:
+            conn.close()
+
+    try:
+        source_digest = _digest(src_cfg, source_ref, [p[0] for p in pairs])
+        dest_digest = _digest(dest_cfg, dest_ref, [p[1] for p in pairs])
+    except Exception as exc:
+        logging.getLogger(__name__).info(
+            "Engine population digest unavailable, using row fingerprints: %s", exc
+        )
+        return None
+    if source_digest is None or dest_digest is None:
+        return None
+    return source_digest.checksum, dest_digest.checksum, dest_digest.row_count
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -848,22 +935,41 @@ def run_reconciliation(
             if x is not None and str(x) != ""
         ] or None
 
-    # Always full-table first for SQL. Keyed batch proof is a fallback when the
-    # sink legitimately has extras (upsert/append into non-empty) — never for a
-    # first load where target_rows == source_rows (would fingerprint a sample).
-    target_rows, target_checksum = verify_target(
-        db_type,
-        cfg,
-        schema=schema,
-        table_name=table_name,
-        fallback_rows=-1,
-        fallback_checksum="",
-        target_columns=target_cols,
-        limit=checksum_limit,
-        dest_types=dest_types,
-        written_ids=None,
-        pk_column=None,
-    )
+    # Both digests computed by the engines when they will render identically —
+    # the same population coverage at a fraction of the cost, since neither side
+    # has to bring rows into Python to hash them.
+    engine_digests = None
+    if not source_checksum_scope_note:
+        engine_digests = _engine_population_digests(
+            source_endpoint=source_endpoint,
+            dest_cfg=cfg,
+            dest_db_type=db_type,
+            dest_schema=schema,
+            dest_table=table_name,
+            mappings=mapping_dicts,
+            source_schema=source_schema,
+            dest_types=dest_types,
+        )
+
+    if engine_digests is not None:
+        source_checksum, target_checksum, target_rows = engine_digests
+    else:
+        # Always full-table first for SQL. Keyed batch proof is a fallback when the
+        # sink legitimately has extras (upsert/append into non-empty) — never for a
+        # first load where target_rows == source_rows (would fingerprint a sample).
+        target_rows, target_checksum = verify_target(
+            db_type,
+            cfg,
+            schema=schema,
+            table_name=table_name,
+            fallback_rows=-1,
+            fallback_checksum="",
+            target_columns=target_cols,
+            limit=checksum_limit,
+            dest_types=dest_types,
+            written_ids=None,
+            pk_column=None,
+        )
 
     strict_checksum = validation_mode in ("strict", "maximum")
 

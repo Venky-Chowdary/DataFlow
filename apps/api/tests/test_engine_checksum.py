@@ -21,8 +21,9 @@ import uuid
 import pytest
 
 from services.engine_checksum import (
-    engine_checksum_comparable,
+    comparable_column_pairs,
     engine_supports_checksum,
+    engines_comparable,
     postgresql_engine_checksum,
 )
 
@@ -193,22 +194,71 @@ def test_empty_table_digests_without_error(pg):
         empty.drop()
 
 
-def test_comparability_requires_matching_declared_types():
-    same = {"id": "bigint", "amount": "numeric(12,2)"}
+def test_engines_must_match_and_be_supported():
+    assert engines_comparable("postgresql", "postgresql")
+    assert not engines_comparable("postgresql", "mysql")
+    assert not engines_comparable("mysql", "mysql")
+    assert not engines_comparable("", "")
+
+
+IDENTITY = [
+    {"source": "id", "target": "id"},
+    {"source": "amount", "target": "amount"},
+]
+SAME = {"id": "bigint", "amount": "numeric(12,2)"}
+
+
+def test_pure_carry_onto_identical_types_is_comparable():
+    assert comparable_column_pairs(IDENTITY, SAME, SAME) == [
+        ("id", "id"),
+        ("amount", "amount"),
+    ]
+
+
+def test_rename_is_free_because_the_digest_is_positional():
+    renamed = [
+        {"source": "id", "target": "pk"},
+        {"source": "amount", "target": "total"},
+    ]
+    dest = {"pk": "bigint", "total": "numeric(12,2)"}
+    assert comparable_column_pairs(renamed, SAME, dest) == [
+        ("id", "pk"),
+        ("amount", "total"),
+    ]
+
+
+def test_widened_carrier_is_not_comparable():
+    """numeric(12,2) renders 150.25 where unconstrained numeric renders 150.250."""
     widened = {"id": "bigint", "amount": "numeric"}
-    cols = ["id", "amount"]
-    assert engine_checksum_comparable("postgresql", "postgresql", same, same, cols)
-    # An unconstrained numeric renders 150.250 where numeric(12,2) renders
-    # 150.25 — same number, different text. Text digests must not judge that.
-    assert not engine_checksum_comparable(
-        "postgresql", "postgresql", same, widened, cols
-    )
-    assert not engine_checksum_comparable("postgresql", "mysql", same, same, cols)
-    assert not engine_checksum_comparable("mysql", "mysql", same, same, cols)
-    assert not engine_checksum_comparable("postgresql", "postgresql", same, same, [])
-    assert not engine_checksum_comparable(
-        "postgresql", "postgresql", same, {"id": "bigint"}, cols
-    )
+    assert comparable_column_pairs(IDENTITY, SAME, widened) is None
+
+
+def test_transform_means_the_values_are_meant_to_differ():
+    masked = [
+        {"source": "id", "target": "id"},
+        {"source": "amount", "target": "amount", "transform": "hash_pii"},
+    ]
+    assert comparable_column_pairs(masked, SAME, SAME) is None
+    identity_named = [
+        {"source": "id", "target": "id", "transform": "none"},
+        {"source": "amount", "target": "amount", "transform": "identity"},
+    ]
+    assert comparable_column_pairs(identity_named, SAME, SAME) is not None
+
+
+def test_declared_omission_is_not_comparable():
+    """A digest over a subset would read as a full-population pass."""
+    omitted = [
+        {"source": "id", "target": "id"},
+        {"source": "amount", "target": "", "intentional_omit": True},
+    ]
+    assert comparable_column_pairs(omitted, SAME, SAME) is None
+
+
+def test_unknown_type_on_either_side_is_not_comparable():
+    assert comparable_column_pairs(IDENTITY, SAME, {"id": "bigint"}) is None
+    assert comparable_column_pairs(IDENTITY, {"id": "bigint"}, SAME) is None
+    assert comparable_column_pairs([], SAME, SAME) is None
 
 
 def test_supported_engines():

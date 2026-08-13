@@ -240,13 +240,20 @@ def _format_datetime(dt: datetime) -> str:
     never had, and the MySQL ``DATETIME`` writer then quarantined every row for
     being timezone-aware. Postgres→MySQL moved zero rows as a result. A value
     with no zone carries no zone downstream; only a real offset survives.
+
+    Sub-second precision survives too. Every branch here used to render seconds
+    and nothing finer, and the mapper stamps this transform on *every* timestamp
+    column by default, so a PostgreSQL ``timestamp(6)`` copied to an identical
+    ``timestamp(6)`` arrived with its microseconds gone — on every route, for
+    every row, with no finding raised. ``isoformat`` omits the fractional part
+    when it is zero, so whole-second values render exactly as they did.
     """
     if dt.tzinfo is None:
-        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+        return dt.isoformat()
     offset = dt.utcoffset()
     if offset is not None and offset.total_seconds() == 0:
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return dt.isoformat(timespec="seconds")
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.isoformat()
 
 
 def _to_utc_z(dt: datetime) -> str:
