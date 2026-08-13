@@ -1529,7 +1529,47 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
         if default_expr and "nextval(" not in str(default_expr).lower():
             col_pg["default"] = str(default_expr)
         columns.append(col_pg)
+    _measure_unconstrained_decimals(cur, schema, table, columns)
     return columns
+
+
+def _measure_unconstrained_decimals(
+    cur: Any, schema: str, table: str, columns: list[dict]
+) -> None:
+    """Replace bare ``numeric`` with the capacity its rows actually use.
+
+    An unconstrained ``numeric`` declares no bound, so every comparison against
+    a destination carrier concludes the destination is narrower and refuses the
+    route — true of the type, rarely true of the data. The aggregate covers the
+    whole column, so the substituted ``DECIMAL(p,s)`` is measured rather than
+    invented, and ``decimal_capacity_measured`` marks it as such.
+
+    Anything that stops the probe leaves the bare type in place, which keeps the
+    fail-closed verdict the operator would otherwise have received.
+    """
+    from services.decimal_capacity_probe import (
+        probe_postgresql_decimal_capacity,
+        unconstrained_decimal_columns,
+    )
+
+    targets = unconstrained_decimal_columns(columns)
+    if not targets:
+        return
+    try:
+        measured = probe_postgresql_decimal_capacity(cur, schema, table, targets)
+    except Exception as exc:
+        logging.getLogger(__name__).info(
+            "decimal capacity probe failed for %s.%s: %s", schema, table, exc
+        )
+        return
+    by_name = {str(c.get("name") or ""): c for c in columns}
+    for name, capacity in measured.items():
+        col = by_name.get(name)
+        if col is None:
+            continue
+        col["inferred_type"] = capacity.as_type()
+        col["declared_type"] = "DECIMAL"
+        col["decimal_capacity_measured"] = True
 
 
 def _pg_elem_to_logical(elem: str) -> str:
