@@ -46,6 +46,7 @@ from .adapters import (
     resolve_dest_table,
 )
 from .connector_capabilities import resolve_driver_type
+from .stream_row_accounting import stamp_incremental_no_op, stamp_source_row_count
 from .stream_foreign_keys import (
     ForeignKeyContext as _ForeignKeyContext,
     carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
@@ -2290,14 +2291,7 @@ def _stream_database_transfer_impl(
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
         dest_summary["sync_mode"] = effective_sync
-        # Nothing was in scope past the watermark. That is a *measured* zero —
-        # the reader ran and the answer was none — not an absent measurement,
-        # and conservation holds trivially because nothing was read and nothing
-        # was written. Leaving it unstamped made Gate-8 refuse the steady state
-        # of every incremental schedule: most ticks have no new rows, so every
-        # tick after the first failed on a run that had correctly done nothing.
-        dest_summary["source_row_count"] = 0
-        dest_summary["source_row_count_source"] = "incremental_watermark_empty"
+        stamp_incremental_no_op(dest_summary)
         if resume_key_resolved:
             # Honest delivery label: the read side re-delivers the interrupted
             # batch, the write side resolves it on the identity key.
@@ -2562,30 +2556,9 @@ def _stream_database_transfer_impl(
     # committed batch's source rows), so it overrides any per-batch writer stamp
     # that may have merged into the summary — the last batch's mapped-row count is
     # not the population.
-    reader_count = int(committed_offset or 0)
-    if reader_count > 0:
-        dest_summary["source_row_count"] = reader_count
-        dest_summary["source_row_count_source"] = "committed_offset"
-    elif int(written or 0) == 0:
-        # The read loop completed and nothing was in scope. That is a *measured*
-        # zero, not an absent measurement, and conservation holds trivially:
-        # nothing was read and nothing was written.
-        #
-        # Discarding it is what made every incremental schedule fail from its
-        # second tick. A steady-state incremental run reads no rows past its
-        # watermark — that is the normal case, not an error — and Gate-8 then
-        # refused a run that had correctly done nothing.
-        #
-        # A zero read alongside rows written stays unmeasured below: those two
-        # counts disagree, and inventing conservation from the writer's
-        # acknowledgement is exactly the circular balance this guards.
-        dest_summary["source_row_count"] = 0
-        dest_summary["source_row_count_source"] = "committed_offset_empty"
-    elif not isinstance(dest_summary.get("source_row_count"), int) or int(
-        dest_summary.get("source_row_count") or 0
-    ) <= 0:
-        dest_summary["source_row_count_source"] = "unmeasured"
-        dest_summary.pop("source_row_count", None)
+    stamp_source_row_count(
+        dest_summary, reader_count=int(committed_offset or 0), rows_written=int(written or 0)
+    )
     if reconcile_sample:
         dest_summary["reconcile_sample"] = reconcile_sample[:_RECONCILE_SAMPLE_CAP]
     if load_methods_seen:

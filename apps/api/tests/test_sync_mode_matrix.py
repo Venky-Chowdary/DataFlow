@@ -361,6 +361,54 @@ def test_incremental_moves_only_new_rows(pg_source, tmp_path):
         drop()
 
 
+def test_redis_keyspace_probe_survives_a_populated_instance():
+    """The probe must finish a pass over a real keyspace, not a near-empty one.
+
+    It used to scan 64 calls of 8 keys — about 512 — and report "unknown" past
+    that, so every Redis destination fail-closed on any instance holding more
+    keys than a fresh test container. It passed only because CI's Redis was
+    nearly empty.
+    """
+    from connectors.redis_writer import _redis_prefix_key_count_hint
+
+    class _FakeRedis:
+        """A keyspace with many keys and none under the probed prefix."""
+
+        def __init__(self, total: int) -> None:
+            self.total = total
+            self.calls = 0
+
+        def scan(self, cursor: int = 0, match: str = "", count: int = 10):
+            self.calls += 1
+            nxt = int(cursor) + int(count)
+            if nxt >= self.total:
+                return 0, []  # cursor wrapped: the prefix is genuinely absent
+            return nxt, []
+
+    fake = _FakeRedis(total=250_000)
+    assert _redis_prefix_key_count_hint(fake, "orders") == 0, (
+        f"probe gave up after {fake.calls} call(s) on a 250k-key instance"
+    )
+
+    # A prefix that does exist is answered on the first match, not after a pass.
+    class _HasPrefix(_FakeRedis):
+        def scan(self, cursor: int = 0, match: str = "", count: int = 10):
+            self.calls += 1
+            return 0, ["orders:1"]
+
+    assert _redis_prefix_key_count_hint(_HasPrefix(total=10), "orders") > 0
+
+    # Exhausting the budget still reports unknown rather than guessing empty:
+    # reading "no keys" off an incomplete scan would bind Map VARCHAR over live
+    # typed documents.
+    class _NeverWraps(_FakeRedis):
+        def scan(self, cursor: int = 0, match: str = "", count: int = 10):
+            self.calls += 1
+            return int(cursor) + 1, []
+
+    assert _redis_prefix_key_count_hint(_NeverWraps(total=1), "orders") == -1
+
+
 def test_every_mode_has_a_declared_second_run_expectation():
     """A mode nobody declared an expectation for is a mode nobody proved."""
     from services.sync_cursor import CANONICAL_SYNC_MODES

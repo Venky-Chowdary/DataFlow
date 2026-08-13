@@ -160,15 +160,35 @@ def _redis_rematerialize_if_physical_differs(
     )
 
 
-def _redis_prefix_key_count_hint(client: Any, prefix: str, *, probe: int = 8) -> int:
-    """Return >0 when any ``prefix:*`` key exists; 0 if empty; -1 on probe failure.
+#: Keys asked for per SCAN call. Redis treats COUNT as a hint about how much
+#: work to do per call, not a page size, so this bounds latency per round trip
+#: rather than the answer.
+_SCAN_COUNT = 1000
+#: SCAN calls before the probe gives up. With the count above this covers a
+#: keyspace of roughly ten million keys before reporting "unknown".
+_SCAN_MAX_CALLS = 10_000
 
-    Redis SCAN may return a non-zero cursor with an empty key batch — loop until
-    cursor wraps or a key is found so we never treat a populated keyspace as empty.
+
+def _redis_prefix_key_count_hint(
+    client: Any, prefix: str, *, probe: int = _SCAN_COUNT
+) -> int:
+    """Return >0 when any ``prefix:*`` key exists; 0 if empty; -1 if unknown.
+
+    Redis SCAN may return a non-zero cursor with an empty key batch, so proving
+    a prefix is *absent* means walking the cursor until it wraps. Proving it is
+    present stops at the first match.
+
+    The budget used to be 64 calls of 8 keys, which cannot complete a pass over
+    more than about 512 keys — so on any Redis holding more than that, the probe
+    reported "unknown", the writer fail-closed, and every Redis destination
+    refused. It only ever passed because a test instance was nearly empty. The
+    budget is now sized for a real keyspace, and exhausting it still reports
+    unknown rather than guessing empty: reading "no keys" off an incomplete scan
+    would bind Map VARCHAR over live typed documents.
     """
     try:
         cursor = 0
-        for _ in range(64):
+        for _ in range(_SCAN_MAX_CALLS):
             cursor, keys = client.scan(
                 cursor=cursor, match=f"{prefix}:*", count=int(probe)
             )

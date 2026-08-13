@@ -89,6 +89,8 @@ the pipeline read unchanged.
 |--------|--------|-----|
 | `src/transfer/stream.py` | 3418 → 3335, budget 3400 → 3350 | Source FK measurement, parents-first ordering, and post-load constraint carry → `src/transfer/stream_foreign_keys.py` |
 | `src/transfer/stream_foreign_keys.py` | new | One owner for "referential constraints cannot be created alongside the rows" |
+| `src/transfer/stream.py` | over budget again after the incremental fix | Reader-side row accounting for Gate-8 → `src/transfer/stream_row_accounting.py` |
+| `src/transfer/stream_row_accounting.py` | new | One owner for "a source count of zero is a measurement, not an absence" |
 
 `stream.py` had drifted 18 lines past its freeze. Foreign-key carry moved rather
 than the budget rising: it is a self-contained concern with a single reason to
