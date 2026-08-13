@@ -183,8 +183,10 @@ def mapping_fidelity(
     else:
         tgt_type = stamp or src_type
 
+    from services.timezone_policy import effective_source_type as _tz_effective
+
     if is_lossy_coercion(
-        src_type,
+        _tz_effective(src_type, transform),
         tgt_type,
         dest_db=dest,
         dest_table_exists=dest_table_exists,
@@ -441,7 +443,12 @@ def _mapping_risks(
     # Execute read, so a route cannot green under one policy and write another.
     from services.timezone_policy import resolve_timezone_policy
 
-    tz_policy = resolve_timezone_policy(src_type, tgt_type, dest_db=dest)
+    # A declared zone is the operator supplying what the source never recorded,
+    # so the type path is judged on what the column carries after it.
+    from services.timezone_policy import effective_source_type
+
+    tz_src_type = effective_source_type(src_type, transform)
+    tz_policy = resolve_timezone_policy(tz_src_type, tgt_type, dest_db=dest)
 
     if is_timezone_polarity_loss and is_timezone_polarity_loss(
         src_type, tgt_type, dest_db=dest

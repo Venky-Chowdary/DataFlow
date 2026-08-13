@@ -1165,6 +1165,47 @@ def infer_transform_for_mapping(
     return "none"
 
 
+#: A zoneless source column carries wall-clock digits and no zone, so writing it
+#: to an instant carrier has to pick one. Guessing UTC is what silently shifts a
+#: business day; this transform is the operator supplying the fact the source
+#: never recorded, so the instant is asserted rather than invented.
+ASSUME_TIMEZONE_PREFIX = "assume_timezone:"
+
+
+def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
+    """Attach a declared zone to a zoneless datetime.
+
+    A value that already carries an offset is left alone: it has an instant, and
+    overriding it with a declared zone would move a timestamp the source was
+    explicit about.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    zone_name = transform[len(ASSUME_TIMEZONE_PREFIX):].strip()
+    if not zone_name:
+        return None, "assume_timezone needs a zone, e.g. assume_timezone:UTC"
+    try:
+        zone = ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return None, f"Unknown timezone: {zone_name!r}"
+
+    parsed = _parse_datetime(text)
+    if parsed is None:
+        return None, f"Invalid datetime: {text!r}"
+    try:
+        moment = datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None, f"Invalid datetime: {text!r}"
+    # An offset the source stated is an instant already; a declared zone must not
+    # move it.
+    if moment.tzinfo is not None:
+        return _format_datetime(moment), None
+    try:
+        return _format_datetime(moment.replace(tzinfo=zone)), None
+    except (ValueError, OverflowError) as exc:
+        return None, f"Could not apply zone {zone_name!r}: {exc}"
+
+
 def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     """Returns (value, error).
 
@@ -1254,6 +1295,9 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         if parsed is None:
             return None, f"Invalid datetime: {text!r}"
         return parsed, None
+
+    if transform.startswith(ASSUME_TIMEZONE_PREFIX):
+        return _apply_assume_timezone(text, transform)
 
     if transform == "time":
         parsed = _parse_time(text)

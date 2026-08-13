@@ -269,6 +269,54 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _declare_source_timezone(
+    mappings: list[dict],
+    zone: str,
+    *,
+    source_types: dict,
+) -> tuple[list[dict], dict]:
+    """Stamp an operator-declared zone onto the zoneless temporal columns.
+
+    Returns the mappings and the source types as they are *after* the
+    declaration. Both matter: the transform changes the value the writer sends,
+    and the type changes what every gate downstream understands the column to
+    carry. Updating only the first leaves the transfer blocked for a problem the
+    declaration already answered — the value would be written correctly by a
+    path nothing allowed to run.
+
+    Only zoneless columns are touched. A column that already carries an offset
+    has an instant the source was explicit about, and overriding it would move a
+    timestamp on the operator's behalf.
+    """
+    from services.timezone_policy import effective_source_type
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+    from services.type_system import datetime_timezone_polarity
+
+    out: list[dict] = []
+    declared_types: dict = dict(source_types or {})
+    for m in mappings:
+        entry = dict(m)
+        src_type = str(
+            entry.get("source_type") or source_types.get(entry.get("source") or "") or ""
+        )
+        existing = str(entry.get("transform") or "").strip().lower()
+        # A plain temporal transform is the mapper parsing the value, not a
+        # decision about its zone — the declaration refines it. Anything else is
+        # an operator choice and is left alone.
+        already_typed = existing not in {"", "none", "identity", "datetime", "date", "timestamp"}
+        if (
+            src_type
+            and datetime_timezone_polarity(src_type) == "ntz"
+            and not already_typed
+        ):
+            entry["transform"] = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
+            declared = effective_source_type(src_type, entry["transform"])
+            entry["source_type"] = declared
+            declared_types[str(entry.get("source") or "")] = declared
+        out.append(entry)
+    return out, declared_types
+
+
 def plan_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
@@ -280,8 +328,16 @@ def plan_transfer(
     schema_policy: str = "manual_review",
     validation_mode: str = "balanced",
     write_via_staging: bool = False,
+    source_timezone: str = "",
 ):
-    """Plan a real transfer: live schemas, real mapping, real preflight gates."""
+    """Plan a real transfer: live schemas, real mapping, real preflight gates.
+
+    ``source_timezone`` answers the one question the tool cannot answer itself:
+    a zoneless source column has no instant, so landing it on a carrier that
+    stores instants has to pick a zone. Guessing UTC is how a business day moves
+    for anyone whose data was not UTC, so the plan is blocked until the operator
+    says which zone the source meant.
+    """
     tool = "plan_transfer"
     src_table = (source_table or "").strip()
     if not src_table:
@@ -366,6 +422,15 @@ def plan_transfer(
         use_llm=False,
     )
     mappings = list(mapping.get("mappings") or [])
+    if source_timezone:
+        mappings, declared_source_types = _declare_source_timezone(
+            mappings,
+            source_timezone,
+            source_types=src_info.get("schema") or {},
+        )
+        # The declaration is a fact about the source, so it travels with the
+        # schema every gate reads — not just with the mapping.
+        src_info["schema"] = declared_source_types
 
     preflight = _run_preflight(
         src_conn=src_conn,
@@ -684,6 +749,7 @@ def start_transfer(
     schema_policy: str = "manual_review",
     validation_mode: str = "balanced",
     limit: int = 0,
+    source_timezone: str = "",
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -697,6 +763,7 @@ def start_transfer(
         sync_mode=sync_mode,
         schema_policy=schema_policy,
         validation_mode=validation_mode,
+        source_timezone=source_timezone,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)

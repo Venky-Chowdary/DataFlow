@@ -68,6 +68,12 @@ DEFAULT_SAMPLE_LIMIT = DEFAULT_SCREENING_LIMIT
 PREFLIGHT_SAMPLE_LIMIT = DEFAULT_SCREENING_LIMIT
 
 
+def _effective_source_type(source_type: str, transform: Any) -> str:
+    from services.timezone_policy import effective_source_type
+
+    return effective_source_type(source_type, transform if isinstance(transform, str) else "")
+
+
 def samples_coerce_mapping(
     mapping: dict,
     *,
@@ -337,7 +343,12 @@ def analyze_coercion(
         src = m.get("source", "")
         if not src:
             continue
-        src_type = source_types.get(src, "VARCHAR")
+        # A declared source zone is the operator supplying the fact the source
+        # never recorded, so every verdict has to read the column the same way
+        # the write path will.
+        src_type = _effective_source_type(
+            source_types.get(src, "VARCHAR"), m.get("transform")
+        )
         tgt_type = _target_type_for(m, dest_types, source_types, dest_db_type=dest_db_type)
         if not str(tgt_type or "").strip():
             # Match-existing without live/Map stamp — refuse source invent green.
