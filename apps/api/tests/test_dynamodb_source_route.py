@@ -112,7 +112,7 @@ def test_stale_item_count_does_not_prove_an_empty_table():
         patch(
             "connectors.dynamodb_writer._fetch_dynamo_physical_types",
             # Key typed, non-key column unresolved, and one item actually seen.
-            return_value=({"id": "VARCHAR"}, True, 1),
+            return_value=({"id": "VARCHAR"}, True, 1, True),
         ),
     ):
         result = write_mapped_rows(
@@ -165,7 +165,7 @@ def test_a_scan_that_saw_nothing_still_allows_map_only_create_new():
         patch(
             "connectors.dynamodb_writer._fetch_dynamo_physical_types",
             # Scan ran and came back empty: emptiness is proven.
-            return_value=({"id": "VARCHAR"}, True, 0),
+            return_value=({"id": "VARCHAR"}, True, 0, True),
         ),
     ):
         result = write_mapped_rows(
@@ -190,6 +190,112 @@ def test_a_scan_that_saw_nothing_still_allows_map_only_create_new():
     assert result.ok is True, result.error
 
 
+def test_stale_positive_item_count_does_not_outrank_an_empty_scan():
+    """ItemCount lags by hours in both directions — the Scan is the observation.
+
+    A table emptied minutes ago still reports a positive ItemCount. Letting that
+    stand as proof of population forced live-DDL coverage on a table with no
+    rows, refusing a Map-only first load of exactly the non-key columns the
+    operator asked for.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from connectors.dynamodb_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            # Stale: the table was emptied since AWS last refreshed this.
+            "ItemCount": 5,
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+        }
+    }
+    client.batch_write_item.return_value = {"UnprocessedItems": {}}
+    with (
+        patch("connectors.dynamodb_writer.boto3_client", return_value=client),
+        patch(
+            "connectors.dynamodb_writer._table_key_types", return_value={"id": "S"}
+        ),
+        patch(
+            "connectors.dynamodb_writer._fetch_dynamo_physical_types",
+            # Scan ran, saw nothing: the table is empty whatever ItemCount says.
+            return_value=({"id": "VARCHAR"}, True, 0, True),
+        ),
+    ):
+        result = write_mapped_rows(
+            host="",
+            port=0,
+            database="test",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["id", "amount"],
+            data_rows=[["1", "10.50"]],
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "amount", "target": "amount"},
+            ],
+            column_types={"id": "VARCHAR", "amount": "VARCHAR"},
+            error_policy="quarantine",
+        )
+    assert result.ok is True, result.error
+
+
+def test_no_scan_at_all_does_not_prove_emptiness():
+    """No Scan runs when every mapped column is a declared key attribute.
+
+    Zero items seen without a Scan is an absence of evidence, so a positive
+    ItemCount still stands and the coverage guard must run.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from connectors.dynamodb_writer import write_mapped_rows
+
+    client = MagicMock()
+    client.describe_table.return_value = {
+        "Table": {
+            "ItemCount": 5,
+            "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+            "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+        }
+    }
+    with (
+        patch("connectors.dynamodb_writer.boto3_client", return_value=client),
+        patch(
+            "connectors.dynamodb_writer._table_key_types", return_value={"id": "S"}
+        ),
+        patch(
+            "connectors.dynamodb_writer._fetch_dynamo_physical_types",
+            return_value=({"id": "VARCHAR"}, True, 0, False),
+        ),
+    ):
+        result = write_mapped_rows(
+            host="",
+            port=0,
+            database="test",
+            username="",
+            password="",
+            schema="",
+            connection_string="",
+            ssl=False,
+            table_name="orders",
+            headers=["id", "amount"],
+            data_rows=[["1", "10.50"]],
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "amount", "target": "amount"},
+            ],
+            column_types={"id": "VARCHAR", "amount": "VARCHAR"},
+            error_policy="quarantine",
+        )
+    assert result.ok is False
+    assert "amount" in (result.error or "")
+
+
 def test_a_failed_scan_leaves_emptiness_unproven():
     """Scan failure is unknown, not empty, so the guard must still refuse."""
     from unittest.mock import MagicMock, patch
@@ -211,7 +317,7 @@ def test_a_failed_scan_leaves_emptiness_unproven():
         ),
         patch(
             "connectors.dynamodb_writer._fetch_dynamo_physical_types",
-            return_value=({"id": "VARCHAR"}, False, 0),
+            return_value=({"id": "VARCHAR"}, False, 0, True),
         ),
     ):
         result = write_mapped_rows(

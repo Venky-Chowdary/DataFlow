@@ -29,15 +29,21 @@ class DynamoLiveTypes(NamedTuple):
     callers must fail closed on populated tables rather than Map-VARCHAR bind
     inventing empty→NULL on live N/BOOL.
 
-    ``items_seen`` is the direct evidence of whether the table holds anything.
-    ``ItemCount`` cannot answer that: AWS documents it as refreshed roughly
-    every six hours, so a table loaded minutes ago reports zero while full. A
-    positive count still proves *populated*; only its zero means nothing.
+    ``items_seen`` is the direct evidence of whether the table holds anything,
+    and ``scanned`` says whether that evidence was gathered at all — no Scan runs
+    when every mapped column is already a declared key attribute, and zero items
+    seen without a Scan proves nothing.
+
+    ``ItemCount`` cannot answer the question in either direction on its own: AWS
+    documents it as refreshed roughly every six hours, so a table loaded minutes
+    ago reports zero while full, and one emptied minutes ago reports full while
+    empty. An unfiltered Scan that came back with nothing outranks it.
     """
 
     physical: dict[str, str]
     sample_ok: bool
     items_seen: int
+    scanned: bool
 
 
 def _fetch_dynamo_physical_types(
@@ -79,12 +85,16 @@ def _fetch_dynamo_physical_types(
     }
     sample_ok = True
     items_seen = 0
+    scanned = False
     if type_counts:
         try:
             from boto3.dynamodb.types import TypeDeserializer
 
             deser = TypeDeserializer()
             resp = client.scan(TableName=table, Limit=int(sample_limit))
+            # An unfiltered Scan that completed is the observation; whether it
+            # returned rows is what ``items_seen`` then records.
+            scanned = True
             for raw in resp.get("Items") or []:
                 if not isinstance(raw, dict):
                     continue
@@ -132,7 +142,7 @@ def _fetch_dynamo_physical_types(
             physical[col] = carrier
             physical.setdefault(col.lower(), carrier)
             physical.setdefault(col.upper(), carrier)
-    return DynamoLiveTypes(physical, sample_ok, items_seen)
+    return DynamoLiveTypes(physical, sample_ok, items_seen, scanned)
 
 
 def _dynamo_rematerialize_if_physical_differs(
@@ -488,7 +498,7 @@ def write_mapped_rows(
 
     # Always probe live carriers after KeySchema is confirmed (do not gate on a
     # prior describe blip — create-new still rematerializes from AttrDefs).
-    physical, sample_ok, items_seen = _fetch_dynamo_physical_types(
+    physical, sample_ok, items_seen, scanned = _fetch_dynamo_physical_types(
         client, table, target_cols
     )
     try:
@@ -497,14 +507,17 @@ def write_mapped_rows(
         )
     except Exception:
         item_count = -1
-    # A table is proven populated by *seeing* an item, or by a positive
-    # ItemCount. It is never proven empty by ItemCount reading zero: AWS
-    # refreshes that metric roughly every six hours, so a table loaded minutes
-    # ago reports zero while full, and trusting it skipped both guards below and
-    # let untyped Map carriers bind against live data.
-    holds_data = items_seen > 0 or item_count > 0
-    # Emptiness is only known when a scan actually ran and came back empty.
-    emptiness_proven = sample_ok and items_seen == 0
+    # Emptiness is known only from an unfiltered Scan that ran and came back
+    # with nothing. ``sample_ok`` alone does not say that: no Scan runs when every
+    # mapped column is already a declared key attribute.
+    emptiness_proven = scanned and sample_ok and items_seen == 0
+    # A table is proven populated by *seeing* an item, or by a positive ItemCount
+    # when nothing was observed directly. ItemCount cannot overrule the Scan in
+    # either direction: AWS refreshes it roughly every six hours, so it reads
+    # zero for a table loaded minutes ago and stays positive for one emptied
+    # minutes ago — which forced live-DDL proof on an empty table and rejected a
+    # legitimate Map-only first load.
+    holds_data = items_seen > 0 or (item_count > 0 and not emptiness_proven)
     mapped_data_cols = [c for c in target_cols if c]
     studio_live = isinstance(live_dest, dict) and all(
         str(live_dest.get(c) or "").strip() for c in mapped_data_cols
