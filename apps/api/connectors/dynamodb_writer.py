@@ -63,13 +63,14 @@ def _fetch_dynamo_physical_types(
 
     wanted = {str(c) for c in target_cols if c}
     if not wanted:
-        return DynamoLiveTypes({}, True, 0)
+        # Nothing to probe, so nothing was scanned: emptiness stays unproven.
+        return DynamoLiveTypes({}, True, 0, False)
     physical: dict[str, str] = {}
     try:
         info = client.describe_table(TableName=table)["Table"]
     except Exception:
         logger.debug("Dynamo describe_table failed for physical types", exc_info=True)
-        return DynamoLiveTypes({}, False, 0)
+        return DynamoLiveTypes({}, False, 0, False)
 
     for attr in info.get("AttributeDefinitions") or []:
         name = str(attr.get("AttributeName") or "")
