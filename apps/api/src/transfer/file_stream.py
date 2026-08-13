@@ -794,6 +794,7 @@ def stream_file_to_database(
 
     try:
         from services.sync_cursor import (
+            is_overwrite_sync,
             map_source_to_target,
             requires_upsert,
             resolve_effective_sync_mode,
@@ -801,6 +802,7 @@ def stream_file_to_database(
         )
     except ImportError:
         from src.services.sync_cursor import (
+            is_overwrite_sync,
             map_source_to_target,
             requires_upsert,
             resolve_effective_sync_mode,
@@ -836,8 +838,9 @@ def stream_file_to_database(
             write_mode = "upsert"
         else:
             raise ValueError(
-                "Cannot resume a streaming insert without a primary key; "
-                "set primary_key on the stream contract or use an upsert sync mode"
+                "Cannot resume a streaming insert without a primary key. "
+                "Re-run this transfer with Full refresh · Overwrite to reload it "
+                "safely, or set a primary key to make the replay idempotent."
             )
 
     checkpoint_service = checkpoint_service or CheckpointService()

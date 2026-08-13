@@ -665,6 +665,32 @@ async def retry_transfer_job(
 
 
 @router.post("/jobs/{job_id}/resume")
+def _resume_restarts_from_scratch(xfer_req: Any) -> bool:
+    """True when Resume should re-run the transfer rather than continue it.
+
+    A full refresh replaces the destination instead of adding to it, so there is
+    no partial state to resume into and re-running is idempotent by definition.
+    Continuing mid-stream is the case that needs an identity key, to make the
+    interrupted batch's replay idempotent — and a keyless source such as an
+    ordinary CSV export can never supply one, which left Resume as an action
+    that could only ever refuse itself.
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    contracts = getattr(xfer_req, "stream_contracts", None) or []
+    for contract in contracts:
+        if isinstance(contract, dict) and contract.get("sync_mode"):
+            if not is_overwrite_sync(str(contract.get("sync_mode"))):
+                return False
+    return is_overwrite_sync(str(getattr(xfer_req, "sync_mode", "") or "")) or bool(
+        contracts
+        and all(
+            isinstance(c, dict) and is_overwrite_sync(str(c.get("sync_mode") or ""))
+            for c in contracts
+        )
+    )
+
+
 async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Resume a failed or paused transfer from its last durable checkpoint."""
     try:
@@ -721,6 +747,14 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         xfer_req = xfer_req_probe
         # Resume must never inherit a stale skip_preflight flag — gates re-run.
         xfer_req.skip_preflight = False
+        # A full refresh has nothing to resume *into*: it replaces the
+        # destination rather than adding to it, so the safe continuation is to
+        # run it again from the top. Continuing mid-file needs an identity key to
+        # make the replay idempotent, and a keyless source — an ordinary CSV
+        # export — can never supply one. Operators hit exactly that wall: Resume
+        # was the only action offered on a failed 1M-row overwrite, and it
+        # answered by demanding a key the sync mode never needed.
+        restart_full_refresh = _resume_restarts_from_scratch(xfer_req)
         # Resume is the one sanctioned exit from a terminal status, and it must
         # also drop any stale cancel request or the resumed run would abort at
         # its first checkpoint.
@@ -731,14 +765,22 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             message=f"Resume requested for job {job_id}",
             allow_terminal_exit=True,
         )
-        background_tasks.add_task(run_transfer_async, job_id, xfer_req, resume=True)
+        background_tasks.add_task(
+            run_transfer_async, job_id, xfer_req, resume=not restart_full_refresh
+        )
         return {
             "success": True,
             "async": True,
             "job_id": job_id,
             "status": "running",
-            "resume": True,
-            "message": "Resume started from last committed checkpoint (at-least-once upsert).",
+            "resume": not restart_full_refresh,
+            "restarted": restart_full_refresh,
+            "message": (
+                "Full refresh restarted from the beginning — it replaces the "
+                "destination, so there is nothing to resume into."
+                if restart_full_refresh
+                else "Resume started from last committed checkpoint (at-least-once upsert)."
+            ),
             "checkpoint_age_hours": safety.get("age_hours"),
             "warnings": safety.get("warnings") or [],
             "honesty": safety.get("honesty"),

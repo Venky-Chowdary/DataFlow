@@ -4304,11 +4304,54 @@ def sample_compare_rows(
                 break
 
     target_by_key: dict[str, dict[str, Any]] = {}
+    duplicate_alignment_key = ""
     if sort_key:
         for d in target_dicts:
             key = normalize_cell(d.get(sort_key))
-            if key and key not in target_by_key:
-                target_by_key[key] = d
+            if not key:
+                continue
+            if key in target_by_key:
+                # Two destination rows answer to the same key, so the key does
+                # not identify a row and cannot align one. Keeping the first and
+                # comparing every later row against it reports the difference
+                # between two *different rows* as corruption.
+                duplicate_alignment_key = sort_key
+                break
+            target_by_key[key] = d
+        if not duplicate_alignment_key:
+            seen_source_keys: set[str] = set()
+            for rec in source_records:
+                if not isinstance(rec, dict):
+                    continue
+                key = normalize_cell(
+                    rec.get(source_sort_key) if source_sort_key else None
+                )
+                if not key:
+                    continue
+                if key in seen_source_keys:
+                    duplicate_alignment_key = sort_key
+                    break
+                seen_source_keys.add(key)
+
+    if duplicate_alignment_key:
+        # Nothing here is evidence of a bad write, so nothing here may fail the
+        # transfer. ``_sort_key_for_columns`` falls back to the first mapped
+        # column when no identity column exists, which for an ordinary export —
+        # a region, a status, a date — repeats on almost every row. Declining is
+        # the honest answer: the sample proved nothing, and says so.
+        return {
+            "passed": True,
+            "compared": 0,
+            "mismatches": [],
+            "skipped": True,
+            "alignment": "declined",
+            "reason": (
+                f"No unique identity key for read-back alignment: "
+                f"`{duplicate_alignment_key}` repeats, so it cannot say which "
+                "destination row corresponds to which source row. Map a primary "
+                "key to enable per-row sample compare."
+            ),
+        }
 
     def _fingerprint(raw: Any, *, transform: str | None, tgt_col: str) -> str:
         ddl = (

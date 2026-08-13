@@ -888,8 +888,9 @@ def _stream_database_transfer_impl(
             write_mode = "upsert"
         else:
             raise ValueError(
-                "Cannot resume a streaming insert without a primary key; "
-                "set primary_key on the stream contract or use an upsert sync mode"
+                "Cannot resume a streaming insert without a primary key. "
+                "Re-run this transfer with Full refresh · Overwrite to reload it "
+                "safely, or set a primary key to make the replay idempotent."
             )
     # Decide up front whether an interrupted batch may be re-sent. Append-only
     # destinations get retries only for failures that prove nothing landed;
