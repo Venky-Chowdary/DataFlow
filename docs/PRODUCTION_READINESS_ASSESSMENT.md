@@ -374,6 +374,52 @@ under someone else's number. Rows now carry their source position through both
 shared steps, including the bind, which drops what it quarantines and so must
 re-derive the numbers of the survivors.
 
+## A sync mode is its second run
+
+The live matrix only ever ran `full_refresh_overwrite`, once, against a fresh
+table. No test had ever run a mode **twice** — and the second run is what
+distinguishes the modes from each other. Running each of the four operator-facing
+Advanced options twice against PostgreSQL, MySQL, SQLite and MongoDB failed in
+two of the four, on every destination:
+
+| Mode | Second run should | Was |
+|---|---|---|
+| `full_refresh_overwrite` | replace: N stays N | **failed** |
+| `full_refresh_append` | add: N becomes 2N | passed |
+| `incremental_append` | read past the watermark: N stays N | **failed** |
+| `upsert` | idempotent by key: N stays N | passed |
+
+**Overwrite failed from run two onward.** Run one created the table and invented
+types from the source. Run two found the table present but carrying no usable
+column types — correctly, since typing against a shape about to be dropped
+would be wrong — and the mapper read "exists, no columns" as "wait for a Studio
+stamp", left every target type pending, and the schema-contract gate refused a
+transfer it had approved minutes earlier. Overwrite recreates the table, so for
+typing the destination is create-new *every* run.
+
+**Incremental failed from run two onward.** A steady-state incremental run reads
+no rows past its watermark — that is the normal case for a schedule, not an
+error — and the engine discarded that zero as "unmeasured", so Gate-8 refused
+conservation on a run that had correctly done nothing. A measured zero is a
+measurement. A zero read *alongside rows written* stays refused, because those
+counts disagree and that is the circular balance the guard exists to prevent.
+
+Both were invisible for the same reason: a test that runs a mode once cannot see
+the state the second run inherits, and every schedule in production is a second
+run.
+
+**Redis then failed three of four modes** with a DDL identity mismatch, because
+a keyspace has no column catalog to bind types to and never will. Destinations
+with no column shape now type as create-new always — declared as a static
+capability rather than guessed from an empty probe, so a PostgreSQL table whose
+probe merely *failed* still fails closed.
+
+The matrix also encodes that a **key-addressed** destination cannot duplicate
+under append: the key is the row's identity, so writing the same two keys twice
+leaves two, not four. Asserting 2N everywhere would report correct Redis
+behaviour as a defect; asserting N everywhere would hide a SQL table silently
+deduplicating rows an operator expected to accumulate.
+
 ## Still open on the four named connectors
 
 Two of the four are done above. The other two are not, and the reasons differ:
