@@ -504,6 +504,36 @@ def _referential_integrity_evidence(
     )
 
 
+def _engine_digest_enabled() -> bool:
+    """Operator gate — default **off** until two gaps are closed.
+
+    The mechanism is proven on its own (see ``test_engine_checksum.py``, and it
+    is what caught the truncated-microseconds bug), but reading both populations
+    back is not yet safe as the default here:
+
+    * **Snapshot.** A PostgreSQL full refresh reads under REPEATABLE READ, so
+      rows inserted while it runs are correctly outside the transfer. Digesting
+      the source afterwards on a fresh connection sees them and reports a
+      mismatch on a transfer that was right. The digest has to run inside the
+      reader's snapshot, not after it.
+    * **Scope.** Whole-table digests are meaningless for an append or upsert
+      into a destination that already held rows; that case re-scopes the target
+      to the written keys further down, and a whole-population source digest
+      cannot be compared against it.
+
+    Until both are handled, this stays behind ``DATAFLOW_ENGINE_DIGEST=1`` so it
+    can be measured and exercised without deciding any operator's Gate-8 verdict.
+    """
+    from services.brand_env import getenv_brand
+
+    return (getenv_brand("ENGINE_DIGEST", "0") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _engine_population_digests(
     *,
     source_endpoint: EndpointConfig | None,
@@ -962,7 +992,7 @@ def run_reconciliation(
     # the same population coverage at a fraction of the cost, since neither side
     # has to bring rows into Python to hash them.
     engine_digests = None
-    if not source_checksum_scope_note:
+    if _engine_digest_enabled() and not source_checksum_scope_note:
         engine_digests = _engine_population_digests(
             source_endpoint=source_endpoint,
             dest_cfg=cfg,
