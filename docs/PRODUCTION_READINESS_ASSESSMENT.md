@@ -420,6 +420,36 @@ leaves two, not four. Asserting 2N everywhere would report correct Redis
 behaviour as a defect; asserting N everywhere would hide a SQL table silently
 deduplicating rows an operator expected to accumulate.
 
+## A connector has two sides, and the app asked about one
+
+"How many connectors are ready?" has three different answers, and the product
+gave one number to all of them. 43 engines are usable in *a* transfer, but only
+28 can be a source and 30 can be a destination, because single-sided connectors
+exist in both directions: a vector store writes and cannot be read, a REST or
+graph feed reads and cannot be written.
+
+Three places conflated them, each in the opposite direction:
+
+| Where | What it did | Consequence |
+|---|---|---|
+| Catalog `role` | only re-sorted, never filtered | The **source** picker offered Pinecone, Weaviate, Milvus, Qdrant and pgvector — none readable |
+| Catalog `transfer_only` / `status=live` | meant *duplex* | Couchbase, Neo4j and InfluxDB could never be picked as sources — the only thing they can be |
+| `/transfer/capabilities` | asked the catalog for `status=live` | Those same source-only connectors reached **neither** list, so Transfer Studio could not use them at all |
+
+The first hands an operator a route that fails at Execute after they have chosen
+the connector, named it and mapped against it. The second and third silently
+remove working connectors from the product.
+
+Readiness is now computed per side from the predicates that already existed
+(`source_ready` / `dest_ready`), and a role-scoped query asks the role's
+question rather than the duplex one. The catalog publishes `source_live` and
+`dest_live` next to the union, derived the same way the list is filtered, so the
+number always describes the list on screen. Verified in the running UI: the
+source picker reads *"28 usable as source · Write-only stores (vector databases)
+are not listed — they cannot be read"* and returns nothing for `pinecone`,
+`weaviate`, `qdrant` or `milvus`, while the destination picker shows them with a
+"Destination Only" badge.
+
 ## Still open on the four named connectors
 
 Two of the four are done above. The other two are not, and the reasons differ:
