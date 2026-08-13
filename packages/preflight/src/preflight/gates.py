@@ -1619,9 +1619,9 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         else:
             # Key-addressed / upsert destinations must resolve an identity key.
             try:
-                from services.primary_key import sync_requires_unique_identity
+                from services.primary_key import missing_identity_blocks
 
-                if sync_requires_unique_identity(
+                if missing_identity_blocks(
                     getattr(ctx.plan, "sync_mode", "") or "",
                     dest_kind=dest_kind,
                 ):

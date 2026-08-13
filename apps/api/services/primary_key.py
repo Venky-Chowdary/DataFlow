@@ -41,6 +41,19 @@ KEY_ADDRESSED_DESTS = frozenset({
     "pgvector",
 })
 
+# Of those, the ones that *derive* the key from row data: two rows that resolve
+# to the same key silently overwrite each other, so a write with no identity
+# loses rows no matter which sync mode asked for it.
+#
+# MongoDB is deliberately absent. When ``_id`` is unmapped the server assigns a
+# unique ObjectId per document, so an insert-only run cannot collide — which is
+# what ``mongodb_writer._idempotent_insert_many`` documents and relies on.
+# Demanding an identity there blocked plain overwrite and append loads that
+# Execute would have completed correctly. A *mapped* ``_id`` still has to be
+# unique in every mode, because duplicates within one batch are last-write-wins;
+# that is ``sync_requires_unique_identity``, which still covers MongoDB.
+_DERIVED_KEY_DESTS = KEY_ADDRESSED_DESTS - {"mongodb"}
+
 # Sync modes that must enforce identity uniqueness on the Validate sample for
 # SQL / document stores. Key-addressed sinks always require uniqueness.
 _UNIQUE_IDENTITY_SYNC_MODES = frozenset({
@@ -113,14 +126,35 @@ def sync_requires_unique_identity(
     kind = normalize_dest_kind(dest_kind) if dest_kind else ""
     if kind in KEY_ADDRESSED_DESTS:
         return True
+    return _normalized_mode(sync_mode) in _UNIQUE_IDENTITY_SYNC_MODES
+
+
+def _normalized_mode(sync_mode: str | None) -> str:
     mode = (sync_mode or "").strip().lower()
     try:
         from services.sync_cursor import normalize_sync_mode
 
-        mode = normalize_sync_mode(sync_mode)
+        return normalize_sync_mode(sync_mode)
     except Exception:
-        pass
-    return mode in _UNIQUE_IDENTITY_SYNC_MODES
+        return mode
+
+
+def missing_identity_blocks(
+    sync_mode: str | None,
+    dest_kind: str | None = None,
+) -> bool:
+    """True when having *no* identity key at all must fail the transfer.
+
+    Distinct from :func:`sync_requires_unique_identity`, which answers whether a
+    key that *is* bound has to be unique. A sink that derives its key from row
+    data cannot accept a keyless write without losing rows. A sink that assigns
+    its own key can, for insert-only modes — the row still lands exactly once.
+    Upsert-class modes need a key everywhere: there is nothing to match on.
+    """
+    kind = normalize_dest_kind(dest_kind) if dest_kind else ""
+    if kind in _DERIVED_KEY_DESTS:
+        return True
+    return _normalized_mode(sync_mode) in _UNIQUE_IDENTITY_SYNC_MODES
 
 
 def pick_dynamodb_identity_column(candidates: list[str]) -> str | None:
