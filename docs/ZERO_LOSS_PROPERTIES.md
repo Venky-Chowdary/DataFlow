@@ -969,6 +969,22 @@ rowcount is not that proof.
     tests still pass. MoR / deletion vectors Planned. Skips: 2 moto,
     3 Qdrant `:6333`, SQL Server `:1433`, Oracle `:1521`.
 
+  Iceberg composite leftover MERGE (this host, after 2026-08-14 slice):
+    385 passed, 9 skipped in 46.73s (same Property 5+9 command plus mapping
+    goldens + Iceberg CDC delete; +6 vs the PK-projection slice). Mapping
+    goldens unchanged (93/93 + 200/200 floor 1.0). Identity is leftover =
+    D \ S per PK *tuple*: dest `{(1,1),(1,2),(9,9)}` vs S `{(1,1),(1,2)}`
+    CoW-deletes `(9,9)` → dest COUNT=2, extra=0 on filesystem and
+    SqlCatalog (integer PK parts; `DataScan.to_arrow` / `count` patched
+    to raise). Incremental `complete_snapshot=False` leaves dest 3.
+    Arity mismatch (`"9,9"` without the CDC unit separator) raises;
+    dest COUNT unchanged. Catalog predicate is OR of AND equalities
+    typed per field — never `In("order_id,line_id", ...)`. Digit string
+    on a string PK stays a string; long binds int. Incomplete PK
+    projection (missing a composite part) is unmeasured. Quoted-string
+    `IN` fallback is string PK only. MoR / deletion vectors Planned.
+    Skips: 2 moto, 3 Qdrant `:6333`, SQL Server `:1433`, Oracle `:1521`.
+
   XML artifact dest COUNT (this host, after 2026-08-14 slice):
     221 passed, 8 skipped in 35.35s (Property 9 command).
     Identity: unique repeating record-path, never parse_xml max_rows,
@@ -1225,7 +1241,8 @@ TypeScript does not recompute dest.
   Incremental remains a hard no-op (a batch is not `S`). Iceberg leftover
   MERGE is **PARTIAL** on filesystem CoW and pyiceberg SqlCatalog (same
   identity as SQL: dest `{1,2,3,99}` vs S `{1,2,3}` CoW-deletes 99,
-  extra=0; missing source keys stay missing). Catalog dest COUNT is
+  extra=0; composite dest `{(1,1),(1,2),(9,9)}` vs S `{(1,1),(1,2)}`
+  deletes `(9,9)`; missing source keys stay missing). Catalog dest COUNT is
   dest-engine file footers, never `scan().count()`. MoR / deletion
   vectors Planned.
 * Stream-path this-run `soft_deleted` / `reactivated` census — dest-engine
