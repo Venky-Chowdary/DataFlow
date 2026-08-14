@@ -13,7 +13,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
-| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py -q` (49 passed on this host: collation 11 + instant/policy/session 38; unit + live PG 16 ↔ MariaDB 10.11) | Collation equality class carried as dest-native CS (`utf8mb4_bin`); CI→PG UNIQUE is `unsupported`. Session-independent instant: MySQL `TIMESTAMP` pinned UTC on source *and* dest; `UNIX_TIMESTAMP` / `EXTRACT(EPOCH)` under dest `+05:30` still 1709271000; `DATETIME` / PG `TIMESTAMP` stay wall-clock | Offset-label preservation (`DATETIMEOFFSET`); encoding round-trip; decimal rounding; JSON number vs string; UCA 0900 vs 1400; Oracle/SQL Server live COLLATE; generic_sql SA `collation=` |
+| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py -q` (61 passed on this host: collation 11 + instant 38 + JSON polarity 12; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant (`UNIX_TIMESTAMP` 1709271000 under `+05:30`). JSON polarity: engine `col::text` so JSON `"1"` stays STRING and `1` stays INTEGER; `2**53+1` digits survive; SQL NULL ≠ JSON null | Offset-label (`DATETIMEOFFSET`); encoding round-trip; decimal rounding; UCA 0900 vs 1400; Oracle/SQL Server live COLLATE; generic_sql SA `collation=` |
 | 9 | Every row is accounted for | UNPROVEN | — | — | — |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
@@ -441,7 +441,7 @@ Includes:
 ### NOT claimed / remaining for PROVEN (collation slice)
 
 * Encoding round-trip / charset capacity beyond utf8mb3→utf8mb4 promote
-* Decimal rounding, JSON number-vs-string, float binary
+* Decimal rounding, float binary
 * UCA 0900 vs 1400 linguistic equality
 * Oracle / SQL Server live COLLATE certify (planner covers SQL Server BIN/CI_AS)
 * generic_sql SQLAlchemy `collation=` (native PG/MySQL writers emit suffixes)
@@ -519,5 +519,65 @@ Includes:
 * MySQL `TIMESTAMP` year-2038 range is quarantined (unit-proven), not a
   live 2038 row in this run
 * Exactly-once / 100% of all routes — not claimed
+
+## Property 8 — PARTIAL (2026-08-14, JSON scalar polarity)
+
+**Claim:** A JSON document is a typed tree, not a Python object. Number `1`
+and string `"1"` are different cells. Boolean `true` and string `"true"`
+are different cells. JSON `null` is a document value; SQL NULL is absence.
+Integers past `2**53` stay JSON numbers with their digits — they are not
+stringified to “save” JavaScript. Certification is dest-engine polarity
+(`jsonb_typeof` / `JSON_TYPE`), not a second Python parse.
+
+**Why this is the unique product:** psycopg2 and mysql-connector both
+deserialize JSON into Python. `cell_to_string` + `json.loads` then
+collapses `"1"` → `1`. Airbyte/Fivetran/DMS will happily land that as a
+number. DataFlow refuses that collapse: the reader projects engine JSON
+text (`col::text` / `CAST AS CHAR`), the writer binds that exact text, and
+the dest engine reports the polarity. Operators who store `"1"` as a
+string id and `1` as a count get both back.
+
+**Algorithm (canonical, one place):**
+1. JSON/JSONB columns travel as **engine JSON text**, never a deserialized
+   Python tree (`apps/api/services/json_polarity.py`). SQL NULL stays SQL
+   NULL; JSON `null` stays the four characters `null`.
+2. Classify polarity on that text: number / string / boolean / null /
+   array / object. MySQL `INTEGER`/`DOUBLE`/`DECIMAL` are the same JSON
+   number family as Postgres `number`.
+3. Bind the same text as JSON (`coerce_json_wire` uses `json_loads_exact`
+   so Python `True`/`1` exist only as a driver bind, not as the wire).
+4. Certify from the dest engine: `jsonb_typeof` / `JSON_TYPE` on each
+   pointer, plus `->>'big'` / `JSON_UNQUOTE` for digits past 2^53.
+
+**Measured (this host, PostgreSQL 16 + MariaDB 10.11):**
+```
+12 passed in 1.57s
+  Live PG JSONB → MariaDB JSON: n=INTEGER, s=STRING, b=BOOLEAN, z=NULL,
+    big=INTEGER, JSON_UNQUOTE($.big)=9007199254740993; SQL NULL row stays
+    SQL NULL.
+  Live MariaDB JSON → PG JSONB: jsonb_typeof n=number s=string;
+    payload->>'big'=9007199254740993.
+  Unit: polarity of 1 vs "1" vs true vs "true" vs null; round-trip of
+    9007199254740993 as a number; SQL NULL vs JSON null; engine text
+    projection SQL; coerce_json_wire keeps original text.
+```
+
+Combined Property 8 collation + instant + JSON polarity:
+```
+61 passed in 3.81s
+```
+
+### NOT claimed / remaining for PROVEN (JSON polarity slice)
+
+* JSON object key order / duplicate keys (RFC 8259: last-wins at parse;
+  engines may canonicalize)
+* JSON number canonicalization (`1.0` vs `1`, `1e2` vs `100`) — polarity
+  is proven; digit-for-digit text of every number is not
+* Postgres JSON vs JSONB (JSONB canonicalizes); this slice uses JSONB
+* MySQL JSON vs MariaDB JSON binary storage differences
+* Nested array element polarity beyond the document-level pointers in
+  this fixture (array JSON element fidelity is a separate wave-86 proof)
+* Exactly-once / 100% of all routes — not claimed
+
 
 
