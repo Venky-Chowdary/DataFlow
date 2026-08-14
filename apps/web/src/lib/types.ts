@@ -133,6 +133,7 @@ export interface CdcStreamHealth {
   replication_lag_bytes?: number | null;
   watermark?: string | null;
   error?: string | null;
+  row_accounting?: import("./conservationLedger").ConservationLedger | null;
 }
 
 /**

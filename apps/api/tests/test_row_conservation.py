@@ -12,14 +12,17 @@ from pathlib import Path
 
 from services.row_conservation import (
     DEST_ACTIVE_READBACK,
+    DEST_PER_STREAM,
     DEST_READBACK,
     DEST_UNMEASURED,
     KIND_APPEND_DELTA,
     KIND_EMPTY_PASS,
+    KIND_JOB,
     KIND_KEYED,
     KIND_MIRROR,
     KIND_OVERWRITE,
     account_job,
+    account_job_streams,
     account_population,
     conservation_kind,
     dest_count_from_recon,
@@ -888,3 +891,170 @@ def test_sqlite_duplicate_events_census_is_keys_not_rowcount(tmp_path: Path):
     assert ledger.unique_batch_keys == 3
     assert ledger.dest_delta == 0
     assert ledger.writer_ack == 10_000
+
+
+def _overwrite_stream(name: str, dest_count: int, *, writer_ack: int | None = None) -> dict:
+    ack = dest_count if writer_ack is None else writer_ack
+    return {
+        "name": name,
+        "records_processed": ack,
+        "row_accounting": account_job(
+            {
+                "records_processed": ack,
+                "sync_mode": "overwrite",
+                "reconciliation": {
+                    "source_rows": dest_count,
+                    "target_rows": dest_count,
+                    "target_checksum": f"digest-{name}",
+                    "phase": "post_write_row_count",
+                    "coverage": "row_count",
+                },
+            }
+        ).to_dict(),
+    }
+
+
+def test_job_rollup_sums_overwrite_streams_not_last_table():
+    job = {
+        "records_processed": 10_000,
+        "sync_mode": "overwrite",
+        "reconciliation": {
+            "source_rows": 3,
+            "target_rows": 3,
+            "target_checksum": "last-table-only",
+            "coverage": "row_count",
+        },
+        "destination_summary": {
+            "streams": [
+                _overwrite_stream("customers", 2, writer_ack=10_000),
+                _overwrite_stream("orders", 3, writer_ack=10_000),
+            ],
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.conservation_kind == KIND_JOB
+    assert ledger.dest_count == 5
+    assert ledger.rows_read == 5
+    assert ledger.balanced is True
+    assert ledger.summable is True
+    assert ledger.stream_count == 2
+    assert ledger.measured_streams == 2
+    assert ledger.writer_ack == 20_000
+    assert ledger.writer_ack_delta == 5 - 20_000
+    assert ledger.per_stream[0]["stream"] == "customers"
+    assert ledger.per_stream[1]["dest_count"] == 3
+
+
+def test_job_rollup_open_when_first_stream_unmeasured():
+    job = {
+        "records_processed": 10_000,
+        "sync_mode": "overwrite",
+        "reconciliation": {
+            "source_rows": 3,
+            "target_rows": 3,
+            "target_checksum": "last-table-only",
+            "coverage": "row_count",
+        },
+        "destination_summary": {
+            "streams": [
+                {"name": "customers", "records_processed": 2},
+                _overwrite_stream("orders", 3),
+            ],
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.conservation_kind == KIND_JOB
+    assert ledger.balanced is False
+    assert ledger.dest_count is None
+    assert ledger.measured_streams == 1
+    assert ledger.stream_count == 2
+
+
+def test_job_rollup_open_when_first_stream_unbalanced():
+    short = account_job(
+        {
+            "records_processed": 2,
+            "sync_mode": "overwrite",
+            "reconciliation": {
+                "source_rows": 4,
+                "target_rows": 2,
+                "target_checksum": "short",
+                "coverage": "row_count",
+            },
+        }
+    ).to_dict()
+    job = {
+        "records_processed": 10_000,
+        "sync_mode": "overwrite",
+        "destination_summary": {
+            "streams": [
+                {"name": "customers", "row_accounting": short},
+                _overwrite_stream("orders", 3),
+            ],
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.conservation_kind == KIND_JOB
+    assert ledger.balanced is False
+    assert ledger.summable is True
+    assert ledger.dest_count == 5
+
+
+def test_job_rollup_does_not_sum_mixed_kinds():
+    keyed = account_job(
+        {
+            "sync_mode": "cdc",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 3,
+                "target_rows": 4,
+                "target_checksum": "k",
+                "target_rows_before": 3,
+            },
+            "destination_summary": {
+                "target_rows_before": 3,
+                "keyed_census": {
+                    "unique_batch_keys": 4,
+                    "dest_preexisting": 3,
+                    "tombstones": 0,
+                    "unique_tombstone_keys": 0,
+                    "events_read": 10,
+                },
+            },
+        }
+    ).to_dict()
+    job = {
+        "records_processed": 10_000,
+        "destination_summary": {
+            "streams": [
+                _overwrite_stream("customers", 2),
+                {"name": "orders", "row_accounting": keyed},
+            ],
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.conservation_kind == KIND_JOB
+    assert ledger.balanced is True
+    assert ledger.summable is False
+    assert ledger.dest_count is None
+    assert ledger.rows_written_source == DEST_PER_STREAM
+
+
+def test_single_stream_still_uses_table_identity():
+    job = {
+        "records_processed": 10_000,
+        "sync_mode": "overwrite",
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 4,
+            "target_checksum": "one",
+            "coverage": "row_count",
+        },
+        "destination_summary": {
+            "streams": [_overwrite_stream("items", 4)],
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.conservation_kind == KIND_OVERWRITE
+    assert ledger.dest_count == 4
+    assert account_job_streams(job["destination_summary"]["streams"]) is None

@@ -163,6 +163,80 @@ def test_sqlite_overwrite_certificate_uses_dest_count_not_writer_ack(tmp_path: P
     assert cert["row_accounting"]["writer_ack"] == 10_000
 
 
+def test_sqlite_two_table_overwrite_job_is_not_last_table(tmp_path: Path):
+    """Last-table dest COUNT(*) is not the job. customers 2 + orders 3 = 5."""
+    src_path = tmp_path / "p9_multi_src.db"
+    dst_path = tmp_path / "p9_multi_dst.db"
+    src = sqlite3.connect(str(src_path))
+    try:
+        src.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        src.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        src.executemany("INSERT INTO customers (id, label) VALUES (?, ?)", [(1, "a"), (2, "b")])
+        src.executemany(
+            "INSERT INTO orders (id, label) VALUES (?, ?)",
+            [(1, "o1"), (2, "o2"), (3, "o3")],
+        )
+        src.commit()
+    finally:
+        src.close()
+
+    req = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="sqlite", database=str(src_path), table="customers"
+        ),
+        destination=EndpointConfig(
+            kind="database", format="sqlite", database=str(dst_path), table="customers"
+        ),
+        mappings=_maps(),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="warn",
+        skip_preflight=True,
+        stream_contracts=[
+            {
+                "name": "customers",
+                "selected": True,
+                "sync_mode": "full_refresh_overwrite",
+                "primary_key": "id",
+                "mappings": _maps(),
+            },
+            {
+                "name": "orders",
+                "selected": True,
+                "sync_mode": "full_refresh_overwrite",
+                "primary_key": "id",
+                "mappings": _maps(),
+            },
+        ],
+    )
+    result = _run(req)
+    assert result.success, result.error
+    stamped = result.row_accounting or {}
+    assert stamped.get("conservation_kind") == "job_rollup", stamped
+    assert stamped.get("dest_count") == 5, stamped
+    assert stamped.get("balanced") is True, stamped
+    assert stamped.get("stream_count") == 2, stamped
+    # Last table is orders (3). Writer ack must not close, last-table must not close.
+    result_job = _job_from_result(
+        result, sync_mode="full_refresh_overwrite", src_format="sqlite", dst_format="sqlite"
+    )
+    result_job["records_processed"] = 10_000
+    ledger = row_accounting(result_job)
+    assert ledger["dest_count"] == 5, ledger
+    assert ledger["conservation_kind"] == "job_rollup", ledger
+    dest = sqlite3.connect(str(dst_path))
+    try:
+        customers = dest.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
+        orders = dest.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+    finally:
+        dest.close()
+    assert customers == 2
+    assert orders == 3
+    streams = (result.destination_summary or {}).get("streams") or []
+    assert len(streams) == 2, streams
+    assert streams[0]["row_accounting"]["dest_count"] == 2
+    assert streams[1]["row_accounting"]["dest_count"] == 3
+
+
 @pytest.mark.skipif(not (_pg_up() and _mysql_up()), reason="PostgreSQL or MariaDB not listening")
 def test_pg_to_mariadb_dest_count_closes_the_certificate():
     import psycopg2

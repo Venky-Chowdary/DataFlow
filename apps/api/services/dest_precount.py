@@ -33,6 +33,7 @@ __all__ = [
     "destination_key_hits",
     "precount_destination",
     "precount_table",
+    "count_endpoint_rows",
 ]
 
 # Dest-engine IN-list chunk. Partitioning the key set (not overlapping) so
@@ -338,3 +339,31 @@ def precount_destination(
     return precount_table(
         db_type, cfg, resolve_dest_table(db_type, endpoint, "dt_import")
     )
+
+
+def count_endpoint_rows(
+    endpoint: EndpointConfig | None,
+    *,
+    table_name: str | None = None,
+) -> int | None:
+    """Independent engine COUNT(*) of the object this endpoint currently names.
+
+    Multi-stream jobs remap ``endpoint.table`` per stream. Count while that
+    bind is still in place, or pass ``table_name`` after the bind is restored.
+    ``None`` means unknowable — never substitute writer acknowledgement.
+    """
+    if endpoint is None:
+        return None
+    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    try:
+        cfg = resolve_connector_config(endpoint)
+        db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
+        name = (table_name or "").strip() or resolve_dest_table(
+            db_type, endpoint, "dt_import"
+        )
+        return precount_table(db_type, cfg, name)
+    except Exception as exc:
+        logger.warning("Endpoint COUNT(*) failed: %s", exc)
+        return None

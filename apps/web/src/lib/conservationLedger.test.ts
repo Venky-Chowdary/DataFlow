@@ -270,3 +270,54 @@ describe("keyed ledger shows events vs keys, never closes on event count", () =>
     assert.equal(cells.find((c) => c.label === "Dest Δ")?.value, "0");
   });
 });
+
+describe("job rollup never takes last-stream dest COUNT(*)", () => {
+  const jobLedger = {
+    ...overwriteLedger,
+    conservation_kind: "job_rollup",
+    dest_count: 5,
+    rows_read: 5,
+    rows_written: 5,
+    writer_ack: 10_000,
+    writer_ack_delta: -9995,
+    stream_count: 2,
+    measured_streams: 2,
+    summable: true,
+    per_stream: [
+      { stream: "customers", measured: true, balanced: true, conservation_kind: "overwrite", dest_count: 2, active_count: null, rows_read: 2 },
+      { stream: "orders", measured: true, balanced: true, conservation_kind: "overwrite", dest_count: 3, active_count: null, rows_read: 3 },
+    ],
+    note: "Job conservation closed across 2 overwrite stream(s).",
+  };
+
+  it("headlines 5 at dest when last table held 3 and writer claimed 10,000", () => {
+    const job = { status: "completed", records_processed: 10_000, row_accounting: jobLedger };
+    const h = destHeadline(job);
+    assert.equal(h.value, "5");
+    assert.equal(h.measured, true);
+    assert.equal(destProvenCount(job), 5);
+    assert.equal(destMetricCompact(h), "5 at dest");
+    assert.match(conservationCompleteCopy(job), /5 at destination/);
+    assert.doesNotMatch(conservationCompleteCopy(job), /10,000/);
+    const cells = ledgerIdentityCells(jobLedger);
+    assert.equal(cells.find((c) => c.label === "customers")?.value, "2");
+    assert.equal(cells.find((c) => c.label === "orders")?.value, "3");
+  });
+
+  it("does not invent a dest number for mixed kinds", () => {
+    const mixed = {
+      ...jobLedger,
+      dest_count: null,
+      rows_written: null,
+      active_count: null,
+      summable: false,
+      rows_written_source: "per_stream",
+      balanced: true,
+    };
+    const h = destHeadline({ status: "completed", records_processed: 10_000, row_accounting: mixed });
+    assert.equal(h.value, "—");
+    assert.equal(h.measured, true);
+    assert.equal(destMetricCompact(h), "per-stream dest");
+    assert.equal(destProvenCount({ row_accounting: mixed }), null);
+  });
+});

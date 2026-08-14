@@ -1484,8 +1484,26 @@ def _run_cdc_shared_multi_table(
             except Exception as exc:
                 logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
-    for h in stream_health.values():
-        h["status"] = "completed"
+    from services.row_conservation import record_stream_health
+
+    for name, h in stream_health.items():
+        acc = shared_accum.census_accs.get(name)
+        census = acc.to_census() if acc is not None else None
+        record_stream_health(
+            stream_health,
+            name=name,
+            status="completed",
+            records_processed=int(h.get("records_processed") or 0),
+            extra={
+                "cdc_lag_seconds": h.get("cdc_lag_seconds"),
+                "watermark": h.get("watermark"),
+            },
+            sync_mode=sync_mode,
+            census=census,
+            destination=destination,
+            dest_table=name,
+            count_source=False,
+        )
     lag_fields = _cdc_lag_fields(cdc)
     last_summary = dict(last_summary or {})
     last_summary["streams"] = list(stream_health.values())
@@ -1596,26 +1614,39 @@ def _run_cdc_multi_stream_sequential(
             except Exception as exc:
                 status = "failed"
                 error = str(exc)
-                stream_health.append(
-                    {
-                        "name": stream_name,
-                        "status": status,
-                        "records_processed": rows,
-                        "error": error,
-                    }
+                from services.row_conservation import record_stream_health
+
+                record_stream_health(
+                    stream_health,
+                    name=stream_name,
+                    status=status,
+                    records_processed=rows,
+                    summary=summary,
+                    extra={"error": error},
+                    sync_mode=sync_mode,
+                    destination=destination,
+                    count_source=False,
                 )
                 raise
             cdc_meta = summary.get("cdc") if isinstance(summary.get("cdc"), dict) else {}
-            stream_health.append(
-                {
-                    "name": stream_name,
-                    "status": status,
-                    "records_processed": rows,
+            from services.row_conservation import record_stream_health
+
+            record_stream_health(
+                stream_health,
+                name=stream_name,
+                status=status,
+                records_processed=rows,
+                summary=summary,
+                extra={
                     "cdc_lag_seconds": summary.get("cdc_lag_seconds"),
                     "replication_lag_bytes": cdc_meta.get("replication_lag_bytes"),
                     "watermark": cdc_meta.get("watermark"),
                     "error": error,
-                }
+                },
+                sync_mode=sync_mode,
+                destination=destination,
+                dest_table=stream_name,
+                count_source=False,
             )
     finally:
         if original_table is not None:

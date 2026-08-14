@@ -43,6 +43,7 @@ export function ConservationLedgerCard({
   const disagrees = writerAckDisagrees(ledger);
   const unbalanced = Boolean(ledger && ledger.balanced === false);
   const isMirror = ledger?.conservation_kind === "mirror";
+  const isJob = ledger?.conservation_kind === "job_rollup";
   const leftover =
     isMirror && ledger?.dest_count != null && ledger.active_count != null
       ? Math.max(ledger.dest_count - ledger.active_count, 0)
@@ -56,18 +57,24 @@ export function ConservationLedgerCard({
       ? { label: "Open Validate", onClick: onOpenValidate }
       : null;
 
-  const unit = isMirror ? "ACTIVE" : "COUNT(*)";
+  const unit = isMirror ? "ACTIVE" : isJob && dest.value === "—" ? "STREAMS" : "COUNT(*)";
   const nextTitle = unbalanced
     ? "Ledger unbalanced"
     : measured
       ? "Ledger balanced"
       : "Dest unmeasured";
   const nextBody = unbalanced
-    ? isMirror
+    ? isJob
+      ? "The job is closed iff every stream ledger is closed. Last-table dest COUNT(*) is not the job."
+      : isMirror
       ? "Rows read do not equal dest-engine active population plus hold-outs and skips."
       : "Rows read do not equal dest COUNT(*) plus hold-outs and skips."
     : measured
-      ? isMirror
+      ? isJob
+        ? dest.value === "—"
+          ? "Every stream ledger is closed. Dest COUNT(*) is not summed across mixed or keyed kinds."
+          : "Every stream ledger is closed. Job dest is the sum of dest-engine counts of the same kind."
+        : isMirror
         ? leftover
           ? `Every source row is active at destination, quarantined, or skipped. ${leftover.toLocaleString()} leftover dest key(s) stay as _deleted — physical COUNT(*) does not drop.`
           : "Every source row is active at destination, quarantined, or skipped. Physical COUNT(*) does not drop on soft-delete."
@@ -77,7 +84,13 @@ export function ConservationLedgerCard({
   return (
     <section
       className={`df2-conservation-ledger ${toneClass(tone)} ${isMirror ? "is-mirror" : ""} ${compact ? "is-compact" : ""} ${className}`.trim()}
-      aria-label={isMirror ? "Mirror active population conservation" : "Destination population conservation"}
+      aria-label={
+        isJob
+          ? "Job stream conservation"
+          : isMirror
+            ? "Mirror active population conservation"
+            : "Destination population conservation"
+      }
     >
       <div className="df2-conservation-ledger-head">
         <div className="df2-conservation-ledger-count" aria-hidden>
@@ -86,19 +99,31 @@ export function ConservationLedgerCard({
         </div>
         <div className="df2-conservation-ledger-title">
           <div className="df2-conservation-ledger-title-row">
-            <h3>{isMirror ? "Active destination population" : "Destination population"}</h3>
+            <h3>
+              {isJob
+                ? "Job destination population"
+                : isMirror
+                  ? "Active destination population"
+                  : "Destination population"}
+            </h3>
             <span className="df2-conservation-ledger-kind">
               {conservationKindLabel(ledger?.conservation_kind)}
             </span>
           </div>
           <p>
             {measured
-              ? isMirror
+              ? isJob
+                ? dest.value === "—"
+                  ? "Every stream has a dest-engine ledger. Dest COUNT(*) is not summed across mixed or keyed kinds. Writer acknowledgement is diagnostic only."
+                  : "Sum of dest-engine counts across streams of the same kind. Last-table COUNT(*) is not the job. Writer acknowledgement is diagnostic only."
+                : isMirror
                 ? "Dest-engine COUNT(*) WHERE NOT _deleted. Writer acknowledgement is diagnostic only. Physical COUNT(*) does not drop."
                 : "Independent dest-engine read-back. Writer acknowledgement is diagnostic only."
               : isMirror
                 ? "Active dest population was not captured. Writer ack is not COUNT(*) WHERE NOT _deleted."
-                : "Dest COUNT(*) was not captured. Writer ack is not destination proof."}
+                : isJob
+                  ? "Not every stream has a dest-engine ledger. Last-table COUNT(*) and writer ack are not the job."
+                  : "Dest COUNT(*) was not captured. Writer ack is not destination proof."}
           </p>
         </div>
       </div>

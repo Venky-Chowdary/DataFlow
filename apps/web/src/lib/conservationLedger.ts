@@ -32,6 +32,20 @@ export type ConservationLedger = {
   inferred_deletes: number | null;
   reactivated: number | null;
   events_read: number | null;
+  stream_count: number | null;
+  measured_streams: number | null;
+  summable: boolean | null;
+  per_stream: StreamLedgerSlice[] | null;
+};
+
+export type StreamLedgerSlice = {
+  stream: string;
+  measured: boolean;
+  balanced: boolean;
+  conservation_kind: string | null;
+  dest_count: number | null;
+  active_count: number | null;
+  rows_read: number | null;
 };
 
 export type LedgerCarrier = {
@@ -92,13 +106,36 @@ export function readConservationLedger(
     inferred_deletes: num(raw.inferred_deletes),
     reactivated: num(raw.reactivated),
     events_read: num(raw.events_read),
+    stream_count: num(raw.stream_count),
+    measured_streams: num(raw.measured_streams),
+    summable: raw.summable == null ? null : Boolean(raw.summable),
+    per_stream: parsePerStream(raw.per_stream),
   };
+}
+
+function parsePerStream(value: unknown): StreamLedgerSlice[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  return value
+    .filter((item): item is Record<string, unknown> => isRecord(item))
+    .map((item) => ({
+      stream: String(item.stream ?? item.name ?? ""),
+      measured: Boolean(item.measured),
+      balanced: Boolean(item.balanced),
+      conservation_kind: item.conservation_kind == null ? null : String(item.conservation_kind),
+      dest_count: num(item.dest_count),
+      active_count: num(item.active_count),
+      rows_read: num(item.rows_read),
+    }));
 }
 
 export function isDestMeasured(ledger: ConservationLedger | null | undefined): boolean {
   if (!ledger) return false;
   if (UNMEASURED_KINDS.has(ledger.conservation_kind)) return false;
   if (UNMEASURED_SOURCES.has(ledger.rows_written_source)) return false;
+  if (ledger.conservation_kind === "job_rollup") {
+    if (ledger.rows_written_source === "per_stream") return ledger.balanced;
+    return ledger.dest_count != null || ledger.active_count != null;
+  }
   if (ledger.conservation_kind === "mirror") {
     return ledger.active_count != null;
   }
@@ -116,6 +153,8 @@ export function conservationKindLabel(kind: string | null | undefined): string {
       return "Keyed · inserts − deletes (keys, not events)";
     case "mirror":
       return "Mirror · active population";
+    case "job_rollup":
+      return "Job · every stream closed";
     case "empty_pass":
       return "Empty pass · measured zero";
     case "unmeasured":
@@ -135,6 +174,15 @@ export function ledgerEquation(ledger: ConservationLedger): string {
   const kind = ledger.conservation_kind;
   if (kind === "keyed") {
     return `dest Δ ${fmt(ledger.dest_delta)} = inserts ${fmt(ledger.inserts)} − deletes ${fmt(ledger.deletes)}`;
+  }
+  if (kind === "job_rollup") {
+    if (ledger.active_count != null) {
+      return `job active ${fmt(ledger.active_count)} across ${fmt(ledger.stream_count)} stream(s)`;
+    }
+    if (ledger.dest_count != null) {
+      return `job dest ${fmt(ledger.dest_count)} = sum of ${fmt(ledger.stream_count)} stream COUNT(*)`;
+    }
+    return `job closed iff every stream is closed (${fmt(ledger.measured_streams)}/${fmt(ledger.stream_count)} measured)`;
   }
   if (kind === "mirror") {
     return `read ${fmt(ledger.rows_read)} = active ${fmt(ledger.active_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
@@ -190,6 +238,34 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
   const ledger = readConservationLedger(source);
   const running = isRunningStatus(source?.status);
   if (isDestMeasured(ledger) && ledger) {
+    if (ledger.conservation_kind === "job_rollup") {
+      const unbalanced = ledger.balanced === false;
+      if (ledger.active_count != null) {
+        return {
+          value: Number(ledger.active_count).toLocaleString(),
+          label: running ? "Active so far" : "Active at dest",
+          title: ledger.note || "Sum of dest-engine active populations across streams of the same kind.",
+          measured: true,
+          tone: unbalanced ? "danger" : "ok",
+        };
+      }
+      if (ledger.dest_count != null) {
+        return {
+          value: Number(ledger.dest_count).toLocaleString(),
+          label: running ? "Dest so far" : "At destination",
+          title: ledger.note || "Sum of dest-engine COUNT(*) across streams of the same kind. Last-table COUNT is not the job.",
+          measured: true,
+          tone: unbalanced ? "danger" : "ok",
+        };
+      }
+      return {
+        value: "—",
+        label: running ? "Per-stream" : "Per-stream dest",
+        title: ledger.note || "Dest COUNT(*) is not summed across mixed or keyed kinds. Open each stream.",
+        measured: true,
+        tone: unbalanced ? "danger" : "ok",
+      };
+    }
     if (ledger.conservation_kind === "mirror") {
       const unbalanced = ledger.balanced === false;
       return {
@@ -252,6 +328,7 @@ export function writerHeadline(source: LedgerCarrier | null | undefined): RowMet
 /** Compact Jobs list / Overview / search caption. Never falls dest back to writer ack. */
 export function destMetricCompact(metric: RowMetric): string {
   if (!metric.measured) return `${metric.value} ${metric.label.toLowerCase()}`;
+  if (metric.label.toLowerCase().includes("per-stream")) return "per-stream dest";
   if (metric.label.toLowerCase().includes("active")) return `${metric.value} active`;
   return `${metric.value} at dest`;
 }
@@ -273,6 +350,11 @@ export function destProvenCount(source: LedgerCarrier | null | undefined): numbe
   if (ledger.conservation_kind === "mirror") {
     return ledger.active_count;
   }
+  if (ledger.conservation_kind === "job_rollup") {
+    if (ledger.active_count != null) return ledger.active_count;
+    if (ledger.dest_count != null) return ledger.dest_count;
+    return null;
+  }
   if (ledger.dest_count == null) return null;
   return ledger.dest_count;
 }
@@ -286,16 +368,21 @@ export function conservationCompleteCopy(
   const writer = writerHeadline(source);
   const ledger = readConservationLedger(source);
   const mirror = ledger?.conservation_kind === "mirror";
+  const job = ledger?.conservation_kind === "job_rollup";
   if (opts?.quarantine) {
     if (dest.measured) {
       return mirror
         ? `${dest.value} active at destination; some rows held out or coerced to NULL`
-        : `${dest.value} at destination; some rows held out or coerced to NULL`;
+        : job && dest.value === "—"
+          ? "Per-stream dest; some rows held out or coerced to NULL"
+          : `${dest.value} at destination; some rows held out or coerced to NULL`;
     }
     return `${writer.value} writer-acked (dest COUNT unmeasured); some rows held out or coerced to NULL`;
   }
   if (dest.measured) {
-    return mirror ? `${dest.value} active at destination` : `${dest.value} at destination`;
+    if (mirror) return `${dest.value} active at destination`;
+    if (job && dest.value === "—") return "Every stream ledger is closed — dest COUNT not summed";
+    return `${dest.value} at destination`;
   }
   return `${writer.value} writer-acked — dest COUNT unmeasured`;
 }
@@ -304,7 +391,28 @@ export type LedgerIdentityCell = { label: string; value: string };
 
 /** Display-only identity cells from engine fields — not a second algorithm. */
 export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[] {
-  if (ledger.conservation_kind === "keyed") {
+  if (ledger.conservation_kind === "job_rollup") {
+    const cells: LedgerIdentityCell[] = [
+      { label: "Streams", value: fmt(ledger.stream_count) },
+      { label: "Measured", value: fmt(ledger.measured_streams) },
+    ];
+    if (ledger.active_count != null) {
+      cells.push({ label: "Active", value: fmt(ledger.active_count) });
+    } else {
+      cells.push({ label: "Dest COUNT(*)", value: fmt(ledger.dest_count) });
+    }
+    cells.push({ label: "Writer ack", value: fmt(ledger.writer_ack) });
+    for (const stream of ledger.per_stream || []) {
+      const value = stream.active_count != null
+        ? fmt(stream.active_count)
+        : fmt(stream.dest_count);
+      cells.push({
+        label: stream.stream || "stream",
+        value: stream.measured ? value : "—",
+      });
+    }
+    return cells;
+  }
     const cells: LedgerIdentityCell[] = [
       { label: "Inserts", value: fmt(ledger.inserts) },
       { label: "Updates", value: fmt(ledger.updates) },

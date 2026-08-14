@@ -57,6 +57,17 @@ proof that the rows landed.
 
 An empty pass (reader 0, hold-outs 0, skipped 0, writer ack 0) is a
 *measured* zero — the incremental steady state — not an unmeasured dest.
+
+Multi-stream / multi-table jobs:
+
+    job is closed iff every stream ledger is closed
+
+Airbyte sums ``recordsEmitted`` / ``recordsCommitted`` (writer/state ack).
+Fivetran MAR is connection-level. Taking the last stream's dest COUNT(*)
+as the job is the same lie as taking writer ack. Dest COUNT(*) is summed
+only when every stream closed the same additive kind (all overwrite, or
+all mirror active). Mixed or keyed kinds stay per-stream — summing them
+invents a fake job-level table.
 """
 
 from __future__ import annotations
@@ -79,7 +90,13 @@ KIND_KEYED = "keyed"
 KIND_EMPTY_PASS = "empty_pass"
 KIND_UNMEASURED = "unmeasured"
 KIND_MIRROR = "mirror"
+KIND_JOB = "job_rollup"
 DEST_ACTIVE_READBACK = "gate8_dest_active_readback"
+DEST_PER_STREAM = "per_stream"
+# Dest COUNT(*) / active population is additive only when every stream
+# closed the *same* population identity. Mixing overwrite COUNT(*) with
+# keyed dest-delta invents a fake job-level table.
+_SUMMABLE_KINDS = frozenset({KIND_OVERWRITE, KIND_MIRROR, KIND_EMPTY_PASS})
 
 
 @dataclass(frozen=True)
@@ -651,9 +668,13 @@ class ConservationLedger:
     inferred_deletes: int | None = None
     reactivated: int | None = None
     events_read: int | None = None
+    stream_count: int | None = None
+    measured_streams: int | None = None
+    summable: bool | None = None
+    per_stream: tuple[dict[str, Any], ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "rows_read": self.rows_read,
             "rows_written": self.rows_written,
             "rows_quarantined": self.rows_quarantined,
@@ -680,6 +701,15 @@ class ConservationLedger:
             "reactivated": self.reactivated,
             "events_read": self.events_read,
         }
+        if self.stream_count is not None:
+            payload["stream_count"] = self.stream_count
+        if self.measured_streams is not None:
+            payload["measured_streams"] = self.measured_streams
+        if self.summable is not None:
+            payload["summable"] = self.summable
+        if self.per_stream is not None:
+            payload["per_stream"] = [dict(item) for item in self.per_stream]
+        return payload
 
 
 def _empty_pass_ledger(
@@ -1148,9 +1178,17 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     """Conservation ledger for one job document.
 
     ``rows_written`` is dest COUNT(*), never ``records_processed``.
+    Two or more streams replace last-table dest COUNT with the job rollup:
+    the job is closed iff every stream ledger is closed.
     """
-    recon = dict(job.get("reconciliation") or {})
     dest = dict(job.get("destination_summary") or {})
+    streams = dest.get("streams")
+    if streams is None:
+        streams = job.get("streams")
+    rolled = account_job_streams(streams)
+    if rolled is not None:
+        return rolled
+    recon = dict(job.get("reconciliation") or {})
     dest_count, dest_source = dest_count_from_recon(recon)
     before = _as_optional_int(dest.get(PRECOUNT_KEY))
     if before is None:
@@ -1227,6 +1265,314 @@ def ledger_from_transfer_result(
             "coerced_null_rows": dest.get("coerced_null_rows"),
         }
     ).to_dict()
+
+
+def iter_stream_entries(streams: Any) -> list[tuple[str, dict[str, Any]]]:
+    """Normalize ``streams`` as a list or name→health dict."""
+    if isinstance(streams, dict):
+        out: list[tuple[str, dict[str, Any]]] = []
+        for key, value in streams.items():
+            health = dict(value) if isinstance(value, Mapping) else {}
+            name = str(health.get("name") or key)
+            out.append((name, health))
+        return out
+    if isinstance(streams, list):
+        out = []
+        for index, item in enumerate(streams):
+            if not isinstance(item, Mapping):
+                continue
+            health = dict(item)
+            name = str(health.get("name") or health.get("stream") or index)
+            out.append((name, health))
+        return out
+    return []
+
+
+def stream_dest_measured(ledger: Mapping[str, Any] | None) -> bool:
+    """Whether this stream's dest population was independently measured."""
+    data = dict(ledger or {})
+    kind = str(data.get("conservation_kind") or "")
+    source = str(data.get("rows_written_source") or "")
+    if kind in ("", KIND_UNMEASURED) or source in ("", DEST_UNMEASURED):
+        return False
+    if kind == KIND_MIRROR:
+        return data.get("active_count") is not None and source == DEST_ACTIVE_READBACK
+    if kind == KIND_EMPTY_PASS:
+        return True
+    if kind == KIND_JOB:
+        if source == DEST_PER_STREAM:
+            return bool(data.get("balanced"))
+        if source == DEST_ACTIVE_READBACK:
+            return data.get("active_count") is not None
+        return data.get("dest_count") is not None
+    return data.get("dest_count") is not None or data.get("dest_delta") is not None
+
+
+def _compact_stream_ledger(
+    name: str,
+    health: Mapping[str, Any],
+) -> dict[str, Any]:
+    raw = health.get("row_accounting")
+    if not isinstance(raw, Mapping):
+        return {
+            "stream": name,
+            "measured": False,
+            "balanced": False,
+            "conservation_kind": None,
+            "dest_count": None,
+            "active_count": None,
+            "rows_read": None,
+            "rows_written": None,
+            "rows_quarantined": 0,
+            "rows_skipped": 0,
+            "writer_ack": _as_optional_int(health.get("records_processed")),
+        }
+    measured = stream_dest_measured(raw)
+    return {
+        "stream": name,
+        "measured": measured,
+        "balanced": bool(raw.get("balanced")) and measured,
+        "conservation_kind": str(raw.get("conservation_kind") or "") or None,
+        "dest_count": _as_optional_int(raw.get("dest_count")),
+        "active_count": _as_optional_int(raw.get("active_count")),
+        "rows_read": _as_optional_int(raw.get("rows_read")),
+        "rows_written": _as_optional_int(raw.get("rows_written")),
+        "rows_quarantined": _first_present_int(raw.get("rows_quarantined")),
+        "rows_skipped": _first_present_int(raw.get("rows_skipped")),
+        "writer_ack": _as_optional_int(raw.get("writer_ack")),
+        "unaccounted": _as_optional_int(raw.get("unaccounted")),
+    }
+
+
+def account_job_streams(streams: Any) -> ConservationLedger | None:
+    """Job identity: closed iff every stream ledger is closed.
+
+    Returns None when there are fewer than two streams so the single-table
+    path (last dest COUNT(*) of that one object) remains the job.
+    """
+    entries = iter_stream_entries(streams)
+    if len(entries) < 2:
+        return None
+    per = tuple(_compact_stream_ledger(name, health) for name, health in entries)
+    measured_n = sum(1 for item in per if item["measured"])
+    all_measured = measured_n == len(per)
+    all_balanced = all(item["balanced"] for item in per)
+    kinds = {str(item["conservation_kind"]) for item in per if item.get("conservation_kind")}
+    only = next(iter(kinds)) if len(kinds) == 1 else None
+    summable = bool(all_measured and only in _SUMMABLE_KINDS)
+
+    dest_count: int | None = None
+    active_count: int | None = None
+    rows_written: int | None = None
+    rows_read: int | None = None
+    quarantined = 0
+    skipped = 0
+    written_source = DEST_UNMEASURED
+    unaccounted: int | None = None
+    if summable and only == KIND_OVERWRITE:
+        dest_count = sum(int(item["dest_count"] or 0) for item in per)
+        rows_written = dest_count
+        rows_read = sum(int(item["rows_read"] or 0) for item in per)
+        quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
+        skipped = sum(int(item["rows_skipped"] or 0) for item in per)
+        written_source = DEST_READBACK
+        unaccounted = rows_read - (rows_written + quarantined + skipped)
+    elif summable and only == KIND_MIRROR:
+        active_count = sum(int(item["active_count"] or 0) for item in per)
+        dest_count = (
+            sum(int(item["dest_count"] or 0) for item in per)
+            if all(item["dest_count"] is not None for item in per)
+            else None
+        )
+        rows_written = active_count
+        rows_read = sum(int(item["rows_read"] or 0) for item in per)
+        quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
+        skipped = sum(int(item["rows_skipped"] or 0) for item in per)
+        written_source = DEST_ACTIVE_READBACK
+        unaccounted = rows_read - (rows_written + quarantined + skipped)
+    elif summable and only == KIND_EMPTY_PASS:
+        dest_count = 0
+        rows_written = 0
+        rows_read = 0
+        written_source = DEST_EMPTY_PASS
+        unaccounted = 0
+    elif all_measured:
+        written_source = DEST_PER_STREAM
+
+    acks = [item["writer_ack"] for item in per if item.get("writer_ack") is not None]
+    writer_ack = sum(int(a) for a in acks) if len(acks) == len(per) else None
+    ack_delta = None
+    if writer_ack is not None and rows_written is not None:
+        ack_delta = rows_written - writer_ack
+
+    balanced = all_measured and all_balanced
+    if not all_measured:
+        note = (
+            f"Job conservation is open: {len(per) - measured_n} of {len(per)} "
+            "stream(s) have no dest-engine ledger. Last-table dest COUNT(*) is "
+            "not the job. Writer acknowledgements cannot close a multi-stream "
+            "job (Airbyte recordsCommitted / Fivetran MAR)."
+        )
+    elif not all_balanced:
+        note = (
+            "Job conservation is open: a stream ledger is unbalanced. The job "
+            "is closed iff every stream ledger is closed."
+        )
+    elif summable:
+        note = (
+            f"Job conservation closed across {len(per)} {only} stream(s). Dest "
+            "population is the sum of dest-engine counts of the same kind. "
+            "Writer ack is diagnostic."
+        )
+    else:
+        note = (
+            f"Every stream ledger is closed ({', '.join(sorted(kinds))}). Dest "
+            "COUNT(*) is not summed across mixed or keyed kinds — that would "
+            "invent a fake job-level population. Open each stream."
+        )
+    if ack_delta:
+        sign = "more" if ack_delta > 0 else "fewer"
+        note += (
+            f" Writer acknowledged {writer_ack:,}; dest population accounts "
+            f"for {rows_written:,} ({abs(ack_delta):,} {sign} than the writer "
+            "claimed)."
+        )
+    return ConservationLedger(
+        rows_read=rows_read,
+        rows_written=rows_written,
+        rows_quarantined=quarantined,
+        rows_skipped=skipped,
+        rows_coerced_null=0,
+        writer_ack=writer_ack,
+        dest_count=dest_count,
+        dest_count_before=None,
+        unaccounted=unaccounted if summable else None,
+        balanced=balanced,
+        rows_read_source="gate8_source_count" if rows_read is not None else DEST_UNMEASURED,
+        rows_written_source=written_source,
+        conservation_kind=KIND_JOB,
+        note=note,
+        writer_ack_delta=ack_delta,
+        active_count=active_count,
+        stream_count=len(per),
+        measured_streams=measured_n,
+        summable=summable,
+        per_stream=per,
+    )
+
+
+def stamp_stream_populations(
+    summary: dict[str, Any],
+    *,
+    source: Any | None = None,
+    destination: Any | None = None,
+    dest_table: str | None = None,
+    count_source: bool = True,
+) -> dict[str, Any]:
+    """Independent source and dest COUNT(*) while this stream is still bound.
+
+    Job-level Gate-8 reads the restored primary endpoint (last table). Each
+    stream must be counted against the object it actually wrote.
+    """
+    from services.dest_precount import count_endpoint_rows
+
+    recon = dict(summary.get("reconciliation") or {})
+    if count_source and source is not None:
+        src_n = count_endpoint_rows(source)
+        if src_n is not None:
+            recon["source_rows"] = src_n
+    if destination is not None:
+        dest_n = count_endpoint_rows(destination, table_name=dest_table)
+        if dest_n is not None:
+            recon["target_rows"] = dest_n
+            recon["phase"] = "post_write_row_count"
+            recon["coverage"] = "row_count"
+            recon["message"] = (
+                "Independent dest-engine COUNT(*) for this stream. "
+                "Job-level Gate-8 of the last table is not this stream."
+            )
+    if recon:
+        summary["reconciliation"] = recon
+    return summary
+
+
+def stamp_stream_conservation(
+    health: dict[str, Any],
+    summary: Mapping[str, Any] | None,
+    *,
+    records_processed: int | None = None,
+    sync_mode: str = "",
+    census: KeyCensus | None = None,
+) -> dict[str, Any]:
+    """Attach this stream's ledger. Never uses writer ack as dest COUNT(*)."""
+    payload = dict(summary or {})
+    payload.pop("streams", None)
+    if census is not None:
+        payload[CENSUS_KEY] = census.to_dict()
+    ack = records_processed
+    if ack is None:
+        ack = health.get("records_processed")
+    health["row_accounting"] = account_job(
+        {
+            "records_processed": ack,
+            "sync_mode": sync_mode
+            or str(health.get("sync_mode") or payload.get("sync_mode") or ""),
+            "reconciliation": payload.get("reconciliation") or {},
+            "destination_summary": payload,
+            "rejected_rows": payload.get("rejected_rows", payload.get("rejected")),
+            "coerced_null_rows": payload.get("coerced_null_rows"),
+        }
+    ).to_dict()
+    return health
+
+
+def record_stream_health(
+    stream_health: list[dict[str, Any]] | dict[str, dict[str, Any]],
+    *,
+    name: str,
+    status: str,
+    records_processed: int = 0,
+    summary: Mapping[str, Any] | None = None,
+    extra: Mapping[str, Any] | None = None,
+    sync_mode: str = "",
+    census: KeyCensus | None = None,
+    source: Any | None = None,
+    destination: Any | None = None,
+    dest_table: str | None = None,
+    count_source: bool = True,
+) -> dict[str, Any]:
+    """Record one stream's health plus that stream's dest-engine ledger."""
+    entry: dict[str, Any] = {
+        "name": name,
+        "status": status,
+        "records_processed": int(records_processed or 0),
+    }
+    if extra:
+        entry.update(dict(extra))
+    payload = dict(summary or {})
+    payload.pop("streams", None)
+    if source is not None or destination is not None:
+        stamp_stream_populations(
+            payload,
+            source=source,
+            destination=destination,
+            dest_table=dest_table,
+            count_source=count_source,
+        )
+    stamp_stream_conservation(
+        entry,
+        payload,
+        records_processed=int(records_processed or 0),
+        sync_mode=sync_mode or str(entry.get("sync_mode") or payload.get("sync_mode") or ""),
+        census=census,
+    )
+    if isinstance(stream_health, dict):
+        existing = dict(stream_health.get(name) or {})
+        existing.update(entry)
+        stream_health[name] = existing
+        return existing
+    stream_health.append(entry)
+    return entry
 
 
 class KeyCensusAccumulator:

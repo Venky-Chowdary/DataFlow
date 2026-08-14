@@ -1433,8 +1433,8 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 },
                                 {
                                   id: "streams",
-                                  title: "CDC streams",
-                                  description: "Per-stream lag and watermark",
+                                  title: "Streams",
+                                  description: "Per-stream dest COUNT(*) and watermarks",
                                   icon: "zap",
                                   meta: Array.isArray(liveJob.streams) && liveJob.streams.length
                                     ? `${liveJob.streams.length}`
@@ -2020,7 +2020,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
         <Drawer
           open
           onClose={() => setEvidenceDrawer(null)}
-          title="CDC stream health"
+          title="Stream conservation"
           subtitle={`${liveJob.streams.length} stream(s)`}
           icon={<DtIcon name="zap" size={18} />}
           size="lg"
@@ -2030,6 +2030,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <tr>
                 <th>Stream</th>
                 <th>Status</th>
+                <th>At dest</th>
                 <th>Events written</th>
                 <th>Lag</th>
                 <th>Watermark</th>
@@ -2040,6 +2041,15 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                 <tr key={s.name}>
                   <td>{s.name}</td>
                   <td>{s.status || "—"}</td>
+                  <td>
+                    {destMetricCompact(
+                      destHeadline({
+                        status: s.status,
+                        records_processed: s.records_processed,
+                        row_accounting: s.row_accounting,
+                      }),
+                    )}
+                  </td>
                   <td>{Number(s.records_processed ?? 0).toLocaleString()}</td>
                   <td>
                     {s.cdc_lag_seconds != null && Number.isFinite(Number(s.cdc_lag_seconds))

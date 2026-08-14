@@ -34,7 +34,7 @@ from services.bounded_collections import BoundedStrings
 from services.dest_precount import PRECOUNT_KEY, precount_table
 from services.dialect_profiles import schema_from_cfg
 from services.engine_pool import release_engine
-from services.row_conservation import CENSUS_KEY, KeyCensusAccumulator, observe_keyed_batch
+from services.row_conservation import CENSUS_KEY, KeyCensusAccumulator, observe_keyed_batch, record_stream_health
 from services.resilience import (  # noqa: E402, F401
     ResilientBatcher,
     adaptive_chunk_size,
@@ -2865,27 +2865,35 @@ def run_non_cdc_multi_stream_sequential(
             except Exception as exc:
                 status = "failed"
                 error = str(exc)
-                stream_health.append(
-                    {
-                        "name": stream_name,
-                        "status": status,
-                        "records_processed": rows,
-                        "error": error,
-                    }
+                record_stream_health(
+                    stream_health,
+                    name=stream_name,
+                    status=status,
+                    records_processed=rows,
+                    summary=summary,
+                    extra={"error": error},
+                    sync_mode=sync_mode,
+                    source=source,
+                    destination=destination,
                 )
                 raise
-            stream_health.append(
-                {
-                    "name": stream_name,
-                    "status": status,
-                    "records_processed": rows,
+            record_stream_health(
+                stream_health,
+                name=stream_name,
+                status=status,
+                records_processed=rows,
+                summary=summary,
+                extra={
                     "watermark": summary.get("watermark"),
                     "sync_mode": summary.get("sync_mode")
                     or resolve_effective_sync_mode(
                         sync_mode, single_contracts[0].get("sync_mode")
                     ),
                     "error": error,
-                }
+                },
+                sync_mode=sync_mode,
+                source=source,
+                destination=destination,
             )
     finally:
         if original_table is not None:
