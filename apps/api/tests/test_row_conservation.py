@@ -555,3 +555,61 @@ def test_sqlite_prepare_keyed_upsert_hard_deletes_dest_held_keys(tmp_path: Path)
     # Live upserts have not run yet — prepare only strips + deletes.
     assert count == 2
     assert rows == [(1, "a"), (3, "c")]
+
+
+def test_mysql_hard_delete_survives_connection_close():
+    """PyMySQL ``autocommit = True`` assignment used to roll back DELETE on close."""
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 3306), timeout=0.4):
+            pass
+    except OSError:
+        import pytest
+
+        pytest.skip("MariaDB not listening")
+
+    import uuid
+
+    import pymysql
+
+    from services.row_conservation import apply_hard_deletes
+
+    cfg = {
+        "host": "127.0.0.1",
+        "port": 3306,
+        "database": "dataflow",
+        "username": "dataflow",
+        "password": "dataflow",
+    }
+    table = f"p9_mysql_del_{uuid.uuid4().hex[:8]}"
+    conn = pymysql.connect(
+        host=cfg["host"], port=cfg["port"], database=cfg["database"],
+        user=cfg["username"], password=cfg["password"], autocommit=True,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+            cur.execute(
+                f"CREATE TABLE `{table}` (id BIGINT PRIMARY KEY, label VARCHAR(8))"
+            )
+            cur.execute(
+                f"INSERT INTO `{table}` (id, label) VALUES (1,'a'),(2,'b'),(3,'c')"
+            )
+        deleted = apply_hard_deletes(
+            db_type="mysql",
+            cfg=cfg,
+            schema="",
+            table_name=table,
+            key_columns=["id"],
+            keys=[(2,)],
+        )
+        assert deleted == 1
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT id FROM `{table}` ORDER BY id")
+            left = [int(r[0]) for r in cur.fetchall()]
+        assert left == [1, 3]
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+        conn.close()

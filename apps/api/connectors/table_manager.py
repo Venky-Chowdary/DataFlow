@@ -161,7 +161,7 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
 
 
 def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
-    from connectors.mysql_conn import get_connection
+    from connectors.mysql_conn import enable_autocommit, get_connection
 
     try:
         # DDL purpose: short lock wait so full_refresh overwrite cannot hang a
@@ -176,7 +176,7 @@ def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> boo
             ssl=bool(cfg.get("ssl")),
             purpose="ddl",
         )
-        conn.autocommit = True
+        enable_autocommit(conn)
         with conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{table_name}`")
         conn.close()
@@ -819,7 +819,7 @@ def _delete_mysql_composite(
     tuples: list[tuple[Any, ...]],
     schema: str | None,
 ) -> int:
-    from connectors.mysql_conn import get_connection
+    from connectors.mysql_conn import enable_autocommit, get_connection
 
     try:
         conn = get_connection(
@@ -831,7 +831,7 @@ def _delete_mysql_composite(
             connection_string=cfg.get("connection_string", ""),
             ssl=bool(cfg.get("ssl")),
         )
-        conn.autocommit = True
+        enable_autocommit(conn)
         where, _ = _composite_or_and_clause(
             pk_cols, len(tuples), quote_char="`", placeholder="%s"
         )
@@ -842,6 +842,7 @@ def _delete_mysql_composite(
                 binds,
             )
             deleted = cur.rowcount
+        conn.commit()
         conn.close()
         return deleted
     except Exception as exc:
@@ -955,7 +956,7 @@ def _delete_postgresql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: 
 
 
 def _delete_mysql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list[str], schema: str | None) -> int:
-    from connectors.mysql_conn import get_connection
+    from connectors.mysql_conn import enable_autocommit, get_connection
 
     try:
         conn = get_connection(
@@ -967,11 +968,12 @@ def _delete_mysql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list[
             connection_string=cfg.get("connection_string", ""),
             ssl=bool(cfg.get("ssl")),
         )
-        conn.autocommit = True
+        enable_autocommit(conn)
         placeholders = ",".join(["%s"] * len(keys))
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM `{table_name}` WHERE `{pk_col}` IN ({placeholders})", keys)  # nosec B608
             deleted = cur.rowcount
+        conn.commit()
         conn.close()
         return deleted
     except Exception as exc:
