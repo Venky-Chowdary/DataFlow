@@ -32,7 +32,9 @@ from connectors.writer_common import (  # noqa: E402
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
 from services.dest_precount import PRECOUNT_KEY, precount_table
+from services.dialect_profiles import schema_from_cfg
 from services.engine_pool import release_engine
+from services.row_conservation import CENSUS_KEY, KeyCensusAccumulator, observe_keyed_batch
 from services.resilience import (  # noqa: E402, F401
     ResilientBatcher,
     adaptive_chunk_size,
@@ -1378,6 +1380,9 @@ def _stream_database_transfer_impl(
         rows_before = precount_table(dest_type, dest_cfg, dest_table)
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
+    keyed_census_acc = (
+        KeyCensusAccumulator() if write_mode == "upsert" and pk_target_cols else None
+    )
     last_checksum = ""
     # Phase F1 — accumulate fingerprints during the write pass (avoids double source I/O).
     write_pass_fp = FingerprintAccumulator()
@@ -2047,6 +2052,18 @@ def _stream_database_transfer_impl(
             logger.warning("Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc)
 
         try:
+            if keyed_census_acc is not None:
+                observe_keyed_batch(
+                    keyed_census_acc,
+                    headers=batch.headers,
+                    rows=batch.rows,
+                    mappings=mappings,
+                    key_columns=pk_target_cols,
+                    db_type=dest_type,
+                    cfg=dest_cfg,
+                    schema=schema_from_cfg(dest_type, dest_cfg),
+                    table_name=dest_table,
+                )
             batch_written, last_checksum, dest_summary = with_retry(
                 write_op,
                 budget=RetryBudget(
@@ -2557,6 +2574,10 @@ def _stream_database_transfer_impl(
         dest_summary["warnings_suppressed"] = suppressed_warnings
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
+    if keyed_census_acc is not None:
+        census = keyed_census_acc.to_census()
+        if census is not None:
+            dest_summary[CENSUS_KEY] = census.to_dict()
     if pk_target_cols:
         dest_summary.setdefault("conflict_columns", list(pk_target_cols))
         dest_summary.setdefault("primary_key_columns", list(pk_target_cols))

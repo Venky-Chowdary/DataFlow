@@ -684,3 +684,69 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
         sync_mode=str(job.get("sync_mode") or dest.get("sync_mode") or ""),
         census=census,
     )
+
+
+class KeyCensusAccumulator:
+    """Per-batch dest hits, reconstructed as a run-level census.
+
+    Each batch is probed *before* it writes. Inserts this run become dest
+    hits for a later batch, so summing ``len(batch) - hits`` equals new keys
+    for the whole stream. ``dest_preexisting`` is unique keys minus those
+    inserts — dest-engine, not writer ON CONFLICT.
+    """
+
+    def __init__(self) -> None:
+        self._seen: set[tuple[Any, ...]] = set()
+        self._inserts = 0
+        self._failed = False
+
+    def add_batch(self, keys: Sequence[tuple[Any, ...]], dest_hits: int | None) -> None:
+        if dest_hits is None:
+            self._failed = True
+            return
+        batch: list[tuple[Any, ...]] = []
+        seen_batch: set[tuple[Any, ...]] = set()
+        for key in keys:
+            if key in seen_batch:
+                continue
+            seen_batch.add(key)
+            batch.append(key)
+        self._inserts += max(len(batch) - int(dest_hits), 0)
+        self._seen.update(batch)
+
+    def to_census(self) -> KeyCensus | None:
+        if self._failed or not self._seen:
+            return None
+        unique = len(self._seen)
+        preexisting = unique - self._inserts
+        if preexisting < 0:
+            return None
+        return KeyCensus(unique_batch_keys=unique, dest_preexisting=preexisting)
+
+
+def observe_keyed_batch(
+    acc: KeyCensusAccumulator,
+    *,
+    headers: Sequence[str],
+    rows: Sequence[Sequence[Any]],
+    mappings: Sequence[Mapping[str, Any]] | None,
+    key_columns: Sequence[str] | None,
+    db_type: str,
+    cfg: Mapping[str, Any],
+    schema: str,
+    table_name: str,
+) -> None:
+    """Dest-engine key hits for one stream batch, before that batch writes."""
+    from services.dest_precount import destination_key_hits
+
+    records = [dict(zip(headers, row)) for row in rows]
+    keys = extract_batch_keys(records, key_columns, mappings)
+    hits = destination_key_hits(
+        db_type,
+        dict(cfg),
+        schema=schema,
+        table_name=table_name,
+        key_columns=[str(c) for c in (key_columns or []) if str(c).strip()],
+        keys=keys,
+    )
+    acc.add_batch(keys, hits)
