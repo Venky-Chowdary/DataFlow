@@ -14,7 +14,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py tests/test_unicode_form_carry.py tests/test_property8_unicode_form.py -q` (137 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16 + unicode-form 21; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal unscaled integer; unicode form: PG TEXT / MariaDB `general_ci`/`bin` UNIQUE BOTH_LAND for NFC vs NFD; MariaDB `unicode_ci` SECOND_REJECT; dest HEX `C3A9` vs `CC81`; bind does not NFC | UCA 0900 vs 1400 live MySQL 8; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
-| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py -q` | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Keyed upsert: dest-engine census closes `dest_delta == inserts - deletes`. Mirror: dest-engine `COUNT(*) WHERE NOT _deleted` (physical COUNT stays). Conservative tombstone polarity. Writer ack cannot hide a dest shortfall. | Duplicate CDC events per key; inferred deletes on upsert/CDC without tombstone or mirror mode; stream-path this-run `soft_deleted` census; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
+| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py -q` (70 passed in 5.22s on this host). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (21 passed); `npm run build` tsc+vite clean | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Keyed upsert: dest-engine census closes `dest_delta == inserts - deletes`. Mirror: dest-engine `COUNT(*) WHERE NOT _deleted` (physical COUNT stays). Conservative tombstone polarity. Writer ack cannot hide a dest shortfall. | Duplicate CDC events per key; inferred deletes on upsert/CDC without tombstone or mirror mode; stream-path this-run `soft_deleted` census; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
 | 12 | Adversarial and chaos testing | UNPROVEN | — | — | — |
@@ -619,9 +619,9 @@ rowcount is not that proof.
 
 **Measured (this host, SQLite + PostgreSQL 16 → MariaDB 10.11):**
 ```
-63 passed in 3.94s
-  (polarity 5 + identity 28 + live execute_tracked 6 + certificate 24)
-  Adjacent tombstone/CDC: 98 passed, 1 skipped Mongo in 4.09s
+70 passed in 5.22s
+  (polarity + identity + live execute_tracked + certificate + live
+   file→sqlite mirror)
 
   Live SQLite overwrite: dest COUNT(*)=4; certificate uses 4 even when
     records_processed is forged to 10,000.
@@ -636,10 +636,23 @@ rowcount is not that proof.
     + 1 is_deleted tombstone of an existing key; dest COUNT(*) stays 3;
     id=2 gone; inserts=1 deletes=1 dest_delta=0; writer ack 10,000.
   Live PG → MariaDB tombstone upsert: same; dest labels {1:A, 3:c, 4:d}.
+  Live SQLite mirror (CSV snapshot 2): source keys {2,3,4}; dest physical
+    COUNT(*)=4 with id=1 _deleted; active_count=3; inferred_deletes=1;
+    conservation_kind=mirror; rows_written_source=gate8_dest_active_readback;
+    writer ack does not close. Gate-8 target_rows is stuffed active (3),
+    not physical (4).
   MySQL DELETE persists after connection close (PyMySQL autocommit method).
   Unit: last-op DELETE then INSERT is live; missing-key tombstone is not
     an insert; delete-only accumulator expected_delta=-2; is_active /
-    deleted_by are not tombstones.
+    deleted_by are not tombstones; stuffed Gate-8 target_rows=3 with
+    rows_scanned=4 stays dest_count=4 / active_count=3.
+```
+
+Frontend (this host):
+```
+npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts
+  21 passed
+npm run build  tsc + vite  clean
 ```
 
 **Operator UI (same identity, display-only):** Terminal jobs stamp
