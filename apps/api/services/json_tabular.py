@@ -10,7 +10,6 @@ unless ``records_path`` selects one (Airbyte-class trap).
 
 from __future__ import annotations
 
-import io
 import json
 from pathlib import Path
 from typing import Any, Iterator
@@ -412,17 +411,9 @@ def _count_json_records_stax(source: Any, parse: Any) -> int | None:
 
 
 def _json_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
-    if isinstance(content, Path):
-        from services.dest_precount import open_artifact_binary
+    from services.dest_precount import artifact_byte_source
 
-        return open_artifact_binary(content)
-    if isinstance(content, bytes):
-        return io.BytesIO(content), None
-    if isinstance(content, str):
-        return io.BytesIO(content.encode("utf-8")), None
-    if hasattr(content, "read"):
-        return content, None
-    raise TypeError("JSON COUNT expects bytes, str, Path, or a readable stream")
+    return artifact_byte_source(content)
 
 
 def _json_count_as_text(content: bytes | str | Path) -> str | None:

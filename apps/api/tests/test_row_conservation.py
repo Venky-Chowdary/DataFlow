@@ -608,9 +608,9 @@ def test_count_csv_rows_streams_rfc4180_not_line_count(
 def test_count_artifact_rows_gzip_streams_not_slurp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """Local gzip CSV/JSON/JSONL/XML COUNT streams. Never decompress-then-slurp.
+    """Local gzip CSV/JSON/JSONL/XML/Avro COUNT streams. Never decompress-then-slurp.
 
-    Excel/Avro/Parquet/ORC gzip still decompresses first (byte-image parsers).
+    Excel/Parquet/ORC gzip still decompresses first (workbook / footer parsers).
     Object-store GET gzip of the same kinds streams through ``GzipFile``
     (see ``test_count_artifact_payload_gzip_streams_not_decompress_slurp``).
     """
@@ -665,6 +665,20 @@ def test_count_artifact_rows_gzip_streams_not_slurp(
     assert count_xml_records(xml_gz) == 2
     assert count_artifact_rows(xml_gz, fmt="xml") == 2
 
+    pytest.importorskip("fastavro")
+    from services.dest_precount import count_avro_records
+
+    avro_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="avro",
+    )
+    avro_gz = tmp_path / "export.avro.gz"
+    avro_gz.write_bytes(gzip.compress(avro_body))
+    assert count_avro_records(avro_gz) == 3
+    assert count_artifact_rows(avro_gz, fmt="avro") == 3
+
     quoted, _ = convert_rows(
         ["id", "note"],
         [["1", "hello\nworld"], ["2", "b"]],
@@ -680,7 +694,7 @@ def test_count_artifact_rows_gzip_streams_not_slurp(
     bad.write_bytes(b"not-gzip")
     assert count_artifact_rows(bad, fmt="csv") is None
 
-    guarded = {p.resolve() for p in (csv_gz, jsonl_gz, json_gz, xml_gz, quoted_gz)}
+    guarded = {p.resolve() for p in (csv_gz, jsonl_gz, json_gz, xml_gz, avro_gz, quoted_gz)}
     orig_read_bytes = Path.read_bytes
 
     def _no_read_bytes(self, *args, **kwargs):
@@ -693,6 +707,7 @@ def test_count_artifact_rows_gzip_streams_not_slurp(
     assert count_artifact_rows(jsonl_gz, fmt="jsonl") == 2
     assert count_artifact_rows(json_gz, fmt="json") == 3
     assert count_artifact_rows(xml_gz, fmt="xml") == 2
+    assert count_artifact_rows(avro_gz, fmt="avro") == 3
 
 
 def test_count_artifact_payload_gzip_streams_not_decompress_slurp(
@@ -701,8 +716,8 @@ def test_count_artifact_payload_gzip_streams_not_decompress_slurp(
     """Object-store GET gzip COUNT streams GzipFile. Never gzip.decompress.
 
     The GET body is already compressed in RAM. A second decompressed copy
-    is the same hole local *.gz had. Excel/Avro/Parquet/ORC GET gzip still
-    decompresses (byte-image parsers).
+    is the same hole local *.gz had. Excel/Parquet/ORC GET gzip still
+    decompresses (workbook / footer parsers). Avro gzip streams.
     """
     import gzip
 
@@ -733,6 +748,13 @@ def test_count_artifact_payload_gzip_streams_not_decompress_slurp(
         source_format="csv",
         target_format="xml",
     )
+    pytest.importorskip("fastavro")
+    avro_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="avro",
+    )
     quoted, _ = convert_rows(
         ["id", "note"],
         [["1", "hello\nworld"], ["2", "b"]],
@@ -748,6 +770,7 @@ def test_count_artifact_payload_gzip_streams_not_decompress_slurp(
     assert _count_artifact_payload(gzip.compress(jsonl_body), name="export.jsonl.gz") == 2
     assert _count_artifact_payload(gzip.compress(json_body), name="export.json.gz") == 3
     assert _count_artifact_payload(gzip.compress(xml_body), name="export.xml.gz") == 2
+    assert _count_artifact_payload(gzip.compress(avro_body), name="export.avro.gz") == 3
     assert _count_artifact_payload(gzip.compress(quoted), name="quoted.csv.gz") == 2
     assert _count_artifact_payload(b"not-gzip", name="bad.csv.gz") is None
     assert _count_artifact_payload(csv_body, name="export.csv") == 3
@@ -776,12 +799,13 @@ def test_count_csv_rows_one_shot_gzip_stream_no_seek() -> None:
 
     Encoding sniff consumes a prefix. ``seek(0)`` would fail on an HTTP
     GET body. Prefix-then-rest is the COUNT from byte 0 without rewind.
-    JSON/XML/JSONL already walk forward-only; this locks the same
+    JSON/XML/JSONL/Avro already walk forward-only; this locks the same
     contract on those COUNT openers.
     """
     import gzip as gzip_mod
 
     from services.csv_profiler import count_csv_rows
+    from services.dest_precount import count_avro_records
     from services.file_parser import count_jsonl_records, count_xml_records
     from services.format_converter import convert_rows
     from services.json_tabular import count_json_records
@@ -816,12 +840,20 @@ def test_count_csv_rows_one_shot_gzip_stream_no_seek() -> None:
         source_format="csv",
         target_format="xml",
     )
+    pytest.importorskip("fastavro")
+    avro_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="avro",
+    )
 
     assert count_csv_rows(_oneshot_gzip(gzip_mod.compress(csv_body))) == 3
     assert count_csv_rows(_oneshot_gzip(gzip_mod.compress(quoted))) == 2
     assert count_jsonl_records(_oneshot_gzip(gzip_mod.compress(jsonl_body))) == 2
     assert count_json_records(_oneshot_gzip(gzip_mod.compress(json_body))) == 3
     assert count_xml_records(_oneshot_gzip(gzip_mod.compress(xml_body))) == 2
+    assert count_avro_records(_oneshot_gzip(gzip_mod.compress(avro_body))) == 3
 
     with pytest.raises((OSError, EOFError, gzip_mod.BadGzipFile, ValueError)):
         count_csv_rows(_oneshot_gzip(b"not-gzip"))
@@ -2910,6 +2942,100 @@ def test_object_store_avro_and_orc_use_artifact_count(monkeypatch: pytest.Monkey
         destination_row_count("gcs", {"database": "b"}, schema="", table_name="exports/data.orc")
         == 2
     )
+
+
+def test_object_store_avro_gate8_checksum_streams_not_gzip_slurp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Avro GET checksum is sequential object-container records.
+
+    Apache Avro OCF is header + blocks + sync markers — Spark/Hadoop feed
+    GzipCodec the GET stream. Gzip Avro is ``GzipFile``, never
+    ``gzip.decompress(source.read())``. Excel/Parquet/ORC stay byte-image
+    (workbook / footer). Empty well-formed is ``(0, "")``; garbage is
+    unmeasured, not dest=0. One-shot GET must not ``Body.read()``.
+    """
+    pytest.importorskip("fastavro")
+    from services.dest_precount import checksum_artifact_stream, checksum_object_store, iter_avro_dicts
+    from services.format_converter import convert_rows
+    from services.reconciliation import canonical_checksum_from_iter, read_target_sample
+
+    content, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="avro",
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/data.avro", content)])
+    cfg = {"database": "b"}
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/data.avro")
+        == 3
+    )
+    n, digest = checksum_object_store("s3", cfg, table_name="exports/data.avro")
+    assert n == 3
+    assert digest
+    expected = canonical_checksum_from_iter(list(iter_avro_dicts(content)))
+    assert digest == expected
+    rows = read_target_sample(
+        "s3",
+        cfg,
+        schema="",
+        table_name="exports/data.avro",
+        columns=["id", "v"],
+        limit=50,
+    )
+    assert len(rows) == 3
+    assert {str(r["id"]) for r in rows} == {"1", "2", "3"}
+
+    empty, _ = convert_rows(["id"], [], source_format="csv", target_format="avro")
+    _patch_object_store_payloads(monkeypatch, [("exports/empty.avro", empty)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/empty.avro")
+        == 0
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/empty.avro") == (0, "")
+
+    _patch_object_store_payloads(monkeypatch, [("exports/bad.avro", b"not-avro")])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/bad.avro")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/bad.avro") == (-1, "")
+
+    compressed = gzip.compress(content)
+
+    def _no_decompress(*_a, **_k):
+        raise AssertionError("Avro GET gzip must not gzip.decompress the whole body")
+
+    monkeypatch.setattr("services.dest_precount.gzip.decompress", _no_decompress)
+
+    # Caller already wrapped GzipFile (one-shot GET). Name is uncompressed
+    # so the kernel does not wrap a second gzip.
+    oneshot_n, oneshot_digest = checksum_artifact_stream(
+        _oneshot_gzip(compressed), name="export.avro"
+    )
+    assert oneshot_n == 3
+    assert oneshot_digest == digest
+
+    monkeypatch.setattr(
+        "services.dest_precount._object_store_list_keys",
+        lambda *_a, **_k: ["exports/data.avro.gz"],
+    )
+
+    def _open(_kind: str, _cfg: dict, _bucket: str, key: str):
+        buf = _NoSlurpGet(compressed)
+        return buf, buf.close
+
+    monkeypatch.setattr("services.object_streaming.open_object_store_binary", _open)
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/data.avro.gz")
+        == 3
+    )
+    gz_n, gz_digest = checksum_object_store("s3", cfg, table_name="exports/data.avro.gz")
+    assert gz_n == 3
+    assert gz_digest == digest
+
 
 
 def test_object_store_unparseable_part_does_not_sum_prefix(monkeypatch: pytest.MonkeyPatch):

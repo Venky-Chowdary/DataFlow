@@ -1411,17 +1411,9 @@ def _xml_end_kind(elem: Any, had_element_child: bool) -> str:
 
 def _xml_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
     """Byte source for iterparse. Path (including gzip) streams; bytes/str stay in RAM."""
-    if isinstance(content, Path):
-        from services.dest_precount import open_artifact_binary
+    from services.dest_precount import artifact_byte_source
 
-        return open_artifact_binary(content)
-    if isinstance(content, bytes):
-        return io.BytesIO(content), None
-    if isinstance(content, str):
-        return io.BytesIO(content.encode("utf-8")), None
-    if hasattr(content, "read"):
-        return content, None
-    raise TypeError("XML COUNT expects bytes, str, Path, or a readable stream")
+    return artifact_byte_source(content)
 
 
 def _xml_count_as_text(content: bytes | str | Path) -> str | None:

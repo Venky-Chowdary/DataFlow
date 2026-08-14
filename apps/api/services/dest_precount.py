@@ -48,17 +48,19 @@ streams. NDJSON aliases onto JSONL. CSV/TSV dest
 population is RFC 4180 ``csv.reader`` rows after the header
 (``count_csv_rows``), never ``wc -l``, never spreadsheet ``,,,,``
 blank lines. Quoted embedded newlines are one record. Local CSV/TSV
-is counted from the path; gzip CSV/TSV streams. Excel / Avro /
-Parquet / ORC gzip still decompresses first (workbook / footer
-parsers need a byte image). Object-store GET of CSV/JSON/JSONL/XML
-streams the HTTP body (gzip through ``GzipFile(fileobj=StreamingBody)``).
+is counted from the path; gzip CSV/TSV streams. Excel / Parquet / ORC gzip
+still decompresses first (workbook / footer parsers need a byte image).
+Avro is a sequential object-container (header + blocks), not a footer
+format — local and GET gzip Avro stream through ``GzipFile`` like JSONL.
+Object-store GET of CSV/JSON/JSONL/XML/Avro streams the HTTP body
+(gzip through ``GzipFile(fileobj=StreamingBody)``).
 COUNT does not ``Body.read()`` the object, does not hold every part in
-RAM, and does not ``gzip.decompress`` a second copy. Excel/Avro/Parquet/ORC
-GET still materializes one object (byte-image parsers). Gate-8 cell
+RAM, and does not ``gzip.decompress`` a second copy. Excel/Parquet/ORC
+GET still materializes one object (workbook / footer parsers). Gate-8 cell
 checksum of those same GET streams is ``checksum_object_store`` — never
 ``json.loads`` fallback empty (gzip CSV / Parquet as UTF-8 JSON garbage
-was dest=0). JSON root array, JSONL objects, CSV RFC 4180 dicts, and
-Parquet/Avro/ORC/Excel value walks feed ``canonical_checksum_from_iter``.
+was dest=0). JSON root array, JSONL objects, CSV RFC 4180 dicts, streamed
+Avro records, and Parquet/ORC/Excel value walks feed ``canonical_checksum_from_iter``.
 JSON unique-path cell dicts (root array or wrapped ``{\"records\":[]}``)
 and XML unique-path cell dicts are a second StAX pass of the COUNT path
 (one-shot GET is spooled once). Empty well-formed is ``(0, "")``. Dest sample
@@ -263,7 +265,7 @@ _IDENTITY_SCAN_MAX = _KEYSET_CENSUS_MAX
 _ARTIFACT_FORMATS = frozenset({
     "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc", "xml",
 })
-_STREAMING_COUNT_KINDS = frozenset({"csv", "tsv", "json", "jsonl", "xml"})
+_STREAMING_COUNT_KINDS = frozenset({"csv", "tsv", "json", "jsonl", "xml", "avro"})
 
 
 class UnmeasuredArtifact(Exception):
@@ -1716,14 +1718,24 @@ def _iter_excel_records(body: bytes) -> Any:
         raise UnmeasuredArtifact("excel_unparseable") from exc
 
 
-def _iter_avro_records(body: bytes) -> Any:
-    """Cell values of one Avro object. Same ``fastavro.reader`` as COUNT."""
+def iter_avro_dicts(content: bytes | str | Path | Any) -> Any:
+    """Same sequential Avro population as dest COUNT, as dicts for Gate-8.
+
+    Apache Avro object-container files are a header plus data blocks with
+    sync markers — a forward-only record stream, not a footer ``nrows``.
+    ``fastavro.reader`` walks a file-like (local path, GET body, gzip
+    wrapping a StreamingBody). Never ``gzip.decompress`` a second copy,
+    never ingest ``parse_avro``'s row cap. A non-dict datum is unmeasured
+    (tabular dest is records). Empty well-formed yields nothing.
+    """
     try:
         import fastavro
     except ImportError as exc:
         raise UnmeasuredArtifact("avro_checksum_needs_fastavro") from exc
+    closer = None
     try:
-        for rec in fastavro.reader(io.BytesIO(body)):
+        source, closer = artifact_byte_source(content)
+        for rec in fastavro.reader(source):
             if not isinstance(rec, dict):
                 raise UnmeasuredArtifact("avro_non_record")
             yield rec
@@ -1731,10 +1743,33 @@ def _iter_avro_records(body: bytes) -> Any:
         raise
     except Exception as exc:
         raise UnmeasuredArtifact("avro_unparseable") from exc
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def count_avro_records(content: bytes | str | Path | Any) -> int | None:
+    """Dest-engine record COUNT of tabular Avro. Never ingest ``max_rows``.
+
+    Population is one dict per object-container record. Empty header-only
+    is 0. Missing parser / malformed / non-record stay unmeasured, not
+    dest=0. Path and GET streams; gzip is ``GzipFile``, not a decompressed
+    slurp. COUNT is ``sum`` of ``iter_avro_dicts``.
+    """
+    try:
+        return sum(1 for _ in iter_avro_dicts(content))
+    except UnmeasuredArtifact:
+        return None
+    except Exception as exc:
+        logger.info("avro artifact count unavailable: %s", exc)
+        return None
 
 
 def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
-    """CSV/JSON/JSONL/XML records from a forward-only GET."""
+    """CSV/JSON/JSONL/XML/Avro records from a forward-only GET."""
     if kind in {"csv", "tsv"}:
         from services.csv_profiler import iter_csv_dicts
 
@@ -1755,16 +1790,16 @@ def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
 
         yield from iter_xml_dicts(source)
         return
+    if kind == "avro":
+        yield from iter_avro_dicts(source)
+        return
     raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
 
 
 def _iter_byte_image_kind(kind: str, body: bytes, *, name: str) -> Any:
-    """Parquet/Avro/ORC/Excel value walk of one materialized object. Never JSON ``[]``."""
+    """Parquet/ORC/Excel value walk of one materialized object. Never JSON ``[]``."""
     if kind == "parquet":
         yield from _iter_parquet_records(body)
-        return
-    if kind == "avro":
-        yield from _iter_avro_records(body)
         return
     if kind == "orc":
         yield from _iter_orc_records(body)
@@ -1783,9 +1818,9 @@ def _iter_artifact_records(
 ) -> Any:
     """Dest-engine records of an object-store GET. Same gzip machine as COUNT.
 
-    CSV/JSON/JSONL (including gzip) walk ``source`` forward-only.
-    Parquet/Avro/ORC/Excel still materialize one object (byte-image /
-    workbook parsers). JSON unique-path cell dicts (root array or wrapped)
+    CSV/JSON/JSONL/XML/Avro (including gzip) walk ``source`` forward-only.
+    Parquet/ORC/Excel still materialize one object (byte-image /
+    workbook / footer parsers). JSON unique-path cell dicts (root array or wrapped)
     and XML unique-path cell dicts are a second StAX pass of the COUNT
     path (one-shot GET is spooled once). Never ``json.loads`` fallback empty.
     """
@@ -2203,6 +2238,24 @@ def open_artifact_binary(path: Path) -> tuple[Any, Any]:
     return handle, handle.close
 
 
+def artifact_byte_source(content: bytes | str | Path | Any) -> tuple[Any, Any]:
+    """Path / bytes / str / readable stream → a binary handle for dest COUNT.
+
+    ``Path`` (including ``*.gz``) uses ``open_artifact_binary``. Bytes and
+    str stay in RAM. A readable stream is returned as-is (object-store GET,
+    one-shot gzip). JSON, XML, and Avro share this opener — not three copies.
+    """
+    if isinstance(content, Path):
+        return open_artifact_binary(content)
+    if isinstance(content, bytes):
+        return io.BytesIO(content), None
+    if isinstance(content, str):
+        return io.BytesIO(content.encode("utf-8")), None
+    if hasattr(content, "read"):
+        return content, None
+    raise TypeError("artifact COUNT expects bytes, str, Path, or a readable stream")
+
+
 def _count_parquet_bytes(content: bytes) -> int | None:
     import io
 
@@ -2285,23 +2338,8 @@ def _count_excel_bytes(content: bytes) -> int | None:
         return None
 
 
-def _count_avro_bytes(content: bytes) -> int | None:
-    """Streamed record COUNT. Never materialize; never the ingest 100k cap."""
-    import io
-
-    try:
-        import fastavro
-    except ImportError:
-        return None
-    try:
-        return sum(1 for _ in fastavro.reader(io.BytesIO(content)))
-    except Exception as exc:
-        logger.info("avro artifact count unavailable: %s", exc)
-        return None
-
-
 def _count_streaming_kind(kind: str, source: Any) -> int | None:
-    """CSV/TSV/JSON/JSONL/XML COUNT from Path, bytes, str, or a readable stream."""
+    """CSV/TSV/JSON/JSONL/XML/Avro COUNT from Path, bytes, str, or a readable stream."""
     if kind in {"csv", "tsv"}:
         from services.csv_profiler import count_csv_rows
 
@@ -2322,6 +2360,9 @@ def _count_streaming_kind(kind: str, source: Any) -> int | None:
 
         n = count_xml_records(source)
         return None if n is None else int(n)
+    if kind == "avro":
+        n = count_avro_records(source)
+        return None if n is None else int(n)
     return None
 
 
@@ -2338,8 +2379,6 @@ def _count_artifact_kind(kind: str, content: bytes) -> int | None:
             return _count_streaming_kind(kind, content)
         if kind == "excel":
             return _count_excel_bytes(content)
-        if kind == "avro":
-            return _count_avro_bytes(content)
     except Exception as exc:
         logger.info("artifact count failed for kind %s: %s", kind, exc)
         return None
@@ -2354,10 +2393,10 @@ def _count_artifact_stream(
 ) -> int | None:
     """Dest-engine COUNT of an object-store GET stream. Same machine as a local file.
 
-    CSV/JSON/JSONL/XML (including gzip) walk ``source`` forward-only —
+    CSV/JSON/JSONL/XML/Avro (including gzip) walk ``source`` forward-only —
     ``GzipFile(fileobj=StreamingBody)``, never ``Body.read()`` of the object
     and never ``gzip.decompress`` of a second copy. CSV encoding sniff is
-    prefix-then-rest (no ``seek(0)``). Excel/Avro/Parquet/ORC still
+    prefix-then-rest (no ``seek(0)``). Excel/Parquet/ORC still
     materialize one object (byte-image / footer parsers). Unparseable /
     unsupported / missing parser stay unmeasured — never JSON-fallback
     empty (that is dest=0).
@@ -2434,10 +2473,10 @@ def count_artifact_rows(
     ``json.loads`` of the whole export. JSONL counts one object per
     non-blank line from disk, not ``decode`` + ``splitlines`` of the
     whole export. CSV/TSV counts RFC 4180 records from disk, not
-    ``wc -l`` and not a slurp of the whole file. Local CSV/JSON/JSONL/XML
-    gzip streams; Excel/Avro/Parquet/ORC gzip still decompresses first.
-    Object-store GET of CSV/JSON/JSONL/XML streams the HTTP body through
-    ``GzipFile`` when gzip; Excel/Avro/Parquet/ORC GET still materializes
+    ``wc -l`` and not a slurp of the whole file. Local CSV/JSON/JSONL/XML/Avro
+    gzip streams; Excel/Parquet/ORC gzip still decompresses first.
+    Object-store GET of CSV/JSON/JSONL/XML/Avro streams the HTTP body through
+    ``GzipFile`` when gzip; Excel/Parquet/ORC GET still materializes
     one object.
     """
     raw = str(path or "").strip()
