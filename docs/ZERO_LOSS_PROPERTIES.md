@@ -14,7 +14,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py tests/test_unicode_form_carry.py tests/test_property8_unicode_form.py -q` (137 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16 + unicode-form 21; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal unscaled integer; unicode form: PG TEXT / MariaDB `general_ci`/`bin` UNIQUE BOTH_LAND for NFC vs NFD; MariaDB `unicode_ci` SECOND_REJECT; dest HEX `C3A9` vs `CC81`; bind does not NFC | UCA 0900 vs 1400 live MySQL 8; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
-| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py tests/test_stream_append_precount.py tests/test_execute_tracked_sqlite_to_csv_to_sqlite_roundtrip.py -q` (94 passed in 6.08s on this host). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (25 passed); `npm run build` tsc+vite | Overwrite: dest COUNT(*). Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**. Dest-before before first write. Mirror: `COUNT(*) WHERE NOT _deleted`. Job closed iff every stream closed. File/object export: independent artifact record COUNT (re-open the file), not writer bytes. Writer ack never closes. | Inferred deletes on upsert/CDC without tombstone and not mirror; stream-path this-run `soft_deleted` census; Oracle/SQL Server live COUNT; dest-only sinks (pgvector, Milvus); object-store without a local path; live shared-reader CDC dest-before on PG logical; exactly-once |
+| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py tests/test_stream_append_precount.py tests/test_execute_tracked_sqlite_to_csv_to_sqlite_roundtrip.py -q` (97 passed, 1 skipped moto in 6.16s on this host). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (25 passed); `npm run build` tsc+vite | Overwrite: dest COUNT(*). Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**. Dest-before before first write — SQL, Iceberg snapshot, and object-store record COUNT (missing table/object = 0). Mirror: `COUNT(*) WHERE NOT _deleted`. Job closed iff every stream closed. File/object export: independent artifact record COUNT. Writer ack never closes. | Inferred deletes on upsert/CDC without tombstone and not mirror; stream-path this-run `soft_deleted` census; Oracle/SQL Server live COUNT; dest-only sinks (pgvector, Milvus); live moto/MinIO object-store COUNT (algorithm wired; moto absent this host); live shared-reader CDC dest-before on PG logical; exactly-once |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
 | 12 | Adversarial and chaos testing | UNPROVEN | — | — | — |
@@ -632,6 +632,12 @@ rowcount is not that proof.
    (dest-before 0). Cardinality ≠ cell checksum — Gate-8 stays
    `skipped_readback` / `migration_proven=false`. Remote URI without a
    local path stays unmeasured.
+10. Lakehouse / object-store dest-before: `destination_row_count` for
+    Iceberg (filesystem snapshot rows or catalog `scan().count()`) and
+    S3/GCS/ADLS (GET + the same parser Gate-8 uses). Missing table or
+    object is **0**. Iceberg key census scans the current snapshot —
+    `Table.upsert` rowcount never closes dest Δ. Metadata
+    `record-count` is writer-stamped and is not dest COUNT.
 
 **Measured (this host, SQLite + PostgreSQL 16 → MariaDB 10.11):**
 ```
@@ -692,6 +698,14 @@ rowcount is not that proof.
     CSV→JSON/JSONL/CSV conversion: artifact_row_count=2 independently.
     s3:// URI and unparseable JSONL stay unmeasured — never dest = writer.
 
+  Lakehouse / object-store dest-before (this host, after 2026-08-14 slice):
+    97 passed, 1 skipped (moto) in 6.16s.
+    Iceberg filesystem: missing table dest-before=0; after upsert COUNT=2;
+      key hits of {1,9}=1; DestBeforeCensus second capture stays 2 after
+      CoW update (dest-after still 2). Adapters `write_destination_database`
+      stamps target_rows_before=0 then 2. Writer upsert ack does not close.
+    S3 missing-key=0 / JSON array COUNT=2 wired; moto absent this host (skip).
+
   MySQL DELETE persists after connection close (PyMySQL autocommit method).
   Unit: last-op DELETE then INSERT is live; missing-key tombstone is not
     an insert; delete-only accumulator expected_delta=-2; is_active /
@@ -730,11 +744,14 @@ never “at destination table”, and never writer bytes.
 * Stream-path this-run `soft_deleted` / `reactivated` census (module-size freeze on `stream.py`)
 * Oracle / SQL Server live dest COUNT certify
 * dest-only sinks (pgvector, Milvus) — no SQL read-back by design
-* Object-store exports without a local path (S3 URI only) — dest COUNT
-  stays unmeasured until a dest-engine list/count exists. Local file
-  export artifact COUNT is **PARTIAL** (CSV/JSONL/JSON/Parquet footer).
+* Object-store dest COUNT — algorithm in `destination_row_count` (missing
+  object = 0; GET + Gate-8 parser). Live moto/MinIO certify skipped this
+  host (no moto). Local file_export artifact COUNT remains **PARTIAL**.
   Excel/Avro/ORC stay unmeasured. Artifact COUNT is not Gate-8 cell
   fidelity / `migration_proven`.
+* Iceberg dest-before — **PARTIAL** on filesystem CoW: missing=0, COUNT=2,
+  key hits=1, DestBeforeCensus frozen. pyiceberg SqlCatalog live scan
+  not run this host (pyiceberg absent). MoR / deletion vectors Planned.
 * Multi-table job rollup — **PARTIAL** on named SQLite fixture: two overwrite
   tables (2+3) close as job dest 5, not last-table 3. Mixed/keyed kinds are not
   summed.

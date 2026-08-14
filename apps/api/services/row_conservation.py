@@ -31,6 +31,8 @@ How dest_population is chosen:
 * **append** — only the delta proves anything:
   ``COUNT(*)_after - COUNT(*)_before``. A table that already held 30 rows
   satisfies ``dest >= expected`` even if the writer appended nothing.
+  Iceberg snapshot COUNT and object-store record COUNT are dest-before
+  the same way SQL COUNT(*) is — missing table/object is 0.
 * **upsert / CDC into a non-empty dest** — COUNT(*) is not event
   conservation (updates do not change cardinality). Dest-engine key census
   closes the *cardinality* identity:

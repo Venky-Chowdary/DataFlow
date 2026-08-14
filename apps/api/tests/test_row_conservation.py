@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
     DEST_COUNT_ARTIFACT,
@@ -1203,8 +1205,156 @@ def test_dest_before_census_counts_once_per_table(tmp_path: Path):
     assert census.get("items_alias") == 3
     assert count_endpoint_rows(endpoint, table_name="items") == 4
     summary: dict = {}
-    census.stamp(summary, "items")
+    assert census.stamp(summary, "items")
     assert summary["target_rows_before"] == 3
+
+
+def _iceberg_cfg(warehouse: Path) -> dict:
+    return {
+        "connection_string": str(warehouse),
+        "database": str(warehouse),
+        "host": "",
+        "schema": "",
+    }
+
+
+def test_iceberg_missing_table_is_measured_zero(tmp_path: Path):
+    """Create-on-first-write is dest-before 0, not unmeasured."""
+    from services.dest_precount import destination_row_count
+
+    n = destination_row_count(
+        "iceberg", _iceberg_cfg(tmp_path / "wh"), schema="", table_name="orders"
+    )
+    assert n == 0
+
+
+def test_iceberg_filesystem_dest_count_and_key_hits_independent_of_writer(tmp_path: Path):
+    """Lakehouse MERGE conservation: dest snapshot COUNT and key hits, not upsert ack."""
+    from connectors.iceberg_writer import write_mapped_rows
+    from services.dest_precount import (
+        DestBeforeCensus,
+        count_endpoint_rows,
+        destination_key_hits,
+        destination_row_count,
+    )
+    from src.transfer.models import EndpointConfig
+
+    warehouse = tmp_path / "wh"
+    cfg = _iceberg_cfg(warehouse)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+        {"source": "_df_lsn", "target": "_df_lsn", "transform": "direct"},
+    ]
+    first = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="orders",
+        headers=["id", "v", "_df_lsn"],
+        data_rows=[["1", "a", "0/10"], ["2", "b", "0/10"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert first.ok, first.error
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 2
+    assert (
+        destination_key_hits(
+            "iceberg",
+            cfg,
+            schema="",
+            table_name="orders",
+            key_columns=["id"],
+            keys=[("1",), ("9",)],
+        )
+        == 1
+    )
+
+    endpoint = EndpointConfig(
+        kind="database",
+        format="iceberg",
+        connection_string=str(warehouse),
+        database=str(warehouse),
+        table="orders",
+    )
+    census = DestBeforeCensus()
+    before = census.capture(endpoint, table_name="orders")
+    assert before == 2
+    second = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="orders",
+        headers=["id", "v", "_df_lsn"],
+        data_rows=[["1", "a2", "0/20"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert second.ok, second.error
+    assert census.capture(endpoint, table_name="orders") == 2
+    assert count_endpoint_rows(endpoint, table_name="orders") == 2
+    summary: dict = {}
+    census.stamp(summary, "orders")
+    assert summary["target_rows_before"] == 2
+
+
+def test_write_destination_database_stamps_iceberg_dest_before(tmp_path: Path):
+    """Adapters precount uses dest-engine Iceberg COUNT — missing table is 0."""
+    from src.transfer.adapters import write_destination_database
+    from src.transfer.models import EndpointConfig
+
+    warehouse = tmp_path / "wh"
+    dest = EndpointConfig(
+        kind="database",
+        format="iceberg",
+        database=str(warehouse),
+        table="orders",
+        connection_string=str(warehouse),
+    )
+    records = [{"id": "1", "v": "a"}, {"id": "2", "v": "b"}]
+    columns = ["id", "v"]
+    mappings = [{"source": c, "target": c} for c in columns]
+    schema = {"id": "string", "v": "string"}
+    written, _ddl, summary = write_destination_database(
+        dest, records, columns, schema, mappings
+    )
+    assert written == 2, summary
+    assert summary.get("target_rows_before") == 0
+    written2, _ddl2, summary2 = write_destination_database(
+        dest, records, columns, schema, mappings
+    )
+    assert written2 == 2
+    assert summary2.get("target_rows_before") == 2
+
+
+def test_s3_missing_object_is_measured_zero():
+    """Missing object is dest-before 0 (create-on-first-write), not writer ack."""
+    moto = pytest.importorskip("moto")
+    import boto3
+
+    from services.dest_precount import destination_row_count
+
+    with moto.mock_aws():
+        boto3.client("s3", region_name="us-east-1").create_bucket(Bucket="df-count")
+        n = destination_row_count(
+            "s3",
+            {"database": "df-count", "host": "us-east-1"},
+            schema="",
+            table_name="exports/missing.json",
+        )
+        assert n == 0
+        boto3.client("s3", region_name="us-east-1").put_object(
+            Bucket="df-count",
+            Key="exports/data.json",
+            Body=b'[{"id":1},{"id":2}]',
+        )
+        assert (
+            destination_row_count(
+                "s3",
+                {"database": "df-count", "host": "us-east-1"},
+                schema="",
+                table_name="exports/data.json",
+            )
+            == 2
+        )
 
 
 def test_job_rollup_two_keyed_streams_closed_not_summed():

@@ -62,6 +62,11 @@ DIALECT_PROFILES: dict[str, DialectProfile] = {
     "presto": DialectProfile("presto", "public", True, "none", "double"),
     "trino": DialectProfile("trino", "default", True, "none", "double"),
     "generic_sql": DialectProfile("generic_sql", None, True, "none", "double"),
+    "iceberg": DialectProfile("iceberg", None, True, "none", "double", "namespace"),
+    "apache_iceberg": DialectProfile("apache_iceberg", None, True, "none", "double", "namespace"),
+    "s3": DialectProfile("s3", None, False, "none", "none", "bucket"),
+    "gcs": DialectProfile("gcs", None, False, "none", "none", "bucket"),
+    "adls": DialectProfile("adls", None, False, "none", "none", "container"),
 }
 
 _ALIASES: dict[str, str] = {
@@ -70,6 +75,10 @@ _ALIASES: dict[str, str] = {
     "mysql+pymysql": "mysql",
     "oracle+oracledb": "oracle",
     "bq": "bigquery",
+    "amazon_s3": "s3",
+    "azure_blob_storage": "adls",
+    "azure_data_lake": "adls",
+    "azure_data_lake_storage": "adls",
 }
 
 

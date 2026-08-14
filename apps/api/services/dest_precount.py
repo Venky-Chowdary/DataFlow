@@ -25,6 +25,11 @@ COUNT records. Writer ``rows`` / bytes-landed is Airbyte/Fivetran S3
 success — it does not close conservation. Independent artifact COUNT is
 cardinality, not Gate-8 cell fidelity.
 
+Lakehouse and object-store destinations already have dest-*after* read-back
+(Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
+append delta and first-write overwrite (missing table/object = 0) can close.
+Writer ``Table.upsert`` / PUT rowcount is not that proof.
+
 ``None`` means the count is unavailable (unsupported engine, missing table,
 unreachable destination, or an unreadable/unsupported artifact); callers
 must degrade assurance rather than assume zero.
@@ -74,6 +79,14 @@ DEST_COUNT_SOURCE_KEY = "dest_count_source"
 DEST_COUNT_ARTIFACT = "artifact_readback"
 
 _ARTIFACT_FORMATS = frozenset({"csv", "tsv", "json", "jsonl", "parquet"})
+_OBJECT_STORE_DRIVERS = frozenset({
+    "s3",
+    "gcs",
+    "adls",
+    "azure_blob_storage",
+    "azure_data_lake",
+    "azure_data_lake_storage",
+})
 
 
 def _count(conn: Any, table_ref: str) -> int:
@@ -187,6 +200,12 @@ def destination_row_count(
                 return int(coll.count_documents({}))
             finally:
                 client.close()
+
+        if db_type in {"iceberg", "apache_iceberg"}:
+            return _iceberg_row_count(cfg, schema=schema, table_name=table)
+
+        if db_type in _OBJECT_STORE_DRIVERS:
+            return _object_store_row_count(db_type, cfg, table_name=table)
     except Exception as exc:  # pragma: no cover - destination-specific failure
         logger.warning("Pre-write destination count failed: %s", exc)
         return None
@@ -231,6 +250,14 @@ def destination_key_hits(
         return None
     if n == 0:
         return 0
+    if db_type in {"iceberg", "apache_iceberg"}:
+        try:
+            return _iceberg_key_hits(
+                cfg, schema=schema, table_name=table, cols=cols, keys=unique
+            )
+        except Exception as exc:  # pragma: no cover
+            logger.warning("Iceberg dest key census failed: %s", exc)
+            return None
     try:
         return _key_hits_sql(db_type, cfg, schema=schema, table_name=table, cols=cols, keys=unique)
     except Exception as exc:  # pragma: no cover - destination-specific failure
@@ -339,6 +366,265 @@ def _sum_distinct_hits(
             total += int(row[0]) if row and row[0] is not None else 0
         finally:
             cur.close()
+    return total
+
+
+def _iceberg_endpoint(cfg: dict[str, Any], table_name: str, schema: str) -> dict[str, Any]:
+    return {
+        **dict(cfg),
+        "table": table_name,
+        "table_name": table_name,
+        "schema": schema or cfg.get("schema") or "",
+    }
+
+
+def _iceberg_missing_table(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    text = str(exc).lower()
+    return "NoSuchTable" in name or "not found" in text or "does not exist" in text
+
+
+def _iceberg_filesystem_count(cfg: dict[str, Any], table_name: str, schema: str) -> int | None:
+    """Independent snapshot COUNT from current data files — not metadata record-count."""
+    from connectors.iceberg_writer import (
+        _load_existing_rows,
+        _load_metadata,
+        _resolve_iceberg_table_dir,
+    )
+
+    table_dir = _resolve_iceberg_table_dir(cfg, table_name, schema or None)
+    meta_dir = table_dir / "metadata"
+    if not meta_dir.is_dir():
+        return 0
+    versions = sorted(meta_dir.glob("v*.metadata.json"))
+    if not versions:
+        return 0
+    current_meta = _load_metadata(versions[-1])
+    if not current_meta:
+        return 0
+    schema_json = (current_meta.get("schemas") or [{}])[-1] or current_meta.get("schema") or {}
+    columns = [str(f.get("name")) for f in (schema_json.get("fields") or []) if f.get("name")]
+    rows = _load_existing_rows(table_dir, columns or ["_"], current_meta)
+    return len(rows)
+
+
+def _iceberg_catalog_count(cfg: dict[str, Any], table_name: str, schema: str) -> int | None:
+    from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+
+    endpoint = _iceberg_endpoint(cfg, table_name, schema)
+    parsed = parse_iceberg_catalog_config(endpoint)
+    catalog = load_catalog(endpoint)
+    identifier = parsed["namespace"] + (parsed["table_name"],)
+    try:
+        tbl = catalog.load_table(identifier)
+    except Exception as exc:
+        if _iceberg_missing_table(exc):
+            return 0
+        raise
+    return int(tbl.scan().count())
+
+
+def _iceberg_row_count(
+    cfg: dict[str, Any], *, schema: str, table_name: str
+) -> int | None:
+    from connectors.iceberg_writer import resolve_iceberg_write_path
+
+    endpoint = _iceberg_endpoint(cfg, table_name, schema)
+    try:
+        path = resolve_iceberg_write_path(endpoint)
+    except RuntimeError as exc:
+        logger.info("Iceberg dest COUNT unavailable: %s", exc)
+        return None
+    if path == "catalog":
+        return _iceberg_catalog_count(cfg, table_name, schema)
+    return _iceberg_filesystem_count(cfg, table_name, schema)
+
+
+def _iceberg_snapshot_rows(
+    cfg: dict[str, Any], *, schema: str, table_name: str, cols: Sequence[str]
+) -> list[dict[str, Any]] | None:
+    from connectors.iceberg_writer import resolve_iceberg_write_path
+
+    endpoint = _iceberg_endpoint(cfg, table_name, schema)
+    try:
+        path = resolve_iceberg_write_path(endpoint)
+    except RuntimeError:
+        return None
+    if path == "catalog":
+        from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+
+        parsed = parse_iceberg_catalog_config(endpoint)
+        catalog = load_catalog(endpoint)
+        identifier = parsed["namespace"] + (parsed["table_name"],)
+        try:
+            tbl = catalog.load_table(identifier)
+        except Exception as exc:
+            if _iceberg_missing_table(exc):
+                return []
+            raise
+        wanted = [str(c) for c in cols if str(c).strip()]
+        arrow = tbl.scan().select(wanted).to_arrow() if wanted else tbl.scan().to_arrow()
+        return list(arrow.to_pylist())
+    from connectors.iceberg_writer import (
+        _load_existing_rows,
+        _load_metadata,
+        _resolve_iceberg_table_dir,
+    )
+
+    table_dir = _resolve_iceberg_table_dir(cfg, table_name, schema or None)
+    meta_dir = table_dir / "metadata"
+    if not meta_dir.is_dir():
+        return []
+    versions = sorted(meta_dir.glob("v*.metadata.json"))
+    if not versions:
+        return []
+    current_meta = _load_metadata(versions[-1])
+    if not current_meta:
+        return []
+    schema_json = (current_meta.get("schemas") or [{}])[-1] or current_meta.get("schema") or {}
+    columns = [str(f.get("name")) for f in (schema_json.get("fields") or []) if f.get("name")]
+    load_cols = list(dict.fromkeys([*columns, *[str(c) for c in cols if str(c).strip()]]))
+    return _load_existing_rows(table_dir, load_cols or list(cols), current_meta)
+
+
+def _norm_dest_key(values: Sequence[Any]) -> tuple[str, ...] | None:
+    """Comparable dest key — JSONL strings and catalog ints must hit the same PK."""
+    out: list[str] = []
+    for value in values:
+        if value is None or value == "":
+            return None
+        out.append(str(value))
+    return tuple(out)
+
+
+def _iceberg_key_hits(
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    rows = _iceberg_snapshot_rows(cfg, schema=schema, table_name=table_name, cols=cols)
+    if rows is None:
+        return None
+    wanted = {norm for key in keys if (norm := _norm_dest_key(key)) is not None}
+    seen: set[tuple[str, ...]] = set()
+    for row in rows:
+        tup = _norm_dest_key(row.get(c) for c in cols)
+        if tup is not None and tup in wanted:
+            seen.add(tup)
+    return len(seen)
+
+
+def _object_store_kind(db_type: str) -> str:
+    if db_type in {"adls", "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage"}:
+        return "adls"
+    return db_type
+
+
+def _object_store_list_and_get(
+    kind: str, cfg: dict[str, Any], bucket: str, key: str
+) -> list[tuple[str, bytes]] | None:
+    """Payloads for dest COUNT. ``[]`` is missing (measured zero). ``None`` is unknowable."""
+    from connectors.object_store_common import (
+        normalize_object_base_key,
+        object_parts_prefix,
+        object_store_read_keys,
+    )
+
+    if kind == "s3":
+        from connectors.s3_reader import list_objects
+    elif kind == "gcs":
+        from connectors.gcs_reader import list_objects
+    elif kind == "adls":
+        from connectors.adls_reader import list_objects
+    else:
+        return None
+
+    base = normalize_object_base_key(key)
+    parts_prefix = object_parts_prefix(base)
+    try:
+        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
+    except Exception as exc:
+        logger.info("object-store list failed for dest COUNT: %s", exc)
+        return None
+    read_keys = object_store_read_keys(base, listed)
+    payloads: list[tuple[str, bytes]] = []
+    for obj_key in read_keys:
+        body = _object_store_get_bytes(kind, cfg, bucket, obj_key)
+        if body is False:
+            continue
+        if body is None:
+            return None
+        payloads.append((obj_key, body))
+    return payloads
+
+
+def _object_store_get_bytes(
+    kind: str, cfg: dict[str, Any], bucket: str, key: str
+) -> bytes | None | bool:
+    """bytes on hit, False if missing, None if unknowable."""
+    try:
+        if kind == "s3":
+            from botocore.exceptions import ClientError
+            from connectors.aws_common import boto3_client
+
+            try:
+                return boto3_client("s3", cfg).get_object(Bucket=bucket, Key=key)["Body"].read()
+            except ClientError as exc:
+                code = str((exc.response or {}).get("Error", {}).get("Code") or "")
+                http = str((exc.response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode") or "")
+                if code in {"404", "NoSuchKey", "NotFound"} or http == "404":
+                    return False
+                raise
+        if kind == "gcs":
+            from connectors.gcs_common import gcs_client
+
+            blob = gcs_client(cfg).bucket(bucket).get_blob(key)
+            if blob is None:
+                return False
+            return blob.download_as_bytes()
+        if kind == "adls":
+            from connectors.adls_common import blob_service_client
+
+            try:
+                return (
+                    blob_service_client(cfg)
+                    .get_blob_client(bucket, key)
+                    .download_blob()
+                    .readall()
+                )
+            except Exception as exc:
+                name = type(exc).__name__
+                if "NotFound" in name or "404" in str(exc):
+                    return False
+                raise
+    except Exception as exc:
+        logger.info("object-store GET failed for dest COUNT (%s/%s): %s", bucket, key, exc)
+        return None
+    return None
+
+
+def _object_store_row_count(
+    db_type: str, cfg: dict[str, Any], *, table_name: str
+) -> int | None:
+    bucket = str(cfg.get("database") or "").strip()
+    key = str(table_name or "").strip()
+    if not bucket or not key:
+        return None
+    kind = _object_store_kind(db_type)
+    payloads = _object_store_list_and_get(kind, cfg, bucket, key)
+    if payloads is None:
+        return None
+    if not payloads:
+        return 0
+    from services.reconciliation import _rows_from_object_bytes
+
+    total = 0
+    for obj_key, body in payloads:
+        rows, _headers = _rows_from_object_bytes(body, obj_key)
+        total += len(rows)
     return total
 
 
