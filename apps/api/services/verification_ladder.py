@@ -97,17 +97,30 @@ def layer_l1_row_balance(
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
     allow_extra_rows: bool = False,
+    target_rows_before: int | None = None,
 ) -> LayerReport:
-    """L1 — accounting identity used by Gate-8 reconcile()."""
+    """L1 — accounting identity used by Gate-8 reconcile().
+
+    Overwrite: ``source - dropped - skipped == dest COUNT(*)``.
+    Append/upsert into a larger sink: dest-before delta is the identity
+    (``dest - dest_before == expected``). ``dest >= expected`` alone is not
+    proof — the table may already have held more rows than the batch.
+    """
     dropped = max(max(int(rejected_rows or 0), 0) - max(int(coerced_null_rows or 0), 0), 0)
     skipped = max(int(rows_skipped or 0), 0)
     expected = max(int(source_rows) - dropped - skipped, 0)
     target = int(target_rows)
-    ok = target == expected or (allow_extra_rows and target >= expected)
+    equation = "source - dropped - skipped == target"
+    if allow_extra_rows and target_rows_before is not None:
+        delta = target - int(target_rows_before)
+        ok = delta == expected
+        equation = "target - target_rows_before == expected"
+    else:
+        ok = target == expected or (allow_extra_rows and target >= expected)
     return LayerReport(
         layer="L1",
         passed=ok,
-        population_proof=True,
+        population_proof=not allow_extra_rows,
         details={
             "source_rows": int(source_rows),
             "target_rows": target,
@@ -116,7 +129,8 @@ def layer_l1_row_balance(
             "rows_skipped": skipped,
             "dropped_rows": dropped,
             "expected_rows": expected,
-            "equation": "source - dropped - skipped == target",
+            "target_rows_before": target_rows_before,
+            "equation": equation,
         },
     )
 
@@ -566,6 +580,8 @@ def run_five_layer_verification(
     dest_types: dict[str, str] | None = None,
     allow_extra_rows: bool = False,
     always_localize: bool = False,
+    checksum_scope: str = "",
+    target_rows_before: int | None = None,
 ) -> dict[str, Any]:
     """Execute L1–L5 on two in-memory populations (SQL-loaded or buffered).
 
@@ -603,6 +619,7 @@ def run_five_layer_verification(
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
         allow_extra_rows=allow_extra_rows,
+        target_rows_before=target_rows_before,
     )
 
     src_agg = compute_column_aggregates(source_rows, cols)
@@ -618,16 +635,36 @@ def run_five_layer_verification(
     tgt_chk = (target_checksum or "").strip() or aggregate_checksum(
         target_rows, cols, dest_db_type=dest_db_type, dest_types=dest_types
     )
-    l3 = LayerReport(
-        layer="L3",
-        passed=bool(src_chk and tgt_chk and src_chk == tgt_chk),
-        population_proof=True,
-        details={
-            "source_checksum": src_chk,
-            "target_checksum": tgt_chk,
-            "algorithm": "order_independent_sha256_row_fingerprints",
-        },
-    )
+    from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+
+    incomparable = str(checksum_scope or "") == WHOLE_TABLE_NOT_COMPARABLE
+    if incomparable:
+        # Whole-table hashes cover rows this job never wrote. Gate-8 already
+        # judged the dest-before delta; treating the digest gap as L3 failure
+        # marks a healthy append as a failed transfer.
+        l3 = LayerReport(
+            layer="L3",
+            passed=True,
+            population_proof=False,
+            details={
+                "skipped": True,
+                "reason": WHOLE_TABLE_NOT_COMPARABLE,
+                "source_checksum": src_chk,
+                "target_checksum": tgt_chk,
+                "algorithm": "order_independent_sha256_row_fingerprints",
+            },
+        )
+    else:
+        l3 = LayerReport(
+            layer="L3",
+            passed=bool(src_chk and tgt_chk and src_chk == tgt_chk),
+            population_proof=True,
+            details={
+                "source_checksum": src_chk,
+                "target_checksum": tgt_chk,
+                "algorithm": "order_independent_sha256_row_fingerprints",
+            },
+        )
 
     layers = {
         "L1": l1.to_dict(),
@@ -636,7 +673,7 @@ def run_five_layer_verification(
     }
     localization: dict[str, Any] = {}
 
-    run_localize = (not l3.passed) or always_localize
+    run_localize = ((not l3.passed) or always_localize) and not incomparable
     if run_localize and pk and cols:
         src_col = column_typed_checksums(
             source_rows, cols, dest_db_type=dest_db_type, dest_types=dest_types
@@ -678,9 +715,15 @@ def run_five_layer_verification(
     # Required for green: L1 + L3. L2 is advisory when numeric coercion differs
     # in text form but fingerprints match — still reported.
     passed = bool(l1.passed and l3.passed)
-    assurance = "five_layer" if passed and "L4" in layers and layers["L4"].get("passed") else (
-        "full_checksum" if passed else "failed"
-    )
+    expected = int((l1.details or {}).get("expected_rows") or 0)
+    extra_dest = bool(allow_extra_rows and tgt_n > expected)
+    l3_skipped = bool((l3.details or {}).get("skipped"))
+    if incomparable and passed:
+        assurance = "row_count"
+    else:
+        assurance = "five_layer" if passed and "L4" in layers and layers["L4"].get("passed") else (
+            "full_checksum" if passed else "failed"
+        )
     summary = ""
     if localization.get("rows"):
         first = localization["rows"][0]
@@ -699,7 +742,9 @@ def run_five_layer_verification(
         "assurance_level": assurance,
         # Population RI (FK/constraints) is still not claimed — only typed fidelity.
         "population_proof": False,
-        "population_checksum_proof": bool(l3.passed and l1.passed),
+        "population_checksum_proof": bool(
+            l3.passed and l1.passed and not incomparable and not extra_dest and not l3_skipped
+        ),
         "localization": localization,
         "localization_summary": summary,
         "screening_note": (

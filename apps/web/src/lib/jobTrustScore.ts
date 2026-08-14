@@ -136,6 +136,10 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       assurance === "sample"
       || phase.includes("sample_verified")
       || /sample-verified|sample verified/i.test(msg);
+    const appendDelta =
+      assurance === "row_count"
+      || phase.includes("row_count")
+      || String(recon.checksum_scope || "").toLowerCase() === "whole_table_not_comparable";
     const fullChecksum =
       assurance === "full_checksum"
       || (
@@ -146,6 +150,7 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
         && !writerAck
         && !sample
         && !unproven
+        && !appendDelta
       );
     const preWrite =
       preview
@@ -165,6 +170,8 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       reconScore = 58;
     } else if (sample) {
       reconScore = 68;
+    } else if (appendDelta) {
+      reconScore = 70;
     } else if (fullChecksum) {
       reconScore = 100;
     } else if (passed === true) {
@@ -185,6 +192,8 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       rNote = "Writer acknowledgment only — independent read-back not captured.";
     } else if (sample) {
       rNote = "Sample-verified Gate-8 — not full independent checksum.";
+    } else if (appendDelta) {
+      rNote = "Gate-8 append delta verified — whole-table checksums are not comparable; per-cell fidelity is not proven.";
     } else if (missing || extra) {
       rNote = `Keys missing=${missing} extra=${extra}.`;
     } else if (fullChecksum) {
@@ -263,6 +272,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       && !phase.includes("skipped")
       && recon?.unproven !== true
       && recon?.skipped_readback !== true
+      && assurance !== "row_count"
+      && !phase.includes("row_count")
+      && String(recon?.checksum_scope || "") !== "whole_table_not_comparable"
     );
   if (!recon) {
     score = Math.min(score, 84);

@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyGate8Status, isGate8IdentityUnproven, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
+import { classifyGate8Status, isGate8AppendDelta, isGate8IdentityUnproven, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
@@ -236,4 +236,27 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
     assert.equal(view.tone, "warn");
     assert.equal(view.fullPass, false);
   });
+
+  it("strict full append dest-before is append delta, not checksum fail or Verified", () => {
+    const report = {
+      passed: true,
+      phase: "post_write_row_count",
+      coverage: "row_count",
+      assurance_level: "row_count",
+      checksum_scope: "whole_table_not_comparable",
+      source_checksum: "aaa",
+      target_checksum: "bbb",
+      checksum_match: false,
+      migration_proven: false,
+      source_rows: 200,
+      target_rows: 300,
+      message: "Append delta verified (200 row(s) appended: 100 → 300). Whole-table digests are not comparable.",
+    };
+    assert.equal(isGate8AppendDelta(report), true);
+    const view = classifyGate8Status(report);
+    assert.equal(view.label, "Append delta");
+    assert.equal(view.tone, "warn");
+    assert.equal(view.fullPass, false);
+  });
 });
+

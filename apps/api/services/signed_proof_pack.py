@@ -69,26 +69,63 @@ class FidelityVeto:
         }
 
 
+def _append_delta_scope(recon: dict[str, Any]) -> bool:
+    """True when Gate-8 already judged incomparable whole-table hashes via dest-before."""
+    from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+
+    scope = str(recon.get("checksum_scope") or "")
+    coverage = str(recon.get("coverage") or recon.get("assurance_level") or "").lower()
+    phase = str(recon.get("phase") or "").lower()
+    return (
+        scope == WHOLE_TABLE_NOT_COMPARABLE
+        or coverage == "row_count"
+        or phase.endswith("row_count")
+        or "post_write_row_count" in phase
+    )
+
+
+def _ladder_fail_veto(ladder: dict[str, Any]) -> FidelityVeto:
+    loc = str(ladder.get("localization_summary") or "").strip()
+    note = "Column-profile / verification ladder failed — migration not proven."
+    if loc:
+        note = f"{note} {loc}"
+    return FidelityVeto(
+        claim_level="failed",
+        phase="post_write_failed",
+        operational_passed=False,
+        assurance_level="none",
+        coverage="none",
+        note=note,
+    )
+
+
 def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
     """Return a veto when the destination does not hold the source values.
 
     Operational ``passed`` (rows landed) is a different question — a coerced
     write can complete and still be forbidden from claiming ``migration_proven``.
     """
+    from services.reconcile_coverage import WRITTEN_BATCH_KEYS
+
     ladder = recon.get("verification_ladder") if isinstance(recon.get("verification_ladder"), dict) else {}
     if ladder and not ladder.get("skipped") and ladder.get("passed") is False:
-        loc = str(ladder.get("localization_summary") or "").strip()
-        note = "Column-profile / verification ladder failed — migration not proven."
-        if loc:
-            note = f"{note} {loc}"
-        return FidelityVeto(
-            claim_level="failed",
-            phase="post_write_failed",
-            operational_passed=False,
-            assurance_level="none",
-            coverage="none",
-            note=note,
-        )
+        skip_veto = False
+        if bool(recon.get("passed")):
+            layers = ladder.get("layers") or {}
+            l1_ok = (layers.get("L1") or {}).get("passed") is not False
+            l3_ok = (layers.get("L3") or {}).get("passed") is not False
+            # Dest-before already closed; whole-table hashes are not a cell failure.
+            if _append_delta_scope(recon) and l1_ok:
+                skip_veto = True
+            # Keyed-batch cells matched; extra dest rows sit outside that proof.
+            elif (
+                str(recon.get("checksum_scope") or "") == WRITTEN_BATCH_KEYS
+                and recon.get("checksum_match") is True
+                and l3_ok
+            ):
+                skip_veto = True
+        if not skip_veto:
+            return _ladder_fail_veto(ladder)
     coverage = str(recon.get("coverage") or "").lower()
     phase = str(recon.get("phase") or "").lower()
     # Only veto a write that operationally completed. A failed run with
@@ -280,6 +317,20 @@ def classify_post_write_assurance(
             "note": (
                 "Writer acknowledgement is not independent post-write verification — "
                 "migration not proven."
+            ),
+        }
+
+    if _append_delta_scope(recon) and passed:
+        return {
+            "claim_level": "row_count",
+            "post_write_verified": True,
+            "migration_proven": False,
+            "population_proof": False,
+            "referential_integrity_proven": False,
+            "checksum_match": False,
+            "note": (
+                "Append/upsert dest-before delta verified — whole-table digests "
+                "are not comparable. Per-cell / population fidelity is not proven."
             ),
         }
 

@@ -23,6 +23,7 @@ from services.reconcile_coverage import (
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
     SOURCE_DIGEST_WRITER_ACK,
+    WHOLE_TABLE_NOT_COMPARABLE,
     WRITTEN_BATCH_KEYS,
 )
 from services.reconciliation import (
@@ -497,6 +498,17 @@ def _maybe_attach_verification_ladder(
         for m in mappings
         if m.get("target") and (m.get("target_type") or m.get("inferredType"))
     }
+    from services.sync_cursor import is_overwrite_sync
+
+    sync_mode = str(
+        dest_summary.get("sync_mode") or dest_summary.get("effective_sync_mode") or ""
+    )
+    allow_extra = (
+        not is_overwrite_sync(sync_mode)
+        and sync_mode.lower() not in {"full_refresh_mirror", "mirror", "scd2"}
+    )
+    raw_before = dest_summary.get(PRECOUNT_KEY)
+    dest_before = int(raw_before) if isinstance(raw_before, int) else None
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -511,6 +523,9 @@ def _maybe_attach_verification_ladder(
         target_checksum=str(report.get("target_checksum") or ""),
         dest_db_type=dest_type,
         dest_types=dest_types,
+        allow_extra_rows=allow_extra,
+        checksum_scope=str(report.get("checksum_scope") or ""),
+        target_rows_before=dest_before,
         # maximum: always run L4/L5. strict/balanced: localize only on L3 fail.
         always_localize=str(validation_mode or "").lower() == "maximum",
     )
@@ -1380,7 +1395,6 @@ def run_reconciliation(
         # cardinality and say plainly that population fidelity is not proven —
         # never compare two different populations and call the difference
         # corruption.
-        from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
         from services.reconciliation import ReconciliationReport
 
         expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)

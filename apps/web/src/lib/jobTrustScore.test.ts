@@ -155,4 +155,28 @@ describe("computeJobTrustScore", () => {
     assert.ok((factor?.score as number) <= 45);
     assert.ok(factor?.note.toLowerCase().includes("unproven"));
   });
+
+  it("does not treat append dest-before delta as full checksum Verified", () => {
+    const append = computeJobTrustScore({
+      status: "completed",
+      records_processed: 200,
+      rejected_rows: 0,
+      reconciliation: {
+        passed: true,
+        phase: "post_write_row_count",
+        assurance_level: "row_count",
+        coverage: "row_count",
+        checksum_scope: "whole_table_not_comparable",
+        source_checksum: "aaa",
+        target_checksum: "bbb",
+        checksum_match: false,
+        migration_proven: false,
+        message: "Append delta verified (200 row(s) appended: 100 → 300).",
+      },
+    });
+    const factor = append.factors.find((f) => f.id === "reconcile");
+    assert.ok(factor?.note.toLowerCase().includes("append delta"));
+    assert.notEqual(append.grade, "A");
+    assert.ok(append.score <= 89);
+  });
 });

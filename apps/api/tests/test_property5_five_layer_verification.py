@@ -314,3 +314,85 @@ def test_pg_five_layer_localizes_injected_drift():
             cur.execute(f'DROP TABLE IF EXISTS public."{dst_table}"')
         conn.commit()
         conn.close()
+
+
+def test_l1_append_uses_dest_before_delta():
+    from services.verification_ladder import layer_l1_row_balance
+
+    # 200 written into a table that already held 100 → dest=300.
+    ok = layer_l1_row_balance(
+        source_rows=200,
+        target_rows=300,
+        allow_extra_rows=True,
+        target_rows_before=100,
+    )
+    assert ok.passed is True
+    assert ok.details["equation"] == "target - target_rows_before == expected"
+
+    short = layer_l1_row_balance(
+        source_rows=200,
+        target_rows=250,
+        allow_extra_rows=True,
+        target_rows_before=100,
+    )
+    assert short.passed is False
+
+
+def test_ladder_does_not_fail_incomparable_append_hashes():
+    """Whole-table hashes after Full Append are not L3 cell proof."""
+    from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+    from services.verification_ladder import run_five_layer_verification
+
+    source = [{"id": 1, "nm": "a"}, {"id": 2, "nm": "b"}]
+    dest = source + [{"id": 9, "nm": "seed"}, {"id": 10, "nm": "seed"}]
+    ladder = run_five_layer_verification(
+        source_rows=source,
+        target_rows=dest,
+        columns=["id", "nm"],
+        pk_column="id",
+        source_row_count=2,
+        target_row_count=4,
+        source_checksum="aaa",
+        target_checksum="bbb",
+        allow_extra_rows=True,
+        checksum_scope=WHOLE_TABLE_NOT_COMPARABLE,
+        target_rows_before=2,
+    )
+    assert ladder["layers"]["L1"]["passed"] is True
+    assert ladder["layers"]["L3"]["details"]["skipped"] is True
+    assert ladder["passed"] is True
+    assert ladder["population_checksum_proof"] is False
+    assert ladder["assurance_level"] == "row_count"
+
+
+def test_attach_ladder_does_not_veto_dest_before_pass():
+    from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+    from services.verification_ladder import attach_ladder_to_reconcile_report
+
+    report = {
+        "passed": True,
+        "message": "Append delta verified (2 row(s) appended: 2 → 4).",
+        "phase": "post_write_row_count",
+        "coverage": "row_count",
+        "assurance_level": "row_count",
+        "checksum_scope": WHOLE_TABLE_NOT_COMPARABLE,
+        "checksum_match": False,
+        "source_checksum": "aaa",
+        "target_checksum": "bbb",
+        "migration_proven": False,
+    }
+    ladder = {
+        "passed": False,
+        "skipped": False,
+        "assurance_level": "failed",
+        "population_checksum_proof": False,
+        "layers": {
+            "L1": {"passed": True},
+            "L3": {"passed": False},
+        },
+        "localization_summary": "",
+    }
+    out = attach_ladder_to_reconcile_report(report, ladder)
+    assert out["passed"] is True
+    assert out["phase"] == "post_write_row_count"
+    assert out["migration_proven"] is not True

@@ -186,6 +186,16 @@ export function isGate8PreWriteSimulation(report: Gate8Reconciliation): boolean 
   return false;
 }
 
+/** True when Gate-8 closed on dest-before delta, not comparable whole-table hashes. */
+export function isGate8AppendDelta(report: Gate8Reconciliation): boolean {
+  const scope = String(report.checksum_scope || "").toLowerCase();
+  if (scope === "whole_table_not_comparable") return true;
+  const coverage = String(report.coverage || report.assurance_level || "").toLowerCase();
+  if (coverage === "row_count") return true;
+  const phase = String(report.phase || "").toLowerCase();
+  return phase.includes("post_write_row_count") || phase.endsWith("row_count");
+}
+
 export type Gate8StatusView = {
   label: string;
   tone: "ok" | "warn" | "danger" | "muted";
@@ -244,6 +254,9 @@ export function classifyGate8Status(
   if (isGate8SampleVerified(report)) {
     // Sample ≠ population — never green "ok" (Enterprise GA honesty).
     return { label: "Sample verified", tone: "warn", fullPass: false };
+  }
+  if (isGate8AppendDelta(report)) {
+    return { label: "Append delta", tone: "warn", fullPass: false };
   }
   // File/object export: API may set passed=true for operational success while
   // unproven/migration_proven=false — never green "Passed" without read-back.
@@ -338,7 +351,8 @@ export function Gate8ProofCard({
   }, [jobId, report.source_checksum, report.target_checksum, report.phase, report.passed]);
   const preWrite = isGate8PreWriteSimulation(report);
   const sampleVerified = !preWrite && isGate8SampleVerified(report);
-  const writerAck = !preWrite && !sampleVerified && isGate8WriterAckOnly(report);
+  const appendDelta = !preWrite && !sampleVerified && isGate8AppendDelta(report);
+  const writerAck = !preWrite && !sampleVerified && !appendDelta && isGate8WriterAckOnly(report);
   const passed = Boolean(report.passed) && !preWrite && !writerAck;
   const simulationOk = Boolean(report.passed) && preWrite;
   const writerAckOk = Boolean(report.passed) && writerAck;
@@ -375,12 +389,12 @@ export function Gate8ProofCard({
     || Boolean(sampleError)
     || sampleSkipped;
 
-  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven;
+  const fullChecksumPass = passed && !sampleVerified && !writerAck && !preWrite && !identityUnproven && !appendDelta;
   const toneClass = preWrite
     ? (simulationOk ? "is-pending" : "is-fail")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-fail")
-      : sampleVerified || identityUnproven
+      : sampleVerified || identityUnproven || appendDelta
         ? "is-pending"
         : (fullChecksumPass ? "is-pass" : (passed ? "is-pending" : "is-fail"));
   const title = preWrite
@@ -395,7 +409,9 @@ export function Gate8ProofCard({
         ? "Sample compared — identity not proven"
         : sampleVerified
           ? "Keyed sample matched — not population / migration_proven"
-          : (fullChecksumPass ? "Source and destination match" : "Reconciliation did not verify");
+          : appendDelta && passed
+            ? "Append delta verified — whole-table checksums not comparable"
+            : (fullChecksumPass ? "Source and destination match" : "Reconciliation did not verify");
   const badge = preWrite
     ? (simulationOk ? "Pending" : "Failed")
     : writerAck
@@ -404,12 +420,14 @@ export function Gate8ProofCard({
         ? "Unproven identity"
         : sampleVerified
           ? "Sample only"
-          : (fullChecksumPass ? "Verified" : "Failed");
+          : appendDelta && passed
+            ? "Row count"
+            : (fullChecksumPass ? "Verified" : "Failed");
   const badgeClass = preWrite
     ? (simulationOk ? "is-pending" : "is-bad")
     : writerAck
       ? (writerAckOk ? "is-pending" : "is-bad")
-      : identityUnproven || sampleVerified
+      : identityUnproven || sampleVerified || (appendDelta && passed)
         ? "is-pending"
         : (fullChecksumPass ? "is-ok" : "is-bad");
 
