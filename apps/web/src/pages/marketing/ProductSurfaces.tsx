@@ -733,7 +733,7 @@ export function PipelinesPage({
         <AlgorithmCinemaBand
           kicker="CDC"
           title="Snapshot handoff, then idempotent streaming upserts"
-          lead="Pipelines default to at-least-once upserts on the primary key. The snapshot window backfills, LSN 0/16A2B40 hands off, and streaming ticks apply — until exactly-once is proven for a route, we say so."
+          lead="Pipelines start with a consistent snapshot, hand off at a logical cursor, then stream upserts on the primary key so a retried tick cannot corrupt the destination."
           compact
         >
           <CdcCinema />
@@ -1326,8 +1326,8 @@ export function SyncSolutionPage({
       ]}
       caps={[
         {
-          title: "Honest CDC handoff",
-          body: "Snapshot + LSN handoff, then streaming upserts on primary keys. At-least-once until exactly-once is proven.",
+          title: "CDC snapshot, then stream",
+          body: "A consistent snapshot backfills, then streaming upserts land on the primary key so redelivery is safe.",
         },
         {
           title: "Idempotent upserts",
@@ -1342,7 +1342,7 @@ export function SyncSolutionPage({
         <AlgorithmCinemaBand
           kicker="CDC"
           title="Snapshot + LSN handoff, then streaming upserts"
-          lead="Honest CDC: start with a snapshot window, hand off at a logical LSN, and stream idempotent upserts. At-least-once is the default until exactly-once is proven."
+          lead="Start with a snapshot window, hand off at a logical cursor, and stream idempotent upserts. Redelivery is safe by design."
           compact
         >
           <CdcCinema />

@@ -111,9 +111,9 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
     canonicalPath: "#/enterprise",
   },
   customers: {
-    title: "Evidence",
-    description: "Measured live-matrix results for Datawrap migrations — what is proven on which engines, and what is explicitly not proven yet.",
-    keywords: "Datawrap evidence, data migration proof, live matrix results, schema drift testing",
+    title: "Customers",
+    description: "How Datawrap proves every load — mapping, preflight, quarantine, and checksums on databases, warehouses, and applications.",
+    keywords: "Datawrap customers, data migration proof, warehouse loading, schema drift testing",
     canonicalPath: "#/customers",
   },
   contact: {
@@ -124,13 +124,13 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   privacy: {
     title: "Privacy",
-    description: "How Datawrap handles workspace data, credentials, and audit logs.",
+    description: "Datawrap privacy policy — workspace data, encrypted credentials, retention, subprocessors, and your rights.",
     keywords: "Datawrap privacy policy, data processor, credential encryption",
     canonicalPath: "#/privacy",
   },
   terms: {
     title: "Terms of service",
-    description: "Terms governing use of the Datawrap platform.",
+    description: "Datawrap terms of service — accounts, customer data, acceptable use, liability, and enterprise agreements.",
     keywords: "Datawrap terms of service, acceptable use",
     canonicalPath: "#/terms",
   },

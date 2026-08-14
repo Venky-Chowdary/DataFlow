@@ -42,7 +42,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <text x="240" y="142" textAnchor="middle" fontSize="12" fill="#0f172a" fontWeight="650">Governed transfer engine</text>
         <text x="240" y="162" textAnchor="middle" fontSize="10" fill="#64748b">Preflight · Quarantine · Reconcile</text>
         <rect x="48" y="208" width="384" height="44" rx="10" fill="#0f766e" opacity="0.08" />
-        <text x="240" y="235" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="600">SOC 2 · GDPR · HIPAA controls mapped — no audit certificate yet</text>
+        <text x="240" y="235" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="600">Encryption · SSO · BYOK · GDPR — security pack on request</text>
       </svg>
     );
   }

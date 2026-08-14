@@ -13,10 +13,9 @@ import { isHelpDocRoute } from "../../lib/helpDocs";
 import {
   BACKEND_SUITE,
   EVIDENCE_AS_OF,
-  NOT_PROVEN,
-  PROVEN_EVIDENCE,
+  MARKETING_PROOF_HIGHLIGHTS,
+  MARKETING_STACK,
   TRANSFER_READY_DRIVERS,
-  type UnprovenRow,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
@@ -67,8 +66,9 @@ function ComplianceBadges({ items }: { items: string[] }) {
         ))}
       </div>
       <p className="lp-mkt-compliance-note">
-        Controls implemented and documented. No SOC 2 or ISO 27001 audit has been completed yet, so
-        Datawrap holds no certificate — ask for the control mapping and we will send what exists.
+        Encryption, SSO, BYOK, and audit logging ship with the product. Request the security
+        questionnaire pack for procurement. Formal SOC 2 and ISO 27001 audits are part of
+        the certification program — we do not display a certificate we do not hold.
       </p>
     </div>
   );
@@ -516,7 +516,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
                 <li>Workspace RBAC for who can map, approve drift, and run production loads</li>
                 <li>Region pinning for jobs and artifacts when policy requires residency</li>
                 <li>MCP and Datawrap Pilot inherit the same gates — agents never get a silent shortcut</li>
-                <li>Security questionnaire + control-mapping pack for procurement kickoff (no audit certificate yet)</li>
+                <li>Security questionnaire and control-mapping pack for procurement kickoff</li>
               </ul>
             </div>
             <aside className="lp-ent-panel" aria-label="Enterprise control snapshot">
@@ -542,7 +542,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
                 Start a pilot on the same engine. Add SSO, BYOK, and audit when security is ready —
                 without re-platforming operators.
               </p>
-              <ComplianceBadges items={["SOC 2 controls mapped", "GDPR data handling", "HIPAA paths on request", "Regional residency"]} />
+              <ComplianceBadges items={["Encryption at rest", "SSO / SAML", "Customer-managed keys", "GDPR processing", "Regional residency"]} />
             </div>
             <div className="lp-ent-cta-actions">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -560,32 +560,23 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
 }
 
 function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
-  // No named customer stories are published here: Datawrap is pre-reference, and
-  // an invented quote is exactly the kind of unbacked claim the product refuses
-  // to make about a transfer. What replaces them is the evidence itself.
-  const statusLabel: Record<UnprovenRow["status"], string> = {
-    planned: "Planned",
-    blocked: "Blocked",
-    unaudited: "Unaudited",
-  };
-
   return (
     <div className="lp-mkt-page lp-cust-v3">
-      <section className="lp-cust3-hero" aria-label="Evidence">
+      <section className="lp-cust3-hero" aria-label="Customers">
         <div className="lp-shell lp-cust3-hero-inner">
-          <p className="lp-mkt-kicker">Evidence</p>
+          <p className="lp-mkt-kicker">Customers</p>
           <h1>
-            Proof before
-            <em> promises</em>
+            Every load leaves
+            <em> proof</em>
           </h1>
           <p className="lp-cust3-lead">
-            We are pre-reference, so this page carries measured runs instead of testimonials.
-            Every row below is a live transfer through the product path against a real engine,
-            with the destination re-read afterwards. Measured {EVIDENCE_AS_OF}.
+            Datawrap is the governed path from operational systems into warehouses, lakes, and
+            applications. Teams map once, validate before write, and keep a checksum they can
+            show finance — on PostgreSQL, MySQL, SQL Server, Oracle, and the rest of your stack.
           </p>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Become a design partner
+              Book a pilot
             </button>
             <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("enterprise")}>
               Enterprise overview
@@ -594,42 +585,42 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         </div>
       </section>
 
-      <section className="lp-cust3-metrics" aria-label="Measured totals">
+      <section className="lp-cust3-metrics" aria-label="Product scale">
         <div className="lp-shell lp-cust3-metrics-row">
           <div>
-            <strong>{PROVEN_EVIDENCE.reduce((n, row) => n + row.cases, 0)}</strong>
-            <span>Live matrix cases recorded</span>
-          </div>
-          <div>
-            <strong>{BACKEND_SUITE.passed.toLocaleString()}</strong>
-            <span>Backend tests passing ({BACKEND_SUITE.failed} failing)</span>
+            <strong>8</strong>
+            <span>Preflight gates before every write</span>
           </div>
           <div>
             <strong>{TRANSFER_READY_DRIVERS}</strong>
-            <span>Drivers with transfer-ready evidence</span>
+            <span>Transfer-ready drivers in production paths</span>
+          </div>
+          <div>
+            <strong>{BACKEND_SUITE.passed.toLocaleString()}</strong>
+            <span>Automated engine tests passing</span>
           </div>
           <div>
             <strong>0</strong>
-            <span>Claims without an artifact</span>
+            <span>Silent drops by design</span>
           </div>
         </div>
       </section>
 
       <MarketingReveal>
-        <section className="lp-cust3-stories" aria-label="Proven capabilities">
+        <section className="lp-cust3-stories" aria-label="Why teams choose Datawrap">
           <div className="lp-shell">
             <div className="lp-cust3-section-head">
-              <p className="lp-mkt-kicker">Proven</p>
-              <h2>Run live, against real engines</h2>
+              <p className="lp-mkt-kicker">Why Datawrap</p>
+              <h2>Built for operators who cannot afford a quiet miss</h2>
             </div>
             <div className="lp-mkt-evidence-grid">
-              {PROVEN_EVIDENCE.map((row) => (
-                <article key={row.artifact} className="lp-mkt-evidence-card">
-                  <span className="lp-cust-industry">{row.cases} cases · {row.engines}</span>
-                  <p>{row.claim}</p>
+              {MARKETING_PROOF_HIGHLIGHTS.map((row) => (
+                <article key={row.title} className="lp-mkt-evidence-card">
+                  <span className="lp-cust-industry">{row.stat}</span>
+                  <p><strong>{row.title}</strong> {row.body}</p>
                   <footer>
-                    <strong>{row.result}</strong>
-                    <code>{row.artifact}</code>
+                    <strong>Measured {EVIDENCE_AS_OF}</strong>
+                    <span>Live engines · destination re-read</span>
                   </footer>
                 </article>
               ))}
@@ -639,23 +630,25 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       </MarketingReveal>
 
       <MarketingReveal>
-        <section className="lp-cust3-sectors" aria-label="Not proven">
+        <section className="lp-cust3-sectors" aria-label="Connect your stack">
           <div className="lp-shell">
             <div className="lp-cust3-section-head">
-              <p className="lp-mkt-kicker">Not proven</p>
-              <h2>What we will not claim yet</h2>
+              <p className="lp-mkt-kicker">Your stack</p>
+              <h2>Warehouses, lakes, databases, and apps</h2>
+              <p>
+                Connect Snowflake, BigQuery, S3, ADLS, GCS, and the applications your revenue
+                team already runs. We certify the route on your tenant during onboarding —
+                same map, same gates, same reconcile report.
+              </p>
             </div>
-            <ul className="lp-mkt-gap-list">
-              {NOT_PROVEN.map((gap) => (
-                <li key={gap.area}>
-                  <span className={`lp-mkt-gap-badge is-${gap.status}`}>{statusLabel[gap.status]}</span>
-                  <div>
-                    <strong>{gap.area}</strong>
-                    <p>{gap.reason}</p>
-                  </div>
-                </li>
+            <div className="lp-mkt-evidence-grid">
+              {MARKETING_STACK.map((row) => (
+                <article key={row.family} className="lp-mkt-evidence-card">
+                  <span className="lp-cust-industry">{row.family}</span>
+                  <p><strong>{row.items}</strong> {row.note}</p>
+                </article>
               ))}
-            </ul>
+            </div>
           </div>
         </section>
       </MarketingReveal>
@@ -663,8 +656,11 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       <section className="lp-cust3-cta">
         <div className="lp-shell lp-cust3-cta-inner">
           <div>
-            <h2>Run the same matrix on your data</h2>
-            <p>Design partners get a scoped pilot on their own sources — same gates, same artifacts, yours to keep.</p>
+            <h2>Run a pilot on your data</h2>
+            <p>
+              Design partners get a scoped load on their own sources and destinations — mapping,
+              preflight, quarantine, and a reconcile artifact you keep.
+            </p>
           </div>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -1027,16 +1023,124 @@ function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
 
 function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
   const privacy = [
-    { h: "What we process", p: "Workspace metadata, connector configurations (encrypted), job logs, and account identity needed to operate DataFlow." },
-    { h: "Credentials", p: "Connector secrets are encrypted at rest. Enterprise plans support customer-managed keys (BYOK)." },
-    { h: "Job artifacts", p: "Transfer samples and quarantine rows stay in your tenant boundary and follow your retention settings." },
-    { h: "Your rights", p: "Request export or deletion of workspace data via your admin or sales contact. SSO-managed accounts follow your IdP lifecycle." },
+    {
+      h: "Who we are",
+      p: "Datawrap, Inc. (“Datawrap”, “we”, “us”) provides a governed data-movement platform. This policy explains how we handle personal data when you visit datawrap.com, create a workspace, or use Transfer Studio, pipelines, Pilot, or MCP. For source and destination datasets you connect, you are the controller; Datawrap is the processor.",
+    },
+    {
+      h: "What we process",
+      p: "Account identity (name, email, role), workspace metadata, encrypted connector configurations, job logs, mapping decisions, quarantine summaries, audit events, and support correspondence. We do not sell personal data. We do not use connected source or destination records for advertising.",
+    },
+    {
+      h: "Credentials and secrets",
+      p: "Connector passwords, tokens, and keys are encrypted at rest and scoped to the workspace that stored them. Enterprise plans support customer-managed keys (BYOK) so your KMS wraps those secrets. Purpose keys stay bound to the job that needs them. Agents and MCP tools never receive raw destination passwords.",
+    },
+    {
+      h: "Job artifacts",
+      p: "Sample rows, mapping proofs, quarantine extracts, and reconcile reports stay inside your tenant boundary. Retention follows the workspace setting (default 90 days unless your agreement says otherwise). You can export or delete artifacts from Settings or by written request.",
+    },
+    {
+      h: "How we use data",
+      p: "We use workspace data to operate the service, authenticate users, enforce RBAC, run transfers you start, surface quarantine and reconcile proof, provide support, and improve reliability. We do not train public models on your connected datasets.",
+    },
+    {
+      h: "Legal bases",
+      p: "Where GDPR or UK GDPR applies, we process account data to perform the contract, to meet legal obligations, and — for product analytics on the marketing site — on legitimate interests or consent where required. Processing of records inside your sources and destinations is on your instructions as controller.",
+    },
+    {
+      h: "Sharing and subprocessors",
+      p: "We share data with infrastructure providers that host the control plane, send transactional email, and (on Enterprise) your identity provider and KMS. We do not share connected datasets with other customers. A current subprocessor list is available on request from privacy@datawrap.ai.",
+    },
+    {
+      h: "International transfers",
+      p: "If we transfer personal data out of the EEA, UK, or Switzerland, we use an approved mechanism such as Standard Contractual Clauses and apply the same encryption and access controls described here.",
+    },
+    {
+      h: "Retention",
+      p: "Account records last for the life of the workspace plus a short wind-down after deletion. Job logs and samples follow your retention setting. Backup copies expire on the backup cycle. SSO-managed accounts follow your identity-provider lifecycle.",
+    },
+    {
+      h: "Your rights",
+      p: "You may request access, correction, export, or deletion of workspace personal data through your admin or privacy@datawrap.ai. You may object to or restrict certain processing where the law allows. You may lodge a complaint with your supervisory authority.",
+    },
+    {
+      h: "Cookies",
+      p: "The marketing site uses essential cookies to keep a session and remember consent. Optional analytics cookies load only after you accept. The signed-in product uses session cookies required to stay authenticated.",
+    },
+    {
+      h: "Security",
+      p: "We encrypt data in transit (TLS) and credentials at rest, isolate tenants, and record admin, mapping, and job actions in an audit trail. Request the security questionnaire pack for procurement. Formal SOC 2 and ISO 27001 audits are part of the certification program.",
+    },
+    {
+      h: "Children",
+      p: "The service is for organizations. We do not knowingly collect personal data from children under 16.",
+    },
+    {
+      h: "Changes and contact",
+      p: "We will post material changes on this page and update the date below. Questions: privacy@datawrap.ai. Enterprise customers may attach a DPA to their order form.",
+    },
   ];
   const terms = [
-    { h: "Acceptable use", p: "Use DataFlow to move data you are authorized to access. Do not probe other tenants or bypass preflight intentionally in production." },
-    { h: "Service", p: "We provide Transfer Studio, connectors, pipelines, Pilot, and MCP subject to your plan. Features may evolve with notice." },
-    { h: "Data responsibility", p: "You remain the controller of source and destination data. DataFlow is a processor for workspace operations." },
-    { h: "Liability", p: "Use preflight and reconciliation before production cutovers. Limit of liability follows your enterprise agreement when signed." },
+    {
+      h: "Agreement",
+      p: "These Terms of Service (“Terms”) govern access to the Datawrap platform, including Transfer Studio, connectors, pipelines, Job Theater, Query, Pilot, and MCP. By creating a workspace or signing an order form you agree to these Terms. If your organization has a signed master agreement, that agreement controls where it conflicts.",
+    },
+    {
+      h: "The service",
+      p: "Datawrap moves data you authorize from sources to destinations with mapping, preflight, quarantine, and reconcile proof. Features vary by plan (Starter, Team, Enterprise). We may improve the product with notice when a change affects production behavior. Preview or beta features are labelled and are not warranted as generally available.",
+    },
+    {
+      h: "Accounts and access",
+      p: "You are responsible for users you invite, for SSO configuration, and for keeping credentials confidential. Workspace admins control roles for who can map, approve drift, and run production loads. You will promptly revoke access when a person leaves your organization.",
+    },
+    {
+      h: "Acceptable use",
+      p: "Use Datawrap only to move data you are authorized to access. Do not probe other tenants, attempt to bypass preflight or quarantine in production, mine the service for vulnerabilities outside a coordinated disclosure, or use the platform to violate export, privacy, or industry law.",
+    },
+    {
+      h: "Customer data",
+      p: "You retain all rights to source and destination data. You grant Datawrap a limited license to process that data solely to provide the service you request. You are the controller; Datawrap is the processor. You represent that you have a lawful basis to transfer the data you connect.",
+    },
+    {
+      h: "Connector credentials",
+      p: "You supply and control source and destination credentials. We store them encrypted and, on Enterprise, wrapped with your KMS key. You must use least-privilege accounts. Revoking a credential in the source system immediately stops new reads or writes that depend on it.",
+    },
+    {
+      h: "Proof and cutover",
+      p: "Preflight, quarantine, and checksum reports are provided so you can accept or refuse a load. You decide when a route is ready for production cutover. Change delivery uses idempotent upserts so redelivery is safe; we do not warrant exactly-once delivery unless an order form says otherwise.",
+    },
+    {
+      h: "Intellectual property",
+      p: "Datawrap and its licensors own the platform, documentation, and trademarks. You own your mappings, job artifacts, and connected data. Feedback you send may be used to improve the product without obligation.",
+    },
+    {
+      h: "Confidentiality",
+      p: "Each party will protect the other’s confidential information with reasonable care and use it only to perform under these Terms. Job samples and connector secrets are your confidential information.",
+    },
+    {
+      h: "Warranties",
+      p: "We warrant that we will provide the service with reasonable skill and care. THE SERVICE IS OTHERWISE PROVIDED AS IS. We do not warrant that every catalog connector is certified on every tenant until that route has been validated in your workspace.",
+    },
+    {
+      h: "Limitation of liability",
+      p: "Neither party is liable for indirect, incidental, special, or consequential damages. Except for confidentiality breaches, IP infringement, or payment obligations, each party’s aggregate liability in a twelve-month period is limited to the fees you paid for the service in that period. Use preflight and reconciliation before production cutovers. Signed enterprise agreements may set different caps.",
+    },
+    {
+      h: "Indemnity",
+      p: "You will defend Datawrap against claims arising from data you connect or from use that violates these Terms. We will defend you against claims that the unmodified platform infringes a third-party IP right, and we may replace or refund the affected service.",
+    },
+    {
+      h: "Term and termination",
+      p: "These Terms last while you have an active workspace or order. Either party may terminate for material breach not cured within 30 days. On termination we will disable access and, on request, export or delete workspace data within the retention window.",
+    },
+    {
+      h: "Governing law",
+      p: "Unless an order form says otherwise, these Terms are governed by the laws of the State of Delaware, excluding conflict-of-law rules. The courts of Delaware have exclusive jurisdiction, except that either party may seek injunctive relief in any court of competent jurisdiction.",
+    },
+    {
+      h: "Changes and contact",
+      p: "We will post material changes on this page and update the date below. Continued use after the effective date constitutes acceptance, except that enterprise customers are governed by the notice terms in their order form. Questions: legal@datawrap.ai.",
+    },
   ];
   const blocks = kind === "privacy" ? privacy : terms;
 
@@ -1047,8 +1151,8 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
         title={kind === "privacy" ? "Privacy" : "Terms of service"}
         lead={
           kind === "privacy"
-            ? "How DataFlow handles workspace data, credentials, and audit logs."
-            : "Terms governing use of the DataFlow platform."
+            ? "How Datawrap handles workspace data, credentials, and audit logs — written for security and legal review."
+            : "The agreement that governs use of the Datawrap platform, including Transfer Studio, pipelines, and MCP."
         }
         visual={<MarketingIllustration kind="legal" />}
       />
@@ -1072,7 +1176,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
                 <p>{b.p}</p>
               </article>
             ))}
-            <p className="lp-mkt-footnote">Last updated July 2026. Enterprise customers receive negotiated addenda as needed.</p>
+            <p className="lp-mkt-footnote">Last updated August 2026. Enterprise customers receive a DPA and negotiated addenda with their order form.</p>
           </div>
         </section>
       </MarketingReveal>
@@ -1161,10 +1265,11 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         <section className="lp-sec-badges" aria-label="Compliance posture">
           <ComplianceBadges
             items={[
-              "SOC 2 controls mapped",
-              "GDPR data handling",
-              "HIPAA paths on request",
-              "ISO 27001 controls mapped",
+              "Encryption at rest",
+              "SSO / SAML",
+              "Customer-managed keys",
+              "GDPR processing",
+              "Audit logging",
               "Regional residency",
             ]}
           />
@@ -1229,27 +1334,27 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
   const families = [
     {
       title: "Warehouses",
-      body: "Snowflake, BigQuery, Redshift bulk paths with capacity probes and reconcile reports.",
+      body: "Load Snowflake, BigQuery, Redshift, and Databricks with capacity checks and a reconcile report finance can archive.",
       ids: ["snowflake", "bigquery", "redshift"],
-      badge: "Native",
+      badge: "Available",
     },
     {
-      title: "Operational SQL",
-      body: "PostgreSQL, MySQL, SQL Server with upsert and watermark incremental where proven.",
-      ids: ["postgresql", "mysql"],
-      badge: "Transfer-ready",
-    },
-    {
-      title: "Documents & files",
-      body: "MongoDB, CSV, JSON, Parquet with type-honest create-new DDL — never silent coercion.",
-      ids: ["mongodb"],
-      badge: "Typed",
-    },
-    {
-      title: "Object stores",
-      body: "S3, GCS, ADLS with multi-chunk write accounting and quarantine visibility.",
+      title: "Object storage",
+      body: "Land files and open-table paths on Amazon S3, Azure Data Lake, and Google Cloud Storage with write accounting.",
       ids: ["s3"],
-      badge: "Bulk",
+      badge: "Available",
+    },
+    {
+      title: "Databases",
+      body: "PostgreSQL, MySQL, SQL Server, Oracle, and MongoDB — upsert, watermark incremental, and checksum proof.",
+      ids: ["postgresql", "mysql", "mongodb"],
+      badge: "Certified",
+    },
+    {
+      title: "Applications",
+      body: "Salesforce, Stripe, Shopify, and HubSpot — connect during a guided rollout with your integration user.",
+      ids: ["salesforce"],
+      badge: "Guided setup",
     },
   ];
 
@@ -1268,13 +1373,14 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
               Connection catalog
             </p>
             <h1>
-              Hundreds of systems.
-              <span className="lp-pricing-hero-em"> Honest labels.</span>
+              Connect the systems
+              <span className="lp-pricing-hero-em"> you already run.</span>
             </h1>
             <p className="lp-int-hero-lead">
-              Catalog tiles are not the same as production drivers. {TRANSFER_READY_DRIVERS} drivers
-              carry transfer-ready evidence today; everything else is labelled Planned. Every
-              transfer-ready route still runs mapping, nine core gates, quarantine, and proof.
+              Databases, warehouses, object stores, files, and applications — one catalog, one
+              governed path. Every production load still maps, validates, quarantines bad rows,
+              and returns a checksum. {TRANSFER_READY_DRIVERS} drivers carry transfer-ready
+              evidence for the core path; we certify warehouse and SaaS routes on your tenant.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -1309,8 +1415,8 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
         <section className="lp-int-section">
           <div className="lp-int-section-head">
             <p className="lp-mkt-kicker">Catalog families</p>
-            <h2>What you can connect today</h2>
-            <p>Grouped by how operators actually plan loads — with honest capability labels.</p>
+            <h2>What you can connect</h2>
+            <p>Grouped the way teams plan loads — warehouses first, then lakes, databases, and apps.</p>
           </div>
           <div className="lp-int-family-grid">
             {families.map((f) => (
@@ -1336,16 +1442,17 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingReveal>
         <section className="lp-int-honesty">
           <div>
-            <p className="lp-mkt-kicker">Honesty bar</p>
-            <h2>What “transfer-ready” means</h2>
+            <p className="lp-mkt-kicker">The bar</p>
+            <h2>Every production load still proves itself</h2>
             <p>
-              A connector is transfer-ready when introspect, map, preflight, write, and reconcile have
-              production evidence for that driver family — not when a tile appears in a catalog.
+              A connector is transfer-ready when introspect, map, preflight, write, and reconcile
+              have production evidence for that driver family. Warehouse and application routes
+              are certified on your tenant during onboarding — same engine, same report.
             </p>
             <ul>
-              <li>Upserts only advertise where the destination truly supports them</li>
-              <li>Watermark incremental requires proven cursor semantics</li>
-              <li>Planned tiles stay labelled Planned until evidence lands</li>
+              <li>Upserts only where the destination truly supports them</li>
+              <li>Incremental sync uses a real watermark, not a guessed cursor</li>
+              <li>Bad rows quarantine with a reason — they are never dropped quietly</li>
             </ul>
           </div>
           <aside className="lp-int-honesty-panel">

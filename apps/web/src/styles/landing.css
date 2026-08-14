@@ -2825,9 +2825,9 @@
 
 .lp-mkt-legal-block p {
   margin: 0;
-  font-size: 14.5px;
-  line-height: 1.55;
-  color: #404040;
+  font-size: 15px;
+  line-height: 1.65;
+  color: #334155;
 }
 
 .lp-mkt-footnote {
@@ -3629,6 +3629,8 @@
   border: 1px solid var(--lp-line);
   border-radius: 12px;
   background: #fff;
+  max-height: calc(100dvh - 120px);
+  overflow-y: auto;
 }
 
 .lp-mkt-legal-nav h2 {

@@ -568,11 +568,12 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         <div className="lp-home-connectors-inner">
           <Reveal className="lp-home-section-head">
             <p className="lp-section-kicker">Connectors</p>
-            <h2>Hundreds of systems. Honest labels.</h2>
+            <h2>Connect databases, warehouses, files, and apps</h2>
             <p>
-              Catalog tiles are not the same as transfer-ready drivers. We publish both — and every
-              production path still runs mapping, gates, quarantine, and proof.
-              {liveDrivers != null ? ` ${liveDrivers} unique transfer-ready drivers today.` : ""}
+              PostgreSQL, MySQL, Snowflake, BigQuery, S3, ADLS, GCS, Salesforce, and the rest of
+              your stack — one catalog, one governed path. Every production load still maps,
+              validates, and reconciles.
+              {liveDrivers != null ? ` ${liveDrivers} transfer-ready drivers on the core path.` : ""}
             </p>
           </Reveal>
         </div>
@@ -582,8 +583,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         </div>
         <div className="lp-home-connectors-inner">
           <p className="lp-home-connectors-note">
-            Only routes with <code>TRANSFER_READY</code> evidence get the transfer-ready badge. Everything
-            else is labelled Planned.
+            Open the catalog to pick a source and destination. We certify warehouse and application
+            routes on your tenant during onboarding.
           </p>
           <div className="lp-home-arch-cta">
             <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("integrations")}>

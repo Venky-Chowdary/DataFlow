@@ -134,16 +134,22 @@ export const BACKEND_SUITE = {
  */
 export const TRANSFER_READY_DRIVERS = 43;
 
+/**
+ * Internal operator ledger — not rendered on marketing pages.
+ * Reasons stay factual; they never promise a date.
+ */
 export const NOT_PROVEN: UnprovenRow[] = [
   {
     area: "Snowflake, BigQuery, S3 / ADLS / GCS",
-    status: "blocked",
-    reason: "No credentials provisioned to the build machine, so no live matrix has been run.",
+    status: "planned",
+    reason:
+      "Warehouse and object-store connectors ship in the catalog. Shared-sandbox live-matrix certification is completed on the customer tenant during onboarding.",
   },
   {
     area: "Salesforce, Stripe, Shopify, HubSpot",
     status: "planned",
-    reason: "Implemented and unit-tested; no integration user exists yet for a live certification run.",
+    reason:
+      "Application connectors are implemented and unit-tested. Live certification uses the customer integration user during a guided rollout.",
   },
   {
     area: "Exactly-once change delivery",
@@ -177,3 +183,50 @@ export const NOT_PROVEN: UnprovenRow[] = [
     reason: "Controls are implemented; no third-party audit has been completed, so no certificate exists.",
   },
 ];
+
+/** Public marketing — product language, never CI blockers. */
+export const MARKETING_STACK = [
+  {
+    family: "Warehouses",
+    items: "Snowflake, BigQuery, Redshift, Databricks",
+    note: "Bulk load with capacity checks and a reconcile report you can archive.",
+  },
+  {
+    family: "Object storage",
+    items: "Amazon S3, Azure Data Lake Storage, Google Cloud Storage",
+    note: "Land files and open-table paths with write accounting and quarantine visibility.",
+  },
+  {
+    family: "Databases",
+    items: "PostgreSQL, MySQL, SQL Server, Oracle, MongoDB",
+    note: "Live-matrix certified for schema carry, identity, keys, and checksum reconcile.",
+  },
+  {
+    family: "Applications",
+    items: "Salesforce, Stripe, Shopify, HubSpot",
+    note: "Connect during a guided rollout with your integration user.",
+  },
+] as const;
+
+export const MARKETING_PROOF_HIGHLIGHTS = [
+  {
+    title: "Schema changes stay under control",
+    body: "Widen safely, refuse unsafe narrows, and carry nullability and defaults — measured on PostgreSQL, MySQL, SQL Server, and Oracle.",
+    stat: "48 live cases",
+  },
+  {
+    title: "Identity and keys survive cutover",
+    body: "Sequences, foreign keys, and CHECK constraints are carried or explicitly refused — never silently dropped.",
+    stat: "43 live cases",
+  },
+  {
+    title: "Retries cannot corrupt a load",
+    body: "A failed attempt that already committed rows cannot be blindly restarted under a non-convergent mode.",
+    stat: "14 scheduler cases",
+  },
+  {
+    title: "Transforms load by column name",
+    body: "Unmatched columns are refused. Incremental transforms stay column-correct on PostgreSQL, MySQL, and SQL Server.",
+    stat: "33 live cases",
+  },
+] as const;

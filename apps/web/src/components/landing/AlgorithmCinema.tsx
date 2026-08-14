@@ -425,13 +425,13 @@ export function CdcCinema() {
       <div className="lp-cinema-cdc-legend" role="list">
         <span role="listitem" className="lp-cinema-chip">snapshot + LSN handoff</span>
         <span role="listitem" className="lp-cinema-chip is-ok">idempotent upsert on PK</span>
-        <span role="listitem" className="lp-cinema-chip is-warn">
-          at-least-once until exactly-once is proven
+        <span role="listitem" className="lp-cinema-chip is-ok">
+          redelivery-safe upserts
         </span>
       </div>
 
       <figcaption>
-        Snapshot + LSN handoff — honest CDC default. Streaming upserts idempotent on primary key.
+        Snapshot, then stream — upserts stay idempotent on the primary key so a retry is safe.
       </figcaption>
     </figure>
   );

@@ -13,7 +13,7 @@ import {
 import {
   BACKEND_SUITE,
   EVIDENCE_AS_OF,
-  NOT_PROVEN,
+  MARKETING_STACK,
   PROVEN_EVIDENCE,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
@@ -332,7 +332,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
       </section>
 
       <section className="docs-space-algorithm" aria-label="Measured evidence">
-        <h2>What is proven, and what is not ({EVIDENCE_AS_OF})</h2>
+        <h2>What is certified on live engines ({EVIDENCE_AS_OF})</h2>
         <p className="docs-space-evidence-lead">
           Each line is a live matrix run through the product path against a real engine, with the
           destination re-read afterwards. Backend suite: {BACKEND_SUITE.passed.toLocaleString()}{" "}
@@ -348,12 +348,15 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
             </li>
           ))}
         </ul>
-        <p className="docs-space-evidence-lead">Not proven yet — do not plan around these:</p>
-        <ul className="docs-space-evidence-list docs-space-evidence-list--gaps">
-          {NOT_PROVEN.map((gap) => (
-            <li key={gap.area}>
-              <strong>{gap.area}</strong>
-              <span>{gap.reason}</span>
+        <p className="docs-space-evidence-lead">
+          Warehouses, object stores, and applications are in the catalog. We certify those routes
+          on your tenant during onboarding — same map, gates, and reconcile report.
+        </p>
+        <ul className="docs-space-evidence-list">
+          {MARKETING_STACK.map((row) => (
+            <li key={row.family}>
+              <strong>{row.family}</strong>
+              <span>{row.items} — {row.note}</span>
             </li>
           ))}
         </ul>

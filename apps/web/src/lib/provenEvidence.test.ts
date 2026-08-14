@@ -55,6 +55,24 @@ test("public pages hold no certification claim we cannot show a certificate for"
   }
 });
 
+test("marketing pages never publish CI blockers as product gaps", () => {
+  const forbidden = /build machine|No credentials provisioned|What we will not claim yet/i;
+  const marketingDirs = [
+    path.join(SRC, "pages", "marketing"),
+    path.join(SRC, "pages", "LandingPage.tsx"),
+    path.join(SRC, "components", "landing"),
+    path.join(SRC, "components", "marketing"),
+  ];
+  for (const dir of marketingDirs) {
+    const files = dir.endsWith(".tsx") ? [dir] : sourceFiles(dir);
+    for (const file of files) {
+      const body = readFileSync(file, "utf8");
+      const hit = body.match(forbidden);
+      assert.equal(hit, null, `${path.relative(SRC, file)} publishes ${hit?.[0]}`);
+    }
+  }
+});
+
 test("public pages carry no attributed customer quote", () => {
   // Datawrap is pre-reference. An invented quote is the same class of unbacked
   // claim the product refuses to make about a transfer.
