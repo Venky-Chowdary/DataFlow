@@ -24,21 +24,12 @@ SCD2_COLUMNS = [VALID_FROM_COLUMN, VALID_TO_COLUMN, IS_CURRENT_COLUMN, ROW_HASH_
 # Unit separator — safe delimiter for composite natural keys in-memory.
 _KEY_SEP = "\x1f"
 
-# Destinations that store boolean as INTEGER/BIT/NUMBER(1), not ANSI BOOLEAN.
-# SQLAlchemy dialect.name is ``mssql`` for SQL Server. Catalog SKUs alias
-# through warehouse_sql_quote_dialect. T-SQL has no IS TRUE; Oracle 19c has
-# no BOOLEAN (NUMBER(1) until 23c). Never emit IS TRUE / FALSE there.
-_NUMERIC_BOOLEAN_DIALECTS = frozenset({"sqlite", "mssql"})
-
 
 def stores_is_current_as_numeric(dialect: str) -> bool:
     """True when ``is_current`` is 0/1 storage, not ANSI BOOLEAN."""
-    kind = (dialect or "").strip().lower()
-    if kind in _NUMERIC_BOOLEAN_DIALECTS or kind.startswith("mssql"):
-        return True
-    from services.dialect_profiles import warehouse_sql_quote_dialect
+    from services.dialect_profiles import stores_boolean_as_numeric
 
-    return warehouse_sql_quote_dialect(kind) in {"sqlserver", "oracle"}
+    return stores_boolean_as_numeric(dialect)
 
 
 def scd2_is_current_predicate(dialect: str, quoted_column: str) -> str:
@@ -48,16 +39,16 @@ def scd2_is_current_predicate(dialect: str, quoted_column: str) -> str:
     PostgreSQL / MySQL BOOLEAN → ``IS TRUE``. One rule for merge, expire,
     checksum, and conservation COUNT — not a per-engine patch.
     """
-    if stores_is_current_as_numeric(dialect):
-        return f"{quoted_column} = 1"
-    return f"{quoted_column} IS TRUE"
+    from services.dialect_profiles import sql_bool_is_true
+
+    return sql_bool_is_true(dialect, quoted_column)
 
 
 def scd2_is_current_false_sql(dialect: str) -> str:
     """SQL literal that closes a current version (``is_current = …``)."""
-    if stores_is_current_as_numeric(dialect):
-        return "0"
-    return "FALSE"
+    from services.dialect_profiles import sql_bool_false_literal
+
+    return sql_bool_false_literal(dialect)
 
 
 def _now_utc() -> datetime:
@@ -327,36 +318,27 @@ def _active_checksum(
     batch_size: int,
     dialect_name: str,
 ) -> tuple[int, str]:
-    """Read all current rows and compute an order-independent checksum."""
+    """Current-version digest: one streamed SELECT. Never OFFSET.
+
+    SQL Server FETCH requires ORDER BY; Oracle/DB2 reject LIMIT; OFFSET is
+    O(n²) and can skip/duplicate. Same streaming kernel as Gate-8 read-back.
+    """
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
-
-    from services.reconciliation import canonical_checksum
+    from services.reconciliation_api import stream_select_checksum
 
     current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
-    cols_quoted = ",".join(quote_sql_identifier(c) for c in target_cols if c not in SCD2_COLUMNS)
-    rows: list[dict[str, Any]] = []
-    count = 0
-    offset = 0
-    while True:
-        sql = (
-            f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
-            f"WHERE {current_pred} "
-            f"LIMIT {batch_size} OFFSET {offset}"
-        )
-        result = conn.execute(sa.text(sql))
-        batch = result.fetchall()
-        if not batch:
-            break
-        for row in batch:
-            count += 1
-            rows.append({c: row._mapping.get(c) for c in target_cols if c not in SCD2_COLUMNS})
-        if len(batch) < batch_size:
-            break
-        offset += batch_size
-    checksum = canonical_checksum(rows, [c for c in target_cols if c not in SCD2_COLUMNS]) if rows else ""
-    return count, checksum
+    attr_cols = [c for c in target_cols if c not in SCD2_COLUMNS]
+    cols_quoted = ",".join(quote_sql_identifier(c) for c in attr_cols)
+    sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {current_pred}"  # nosec B608
+    return stream_select_checksum(
+        conn,
+        sa.text(sql),
+        attr_cols,
+        itersize=max(1, int(batch_size)),
+        dest_db_type=dialect_name,
+    )
 
 
 def prepare_scd2_mapped_rows(

@@ -142,6 +142,29 @@ def test_postgres_public_literal_folded_per_dialect():
     assert schema_from_cfg("mysql", {"schema": "public"}) == ""  # schema N/A
 
 
+def test_sql_bool_predicates_numeric_vs_ansi():
+    from services.dialect_profiles import (
+        sql_bool_false_literal,
+        sql_bool_is_not_true,
+        sql_bool_is_true,
+        sql_bool_true_literal,
+        stores_boolean_as_numeric,
+    )
+
+    for dialect in ("mssql", "sqlserver", "azure_sql_database", "oracle", "sqlite"):
+        assert stores_boolean_as_numeric(dialect), dialect
+        assert sql_bool_is_true(dialect, "c") == "c = 1"
+        assert "IS TRUE" not in sql_bool_is_not_true(dialect, "c").upper()
+        assert sql_bool_true_literal(dialect) == "1"
+        assert sql_bool_false_literal(dialect) == "0"
+    for dialect in ("postgresql", "mysql", "snowflake"):
+        assert not stores_boolean_as_numeric(dialect), dialect
+        assert sql_bool_is_true(dialect, "c") == "c IS TRUE"
+        assert sql_bool_is_not_true(dialect, "c") == "c IS NOT TRUE"
+        assert sql_bool_true_literal(dialect) == "TRUE"
+        assert sql_bool_false_literal(dialect) == "FALSE"
+
+
 def test_quote_matrix_no_postgres_leak():
     assert '"PUBLIC"."T"' == quote_table_ref("t", schema_from_cfg("snowflake", {"schema": "public"}), dialect="snowflake")
     assert "[dbo].[t]" == quote_table_ref("t", schema_from_cfg("sqlserver", {"schema": "public"}), dialect="sqlserver")

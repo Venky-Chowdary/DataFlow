@@ -1037,16 +1037,27 @@ TypeScript does not recompute dest.
   **PARTIAL** on live PG 16. Writer chunk-upsert ack never closes.
   Truncated DISTINCT is unmeasured.
 * SCD2 current-row identity — **PARTIAL** on live SQLite: `apply_scd2`
-  twice, current=2, history=3, dest=2 not 3. Oracle / SQL Server
-  dest-engine current COUNT is in `dest_precount` (BIT / `NUMBER(1)`
-  `= 1`, never `IS TRUE`; missing table = 0; missing column unmeasured;
-  catalog SKUs alias). Live `:1433` / `:1521` skip-if-unreachable this
-  host. Incremental watermarked SCD2 stays unproven (change batch is
-  not the current population). Writer `active_rows` is not dest.
-  `is_current` is not a tombstone. Snowflake / BigQuery / DuckDB /
-  Databricks / Redshift SCD2 current COUNT uses dest-engine `COUNT(*)
-  WHERE is_current` (BOOLEAN `IS TRUE`, never catalog stats /
-  `to_regclass`). Connect failure stays unmeasured.
+  twice, current=2, history=3, dest=2 not 3. Writer `_active_checksum`
+  is one streamed SELECT of `is_current` (same `sa_streaming_result` +
+  `canonical_checksum_from_iter` kernel as Gate-8 read-back). OFFSET /
+  `LIMIT` pagination is forbidden — SQL Server FETCH requires ORDER BY,
+  Oracle/DB2 reject LIMIT (ORA-03047), OFFSET is O(n²) and can
+  skip/duplicate. Mirror active digest and staging drain share that
+  kernel. Boolean literals for SQL Server BIT / Oracle NUMBER(1) live
+  in `dialect_profiles.sql_bool_*`. Dest-engine `HASH_AGG` /
+  `CHECKSUM_AGG` pushdown is a future enhancement of this kernel, not a
+  second path. Oracle / SQL Server dest-engine current COUNT is in
+  `dest_precount` (BIT / `NUMBER(1)` `= 1`, never `IS TRUE`; missing
+  table = 0; missing column unmeasured; catalog SKUs alias). Live
+  `:1433` / `:1521` skip-if-unreachable this host. Incremental
+  watermarked SCD2 stays unproven (change batch is not the current
+  population). Writer `active_rows` is not dest. `is_current` is not a
+  tombstone. Snowflake / BigQuery / DuckDB / Databricks / Redshift
+  SCD2 current COUNT uses dest-engine `COUNT(*) WHERE is_current`
+  (BOOLEAN `IS TRUE`, never catalog stats / `to_regclass`). Connect
+  failure stays unmeasured. Stream-path SCD2/mirror allowlist still
+  excludes Oracle/SQL Server (`NotImplementedError`) — in-memory
+  `apply_scd2` / `apply_inferred_soft_deletes` is the live path.
 * Object-store dest COUNT — **PARTIAL**: GET bodies use the same artifact
   COUNT as local files (Excel value-bearing rows, streamed Avro, Parquet/ORC
   footer, XML unique record-path). JSON-fallback empty is forbidden.

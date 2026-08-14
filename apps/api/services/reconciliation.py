@@ -790,6 +790,77 @@ def sa_streaming_result(
     return names, _rows()
 
 
+def iter_select_row_dicts(
+    conn: Any,
+    statement: Any,
+    columns: list[str],
+    *,
+    itersize: int = READBACK_ITERSIZE,
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield dict batches from one SELECT. Full-population drain — never OFFSET.
+
+    ``page_clause`` remains the owner for *windowed* preview reads that have a
+    stable ORDER BY. A complete scan (SCD2 staging, mirror key walk, active-row
+    digest) must be one cursor. Microsoft: OFFSET/FETCH is a new independent
+    query per page and requires a unique ORDER BY; without it SQL Server
+    errors and Oracle/DB2 reject LIMIT (ORA-03047). OFFSET is also O(n²).
+
+    Dest-engine ``HASH_AGG`` / ``CHECKSUM_AGG`` pushdown is a future
+    enhancement of this kernel, not a second path — those aggregates are not
+    type-portable (CHECKSUM_AGG ignores NULL; HASH_AGG is Snowflake-only).
+    """
+    _names, raw = sa_streaming_result(conn, statement, itersize=itersize)
+    batch: list[dict[str, Any]] = []
+    size = max(1, int(itersize))
+    for row in raw:
+        mapping = getattr(row, "_mapping", None)
+        if mapping is None:
+            mapping = dict(zip(columns, row))
+        batch.append({c: mapping.get(c) for c in columns})
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def stream_select_checksum(
+    conn: Any,
+    statement: Any,
+    columns: list[str],
+    *,
+    itersize: int = READBACK_ITERSIZE,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Order-independent checksum of a full SELECT, streamed.
+
+    Same Gate-8 fingerprint kernel as dest read-back
+    (``sa_streaming_result`` + ``canonical_checksum_from_iter``). Empty
+    population returns ``(0, "")`` — the SCD2/mirror writer contract (blank
+    digest, not sha256 of empty). This digest does not by itself close
+    Gate-8 or claim ``migration_proven``.
+    """
+    count = 0
+
+    def _rows() -> Iterator[Any]:
+        nonlocal count
+        for batch in iter_select_row_dicts(
+            conn, statement, columns, itersize=itersize
+        ):
+            for row in batch:
+                count += 1
+                yield row
+
+    digest = canonical_checksum_from_iter(
+        _rows(),
+        columns,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+    )
+    return count, (digest if count else "")
+
+
 # Cap on keys fetched back per batch proof: bounded so a 10M-row append does
 # not build a 10M-term IN list, and matched by the writer's stashed id sample.
 KEYED_READBACK_ID_CAP: Final[int] = 500

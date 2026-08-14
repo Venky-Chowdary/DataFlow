@@ -9,8 +9,20 @@ from services.mirror_engine import (
     _qualified_name,
     _target_columns,
     _update_deleted_batch,
+    apply_inferred_deletes_via_staging,
     apply_inferred_soft_deletes,
     quote_sql_identifier,
 )
 
-__all__ = ['SOFT_DELETE_COLUMN', '_qualified_name', '_key_value', '_target_columns', '_ensure_soft_delete_column', '_update_deleted_batch', '_compute_active_checksum', 'apply_inferred_soft_deletes', 'quote_sql_identifier']
+__all__ = [
+    "SOFT_DELETE_COLUMN",
+    "_qualified_name",
+    "_key_value",
+    "_target_columns",
+    "_ensure_soft_delete_column",
+    "_update_deleted_batch",
+    "_compute_active_checksum",
+    "apply_inferred_deletes_via_staging",
+    "apply_inferred_soft_deletes",
+    "quote_sql_identifier",
+]

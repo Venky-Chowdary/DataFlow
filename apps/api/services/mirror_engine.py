@@ -84,23 +84,36 @@ def _ensure_soft_delete_column(
 ) -> None:
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
+    from services.dialect_profiles import (
+        sql_bool_false_literal,
+        stores_boolean_as_numeric,
+        warehouse_sql_quote_dialect,
+    )
 
     col_quoted = quote_sql_identifier(soft_delete_column)
-    # Best-effort add.  Most dialects accept BOOLEAN DEFAULT FALSE; if they do
-    # not, the exception is ignored because the column likely already exists.
-    for ddl in (
-        f"ALTER TABLE {qualified} ADD COLUMN {col_quoted} BOOLEAN DEFAULT FALSE",
-        f"ALTER TABLE {qualified} ADD COLUMN {col_quoted} BOOLEAN",
-    ):
+    dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "")
+    false_lit = sql_bool_false_literal(dialect_name)
+    family = warehouse_sql_quote_dialect(dialect_name)
+    if family == "sqlserver" or dialect_name.lower().startswith("mssql"):
+        type_sql = "BIT"
+    elif family == "oracle":
+        type_sql = "NUMBER(1)"
+    elif stores_boolean_as_numeric(dialect_name):
+        type_sql = "INTEGER"
+    else:
+        type_sql = "BOOLEAN"
+    ddl = (
+        f"ALTER TABLE {qualified} ADD COLUMN {col_quoted} {type_sql} DEFAULT {false_lit}"
+    )
+    try:
+        conn.execute(sa.text(ddl))
+        conn.commit()
+        return
+    except Exception:
         try:
-            conn.execute(sa.text(ddl))
-            conn.commit()
-            return
-        except Exception:
-            try:
-                conn.rollback()
-            except Exception as exc:
-                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
+            conn.rollback()
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _update_deleted_batch(
@@ -113,14 +126,18 @@ def _update_deleted_batch(
 ) -> tuple[int, int]:
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
+    from services.dialect_profiles import sql_bool_false_literal, sql_bool_true_literal
 
+    dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "")
     col_quoted = quote_sql_identifier(soft_delete_column)
+    true_lit = sql_bool_true_literal(dialect_name)
+    false_lit = sql_bool_false_literal(dialect_name)
     activated = 0
     deactivated = 0
 
     if activate_keys:
         where_keys, params = _pk_or_clause(pk_columns, activate_keys, prefix="a")
-        stmt = f"UPDATE {qualified} SET {col_quoted} = FALSE WHERE {where_keys}"  # nosec B608
+        stmt = f"UPDATE {qualified} SET {col_quoted} = {false_lit} WHERE {where_keys}"  # nosec B608
         try:
             result = conn.execute(sa.text(stmt), params)
             conn.commit()
@@ -131,9 +148,9 @@ def _update_deleted_batch(
     if delete_keys:
         where_keys, params = _pk_or_clause(pk_columns, delete_keys, prefix="d")
         stmt = (
-            f"UPDATE {qualified} SET {col_quoted} = TRUE "  # nosec B608
+            f"UPDATE {qualified} SET {col_quoted} = {true_lit} "  # nosec B608
             f"WHERE {where_keys} "
-            f"AND ({col_quoted} IS NULL OR {col_quoted} = FALSE)"
+            f"AND ({col_quoted} IS NULL OR {col_quoted} = {false_lit})"
         )
         try:
             result = conn.execute(sa.text(stmt), params)
@@ -152,36 +169,70 @@ def _compute_active_checksum(
     soft_delete_column: str,
     batch_size: int,
 ) -> tuple[int, str]:
-    """Read active rows and return an order-independent checksum."""
+    """Active-row digest: one streamed SELECT. Never OFFSET."""
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
+    from services.dialect_profiles import sql_bool_is_not_true
+    from services.reconciliation_api import stream_select_checksum
 
-    from services.reconciliation import canonical_checksum
-
+    dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "")
     col_quoted = quote_sql_identifier(soft_delete_column)
+    pred = sql_bool_is_not_true(dialect_name, col_quoted)
     cols_quoted = ",".join(quote_sql_identifier(c) for c in target_cols)
-    active_rows: list[dict[str, Any]] = []
-    active_count = 0
-    offset = 0
-    while True:
-        sql = (
-            f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
-            f"WHERE {col_quoted} IS NOT TRUE "
-            f"LIMIT {batch_size} OFFSET {offset}"
-        )
-        result = conn.execute(sa.text(sql))
-        rows = result.fetchall()
-        if not rows:
-            break
-        for row in rows:
-            active_count += 1
-            active_rows.append({c: row._mapping.get(c) for c in target_cols})
-        if len(rows) < batch_size:
-            break
-        offset += batch_size
+    sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {pred}"  # nosec B608
+    return stream_select_checksum(
+        conn,
+        sa.text(sql),
+        target_cols,
+        itersize=max(1, int(batch_size)),
+        dest_db_type=dialect_name,
+    )
 
-    checksum = canonical_checksum(active_rows, target_cols) if active_rows else ""
-    return active_count, checksum
+
+def apply_inferred_deletes_via_staging(
+    conn: Any,
+    target_qualified: str,
+    staging_qualified: str,
+    pk_columns: list[str],
+    *,
+    soft_delete_column: str = SOFT_DELETE_COLUMN,
+    dialect: str = "",
+) -> None:
+    """Set-based inferred deletes: keys in staging stay active; dest \\ staging soft-delete.
+
+    Fivetran-style full-refresh mirror as one anti-join — not OFFSET pages of
+    dest PKs. Boolean literals follow ``sql_bool_*`` (SQL Server BIT / Oracle
+    NUMBER(1)). Does not close Gate-8 by itself.
+    """
+    import sqlalchemy as sa
+    from connectors.writer_common import quote_sql_identifier
+    from services.dialect_profiles import sql_bool_false_literal, sql_bool_true_literal
+
+    _ensure_soft_delete_column(conn, target_qualified, soft_delete_column)
+    dialect_name = dialect or str(getattr(getattr(conn, "dialect", None), "name", "") or "")
+    col_quoted = quote_sql_identifier(soft_delete_column)
+    true_lit = sql_bool_true_literal(dialect_name)
+    false_lit = sql_bool_false_literal(dialect_name)
+    join_pred = " AND ".join(
+        f"{staging_qualified}.{quote_sql_identifier(c)} = "
+        f"{target_qualified}.{quote_sql_identifier(c)}"
+        for c in pk_columns
+    )
+    conn.execute(
+        sa.text(
+            f"UPDATE {target_qualified} "  # nosec B608
+            f"SET {col_quoted} = {false_lit} "
+            f"WHERE EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})"
+        )
+    )
+    conn.execute(
+        sa.text(
+            f"UPDATE {target_qualified} "  # nosec B608
+            f"SET {col_quoted} = {true_lit} "
+            f"WHERE NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
+            f"AND ({col_quoted} IS NULL OR {col_quoted} = {false_lit})"
+        )
+    )
 
 
 def apply_inferred_soft_deletes(
@@ -253,23 +304,20 @@ def apply_inferred_soft_deletes(
             _ensure_soft_delete_column(conn, qualified, soft_delete_column)
 
             pk_quoted = ", ".join(quote_sql_identifier(c) for c in pk_columns)
-            order_by = ", ".join(quote_sql_identifier(c) for c in pk_columns)
             col_quoted = quote_sql_identifier(soft_delete_column)
-            offset = 0
-            while True:
-                sql = (
-                    f"SELECT {pk_quoted}, {col_quoted} FROM {qualified} "  # nosec B608
-                    f"ORDER BY {order_by} LIMIT {batch_size} OFFSET {offset}"
-                )
-                result = conn.execute(sa.text(sql))
-                rows = result.fetchall()
-                if not rows:
-                    break
-                scanned += len(rows)
+            from services.reconciliation_api import iter_select_row_dicts
 
+            sql = f"SELECT {pk_quoted}, {col_quoted} FROM {qualified}"  # nosec B608
+            for rows in iter_select_row_dicts(
+                conn,
+                sa.text(sql),
+                list(pk_columns) + [soft_delete_column],
+                itersize=batch_size,
+            ):
+                scanned += len(rows)
                 target_keys: set[str] = set()
                 for row in rows:
-                    pk_val = _compose_key(dict(row._mapping), pk_columns)
+                    pk_val = _compose_key(row, pk_columns)
                     if pk_val and not all(p == "" for p in pk_val.split(_KEY_SEP)):
                         target_keys.add(pk_val)
 
@@ -280,10 +328,6 @@ def apply_inferred_soft_deletes(
                 )
                 activated_total += a
                 deactivated_total += d
-
-                if len(rows) < batch_size:
-                    break
-                offset += batch_size
 
             active_rows, active_checksum = _compute_active_checksum(
                 conn, qualified, target_cols, soft_delete_column, batch_size

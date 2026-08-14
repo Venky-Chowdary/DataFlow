@@ -370,7 +370,19 @@ def denormalize_result_key(driver: str | None, name: str) -> str:
 
 
 def page_clause(driver: str | None, offset: int, limit: int) -> str:
-    """Dialect-correct row-window clause (caller supplies its own ORDER BY)."""
+    """Dialect-correct *window* clause. Caller supplies a unique ORDER BY.
+
+    Microsoft: each OFFSET/FETCH page is an independent query and is invalid
+    without ORDER BY. Oracle/DB2 reject ``LIMIT`` (ORA-03047). OFFSET is
+    O(n²) and can skip/duplicate rows when the order key is not unique.
+
+    Full-population reads (SCD2 current digest, mirror active digest, staging
+    drain) must not use this helper — stream one SELECT
+    (``iter_select_row_dicts`` / ``stream_select_checksum``). Dest-engine
+    ``HASH_AGG`` / ``CHECKSUM_AGG`` pushdown is a future enhancement of that
+    kernel, not a second path: CHECKSUM_AGG ignores NULL; HASH_AGG is not
+    portable.
+    """
     if uses_fetch_first_pagination(driver):
         return f"OFFSET {int(offset)} ROWS FETCH NEXT {int(limit)} ROWS ONLY"
     return f"LIMIT {int(limit)} OFFSET {int(offset)}"
@@ -396,3 +408,38 @@ def quote_char_for(driver: str | None) -> str:
     if style == "none":
         return ""
     return '"'
+
+
+def stores_boolean_as_numeric(driver: str | None) -> bool:
+    """True when BOOLEAN is INTEGER/BIT/NUMBER(1), not ANSI BOOLEAN.
+
+    SQLAlchemy dialect.name is ``mssql`` for SQL Server. Catalog SKUs alias
+    through ``warehouse_sql_quote_dialect``. T-SQL has no ``IS TRUE``;
+    Oracle 19c has no BOOLEAN (NUMBER(1) until 23c).
+    """
+    kind = (driver or "").strip().lower()
+    if kind in {"sqlite", "mssql"} or kind.startswith("mssql"):
+        return True
+    return warehouse_sql_quote_dialect(kind) in {"sqlserver", "oracle"}
+
+
+def sql_bool_is_true(driver: str | None, quoted_column: str) -> str:
+    """Predicate: column is the SQL TRUE / 1 value."""
+    if stores_boolean_as_numeric(driver):
+        return f"{quoted_column} = 1"
+    return f"{quoted_column} IS TRUE"
+
+
+def sql_bool_is_not_true(driver: str | None, quoted_column: str) -> str:
+    """Predicate: column is FALSE or NULL (SQL ``IS NOT TRUE``)."""
+    if stores_boolean_as_numeric(driver):
+        return f"({quoted_column} IS NULL OR {quoted_column} = 0)"
+    return f"{quoted_column} IS NOT TRUE"
+
+
+def sql_bool_true_literal(driver: str | None) -> str:
+    return "1" if stores_boolean_as_numeric(driver) else "TRUE"
+
+
+def sql_bool_false_literal(driver: str | None) -> str:
+    return "0" if stores_boolean_as_numeric(driver) else "FALSE"

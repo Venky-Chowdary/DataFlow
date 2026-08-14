@@ -7,6 +7,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+import pytest
+
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -469,3 +471,113 @@ def test_scd2_df_missing_hydrates_prior_attr_not_null_history():
             Path(db_path).unlink(missing_ok=True)
         except PermissionError:
             pass
+
+
+def test_active_checksum_sql_is_a_full_scan_not_limit_offset():
+    """Oracle/SQL Server reject LIMIT; OFFSET pagination is not this kernel."""
+    from services.scd2_engine import _active_checksum
+
+    captured: dict[str, str] = {}
+
+    class _Row:
+        def __init__(self, mapping):
+            self._mapping = mapping
+
+    class _Result:
+        def keys(self):
+            return ["id", "name"]
+
+        def partitions(self, _n):
+            yield [_Row({"id": "1", "name": "A"})]
+
+    class _Conn:
+        def execution_options(self, **_kw):
+            return self
+
+        def execute(self, statement):
+            captured["sql"] = str(statement)
+            return _Result()
+
+        dialect = type("D", (), {"name": "mssql"})()
+
+    count, digest = _active_checksum(_Conn(), "dbo.products", ["id", "name"], 10, "mssql")
+    assert count == 1
+    assert digest
+    sql = captured["sql"].upper()
+    assert "LIMIT" not in sql
+    assert "OFFSET" not in sql
+    assert "IS TRUE" not in sql
+    assert "= 1" in sql
+
+
+def _pg_reachable() -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 5432), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
+@pytest.mark.skipif(not _pg_reachable(), reason="PostgreSQL :5432 not reachable")
+def test_live_pg_scd2_active_checksum_streams_current_rows():
+    """Live PG: current-row digest after two versions. Not migration_proven."""
+    import uuid
+
+    psycopg2 = pytest.importorskip("psycopg2")
+    from src.transfer.models import EndpointConfig
+
+    table = f"scd2_stream_{uuid.uuid4().hex[:8]}"
+    conn = psycopg2.connect(
+        host="127.0.0.1",
+        port=5432,
+        dbname="dataflow",
+        user="dataflow",
+        password="dataflow",
+    )
+    conn.autocommit = True
+    try:
+        endpoint = EndpointConfig(
+            kind="database",
+            format="postgresql",
+            host="127.0.0.1",
+            port=5432,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            schema="public",
+            table=table,
+        )
+        first = apply_scd2(
+            endpoint,
+            [{"id": "1", "name": "A"}, {"id": "2", "name": "B"}],
+            columns=["id", "name"],
+            schema={"id": "string", "name": "string"},
+            mappings=None,
+            conflict_columns=["id"],
+        )
+        assert first.get("ok") is not False, first.get("error")
+        assert first["active_rows"] == 2
+        second = apply_scd2(
+            endpoint,
+            [{"id": "1", "name": "A2"}, {"id": "2", "name": "B"}],
+            columns=["id", "name"],
+            schema={"id": "string", "name": "string"},
+            mappings=None,
+            conflict_columns=["id"],
+        )
+        assert second["active_rows"] == 2
+        assert second["updated_rows"] >= 1
+        assert second["active_checksum"]
+        with conn.cursor() as cur:
+            cur.execute(f'SELECT COUNT(*) FROM public."{table}" WHERE is_current IS TRUE')
+            current = cur.fetchone()[0]
+            cur.execute(f'SELECT COUNT(*) FROM public."{table}"')
+            physical = cur.fetchone()[0]
+        assert current == 2
+        assert physical == 3
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
+        conn.close()

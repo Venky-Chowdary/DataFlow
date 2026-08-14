@@ -3000,9 +3000,7 @@ def stream_scd2_mirror_transfer(
     """
     import math
 
-    import sqlalchemy as sa
     from connectors.generic_sql import drop_table, get_sql_schema, get_sqlalchemy_engine
-    from connectors.writer_common import quote_sql_identifier
     from services.sync_cursor import (
         map_source_to_target,
         resolve_effective_sync_mode,
@@ -3199,9 +3197,9 @@ def stream_scd2_mirror_transfer(
                     rows_written = written_total
 
         elif effective_sync in ("full_refresh_mirror", "mirror"):
-            from src.services.mirror_engine import (
+            from services.mirror_engine import (
                 _compute_active_checksum,
-                _ensure_soft_delete_column,
+                apply_inferred_deletes_via_staging,
             )
 
             # Stream upsert staging → target.
@@ -3237,7 +3235,6 @@ def stream_scd2_mirror_transfer(
 
             # Single SQL pass to reactivate present keys and soft-delete missing keys.
             engine = get_sqlalchemy_engine(dest_cfg)
-            soft_delete_col = quote_sql_identifier("_deleted")
             if contract and contract.primary_key:
                 pk_cols = [
                     map_source_to_target(col, mappings) for col in contract.primary_key_columns()
@@ -3247,34 +3244,15 @@ def stream_scd2_mirror_transfer(
                     "Mirror requires an explicit primary_key on the stream contract; "
                     "refuse inventing a conflict key from the first mapped column"
                 )
-            # Correlate target↔staging without UPDATE aliases (SQLite-compatible).
-            join_pred = " AND ".join(
-                f"{staging_qualified}.{quote_sql_identifier(c)} = "
-                f"{target_qualified}.{quote_sql_identifier(c)}"
-                for c in pk_cols
-            )
             with engine.connect() as conn:
-                _ensure_soft_delete_column(conn, target_qualified, "_deleted")
-                # Reactivate rows that are back in the source.
-                conn.execute(
-                    sa.text(
-                        f"UPDATE {target_qualified} "  # nosec B608
-                        f"SET {soft_delete_col} = FALSE "
-                        f"WHERE EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})"
-                    )
-                )
-                # Soft-delete rows that are no longer in the source.
-                conn.execute(
-                    sa.text(
-                        f"UPDATE {target_qualified} "  # nosec B608
-                        f"SET {soft_delete_col} = TRUE "
-                        f"WHERE NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
-                        f"AND ({soft_delete_col} IS NULL OR {soft_delete_col} = FALSE)"
-                    )
+                apply_inferred_deletes_via_staging(
+                    conn,
+                    target_qualified,
+                    staging_qualified,
+                    pk_cols,
+                    dialect=dest_type,
                 )
                 conn.commit()
-
-                # Read active rows and compute checksum.
                 active_count, active_checksum = _compute_active_checksum(
                     conn, target_qualified, target_cols, "_deleted", batch_size=1_000
                 )
@@ -3307,27 +3285,21 @@ def _read_staging_batches(
     columns: list[str],
     batch_size: int,
 ):
-    """Yield batches of dicts from the staging table using LIMIT/OFFSET."""
+    """Yield batches from staging via one streamed SELECT. Never OFFSET."""
     import sqlalchemy as sa
     from connectors.generic_sql import get_sqlalchemy_engine
     from connectors.writer_common import quote_sql_identifier
+    from services.reconciliation_api import iter_select_row_dicts
 
     engine = get_sqlalchemy_engine(cfg)
     qualified = _qualified(endpoint.table, schema_name)
     try:
         with engine.connect() as conn:
-            offset = 0
-            while True:
-                cols = ",".join(quote_sql_identifier(c) for c in columns)
-                sql = f"SELECT {cols} FROM {qualified} LIMIT {batch_size} OFFSET {offset}"  # nosec B608
-                result = conn.execute(sa.text(sql))
-                rows = result.mappings().all()
-                if not rows:
-                    break
-                yield [{c: row[c] for c in columns} for row in rows]
-                if len(rows) < batch_size:
-                    break
-                offset += batch_size
+            cols = ",".join(quote_sql_identifier(c) for c in columns)
+            sql = f"SELECT {cols} FROM {qualified}"  # nosec B608
+            yield from iter_select_row_dicts(
+                conn, sa.text(sql), columns, itersize=batch_size
+            )
     finally:
         release_engine(engine)
 
