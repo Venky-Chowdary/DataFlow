@@ -48,7 +48,10 @@ export function inferTransferFailureHint(
   if (
     text.includes("cdc_lsn_gap")
     || text.includes("cdc_scn_gap")
+    || text.includes("cdc_binlog_gap")
+    || text.includes("cdc_slot_gap")
     || text.includes("cdc_cursor_gap")
+    || text.includes("wal_status=lost")
     || text.includes("before capture retention")
     || text.includes("before available redo")
     || text.includes("min_lsn")

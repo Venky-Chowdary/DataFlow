@@ -138,7 +138,7 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
   const leaseConflict = Boolean(job?.cdc_lease_conflict);
   const cursorGap =
     Boolean(job?.cdc_cursor_gap)
-    || ["cdc_cursor_gap", "cdc_lsn_gap", "cdc_scn_gap", "cdc_binlog_gap"].includes(
+    || ["cdc_cursor_gap", "cdc_lsn_gap", "cdc_scn_gap", "cdc_binlog_gap", "cdc_slot_gap"].includes(
       String(job?.error_code || ""),
     );
   const snapshotMode =

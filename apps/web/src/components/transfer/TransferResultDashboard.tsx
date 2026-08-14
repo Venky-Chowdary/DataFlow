@@ -569,7 +569,7 @@ export function TransferResultDashboard({
         </section>
       )}
 
-      {!result.success && (result.cdc_cursor_gap || result.error_code === "cdc_lsn_gap" || result.error_code === "cdc_scn_gap" || result.error_code === "cdc_cursor_gap") && (
+      {!result.success && (result.cdc_cursor_gap || result.error_code === "cdc_lsn_gap" || result.error_code === "cdc_scn_gap" || result.error_code === "cdc_binlog_gap" || result.error_code === "cdc_slot_gap" || result.error_code === "cdc_cursor_gap") && (
         <CdcCursorGapPanel
           job={{
             _id: result.job_id,

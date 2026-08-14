@@ -3,10 +3,11 @@
 Honesty
 -------
 ``ok`` / ``at_risk`` / ``gap`` classify resume against live retention. A ``gap``
-means continuous CDC across the window is impossible. ``when_needed`` recovers
-by blocking-snapshot of current source keys (see ``cdc_snapshot_mode``);
-``initial`` / ``never`` stay fail-closed. This does not invent dual-node AG
-failover; single-node cleanup produces the same gap class.
+means continuous CDC across the window is impossible. PostgreSQL
+``wal_status=lost`` or a dropped slot is the same class as a purged binlog —
+recreating the slot at current WAL skips the lost window. ``when_needed``
+recovers by blocking-snapshot of current source keys (see ``cdc_snapshot_mode``);
+``initial`` / ``never`` stay fail-closed.
 """
 
 from __future__ import annotations
@@ -296,6 +297,135 @@ def classify_binlog_retention(
     )
 
 
+def classify_pg_slot_retention(
+    *,
+    slot_exists: bool | None = None,
+    wal_status: str = "",
+    restart_lsn: str = "",
+    confirmed_flush_lsn: str = "",
+    watermark: Any = None,
+    resume_expected: bool | None = None,
+    cursor_key: str = "",
+    slot_name: str = "",
+) -> RetentionProbeResult:
+    """Classify a PostgreSQL logical slot against ``wal_status`` / existence.
+
+    PG13+ ``pg_replication_slots.wal_status``:
+
+    - ``lost`` — required WAL was recycled (``max_slot_wal_keep_size``). Gap.
+    - ``unreserved`` / ``extended`` — next checkpoint may invalidate. At-risk.
+    - ``reserved`` — restart_lsn is retained. Ok.
+    - empty (PG12) — slot existence retains WAL; treat existing slot as ok.
+
+    A **dropped** slot while a watermark/resume is present is the same gap
+    class: ``pg_create_logical_replication_slot`` would start at *current* WAL
+    and skip the lost window. That is silent CDC data loss. Snapshot recovery
+    (``when_needed``) may recreate the slot; poll/resume must not.
+    """
+    from services.cdc_snapshot_mode import watermark_present
+
+    wal = str(wal_status or "").strip().lower()
+    exists = bool(slot_exists)
+    expected = (
+        bool(resume_expected)
+        if resume_expected is not None
+        else watermark_present(watermark)
+    )
+    resume = str(confirmed_flush_lsn or watermark or slot_name or "").strip()
+    retained = wal or restart_lsn or ("slot_missing" if not exists else "")
+    lost_note = (
+        "Recreating the slot at current WAL would skip the lost window. "
+        "when_needed snapshots current source keys then streams from the new tip. "
+        "Not continuous CDC, not migration_proven."
+    )
+
+    if not exists:
+        if expected:
+            return RetentionProbeResult(
+                status="gap",
+                dialect="postgresql",
+                resume=resume,
+                retained="slot_missing",
+                cursor_key=cursor_key,
+                capture_instance=slot_name,
+                message=(
+                    f"PostgreSQL replication slot {slot_name or '(unnamed)'} is missing "
+                    f"while a CDC watermark is present. {lost_note}"
+                ),
+                details={"slot_exists": False, "wal_status": wal, "slot_name": slot_name},
+            )
+        return RetentionProbeResult(
+            status="no_watermark",
+            dialect="postgresql",
+            retained=retained,
+            cursor_key=cursor_key,
+            capture_instance=slot_name,
+            message="No PostgreSQL slot or watermark — next run will snapshot and create the slot.",
+            details={"slot_exists": False, "slot_name": slot_name},
+        )
+
+    if wal == "lost":
+        return RetentionProbeResult(
+            status="gap",
+            dialect="postgresql",
+            resume=resume,
+            retained="lost",
+            cursor_key=cursor_key,
+            capture_instance=slot_name,
+            message=(
+                f"PostgreSQL slot {slot_name or '(unnamed)'} wal_status=lost "
+                f"(restart_lsn={restart_lsn or '?'}, confirmed_flush={confirmed_flush_lsn or '?'}). "
+                f"{lost_note}"
+            ),
+            details={
+                "slot_exists": True,
+                "wal_status": "lost",
+                "restart_lsn": restart_lsn,
+                "confirmed_flush_lsn": confirmed_flush_lsn,
+                "slot_name": slot_name,
+            },
+        )
+    if wal in {"unreserved", "extended"}:
+        return RetentionProbeResult(
+            status="at_risk",
+            dialect="postgresql",
+            resume=resume,
+            retained=wal,
+            cursor_key=cursor_key,
+            capture_instance=slot_name,
+            message=(
+                f"PostgreSQL slot {slot_name or '(unnamed)'} wal_status={wal}. "
+                "max_slot_wal_keep_size may invalidate the slot at the next checkpoint. "
+                "when_needed snapshot readiness is the recovery path — not continuous CDC."
+            ),
+            details={
+                "slot_exists": True,
+                "wal_status": wal,
+                "restart_lsn": restart_lsn,
+                "slot_name": slot_name,
+            },
+        )
+    return RetentionProbeResult(
+        status="ok",
+        dialect="postgresql",
+        resume=resume,
+        retained=wal or restart_lsn,
+        cursor_key=cursor_key,
+        capture_instance=slot_name,
+        message=(
+            f"PostgreSQL slot {slot_name or '(unnamed)'} retains WAL "
+            f"(wal_status={wal or 'n/a-pg12'}, restart_lsn={restart_lsn or '?'})."
+        ),
+        details={
+            "slot_exists": True,
+            "wal_status": wal,
+            "restart_lsn": restart_lsn,
+            "confirmed_flush_lsn": confirmed_flush_lsn,
+            "slot_name": slot_name,
+        },
+    )
+
+
 def _resume_binlog_from_watermark(watermark: str | None) -> dict[str, Any]:
     """Extract file/pos/gtid from a MySQL CDC watermark JSON or bare file:pos."""
     out: dict[str, Any] = {"file": "", "pos": None, "gtid": ""}
@@ -558,6 +688,128 @@ def probe_mysql_retention(
         )
 
 
+_PG_RETENTION_DIALECTS = frozenset(
+    {
+        "postgresql",
+        "postgres",
+        "pg",
+        "amazon_rds_postgresql",
+        "aurora_postgres",
+        "alloydb",
+        "supabase",
+        "timescaledb",
+        "cloudsql_postgres",
+    }
+)
+
+
+def probe_postgres_retention(
+    cfg: dict[str, Any],
+    *,
+    table: str = "",
+    cursor_key: str = "",
+    watermark: str | None = None,
+    slot_name: str = "",
+) -> RetentionProbeResult:
+    """Live probe: ``pg_replication_slots`` existence + ``wal_status`` (PG13+)."""
+    from connectors.postgresql_change_stream import _slot_name
+    from connectors.postgresql_conn import get_connection
+
+    from services.sync_cursor import get_watermark
+
+    ck = (cursor_key or "").strip()
+    wm = watermark if watermark is not None else (get_watermark(ck) if ck else None)
+    database = str(cfg.get("database") or "postgres")
+    slot = (slot_name or "").strip() or (
+        _slot_name(database, table, ck) if (table or ck) else ""
+    )
+    if not slot:
+        return RetentionProbeResult(
+            status="n_a",
+            dialect="postgresql",
+            cursor_key=ck,
+            message="slot_name or table+cursor_key required for PostgreSQL retention probe.",
+        )
+    try:
+        conn = get_connection(
+            host=cfg.get("host") or "localhost",
+            port=cfg.get("port") or 5432,
+            database=database,
+            username=cfg.get("username") or "",
+            password=cfg.get("password") or "",
+            connection_string=cfg.get("connection_string") or "",
+            ssl=bool(cfg.get("ssl")),
+        )
+        try:
+            exists = False
+            wal = ""
+            restart = ""
+            confirmed = ""
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(
+                        """
+                        SELECT restart_lsn::text,
+                               confirmed_flush_lsn::text,
+                               wal_status
+                        FROM pg_replication_slots
+                        WHERE slot_name = %s
+                        """,
+                        (slot,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        exists = True
+                        restart = str(row[0] or "")
+                        confirmed = str(row[1] or "")
+                        wal = str(row[2] or "")
+                except Exception as col_exc:
+                    msg = str(col_exc).lower()
+                    if "wal_status" not in msg and "undefined" not in msg:
+                        raise
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    cur.execute(
+                        """
+                        SELECT restart_lsn::text, confirmed_flush_lsn::text
+                        FROM pg_replication_slots
+                        WHERE slot_name = %s
+                        """,
+                        (slot,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        exists = True
+                        restart = str(row[0] or "")
+                        confirmed = str(row[1] or "")
+            return classify_pg_slot_retention(
+                slot_exists=exists,
+                wal_status=wal,
+                restart_lsn=restart,
+                confirmed_flush_lsn=confirmed,
+                watermark=wm,
+                cursor_key=ck,
+                slot_name=slot,
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect="postgresql",
+            resume=str(wm or ""),
+            cursor_key=ck,
+            capture_instance=slot,
+            message=f"PostgreSQL slot retention probe failed: {exc}",
+            details={"error": str(exc)[:300], "slot_name": slot},
+        )
+
+
 def probe_cdc_retention(
     cfg: dict[str, Any],
     *,
@@ -586,6 +838,13 @@ def probe_cdc_retention(
         return probe_mysql_retention(
             cfg, cursor_key=cursor_key, watermark=watermark
         )
+    if dialect in _PG_RETENTION_DIALECTS:
+        return probe_postgres_retention(
+            cfg,
+            table=table,
+            cursor_key=cursor_key,
+            watermark=watermark,
+        )
     return RetentionProbeResult(
         status="n_a",
         dialect=dialect or "unknown",
@@ -612,13 +871,44 @@ def attach_cdc_retention(cdc: Any, src_cfg: dict[str, Any] | None, *, table: str
         "microsoft_sql_server",
         "azure_sql_database",
         "amazon_rds_sql_server",
-    }:
+    } | _PG_RETENTION_DIALECTS:
         return None
     table_name = table or str(getattr(cdc, "table", "") or src_cfg.get("table") or "")
     if isinstance(table_name, (list, tuple)):
         table_name = str(table_name[0]) if table_name else ""
     cursor_key = str(getattr(cdc, "cursor_key", "") or src_cfg.get("cursor_key") or "")
     schema = str(src_cfg.get("schema") or getattr(cdc, "schema", "") or "")
+    if dialect in _PG_RETENTION_DIALECTS and cdc is not None and hasattr(
+        cdc, "_slot_catalog_status"
+    ):
+        catalog: dict[str, Any] = {}
+        try:
+            catalog = dict(cdc._slot_catalog_status(max_age_sec=0) or {})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        from services.sync_cursor import get_watermark
+
+        wm = getattr(cdc, "consistent_point_lsn", None) or (
+            get_watermark(cursor_key) if cursor_key else None
+        )
+        resume_expected = (
+            bool(cdc._resume_expected) if hasattr(cdc, "_resume_expected") else None
+        )
+        probe = classify_pg_slot_retention(
+            slot_exists=catalog.get("slot_exists"),
+            wal_status=str(catalog.get("wal_status") or ""),
+            restart_lsn=str(catalog.get("restart_lsn") or ""),
+            confirmed_flush_lsn=str(catalog.get("confirmed_flush_lsn") or ""),
+            watermark=wm,
+            resume_expected=resume_expected,
+            cursor_key=cursor_key,
+            slot_name=str(getattr(cdc, "slot_name", "") or ""),
+        )
+        try:
+            setattr(cdc, "_cdc_retention", probe)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return probe
     probe = probe_cdc_retention(
         src_cfg,
         table=table_name,

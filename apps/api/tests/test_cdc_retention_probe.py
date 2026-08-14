@@ -87,3 +87,89 @@ def test_synthetic_gap_then_clear_roundtrip(tmp_path, monkeypatch):
     assert get_watermark(ck) is None
     probe2 = classify_lsn_retention(_resume_lsn_from_watermark(None), "0b", cursor_key=ck)
     assert probe2.status == "no_watermark"
+
+
+def test_classify_pg_slot_lost_and_missing_are_gaps():
+    from services.cdc_retention_probe import classify_pg_slot_retention
+
+    lost = classify_pg_slot_retention(
+        slot_exists=True,
+        wal_status="lost",
+        restart_lsn="0/100",
+        confirmed_flush_lsn="0/200",
+        watermark="slot=df_x|phase=streaming|lsn=0/200",
+        slot_name="df_x",
+        cursor_key="ck",
+    )
+    assert lost.status == "gap"
+    assert lost.dialect == "postgresql"
+    assert "lost window" in lost.message.lower() or "wal_status=lost" in lost.message
+
+    missing = classify_pg_slot_retention(
+        slot_exists=False,
+        watermark="slot=df_x|phase=streaming|lsn=0/200",
+        slot_name="df_x",
+    )
+    assert missing.status == "gap"
+    assert missing.retained == "slot_missing"
+
+    fresh = classify_pg_slot_retention(slot_exists=False, watermark=None, slot_name="df_x")
+    assert fresh.status == "no_watermark"
+
+    reserved = classify_pg_slot_retention(
+        slot_exists=True, wal_status="reserved", restart_lsn="0/1", watermark="0/1"
+    )
+    assert reserved.status == "ok"
+
+    risk = classify_pg_slot_retention(
+        slot_exists=True, wal_status="unreserved", restart_lsn="0/1", watermark="0/1"
+    )
+    assert risk.status == "at_risk"
+
+    pg12 = classify_pg_slot_retention(
+        slot_exists=True, wal_status="", restart_lsn="0/1", watermark="0/1"
+    )
+    assert pg12.status == "ok"
+
+
+def test_when_needed_pg_slot_lost_is_blocking_snapshot():
+    from services.cdc_retention_probe import classify_pg_slot_retention
+    from services.cdc_snapshot_mode import KIND_BLOCKING, classify_snapshot_plan, SnapshotMode
+
+    probe = classify_pg_slot_retention(
+        slot_exists=True,
+        wal_status="lost",
+        confirmed_flush_lsn="0/200",
+        watermark="0/200",
+        slot_name="df_x",
+    )
+    plan = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="0/200", retention_status=probe.status
+    )
+    assert plan["kind"] == KIND_BLOCKING
+    assert plan["lost_window"] is True
+    assert plan["run_snapshot"] is True
+
+
+def test_attach_cdc_retention_uses_pg_slot_catalog():
+    from types import SimpleNamespace
+
+    from services.cdc_retention_probe import attach_cdc_retention
+
+    cdc = SimpleNamespace(
+        table="orders",
+        cursor_key="pg:db:orders",
+        slot_name="df_orders",
+        consistent_point_lsn="0/200",
+        _resume_expected=True,
+        _slot_catalog_status=lambda max_age_sec=0: {
+            "slot_exists": True,
+            "wal_status": "lost",
+            "restart_lsn": "0/100",
+            "confirmed_flush_lsn": "0/200",
+        },
+    )
+    probe = attach_cdc_retention(cdc, {"type": "postgresql", "database": "db"}, table="orders")
+    assert probe is not None
+    assert probe.status == "gap"
+    assert cdc._cdc_retention.status == "gap"

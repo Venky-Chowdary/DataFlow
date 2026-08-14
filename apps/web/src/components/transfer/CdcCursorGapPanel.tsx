@@ -42,7 +42,9 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
     || job.error_code === "cdc_cursor_gap"
     || job.error_code === "cdc_lsn_gap"
     || job.error_code === "cdc_scn_gap"
-    || /before capture retention|before available redo|min_lsn|oldest_available|ora-01291/i.test(
+    || job.error_code === "cdc_binlog_gap"
+    || job.error_code === "cdc_slot_gap"
+    || /before capture retention|before available redo|min_lsn|oldest_available|ora-01291|wal_status=lost|replication slot/i.test(
       String(job.error || ""),
     );
 

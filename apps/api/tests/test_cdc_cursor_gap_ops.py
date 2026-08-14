@@ -62,6 +62,25 @@ def test_humanize_cdc_binlog_gap():
     assert "watermark" in h["fix"].lower() or "snapshot" in h["fix"].lower()
 
 
+def test_humanize_cdc_slot_gap():
+    from services.cdc_cursor_gap import CdcSlotGapError
+    from services.error_handling import humanize_transfer_failure
+
+    exc = CdcSlotGapError(
+        "slot wal_status=lost",
+        slot_name="df_orders",
+        wal_status="lost",
+        restart_lsn="0/100",
+        confirmed_flush_lsn="0/200",
+        cursor_key="pg:db:orders",
+    )
+    h = humanize_transfer_failure(exc)
+    assert h["code"] == "cdc_slot_gap"
+    assert h["dialect"] == "postgresql"
+    assert h["cursor_key"] == "pg:db:orders"
+    assert "snapshot" in h["fix"].lower()
+
+
 def test_job_failure_fields_stamp_cursor_gap():
     from services.cdc_cursor_gap import CdcLsnGapError
     from src.transfer.engine import _job_failure_fields

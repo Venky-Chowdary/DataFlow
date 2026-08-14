@@ -382,6 +382,12 @@ def test_classify_snapshot_plan_when_needed_gap_is_blocking() -> None:
         )
     assert never_gap.value.snapshot_plan["reason"] == "never_forbids_snapshot"
 
+    pg_lost = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="0/200", retention_status="gap"
+    )
+    assert pg_lost["kind"] == KIND_BLOCKING
+    assert pg_lost["lost_window"] is True
+
 
 def test_cdc_transfer_when_needed_snapshots_on_retention_gap() -> None:
     from types import SimpleNamespace

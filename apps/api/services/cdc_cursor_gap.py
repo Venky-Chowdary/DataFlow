@@ -2,12 +2,13 @@
 
 Honesty
 -------
-SQL Server ``min_lsn``, Oracle oldest redo, and MySQL purged binlog/GTID gaps
-mean continuous CDC across the gap is impossible. ``when_needed`` recovers by
+SQL Server ``min_lsn``, Oracle oldest redo, MySQL purged binlog/GTID, and
+PostgreSQL ``pg_replication_slots.wal_status=lost`` (or a dropped slot) mean
+continuous CDC across the gap is impossible. Recreating a logical slot at
+current WAL while holding an old watermark **skips the lost window** — that is
+silent data loss. ``when_needed`` recovers by dropping an invalidated slot,
 blocking-snapshot of **current** source keys, then streaming from the new tip.
-``initial`` / ``never`` stay fail-closed until the operator changes mode or
-resets the watermark. This is not exactly-once recovery and not continuous CDC
-across the lost window.
+``initial`` / ``never`` stay fail-closed. Not exactly-once. Not continuous CDC.
 """
 
 from __future__ import annotations
@@ -15,7 +16,13 @@ from __future__ import annotations
 from typing import Any
 
 GAP_ERROR_CODES = frozenset(
-    {"cdc_cursor_gap", "cdc_lsn_gap", "cdc_scn_gap", "cdc_binlog_gap"}
+    {
+        "cdc_cursor_gap",
+        "cdc_lsn_gap",
+        "cdc_scn_gap",
+        "cdc_binlog_gap",
+        "cdc_slot_gap",
+    }
 )
 
 
@@ -143,3 +150,32 @@ class CdcBinlogGapError(CdcCursorGapError):
         self.oldest_file = oldest_file
         self.resume_gtid = resume_gtid
         self.gtid_purged = gtid_purged
+
+
+class CdcSlotGapError(CdcCursorGapError):
+    """PostgreSQL: slot missing or ``wal_status=lost`` — WAL for resume is gone."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        slot_name: str = "",
+        wal_status: str = "",
+        restart_lsn: str = "",
+        confirmed_flush_lsn: str = "",
+        cursor_key: str = "",
+        snapshot_plan: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            code="cdc_slot_gap",
+            dialect="postgresql",
+            resume=confirmed_flush_lsn or slot_name,
+            retained=wal_status or restart_lsn or "slot_missing",
+            cursor_key=cursor_key,
+            snapshot_plan=snapshot_plan,
+        )
+        self.slot_name = slot_name
+        self.wal_status = wal_status
+        self.restart_lsn = restart_lsn
+        self.confirmed_flush_lsn = confirmed_flush_lsn

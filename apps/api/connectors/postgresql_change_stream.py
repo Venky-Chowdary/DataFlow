@@ -269,6 +269,8 @@ class PostgreSqlChangeStreamCdc:
         self.slot_name = slot
         self.consistent_point_lsn = lsn
         self.phase = phase if phase != "initial" else "snapshot"
+        # Streaming resume must never recreate a missing/lost slot (silent WAL skip).
+        self._resume_expected = bool(lsn) or phase == "streaming"
         self.output_plugin = output_plugin or self._select_plugin()
         self.source_key = connection_fingerprint(
             {**cfg, "type": "postgresql"},
@@ -552,14 +554,58 @@ class PostgreSqlChangeStreamCdc:
         value = row[0] or row[1]
         return str(value) if value else None
 
-    def _ensure_slot(self) -> str | None:
+    def _ensure_slot(self, *, allow_create: bool = True, recreate_if_lost: bool = False) -> str | None:
         """Create the logical slot if needed; return consistent-point LSN.
 
         Slot is created *before* the initial snapshot so WAL from the snapshot
         window is retained (Debezium / PG logical-decoding handoff pattern).
+
+        Poll/resume must pass ``allow_create=False``. Creating a slot at current
+        WAL while a watermark exists skips the lost window — silent CDC loss.
+        Snapshot recovery may pass ``recreate_if_lost=True`` to drop an
+        invalidated ``wal_status=lost`` slot and establish a new consistent point.
         Semantics remain at-least-once; destination upserts must be idempotent.
         """
         self._acquire_cdc_lease()
+        catalog = self._slot_catalog_status(max_age_sec=0)
+        wal = str(catalog.get("wal_status") or "").strip().lower()
+        exists = bool(catalog.get("slot_exists"))
+        if exists and wal == "lost":
+            if not recreate_if_lost:
+                from services.cdc_cursor_gap import CdcSlotGapError
+
+                raise CdcSlotGapError(
+                    (
+                        f"PostgreSQL slot {self.slot_name} wal_status=lost. "
+                        "Poll will not recreate it at current WAL (that skips the lost window). "
+                        "when_needed snapshots current source keys then streams from the new tip. "
+                        "Not continuous CDC, not migration_proven."
+                    ),
+                    slot_name=self.slot_name,
+                    wal_status="lost",
+                    restart_lsn=str(catalog.get("restart_lsn") or ""),
+                    confirmed_flush_lsn=str(
+                        catalog.get("confirmed_flush_lsn") or self.consistent_point_lsn or ""
+                    ),
+                    cursor_key=self.cursor_key,
+                )
+            self._drop_replication_slot()
+            exists = False
+        if not exists and not allow_create:
+            from services.cdc_cursor_gap import CdcSlotGapError
+
+            raise CdcSlotGapError(
+                (
+                    f"PostgreSQL slot {self.slot_name} is missing. "
+                    "Creating it now would start at current WAL and skip the lost window. "
+                    "when_needed snapshots current source keys then streams from the new tip. "
+                    "Not continuous CDC, not migration_proven."
+                ),
+                slot_name=self.slot_name,
+                wal_status="slot_missing",
+                confirmed_flush_lsn=str(self.consistent_point_lsn or ""),
+                cursor_key=self.cursor_key,
+            )
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -567,6 +613,7 @@ class PostgreSqlChangeStreamCdc:
                     (self.slot_name,),
                 )
                 row = cur.fetchone()
+                created_new = False
                 if row is None:
                     try:
                         cur.execute(
@@ -584,14 +631,65 @@ class PostgreSqlChangeStreamCdc:
                             raise
                     created = cur.fetchone()
                     lsn = str(created[0]) if created and created[0] else None
+                    created_new = True
                 else:
                     # Honor existing slot plugin (cannot change without drop).
                     self.output_plugin = row[0] or self.output_plugin
                     lsn = self._read_slot_lsn(cur)
             conn.commit()
-        if lsn and not self.consistent_point_lsn:
+        self._slot_catalog_cache = None
+        if lsn and (created_new or not self.consistent_point_lsn):
             self.consistent_point_lsn = lsn
         return self.consistent_point_lsn
+
+    def _drop_replication_slot(self) -> None:
+        """Drop an invalidated slot so snapshot can create a new consistent point."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_drop_replication_slot(%s)", (self.slot_name,))
+            conn.commit()
+        self._slot_catalog_cache = None
+        _logger.warning(
+            "Dropped PostgreSQL slot %s (wal_status=lost) so snapshot can recreate "
+            "a consistent point. Lost-window events are gone.",
+            self.slot_name,
+        )
+
+    def _assert_slot_within_retention(self) -> None:
+        """Fail-closed before peek when the slot is missing or wal_status=lost."""
+        if self.phase == "snapshot":
+            return
+        catalog = self._slot_catalog_status(max_age_sec=0)
+        from services.cdc_retention_probe import classify_pg_slot_retention
+
+        probe = classify_pg_slot_retention(
+            slot_exists=catalog.get("slot_exists"),
+            wal_status=str(catalog.get("wal_status") or ""),
+            restart_lsn=str(catalog.get("restart_lsn") or ""),
+            confirmed_flush_lsn=str(
+                catalog.get("confirmed_flush_lsn") or self.consistent_point_lsn or ""
+            ),
+            watermark=self.consistent_point_lsn,
+            resume_expected=bool(getattr(self, "_resume_expected", False)),
+            cursor_key=self.cursor_key,
+            slot_name=self.slot_name,
+        )
+        try:
+            self._cdc_retention = probe
+        except Exception:
+            pass
+        if probe.status != "gap":
+            return
+        from services.cdc_cursor_gap import CdcSlotGapError
+
+        raise CdcSlotGapError(
+            probe.message,
+            slot_name=self.slot_name,
+            wal_status=str(catalog.get("wal_status") or probe.retained),
+            restart_lsn=str(catalog.get("restart_lsn") or ""),
+            confirmed_flush_lsn=str(catalog.get("confirmed_flush_lsn") or ""),
+            cursor_key=self.cursor_key,
+        )
 
     def replication_lag_bytes(self) -> int | None:
         """Return WAL lag for this slot, or None if unavailable."""
@@ -924,7 +1022,7 @@ class PostgreSqlChangeStreamCdc:
         if self.output_plugin == "pgoutput":
             self._ensure_publication()
             self._ensure_replica_identity()
-        self._ensure_slot()
+        self._ensure_slot(allow_create=True, recreate_if_lost=True)
         self.phase = "snapshot"
         self._ensure_decode_schema(resume_offset=self.slot_name)
         self.heartbeat()
@@ -1300,10 +1398,14 @@ class PostgreSqlChangeStreamCdc:
 
     def _peek_stream_events_during_chunk(self, sig: Any) -> list[dict[str, Any]]:
         """Peek WAL (no ack) for DDD-3 stream-wins during an incremental snapshot chunk."""
+        from services.cdc_cursor_gap import CdcCursorGapError
+
         try:
-            self._ensure_slot()
+            self._ensure_slot(allow_create=False)
             if self.output_plugin == "pgoutput":
                 self._ensure_publication()
+        except CdcCursorGapError:
+            raise
         except Exception:
             return []
         events: list[dict[str, Any]] = []
@@ -1437,7 +1539,8 @@ class PostgreSqlChangeStreamCdc:
         if self.output_plugin == "pgoutput":
             self._ensure_publication()
             self._ensure_replica_identity()
-        self._ensure_slot()
+        self._assert_slot_within_retention()
+        self._ensure_slot(allow_create=not bool(getattr(self, "_resume_expected", False)))
         self.phase = "streaming"
         self._ensure_decode_schema(resume_offset=self.slot_name)
         self._maybe_record_schema_change(offset=self.slot_name)
