@@ -24,6 +24,41 @@ SCD2_COLUMNS = [VALID_FROM_COLUMN, VALID_TO_COLUMN, IS_CURRENT_COLUMN, ROW_HASH_
 # Unit separator — safe delimiter for composite natural keys in-memory.
 _KEY_SEP = "\x1f"
 
+# Destinations that store boolean as INTEGER/BIT/NUMBER(1), not ANSI BOOLEAN.
+# SQLAlchemy dialect.name is ``mssql`` for SQL Server. Catalog SKUs alias
+# through warehouse_sql_quote_dialect. T-SQL has no IS TRUE; Oracle 19c has
+# no BOOLEAN (NUMBER(1) until 23c). Never emit IS TRUE / FALSE there.
+_NUMERIC_BOOLEAN_DIALECTS = frozenset({"sqlite", "mssql"})
+
+
+def stores_is_current_as_numeric(dialect: str) -> bool:
+    """True when ``is_current`` is 0/1 storage, not ANSI BOOLEAN."""
+    kind = (dialect or "").strip().lower()
+    if kind in _NUMERIC_BOOLEAN_DIALECTS or kind.startswith("mssql"):
+        return True
+    from services.dialect_profiles import warehouse_sql_quote_dialect
+
+    return warehouse_sql_quote_dialect(kind) in {"sqlserver", "oracle"}
+
+
+def scd2_is_current_predicate(dialect: str, quoted_column: str) -> str:
+    """Dest-engine predicate for the current SCD2 version.
+
+    SQLite INTEGER, SQL Server BIT, Oracle NUMBER(1) → ``= 1``.
+    PostgreSQL / MySQL BOOLEAN → ``IS TRUE``. One rule for merge, expire,
+    checksum, and conservation COUNT — not a per-engine patch.
+    """
+    if stores_is_current_as_numeric(dialect):
+        return f"{quoted_column} = 1"
+    return f"{quoted_column} IS TRUE"
+
+
+def scd2_is_current_false_sql(dialect: str) -> str:
+    """SQL literal that closes a current version (``is_current = …``)."""
+    if stores_is_current_as_numeric(dialect):
+        return "0"
+    return "FALSE"
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -214,7 +249,7 @@ def _fetch_current_snapshots(
     cols_quoted = ", ".join(quote_sql_identifier(c) for c in select_cols)
     current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
     where_keys, params = _pk_or_clause(pk_columns, keys, prefix="k")
-    current_pred = f"{current_quoted} = 1" if dialect_name == "sqlite" else f"{current_quoted} IS TRUE"
+    current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     sql = (
         f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
         f"WHERE {where_keys} AND {current_pred}"
@@ -274,8 +309,8 @@ def _expire_rows(
     valid_to_quoted = quote_sql_identifier(VALID_TO_COLUMN)
     where_keys, params = _pk_or_clause(pk_columns, keys, prefix="e")
     params["ts"] = timestamp
-    current_pred = f"{current_quoted} = 1" if dialect_name == "sqlite" else f"{current_quoted} IS TRUE"
-    false_lit = "0" if dialect_name == "sqlite" else "FALSE"
+    current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
+    false_lit = scd2_is_current_false_sql(dialect_name)
     sql = (
         f"UPDATE {qualified} "  # nosec B608
         f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
@@ -299,6 +334,7 @@ def _active_checksum(
     from services.reconciliation import canonical_checksum
 
     current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
+    current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     cols_quoted = ",".join(quote_sql_identifier(c) for c in target_cols if c not in SCD2_COLUMNS)
     rows: list[dict[str, Any]] = []
     count = 0
@@ -306,15 +342,9 @@ def _active_checksum(
     while True:
         sql = (
             f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
-            f"WHERE {current_quoted} IS TRUE "
+            f"WHERE {current_pred} "
             f"LIMIT {batch_size} OFFSET {offset}"
         )
-        if dialect_name == "sqlite":
-            sql = (
-                f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
-                f"WHERE {current_quoted} = 1 "
-                f"LIMIT {batch_size} OFFSET {offset}"
-            )
         result = conn.execute(sa.text(sql))
         batch = result.fetchall()
         if not batch:

@@ -76,6 +76,14 @@ current identities — return ``None``, never fall back to history
 ``active_rows`` never close. Incremental watermarked SCD2 must not
 treat a change batch as the current population.
 
+Oracle and SQL Server SCD2 current COUNT reuse the leftover-MERGE
+warehouse session (dest-engine ``COUNT(*)``, never partition stats).
+``is_current`` is BIT / ``NUMBER(1)`` — the predicate is ``= 1``, not
+``IS TRUE`` (T-SQL has no ``IS TRUE``; Oracle 19c has no BOOLEAN).
+Catalog SKUs alias onto ``sqlserver`` / ``oracle`` quoting. A missing
+``is_current`` column is unmeasured, never current=0. Snowflake /
+BigQuery SCD2 COUNT stay unmeasured.
+
 ``None`` means the count is unavailable (unsupported engine, missing table,
 unreachable destination, or an unreadable/unsupported artifact); callers
 must degrade assurance rather than assume zero.
@@ -796,6 +804,28 @@ def _is_missing_warehouse_relation(exc: BaseException, dialect: str) -> bool:
     return "invalid object name" in combined
 
 
+def _is_missing_warehouse_column(exc: BaseException, dialect: str) -> bool:
+    """True only for 'no such column'. Missing table is a different classifier.
+
+    SQL Server 207 / 42S22 / Invalid column name. Oracle ORA-00904.
+    Never treat a missing ``is_current`` as current=0 — that would close
+    overwrite on a non-SCD2 table by counting history as empty current.
+    """
+    text = str(exc).lower()
+    orig = getattr(exc, "orig", None)
+    orig_text = str(orig).lower() if orig is not None else ""
+    combined = f"{text} {orig_text}"
+    if dialect == "oracle":
+        return "ora-00904" in combined
+    args = getattr(orig, "args", ()) if orig is not None else ()
+    if args and str(args[0]) in {"207", "42S22"}:
+        return True
+    code = getattr(orig, "sqlstate", None) or getattr(exc, "sqlstate", None)
+    if str(code or "").upper() == "42S22":
+        return True
+    return "invalid column name" in combined
+
+
 @contextmanager
 def _warehouse_sql_engine(db_type: str, cfg: Mapping[str, Any]) -> Iterator[Any]:
     from connectors.generic_sql import get_sqlalchemy_engine
@@ -933,6 +963,55 @@ def _warehouse_sql_key_hits(
         logger.warning("Warehouse dest key hits failed: %s", exc)
         return None
     return total
+
+
+def _warehouse_sql_scd2_populations(
+    db_type: str,
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    dialect: str,
+) -> dict[str, int] | None:
+    """Current vs history from dest-engine COUNT. BIT/NUMBER(1) use ``= 1``.
+
+    Missing table is 0/0. Live table without ``is_current`` is unmeasured.
+    Login/network failure is unmeasured. History COUNT(*) never closes.
+    """
+    import sqlalchemy as sa
+    from connectors.sql_identifiers import quote_sql_identifier
+    from services.dialect_profiles import denormalize_result_key, quote_char_for
+    from services.scd2_engine import IS_CURRENT_COLUMN, scd2_is_current_predicate
+
+    qchar = quote_char_for(dialect) or '"'
+    table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    col = denormalize_result_key(dialect, IS_CURRENT_COLUMN)
+    current_q = quote_sql_identifier(col, qchar)
+    pred = scd2_is_current_predicate(dialect, current_q)
+    history_sql = f"SELECT COUNT(*) FROM {table_ref}"  # nosec B608
+    current_sql = f"SELECT COUNT(*) FROM {table_ref} WHERE {pred}"  # nosec B608
+    try:
+        with _warehouse_sql_engine(db_type, cfg) as engine:
+            with engine.connect() as conn:
+                try:
+                    history = conn.execute(sa.text(history_sql)).scalar()
+                except Exception as exc:
+                    if _is_missing_warehouse_relation(exc, dialect):
+                        return {CURRENT_ROWS_KEY: 0, HISTORY_ROWS_KEY: 0}
+                    raise
+                try:
+                    current = conn.execute(sa.text(current_sql)).scalar()
+                except Exception as exc:
+                    if _is_missing_warehouse_column(exc, dialect):
+                        return None
+                    raise
+        return {
+            CURRENT_ROWS_KEY: int(current or 0),
+            HISTORY_ROWS_KEY: int(history or 0),
+        }
+    except Exception as exc:
+        logger.warning("Warehouse SCD2 current-row count failed: %s", exc)
+        return None
 
 
 def _key_list_sql(
@@ -1714,10 +1793,10 @@ def stamp_vector_census(
 
 
 def _scd2_current_predicate(dialect: str, quoted_column: str) -> str:
-    """Match ``scd2_engine``: SQLite stores boolean as 0/1; others use IS TRUE."""
-    if dialect == "sqlite":
-        return f"{quoted_column} = 1"
-    return f"{quoted_column} IS TRUE"
+    """Same rule as merge/expire: BIT/NUMBER(1) ``= 1``, BOOLEAN ``IS TRUE``."""
+    from services.scd2_engine import scd2_is_current_predicate
+
+    return scd2_is_current_predicate(dialect, quoted_column)
 
 
 def _sqlite_column_names(conn: Any, table: str) -> set[str]:
@@ -1762,7 +1841,8 @@ def count_scd2_populations(
 
     ``None`` means current is unmeasurable (unsupported engine, missing
     ``is_current``, or unreachable dest). Missing table is measured zero
-    on both axes.
+    on both axes. Oracle / SQL Server (and catalog SKUs) use the warehouse
+    dest-engine session; Snowflake / BigQuery stay unmeasured.
     """
     table = (table_name or "").strip()
     if not table:
@@ -1775,6 +1855,13 @@ def count_scd2_populations(
             return _pg_scd2_populations(cfg, schema=schema, table_name=table)
         if kind in {"mysql", "mariadb"}:
             return _mysql_scd2_populations(cfg, table_name=table)
+        from services.dialect_profiles import warehouse_sql_quote_dialect
+
+        dialect = warehouse_sql_quote_dialect(kind)
+        if dialect in {"sqlserver", "oracle"}:
+            return _warehouse_sql_scd2_populations(
+                kind, cfg, schema=schema, table_name=table, dialect=dialect
+            )
     except Exception as exc:  # pragma: no cover - destination-specific failure
         logger.warning("SCD2 current-row count failed: %s", exc)
         return None

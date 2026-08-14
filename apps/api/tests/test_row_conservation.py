@@ -31,6 +31,7 @@ from services.dest_precount import (
     VECTOR_ROWS_KEY,
     count_artifact_rows,
     count_scd2_current,
+    count_scd2_populations,
     destination_key_list,
     destination_keyset_census,
     destination_row_count,
@@ -2722,10 +2723,20 @@ def test_iceberg_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: P
 class _ScriptedWarehouseEngine:
     """In-process dest engine: COUNT(*) / SELECT pk / named-bind hits. No stats views."""
 
-    def __init__(self, *, count: int = 0, rows: list[tuple] | None = None, error: BaseException | None = None):
+    def __init__(
+        self,
+        *,
+        count: int = 0,
+        rows: list[tuple] | None = None,
+        error: BaseException | None = None,
+        count_current: int | None = None,
+        column_error: BaseException | None = None,
+    ):
         self.count = count
+        self.count_current = count_current
         self.rows = list(rows or [])
         self.error = error
+        self.column_error = column_error
         self.sql: list[str] = []
         self.params: list[object] = []
 
@@ -2741,6 +2752,17 @@ class _ScriptedWarehouseEngine:
     def __exit__(self, *exc: object) -> bool:
         return False
 
+    @staticmethod
+    def _mentions_is_current(sql: str) -> bool:
+        compact = (
+            sql.upper()
+            .replace("[", "")
+            .replace("]", "")
+            .replace('"', "")
+            .replace("`", "")
+        )
+        return "IS_CURRENT" in compact
+
     def execute(self, stmt: object, params: object = None):
         from types import SimpleNamespace
 
@@ -2752,6 +2774,11 @@ class _ScriptedWarehouseEngine:
         upper = sql.upper()
         if "SYS.PARTITIONS" in upper or "DM_DB_PARTITION_STATS" in upper or "NUM_ROWS" in upper:
             raise AssertionError(f"warehouse COUNT must not use stats views: {sql}")
+        if self._mentions_is_current(sql):
+            if self.column_error is not None:
+                raise self.column_error
+            n = self.count if self.count_current is None else self.count_current
+            return SimpleNamespace(scalar=lambda: n, fetchall=lambda: [])
         if "COUNT(DISTINCT" in upper or "_DF_KEY_HITS" in upper:
             dest = {row[0] for row in self.rows}
             values = []
@@ -3094,3 +3121,311 @@ def test_oracle_live_leftover_merge_when_reachable():
             conn.commit()
     except Exception:
         pass
+
+
+def test_scd2_numeric_boolean_predicate_never_emits_is_true():
+    """SQL Server BIT / Oracle NUMBER(1) / SQLite INTEGER: = 1, never IS TRUE."""
+    from services.scd2_engine import (
+        scd2_is_current_false_sql,
+        scd2_is_current_predicate,
+        stores_is_current_as_numeric,
+    )
+
+    col = '"is_current"'
+    for dialect in (
+        "sqlite",
+        "sqlserver",
+        "mssql",
+        "azure_sql_database",
+        "amazon_rds_sql_server",
+        "oracle",
+        "amazon_rds_oracle",
+        "oracle_autonomous_warehouse",
+    ):
+        assert stores_is_current_as_numeric(dialect), dialect
+        pred = scd2_is_current_predicate(dialect, col)
+        assert pred == f"{col} = 1", dialect
+        assert "IS TRUE" not in pred.upper()
+        assert scd2_is_current_false_sql(dialect) == "0"
+    for dialect in ("postgresql", "mysql", "mariadb", "redshift"):
+        assert not stores_is_current_as_numeric(dialect), dialect
+        assert scd2_is_current_predicate(dialect, col) == f"{col} IS TRUE"
+        assert scd2_is_current_false_sql(dialect) == "FALSE"
+
+
+def test_sqlserver_scd2_current_not_history_and_never_is_true(monkeypatch: pytest.MonkeyPatch):
+    """Azure SQL / SQL Server: current=2, history=3. BIT predicate is = 1."""
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(count=3, count_current=2),
+    )
+    cfg = {"host": "db.example", "username": "sa", "database": "app"}
+    pop = count_scd2_populations(
+        "azure_sql_database", cfg, schema="", table_name="products"
+    )
+    assert pop is not None
+    assert pop[CURRENT_ROWS_KEY] == 2
+    assert pop[HISTORY_ROWS_KEY] == 3
+    current_sql = [sql for sql in engine.sql if "IS_CURRENT" in sql.upper().replace("[", "")]
+    assert current_sql
+    assert "[dbo].[products]" in current_sql[0]
+    assert "[is_current] = 1" in current_sql[0]
+    assert all("IS TRUE" not in sql.upper() for sql in engine.sql)
+    assert all("sys.partitions" not in sql.lower() for sql in engine.sql)
+    stamped = stamp_scd2_census(
+        {"target_rows": 10_000, "target_checksum": "writer-active"},
+        cfg,
+        schema="",
+        table_name="products",
+        dest_engine="azure_sql_database",
+    )
+    assert stamped[CURRENT_ROWS_KEY] == 2
+    assert stamped[HISTORY_ROWS_KEY] == 3
+    assert stamped["dest_count_source"] == DEST_COUNT_CURRENT
+    assert stamped["target_rows"] == 10_000
+
+
+def test_oracle_scd2_current_folds_is_current_and_missing_table_is_zero(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from sqlalchemy.exc import ProgrammingError
+
+    cfg = {"host": "db.example", "username": "app", "database": "ORCL"}
+    missing = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            error=ProgrammingError("SELECT", {}, Exception("ORA-00942: table or view does not exist")),
+        ),
+    )
+    gone = count_scd2_populations(
+        "amazon_rds_oracle", cfg, schema="", table_name="products"
+    )
+    assert gone == {CURRENT_ROWS_KEY: 0, HISTORY_ROWS_KEY: 0}
+    assert any('"APP"."PRODUCTS"' in sql for sql in missing.sql)
+
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(count=3, count_current=2),
+    )
+    pop = count_scd2_populations(
+        "oracle_autonomous_warehouse", cfg, schema="hr", table_name="products"
+    )
+    assert pop is not None
+    assert pop[CURRENT_ROWS_KEY] == 2
+    assert pop[HISTORY_ROWS_KEY] == 3
+    current_sql = [sql for sql in engine.sql if "IS_CURRENT" in sql.upper().replace('"', "")]
+    assert current_sql
+    assert '"HR"."PRODUCTS"' in current_sql[0]
+    assert '"IS_CURRENT" = 1' in current_sql[0]
+    assert all("IS TRUE" not in sql.upper() for sql in engine.sql)
+
+
+def test_sqlserver_scd2_missing_column_is_unmeasured_not_history(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Live table without is_current must not close on physical COUNT(*)."""
+    from sqlalchemy.exc import ProgrammingError
+
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            count=4,
+            column_error=ProgrammingError(
+                "SELECT", {}, Exception("Invalid column name 'is_current'")
+            ),
+        ),
+    )
+    pop = count_scd2_populations(
+        "sqlserver", {"host": "h"}, schema="dbo", table_name="plain"
+    )
+    assert pop is None
+    assert any("COUNT(*)" in sql.upper() for sql in engine.sql)
+    skipped = stamp_scd2_census(
+        {"target_rows": 4},
+        {"host": "h"},
+        schema="dbo",
+        table_name="plain",
+        dest_engine="sqlserver",
+    )
+    assert skipped.get("dest_count_source") == "skipped_current_readback"
+    assert CURRENT_ROWS_KEY not in skipped
+
+
+def test_oracle_scd2_missing_column_ora_00904_is_unmeasured(monkeypatch: pytest.MonkeyPatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            count=4,
+            column_error=ProgrammingError(
+                "SELECT", {}, Exception('ORA-00904: "IS_CURRENT": invalid identifier')
+            ),
+        ),
+    )
+    assert count_scd2_current("oracle", {"username": "app"}, schema="APP", table_name="plain") is None
+
+
+def test_sqlserver_scd2_login_failure_is_unmeasured_not_empty(monkeypatch: pytest.MonkeyPatch):
+    _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(error=RuntimeError("Login failed for user 'sa'")),
+    )
+    assert count_scd2_populations(
+        "sqlserver", {"host": "h"}, schema="dbo", table_name="products"
+    ) is None
+
+
+def test_snowflake_and_bigquery_scd2_current_stay_unmeasured():
+    assert count_scd2_populations(
+        "snowflake", {"host": "h"}, schema="PUBLIC", table_name="T"
+    ) is None
+    assert count_scd2_current("bigquery", {"project": "p"}, schema="ds", table_name="T") is None
+
+
+def test_sqlserver_live_scd2_current_when_reachable():
+    """Live SQL Server: 2 current / 3 history. Skip when :1433 does not answer.
+
+    Dest-engine COUNT(*) WHERE [is_current] = 1, never sys.partitions, never IS TRUE.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1433), timeout=1).close()
+    except OSError:
+        pytest.skip("SQL Server not listening on 1433")
+
+    cfg = {
+        "type": "sqlserver",
+        "host": "127.0.0.1",
+        "port": 1433,
+        "database": "dataflow",
+        "username": "sa",
+        "password": "Datawrap_CDC_2022!",
+        "schema": "dbo",
+    }
+    table = "df_p9_scd2_current"
+    try:
+        from connectors.generic_sql import get_sqlalchemy_engine
+        import sqlalchemy as sa
+
+        engine = get_sqlalchemy_engine(cfg)
+    except Exception as exc:
+        pytest.skip(f"SQL Server engine unavailable: {exc}")
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                sa.text(
+                    f"IF OBJECT_ID(N'dbo.{table}', N'U') IS NOT NULL DROP TABLE dbo.{table}"
+                )
+            )
+            conn.execute(
+                sa.text(
+                    f"CREATE TABLE dbo.{table} ("
+                    f"id BIGINT NOT NULL, is_current BIT NOT NULL)"
+                )
+            )
+            conn.execute(
+                sa.text(
+                    f"INSERT INTO dbo.{table} (id, is_current) "
+                    f"VALUES (1, 1), (1, 0), (2, 1)"
+                )
+            )
+            conn.commit()
+    except Exception as exc:
+        pytest.skip(f"SQL Server setup failed: {exc}")
+
+    pop = count_scd2_populations("sqlserver", cfg, schema="dbo", table_name=table)
+    assert pop is not None
+    assert pop[CURRENT_ROWS_KEY] == 2
+    assert pop[HISTORY_ROWS_KEY] == 3
+    assert count_scd2_current("sqlserver", cfg, schema="dbo", table_name="df_p9_scd2_gone") == 0
+    with engine.connect() as conn:
+        conn.execute(sa.text(f"CREATE TABLE dbo.{table}_plain (id BIGINT NOT NULL)"))
+        conn.commit()
+    assert count_scd2_current(
+        "sqlserver", cfg, schema="dbo", table_name=f"{table}_plain"
+    ) is None
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                sa.text(
+                    f"IF OBJECT_ID(N'dbo.{table}', N'U') IS NOT NULL DROP TABLE dbo.{table}"
+                )
+            )
+            conn.execute(
+                sa.text(
+                    f"IF OBJECT_ID(N'dbo.{table}_plain', N'U') IS NOT NULL "
+                    f"DROP TABLE dbo.{table}_plain"
+                )
+            )
+            conn.commit()
+    except Exception:
+        pass
+
+
+def test_oracle_live_scd2_current_when_reachable():
+    """Live Oracle: NUMBER(1) current=2 / history=3. Skip when :1521 does not answer."""
+    import os
+    import socket
+
+    host = os.environ.get("DATAFLOW_ORACLE_HOST", "127.0.0.1")
+    port = int(os.environ.get("DATAFLOW_ORACLE_PORT", "1521"))
+    try:
+        socket.create_connection((host, port), timeout=1).close()
+    except OSError:
+        pytest.skip(f"Oracle not listening on {host}:{port}")
+
+    cfg = {
+        "type": "oracle",
+        "host": host,
+        "port": port,
+        "database": os.environ.get("DATAFLOW_ORACLE_SERVICE", "ORCL"),
+        "username": os.environ.get("DATAFLOW_ORACLE_USER", "system"),
+        "password": os.environ.get("DATAFLOW_ORACLE_PASSWORD", ""),
+        "schema": "",
+    }
+    if not cfg["password"]:
+        pytest.skip("Oracle password not configured")
+    table = "DF_P9_SCD2"
+    try:
+        from connectors.generic_sql import get_sqlalchemy_engine
+        import sqlalchemy as sa
+
+        engine = get_sqlalchemy_engine(cfg)
+        with engine.connect() as conn:
+            conn.execute(
+                sa.text(
+                    f"BEGIN EXECUTE IMMEDIATE 'DROP TABLE {table}'; "
+                    f"EXCEPTION WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF; END;"
+                )
+            )
+            conn.execute(
+                sa.text(
+                    f'CREATE TABLE "{table}" (id NUMBER, is_current NUMBER(1))'
+                )
+            )
+            conn.execute(sa.text(f'INSERT INTO "{table}" (id, is_current) VALUES (1, 1)'))
+            conn.execute(sa.text(f'INSERT INTO "{table}" (id, is_current) VALUES (1, 0)'))
+            conn.execute(sa.text(f'INSERT INTO "{table}" (id, is_current) VALUES (2, 1)'))
+            conn.commit()
+    except Exception as exc:
+        pytest.skip(f"Oracle setup failed: {exc}")
+
+    pop = count_scd2_populations("oracle", cfg, schema="", table_name=table)
+    assert pop is not None
+    assert pop[CURRENT_ROWS_KEY] == 2
+    assert pop[HISTORY_ROWS_KEY] == 3
+    assert count_scd2_current("oracle", cfg, schema="", table_name="DF_P9_SCD2_GONE") == 0
+    try:
+        with engine.connect() as conn:
+            conn.execute(
+                sa.text(
+                    f"BEGIN EXECUTE IMMEDIATE 'DROP TABLE {table}'; "
+                    f"EXCEPTION WHEN OTHERS THEN NULL; END;"
+                )
+            )
+            conn.commit()
+    except Exception:
+        pass
+
