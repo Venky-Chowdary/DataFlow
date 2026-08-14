@@ -413,6 +413,7 @@ export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityC
     }
     return cells;
   }
+  if (ledger.conservation_kind === "keyed") {
     const cells: LedgerIdentityCell[] = [
       { label: "Inserts", value: fmt(ledger.inserts) },
       { label: "Updates", value: fmt(ledger.updates) },
