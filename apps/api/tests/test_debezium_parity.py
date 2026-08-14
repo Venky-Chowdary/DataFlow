@@ -748,7 +748,11 @@ def test_idle_change_stream_persists_post_batch_resume_token() -> None:
         stream = MagicMock()
         stream.resume_token = idle_token
         stream.try_next.return_value = None
-        batches = list(_reader(stream, cursor_key="idle-cs-token").poll())
+        reader = _reader(stream, cursor_key="idle-cs-token")
+        try:
+            batches = list(reader.poll())
+        finally:
+            reader.close()
         assert len(batches) == 1
         change = batches[0]
         assert change.inserts == []
@@ -763,7 +767,11 @@ def test_idle_change_stream_persists_post_batch_resume_token() -> None:
         empty = MagicMock()
         empty.resume_token = None
         empty.try_next.return_value = None
-        assert list(_reader(empty, cursor_key="idle-cs-none").poll()) == []
+        none_reader = _reader(empty, cursor_key="idle-cs-none")
+        try:
+            assert list(none_reader.poll()) == []
+        finally:
+            none_reader.close()
     finally:
         reset_store()
 
