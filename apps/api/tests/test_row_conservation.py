@@ -613,3 +613,63 @@ def test_mysql_hard_delete_survives_connection_close():
         with conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{table}`")
         conn.close()
+
+
+def test_attach_conservation_only_on_terminal():
+    from services.row_conservation import attach_conservation_to_updates
+
+    running = {"records_processed": 10}
+    attach_conservation_to_updates("running", running)
+    assert "row_accounting" not in running
+
+    done = {
+        "records_processed": 10_000,
+        "sync_mode": "full_refresh_overwrite",
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 4,
+            "target_checksum": "abc",
+            "source_checksum": "abc",
+            "phase": "post_write_verified",
+            "coverage": "full",
+            "assurance_level": "full_checksum",
+        },
+    }
+    attach_conservation_to_updates("completed", done)
+    ledger = done["row_accounting"]
+    assert ledger["dest_count"] == 4
+    assert ledger["rows_written"] == 4
+    assert ledger["writer_ack"] == 10_000
+    assert ledger["writer_ack_delta"] != 0
+    assert ledger["rows_written_source"] == DEST_READBACK
+    assert ledger["balanced"] is True
+
+
+def test_ledger_from_transfer_result_does_not_close_on_writer_ack():
+    from dataclasses import dataclass, field
+
+    from services.row_conservation import ledger_from_transfer_result
+
+    @dataclass
+    class _Result:
+        records_transferred: int = 10_000
+        operation: str = "full_refresh_overwrite"
+        destination_summary: dict = field(default_factory=dict)
+        reconciliation: dict = field(default_factory=dict)
+
+    result = _Result(
+        reconciliation={
+            "source_rows": 4,
+            "target_rows": 4,
+            "target_checksum": "abc",
+            "source_checksum": "abc",
+            "phase": "post_write_verified",
+            "coverage": "full",
+            "assurance_level": "full_checksum",
+        },
+    )
+    ledger = ledger_from_transfer_result(result, sync_mode="full_refresh_overwrite")
+    assert ledger["dest_count"] == 4
+    assert ledger["writer_ack"] == 10_000
+    assert ledger["rows_written"] != ledger["writer_ack"]
+    assert ledger["balanced"] is True

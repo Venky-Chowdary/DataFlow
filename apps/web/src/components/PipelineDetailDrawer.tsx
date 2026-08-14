@@ -12,6 +12,7 @@ import {
   breakerLabel,
 } from "../lib/contractBreakerUi";
 import { computeJobTrustScore } from "../lib/jobTrustScore";
+import { destHeadline } from "../lib/conservationLedger";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 
@@ -164,6 +165,7 @@ export function PipelineDetailDrawer({
   const rejected = Number(lastJob?.rejected_rows ?? 0);
   const coerced = Number(lastJob?.coerced_null_rows ?? 0);
   const lastTrust = lastJob ? computeJobTrustScore(lastJob) : null;
+  const lastDest = destHeadline(lastJob);
   const needsAttention =
     Boolean(sched.last_status && /fail|error/i.test(String(sched.last_status)))
     || rejected > 0
@@ -330,8 +332,8 @@ export function PipelineDetailDrawer({
             <strong>{mappingCount || "—"}</strong>
           </div>
           <div className="df2-drawer-fact">
-            <span>Last rows</span>
-            <strong>{(lastJob?.records_processed ?? 0).toLocaleString()}</strong>
+            <span>{lastDest.label}</span>
+            <strong title={lastDest.title}>{lastDest.value}</strong>
           </div>
           <div className="df2-drawer-fact">
             <span>Quarantine</span>

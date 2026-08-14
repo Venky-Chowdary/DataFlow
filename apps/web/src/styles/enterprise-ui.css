@@ -8347,6 +8347,203 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: none;
 }
 
+.df2-conservation-ledger {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border-radius: 12px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  background: #fff;
+  margin: 0.75rem 0;
+}
+
+.df2-conservation-ledger.is-ok {
+  border-color: color-mix(in srgb, var(--df-ok, #15803d) 35%, transparent);
+  background: color-mix(in srgb, var(--df-ok, #15803d) 5%, white);
+}
+
+.df2-conservation-ledger.is-warn {
+  border-color: color-mix(in srgb, var(--df-warn, #b45309) 35%, transparent);
+  background: color-mix(in srgb, var(--df-warn, #b45309) 6%, white);
+}
+
+.df2-conservation-ledger.is-danger {
+  border-color: color-mix(in srgb, var(--df-danger, #b91c1c) 40%, transparent);
+  background: color-mix(in srgb, var(--df-danger, #b91c1c) 6%, white);
+}
+
+.df2-conservation-ledger.is-muted {
+  border-color: var(--df-border, #e2e8f0);
+  background: var(--df-surface-muted, #f8fafc);
+}
+
+.df2-conservation-ledger-head {
+  display: flex;
+  gap: 0.85rem;
+  align-items: flex-start;
+}
+
+.df2-conservation-ledger-count {
+  min-width: 64px;
+  height: 52px;
+  padding: 0 0.55rem;
+  border-radius: 12px;
+  border: 2px solid currentColor;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  flex-shrink: 0;
+  line-height: 1.05;
+  color: var(--df-brand-strong, #115e59);
+}
+
+.df2-conservation-ledger.is-danger .df2-conservation-ledger-count,
+.df2-conservation-ledger.is-warn .df2-conservation-ledger-count {
+  color: inherit;
+}
+
+.df2-conservation-ledger-count strong {
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-conservation-ledger-count span {
+  font-size: 0.62rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.75;
+}
+
+.df2-conservation-ledger h3 {
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.df2-conservation-ledger-head p {
+  margin: 0.2rem 0 0;
+  font-size: 0.82rem;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-conservation-ledger-eq {
+  margin: 0;
+  padding: 0.45rem 0.65rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 80%, white);
+  font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.78rem;
+  letter-spacing: -0.01em;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-conservation-ledger-chips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+
+@media (max-width: 640px) {
+  .df2-conservation-ledger-chips {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.df2-conservation-ledger-chips li {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  padding: 0.4rem 0.5rem;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid var(--df-border, #e2e8f0);
+}
+
+.df2-conservation-ledger-chips span {
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-conservation-ledger-chips strong {
+  font-size: 0.92rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-conservation-ledger-ack {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  padding: 0.45rem 0.55rem;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--df-warn, #b45309) 8%, white);
+}
+
+.df2-conservation-ledger-ack strong {
+  display: block;
+  font-size: 0.85rem;
+}
+
+.df2-conservation-ledger-ack span {
+  font-size: 0.78rem;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-conservation-ledger-note {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-conservation-ledger-next {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.65rem;
+  padding-top: 0.35rem;
+  border-top: 1px solid color-mix(in srgb, var(--df-border, #e2e8f0) 80%, transparent);
+}
+
+.df2-conservation-ledger-next strong {
+  display: block;
+  font-size: 0.85rem;
+}
+
+.df2-conservation-ledger-next span {
+  font-size: 0.8rem;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-conservation-ledger.is-compact .df2-conservation-ledger-eq,
+.df2-conservation-ledger.is-compact .df2-conservation-ledger-chips,
+.df2-conservation-ledger.is-compact .df2-conservation-ledger-note {
+  display: none;
+}
+
+.df2-jobs-v3-summary-metrics article.is-metric-dest {
+  border-left-color: #0f766e;
+  background: #f0fdfa;
+}
+
+.df2-jobs-v3-summary-metrics article.is-metric-dest.is-unmeasured {
+  border-left-color: #94a3b8;
+  background: #f8fafc;
+}
+
+.df2-jobs-v3-summary-metrics article.is-metric-dest.is-danger {
+  border-left-color: #dc2626;
+  background: #fef2f2;
+}
+
+.df2-jobs-v3-summary-metrics article.is-metric-writer.is-warn {
+  border-left-color: #d97706;
+  background: #fffbeb;
+}
+
 .df2-overview-v3 {
   display: flex;
   flex-direction: column;
@@ -11320,6 +11517,18 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 0.4rem;
   padding: 0.55rem 0.7rem;
   margin: 0.35rem 0;
+}
+
+.df2-page-jobs .df2-conservation-ledger {
+  gap: 0.4rem;
+  padding: 0.55rem 0.7rem;
+  margin: 0.35rem 0;
+}
+
+.df2-page-jobs .df2-conservation-ledger-count {
+  min-width: 48px;
+  height: 40px;
+  border-width: 2px;
 }
 
 .df2-page-jobs .df2-trust-score-ring {

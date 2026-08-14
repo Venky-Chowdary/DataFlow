@@ -831,6 +831,7 @@ async def execute_transfer_json(
         "reconciliation": result.reconciliation,
         "explanation": getattr(result, "explanation", "") or "",
         "mapping_proof": getattr(result, "mapping_proof", None) or {},
+        "row_accounting": getattr(result, "row_accounting", None) or {},
     }
 
 
@@ -1228,6 +1229,7 @@ async def run_universal_transfer(
         "reconciliation": result.reconciliation,
         "explanation": result.explanation,
         "mapping_proof": result.mapping_proof or {},
+        "row_accounting": getattr(result, "row_accounting", None) or {},
     }
 
 

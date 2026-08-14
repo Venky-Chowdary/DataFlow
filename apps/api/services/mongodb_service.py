@@ -507,6 +507,13 @@ class MongoDBService:
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
+        try:
+            from services.row_conservation import attach_conservation_to_updates
+
+            attach_conservation_to_updates(status, updates, previous=prev_doc)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
         if status == "running":
             updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
@@ -1206,6 +1213,13 @@ class MemoryMongoDBService:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, kwargs, previous=rec)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
+            from services.row_conservation import attach_conservation_to_updates
+
+            attach_conservation_to_updates(status, kwargs, previous=rec)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 

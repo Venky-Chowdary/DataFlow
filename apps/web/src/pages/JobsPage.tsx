@@ -25,6 +25,8 @@ import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
+import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
+import { destHeadline, formatJobRowMetric, writerAckDisagrees, writerHeadline } from "../lib/conservationLedger";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
@@ -549,6 +551,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const rejectedCount = liveJob?.rejected_rows ?? 0;
   const recon = liveJob?.reconciliation;
   const gate8 = classifyGate8Status(recon);
+  const destMetric = destHeadline(liveJob);
+  const writerMetric = writerHeadline(liveJob);
+  const ackDisagrees = writerAckDisagrees(liveJob);
   const jobDuration = formatJobDuration(liveJob?.started_at, liveJob?.completed_at);
   const triggeredBy = liveJob?.triggered_by || liveJob?.created_by || "";
   const syncModeLabel = formatSyncModeLabel(
@@ -750,7 +755,14 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           </div>
                           <div className="df2-job-row-meta">
                             <span className="df2-job-row-route-meta" title={route}>{route}</span>
-                            <span>{(job.records_processed ?? 0).toLocaleString()} rows</span>
+                            {(() => {
+                              const rows = formatJobRowMetric(job);
+                              return (
+                                <span title={rows.title}>
+                                  {rows.value} {rows.measured ? "at dest" : rows.label.toLowerCase()}
+                                </span>
+                              );
+                            })()}
                             <span>
                               {new Date(job.created_at).toLocaleString(undefined, {
                                 month: "short",
@@ -858,10 +870,19 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                     </header>
 
                     <div className="df2-jobs-v3-summary-metrics" role="group" aria-label="Job metrics">
-                      <article className="is-metric-rows">
-                        <strong>{(liveJob.records_processed ?? 0).toLocaleString()}</strong>
-                        <span>Rows</span>
+                      <article
+                        className={`is-metric-dest${destMetric.measured ? "" : " is-unmeasured"}${destMetric.tone === "danger" ? " is-danger" : ""}`}
+                        title={destMetric.title}
+                      >
+                        <strong>{destMetric.value}</strong>
+                        <span>{destMetric.label}</span>
                       </article>
+                      {ackDisagrees && (
+                        <article className="is-metric-writer is-warn" title={writerMetric.title}>
+                          <strong>{writerMetric.value}</strong>
+                          <span>{writerMetric.label}</span>
+                        </article>
+                      )}
                       <article className="is-metric-progress">
                         <strong>{liveJob.progress_pct ?? 100}%</strong>
                         <span>Progress</span>
@@ -999,6 +1020,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                               Overview of this run. Open evidence panels from the right for Gate-8,
                               run metadata, timeline, and logs — keep this pane scannable.
                             </JobOverviewNote>
+                            <ConservationLedgerCard
+                              job={liveJob}
+                              onOpenValidate={() => openValidateInStudio()}
+                            />
                             <JobTrustScoreCard
                               job={liveJob}
                               onOpenQuarantine={

@@ -133,6 +133,10 @@ def test_sqlite_overwrite_certificate_uses_dest_count_not_writer_ack(tmp_path: P
     )
     result = _run(req)
     assert result.success, result.error
+    stamped = result.row_accounting or {}
+    assert stamped.get("dest_count") == 4, stamped
+    assert stamped.get("rows_written") == 4, stamped
+    assert stamped.get("rows_written_source") == "gate8_dest_readback", stamped
 
     dest = sqlite3.connect(str(dst_path))
     try:

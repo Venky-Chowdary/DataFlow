@@ -120,6 +120,7 @@ import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
+import { destHeadline } from "../lib/conservationLedger";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
 import {
   buildDisplayBlockers,
@@ -3984,6 +3985,7 @@ export function TransferPage({
           ?? job.load_history_report,
       },
       reconciliation: job.reconciliation,
+      row_accounting: job.row_accounting,
       explanation: job.explanation,
       mapping_proof: job.mapping_proof,
       ddl_executed: job.ddl_executed ?? job.ddl_log,
@@ -6104,9 +6106,14 @@ export function TransferPage({
               <span>
                 <strong>Result</strong> {result.success ? "Completed" : "Needs attention"}
               </span>
-              <span>
-                <strong>Rows</strong> {(result.records_transferred ?? 0).toLocaleString()}
-              </span>
+              {(() => {
+                const dest = destHeadline(result);
+                return (
+                  <span title={dest.title}>
+                    <strong>{dest.measured ? "At dest" : dest.label}</strong> {dest.value}
+                  </span>
+                );
+              })()}
             </div>
             <div className="df2-run-footer-actions">
               {(!result.success || Boolean(result.destination_summary?.rejected_rows)) && (

@@ -13,6 +13,8 @@ import { QuarantinePanel } from "./QuarantinePanel";
 import type { RepairMapping } from "../../lib/api";
 import { Gate8ProofCard, classifyGate8Status, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
+import { ConservationLedgerCard } from "./ConservationLedgerCard";
+import { destHeadline, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
 import { MappingProofDrawer, type MappingProof } from "../MappingProofDrawer";
@@ -115,8 +117,20 @@ export function TransferResultDashboard({
   const droppedRows = Math.max(rejected - coercedNull, 0);
   const hasIntegrityLoss = result.success && (rejected > 0 || coercedNull > 0);
   const showQuarantine = Boolean(result.job_id) && (!result.success || hasIntegrityLoss || rejected > 0 || issueFindings > 0);
-  const sourceRows = result.reconciliation?.source_rows ?? rec;
-  const targetRows = result.reconciliation?.target_rows ?? rec;
+  const sourceRows = result.reconciliation?.source_rows;
+  const destMetric = destHeadline({
+    status: result.success ? "completed" : "failed",
+    records_processed: rec,
+    records_transferred: rec,
+    row_accounting: result.row_accounting,
+  });
+  const writerMetric = writerHeadline({
+    status: result.success ? "completed" : "failed",
+    records_processed: rec,
+    records_transferred: rec,
+    row_accounting: result.row_accounting,
+  });
+  const ackDisagrees = writerAckDisagrees(result);
   // Never infer Gate-8 Passed from job success alone — and never call writer-ack “Passed”.
   const gate8 = classifyGate8Status(result.reconciliation as Gate8Reconciliation | undefined);
   const reconcileLabel = gate8.label;
@@ -181,15 +195,18 @@ export function TransferResultDashboard({
     : hasIntegrityLoss
       ? "Data transferred — not full fidelity"
       : "Data transferred";
+  const destPhrase = destMetric.measured
+    ? `${destMetric.value} rows at destination`
+    : `${writerMetric.value} writer-acked (dest COUNT unmeasured)`;
   const subtitle = !result.success
     ? "Review failure details and bad-data findings below, then fix on Validate or Map."
     : hasIntegrityLoss
-      ? `${rec.toLocaleString()} records landed; some rows were held out in quarantine or values coerced to NULL`
-      : gate8.fullPass
-        ? `${rec.toLocaleString()} records moved and reconciled`
-        : gate8.label === "Writer ack"
-          ? `${rec.toLocaleString()} records written — writer acknowledged; independent Gate-8 read-back still pending`
-          : `${rec.toLocaleString()} records moved — Gate-8 ${gate8.label.toLowerCase()}`;
+      ? `${destPhrase}; some rows were held out in quarantine or values coerced to NULL`
+      : destMetric.measured && gate8.fullPass
+        ? `${destPhrase} and reconciled`
+        : destMetric.measured
+          ? `${destPhrase} — Gate-8 ${gate8.label.toLowerCase()}`
+          : `${writerMetric.value} records written — writer acknowledged; independent dest COUNT(*) still pending`;
 
   const metaChips: Array<{ label: string; value: string; tone?: "warn" | "ok"; title?: string }> = [];
   if (ds?.load_method) {
@@ -205,7 +222,7 @@ export function TransferResultDashboard({
   if (ds?.chunk_size != null && Number(ds.chunk_size) > 0) {
     metaChips.push({ label: "Batch", value: Number(ds.chunk_size).toLocaleString() });
   }
-  if (sourceRows !== rec && sourceRows > 0) {
+  if (sourceRows != null && sourceRows > 0 && sourceRows !== rec) {
     metaChips.push({ label: "Source rows", value: sourceRows.toLocaleString() });
   }
   if (result.operation) {
@@ -299,8 +316,18 @@ export function TransferResultDashboard({
       </header>
 
       <section className="df2-result-metrics" aria-label="Transfer metrics">
-        <MetricCell value={rec.toLocaleString()} label="Transferred" />
-        <MetricCell value={targetRows.toLocaleString()} label="At destination" />
+        <MetricCell
+          value={destMetric.value}
+          label={destMetric.label}
+          tone={destMetric.tone === "ok" || destMetric.tone === "warn" || destMetric.tone === "danger" ? destMetric.tone : undefined}
+          title={destMetric.title}
+        />
+        <MetricCell
+          value={writerMetric.value}
+          label={writerMetric.label}
+          tone={ackDisagrees ? "warn" : undefined}
+          title={writerMetric.title}
+        />
         <MetricCell
           value={droppedRows.toLocaleString()}
           label="Held out"
@@ -344,6 +371,18 @@ export function TransferResultDashboard({
         notifications={result.notifications}
         className="df2-result-notify"
         compact
+      />
+
+      <ConservationLedgerCard
+        job={{
+          status: result.success
+            ? (rejected > 0 || coercedNull > 0 ? "completed_with_quarantine" : "completed")
+            : "failed",
+          records_processed: rec,
+          records_transferred: rec,
+          row_accounting: result.row_accounting,
+        }}
+        onOpenValidate={onOpenValidate}
       />
 
       <JobTrustScoreCard

@@ -980,6 +980,48 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     )
 
 
+def attach_conservation_to_updates(
+    status: str,
+    updates: dict[str, Any],
+    *,
+    previous: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Stamp ``row_accounting`` on terminal job updates (mutates ``updates``).
+
+    Same hook shape as ``attach_trust_to_updates`` so every completed job
+    carries dest COUNT(*) conservation, not only the certificate export.
+    """
+    from services.job_trust import is_terminal_status
+
+    if not is_terminal_status(status):
+        return updates
+    merged: dict[str, Any] = dict(previous or {})
+    merged.update(updates)
+    merged["status"] = status
+    updates["row_accounting"] = account_job(merged).to_dict()
+    return updates
+
+
+def ledger_from_transfer_result(
+    result: Any,
+    *,
+    sync_mode: str = "",
+) -> dict[str, Any]:
+    """Conservation ledger for a ``TransferResult`` (Studio sync response)."""
+    dest = dict(getattr(result, "destination_summary", None) or {})
+    recon = dict(getattr(result, "reconciliation", None) or {})
+    return account_job(
+        {
+            "records_processed": getattr(result, "records_transferred", None),
+            "sync_mode": sync_mode or dest.get("sync_mode") or getattr(result, "operation", "") or "",
+            "reconciliation": recon,
+            "destination_summary": dest,
+            "rejected_rows": dest.get("rejected_rows") if "rejected_rows" in dest else dest.get("rejected"),
+            "coerced_null_rows": dest.get("coerced_null_rows"),
+        }
+    ).to_dict()
+
+
 class KeyCensusAccumulator:
     """Per-batch dest hits, reconstructed as a run-level census.
 

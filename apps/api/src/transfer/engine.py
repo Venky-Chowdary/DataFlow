@@ -2156,6 +2156,20 @@ class UniversalTransferEngine:
                 result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
                 result.destination_summary["records_per_second"] = result.records_per_second
                 result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
+                try:
+                    from services.row_conservation import ledger_from_transfer_result
+
+                    result.row_accounting = ledger_from_transfer_result(
+                        result,
+                        sync_mode=str(getattr(request, "sync_mode", "") or ""),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Conservation ledger stamp failed for job %s",
+                        job_id,
+                        exc_info=True,
+                    )
+                    result.row_accounting = {}
                 if start_span is not None:
                     set_span_attribute(span, "dataflow.records_transferred", result.records_transferred)
                     set_span_attribute(span, "dataflow.elapsed_seconds", result.elapsed_seconds)

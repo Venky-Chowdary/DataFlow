@@ -8,7 +8,7 @@ import {
   buildThroughputSeries,
   sparklineFromThroughput,
 } from "../lib/overviewAnalytics";
-import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { destProvenCount, formatJobRowMetric } from "../lib/conservationLedger";
 import { DtIcon } from "../components/DtIcon";
 import { DataPlaneFlow } from "../components/overview/DataPlaneFlow";
 import {
@@ -128,7 +128,11 @@ export function DashboardPage({
   const completed = jobs.filter((j) => isJobSuccess(j.status));
   const failed = jobs.filter((j) => j.status === "failed");
   const running = jobs.filter((j) => j.status === "running" || j.status === "pending");
-  const totalRecords = completed.reduce((sum, j) => sum + (j.records_processed || 0), 0);
+  const destMeasured = completed
+    .map((j) => destProvenCount(j))
+    .filter((n): n is number => n != null);
+  const totalRecords = destMeasured.reduce((sum, n) => sum + n, 0);
+  const destMeasuredJobs = destMeasured.length;
   const successRate = jobs.length ? Math.round((completed.length / jobs.length) * 100) : null;
   const healthyConnectors = connectors.filter((c) => c.last_test_ok !== false).length;
   const enabledPipelines = schedules.filter((s) => s.enabled).length;
@@ -254,9 +258,15 @@ export function DashboardPage({
         />
         <section className="df2-overview-v3-kpis" aria-label="Key metrics">
           <MetricGlassTile
-            label="Rows moved"
-            value={jobs.length ? totalRecords.toLocaleString() : "—"}
-            sub={jobs.length ? "Completed transfers" : "No transfers yet"}
+            label="Dest COUNT(*)"
+            value={destMeasuredJobs ? totalRecords.toLocaleString() : "—"}
+            sub={
+              destMeasuredJobs
+                ? `${destMeasuredJobs} of ${completed.length} completed jobs dest-measured`
+                : completed.length
+                  ? "Writer ack is not dest proof — no dest COUNT(*) yet"
+                  : "No transfers yet"
+            }
             icon="trend"
             tone="teal"
             sparkline={throughputSpark}
@@ -299,9 +309,9 @@ export function DashboardPage({
             <header className="df2-overview-v3-card-head">
               <div>
                 <h2 className="df2-overview-v3-card-title">Throughput</h2>
-                <p className="df2-overview-v3-card-sub">Rows moved per day · last 7 days</p>
+                <p className="df2-overview-v3-card-sub">Dest COUNT(*) per day · unmeasured jobs omitted</p>
               </div>
-              <span className="df2-overview-v3-card-badge">{totalRecords.toLocaleString()} total rows</span>
+              <span className="df2-overview-v3-card-badge">{totalRecords.toLocaleString()} dest rows</span>
             </header>
             <div className="df2-overview-v3-card-body df2-overview-v3-chart-body">
               {hasThroughput ? (
@@ -409,7 +419,9 @@ export function DashboardPage({
                             <td><CopyIdChip id={job._id} label="Job" compact /></td>
                             <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>
                             <td className="df2-col-progress"><JobProgressCell job={job} /></td>
-                            <td className="df2-overview-rows">{job.records_processed?.toLocaleString() ?? "—"}</td>
+                            <td className="df2-overview-rows" title={formatJobRowMetric(job).title}>
+                              {formatJobRowMetric(job).value}
+                            </td>
                             <td className="df2-overview-rows">
                               {(job.rejected_rows ?? 0) > 0 ? (
                                 <span className="df2-badge df2-badge-warn" title="Open Jobs → Inspect quarantine for row-level findings">

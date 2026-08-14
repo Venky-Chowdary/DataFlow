@@ -281,6 +281,11 @@ export interface TransferJob {
   cdc_append_only_sink?: boolean | null;
   /** Composite trust score 0–100 (persisted on terminal). */
   trust_score?: number | null;
+  /**
+   * Independent dest COUNT(*) conservation stamped on terminal jobs.
+   * Display only — never close dest with records_processed / writer ack.
+   */
+  row_accounting?: import("./conservationLedger").ConservationLedger | null;
   trust?: {
     score: number;
     grade: string;
@@ -1058,6 +1063,11 @@ export interface TransferResult {
   explanation?: string;
   mapping_proof?: Record<string, unknown>;
   job_id?: string;
+  /**
+   * Independent dest COUNT(*) conservation from execute_tracked.
+   * Display only — dest is never records_transferred.
+   */
+  row_accounting?: import("./conservationLedger").ConservationLedger | null;
   /** CDC operator signals copied from the completed job. */
   cdc_lag_seconds?: number | null;
   cdc_plugin?: string | null;

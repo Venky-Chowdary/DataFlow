@@ -419,6 +419,8 @@ class TransferResult:
     elapsed_seconds: float = 0.0
     records_per_second: float = 0.0
     peak_memory_bytes: int = 0
+    # Independent dest COUNT(*) ledger — never closed by writer ack.
+    row_accounting: dict = field(default_factory=dict)
 
 
 @dataclass

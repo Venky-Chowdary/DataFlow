@@ -1,4 +1,5 @@
 import type { TransferJob } from "./types";
+import { destProvenCount } from "./conservationLedger";
 
 export interface DayThroughput {
   label: string;
@@ -29,7 +30,10 @@ export function buildThroughputSeries(jobs: TransferJob[], days = 7): DayThrough
       return t >= d.getTime() && t < next.getTime();
     });
     const completed = dayJobs.filter((j) => j.status === "completed" || j.status === "completed_with_quarantine");
-    const rows = completed.reduce((s, j) => s + (j.records_processed || 0), 0);
+    const rows = completed.reduce((s, j) => {
+      const dest = destProvenCount(j);
+      return dest == null ? s : s + dest;
+    }, 0);
 
     buckets.push({
       label: d.toLocaleDateString(undefined, { weekday: "short" }),

@@ -20,6 +20,8 @@ import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip"
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
+import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
+import { destHeadline, writerAckDisagrees, writerHeadline } from "../lib/conservationLedger";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
@@ -413,6 +415,9 @@ export function JobTheaterView({
   const { toast } = useToast();
   const total = job.total_rows ?? 0;
   const processed = job.records_processed ?? 0;
+  const destMetric = destHeadline(job);
+  const writerMetric = writerHeadline(job);
+  const ackDisagrees = writerAckDisagrees(job);
   const isFailed = job.status === "failed";
   const isCancelled = job.status === "cancelled";
   const isComplete = isJobSuccess(job.status);
@@ -763,15 +768,21 @@ export function JobTheaterView({
       )}
 
       {!earlyFail && (isComplete || isFailed || isCancelled || isQuarantine) && (
-        <JobTrustScoreCard
-          job={job}
-          onOpenQuarantine={rejectedRows > 0 ? () => {
-            document.getElementById("df2-theater-quarantine")?.scrollIntoView({ behavior: "smooth", block: "start" });
-          } : undefined}
-          onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
-          onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
-          onResume={duplicateKeyFailure ? undefined : onResume}
-        />
+        <>
+          <ConservationLedgerCard
+            job={job}
+            onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
+          />
+          <JobTrustScoreCard
+            job={job}
+            onOpenQuarantine={rejectedRows > 0 ? () => {
+              document.getElementById("df2-theater-quarantine")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            } : undefined}
+            onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
+            onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
+            onResume={duplicateKeyFailure ? undefined : onResume}
+          />
+        </>
       )}
 
       {slowSnowflakeTip && (
@@ -851,20 +862,33 @@ export function JobTheaterView({
           </div>
         </div>
         <div className="df2-theater-v3-bar-legend">
-          <span>{processed.toLocaleString()} rows</span>
+          <span title={isComplete || isQuarantine ? destMetric.title : writerMetric.title}>
+            {isComplete || isQuarantine
+              ? `${destMetric.value} ${destMetric.measured ? "at dest" : destMetric.label.toLowerCase()}`
+              : `${processed.toLocaleString()} written so far`}
+          </span>
           {total > 0 && <span>{total.toLocaleString()} total</span>}
           {reconciling && <span className="df2-theater-v3-bar-legend-note">99% reserved for reconcile proof</span>}
         </div>
       </div>
 
       <div className="df2-theater-v3-metrics">
-        <article className="df2-theater-v3-metric">
+        <article className="df2-theater-v3-metric" title={isComplete || isQuarantine ? destMetric.title : writerMetric.title}>
           <DtIcon name="trend" size={16} />
           <div>
-            <strong>{processed.toLocaleString()}</strong>
-            <span>Rows moved</span>
+            <strong>{isComplete || isQuarantine ? destMetric.value : processed.toLocaleString()}</strong>
+            <span>{isComplete || isQuarantine ? destMetric.label : "Written so far"}</span>
           </div>
         </article>
+        {ackDisagrees && (isComplete || isQuarantine || isFailed) && (
+          <article className="df2-theater-v3-metric" title={writerMetric.title}>
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>{writerMetric.value}</strong>
+              <span>{writerMetric.label}</span>
+            </div>
+          </article>
+        )}
         {total > 0 && (
           <article className="df2-theater-v3-metric">
             <DtIcon name="database" size={16} />

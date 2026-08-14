@@ -1321,6 +1321,9 @@ export function streamJobProgress(
       cdc_append_only_sink: raw.cdc_append_only_sink == null ? null : Boolean(raw.cdc_append_only_sink),
       trust_score: raw.trust_score != null ? Number(raw.trust_score) : null,
       trust: raw.trust && typeof raw.trust === "object" ? raw.trust as JobProgress["trust"] : null,
+      row_accounting: raw.row_accounting && typeof raw.row_accounting === "object"
+        ? raw.row_accounting as JobProgress["row_accounting"]
+        : undefined,
       streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
