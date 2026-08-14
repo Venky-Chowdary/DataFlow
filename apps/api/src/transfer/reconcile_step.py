@@ -12,6 +12,7 @@ from connectors.writer_common import (
 )
 from services.dest_precount import (
     PRECOUNT_KEY,
+    VECTOR_IDENTITY_ENGINES,
     records_to_key_tuples,
     stamp_artifact_census,
     stamp_keyset_census,
@@ -966,7 +967,7 @@ def run_reconciliation(
 
     schema = dest_summary.get("schema") or schema_from_cfg(db_type, cfg)
     table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""
-    if db_type == "pgvector":
+    if db_type in VECTOR_IDENTITY_ENGINES:
         vector_stamp_ctx.update(
             cfg=cfg,
             schema=schema,
@@ -1341,6 +1342,32 @@ def run_reconciliation(
             "target_rows": target_rows if measured else None,
             "source_checksum": source_checksum,
             "target_checksum": target_checksum if measured else "",
+            "rejected_rows": rejected_rows,
+            "coerced_null_rows": coerced_null_rows,
+            "rows_skipped": rows_skipped,
+        })
+
+    if db_type in VECTOR_IDENTITY_ENGINES:
+        # dest-only REST engines (Milvus, Qdrant): no SQL chunk COUNT.
+        # Never stuff writer upsert ack into target_rows — that is the
+        # dest_only writer_ack lie. Identity is stamped in _finalize.
+        # Pinecone / Weaviate are not in VECTOR_IDENTITY_ENGINES.
+        return _finalize({
+            "passed": True,
+            "unproven": True,
+            "skipped_readback": True,
+            "migration_proven": False,
+            "message": (
+                f"{db_type} write completed — Gate-8 embedding cell fidelity "
+                "unproven (opaque vectors). Independent identity is "
+                "COUNT(DISTINCT source_id); collection rowCount / "
+                "points_count and writer chunk-upsert acknowledgement "
+                "are diagnostic."
+            ),
+            "source_rows": source_rows,
+            "target_rows": None,
+            "source_checksum": source_checksum,
+            "target_checksum": "",
             "rejected_rows": rejected_rows,
             "coerced_null_rows": coerced_null_rows,
             "rows_skipped": rows_skipped,

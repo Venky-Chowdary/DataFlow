@@ -92,7 +92,7 @@ export function ConservationLedgerCard({
         : isArtifact
           ? "Every source row is in the export artifact, quarantined, or skipped. Cell fidelity is unproven."
           : isVector
-            ? "Every source row is a dest identity, quarantined, or skipped. Physical vector COUNT(*) is chunk cardinality, not source-row conservation."
+            ? "Every source row is a dest identity, quarantined, or skipped. Physical vector COUNT(*) / collection rowCount is chunk cardinality, not source-row conservation."
             : isScd2
               ? "Every source row is current at destination, quarantined, or skipped. Physical history COUNT(*) grows on every attribute change."
               : "Every source row is at destination, quarantined, or skipped."
@@ -150,7 +150,7 @@ export function ConservationLedgerCard({
                 : isArtifact
                   ? "Independent record count of the written file. Writer acknowledgement is diagnostic only. Gate-8 cell fidelity remains unproven."
                   : isVector
-                    ? "Dest-engine COUNT(DISTINCT source_id). Physical vector COUNT(*) and writer chunk-upsert acknowledgement are diagnostic only. Embedding cell fidelity remains unproven."
+                    ? "Dest-engine COUNT(DISTINCT source_id). Physical vector COUNT(*) / collection rowCount and writer chunk-upsert acknowledgement are diagnostic only. Embedding cell fidelity remains unproven."
                     : isScd2
                       ? "Dest-engine COUNT(*) WHERE is_current. Physical history COUNT(*) and writer version-upsert acknowledgement are diagnostic only."
                       : "Independent dest-engine read-back. Writer acknowledgement is diagnostic only."

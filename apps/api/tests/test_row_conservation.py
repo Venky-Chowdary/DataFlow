@@ -17,16 +17,24 @@ from services.dest_precount import (
     CURRENT_ROWS_KEY,
     DEST_COUNT_ARTIFACT,
     DEST_COUNT_CURRENT,
+    DEST_COUNT_IDENTITY,
     EXTRA_KEYS_KEY,
     HISTORY_ROWS_KEY,
     IDENTITY_COUNT_KEY,
     MISSING_KEYS_KEY,
+    SOURCE_ID_SCAN_COMPLETE,
+    SOURCE_ID_SCAN_MISSING,
+    SOURCE_ID_SCAN_NO_FIELD,
+    SOURCE_ID_SCAN_TRUNCATED,
+    SOURCE_ID_SCAN_UNMEASURED,
+    VECTOR_IDENTITY_ENGINES,
     VECTOR_ROWS_KEY,
     count_artifact_rows,
     count_scd2_current,
     destination_key_list,
     destination_keyset_census,
     destination_row_count,
+    identity_count_from_source_id_scan,
     records_to_key_tuples,
     stamp_artifact_census,
     stamp_keyset_census,
@@ -347,8 +355,8 @@ def test_vector_dest_before_unmeasured_does_not_close():
     assert ledger.unaccounted is None
 
 
-def test_stamp_vector_census_milvus_is_not_identity():
-    """Milvus rowCount is physical, not DISTINCT source_id — do not pretend."""
+def test_stamp_vector_census_milvus_unreachable_is_skipped_identity_not_rowcount():
+    """Unreachable Milvus must not close dest as collection rowCount."""
     stamped = stamp_vector_census(
         {"target_rows": 5, "target_checksum": "abc"},
         {},
@@ -357,7 +365,82 @@ def test_stamp_vector_census_milvus_is_not_identity():
         dest_engine="milvus",
     )
     assert IDENTITY_COUNT_KEY not in stamped
-    assert stamped.get("dest_count_source") != DEST_IDENTITY_READBACK
+    assert stamped.get("dest_count_source") == "skipped_identity_readback"
+    assert stamped["target_rows"] == 5
+
+
+def test_stamp_vector_census_pinecone_rowcount_is_not_identity():
+    """Pinecone has no dest-engine DISTINCT source_id — leave rowCount alone."""
+    stamped = stamp_vector_census(
+        {"target_rows": 5, "target_checksum": "abc"},
+        {},
+        schema="",
+        table_name="docs",
+        dest_engine="pinecone",
+    )
+    assert IDENTITY_COUNT_KEY not in stamped
+    assert stamped.get("dest_count_source") != DEST_COUNT_IDENTITY
+    assert "pinecone" not in VECTOR_IDENTITY_ENGINES
+    assert "weaviate" not in VECTOR_IDENTITY_ENGINES
+
+
+def test_identity_count_from_source_id_scan_is_distinct_not_chunk_count():
+    """5 chunks / 2 documents / empty ids / truncated prefix — SQL COUNT DISTINCT."""
+    assert identity_count_from_source_id_scan(SOURCE_ID_SCAN_MISSING, None) == 0
+    assert identity_count_from_source_id_scan(
+        SOURCE_ID_SCAN_COMPLETE,
+        ["doc-1", "doc-1", "doc-1", "doc-2", "doc-2"],
+    ) == 2
+    assert identity_count_from_source_id_scan(SOURCE_ID_SCAN_COMPLETE, []) == 0
+    assert identity_count_from_source_id_scan(
+        SOURCE_ID_SCAN_COMPLETE, ["doc-1", "", None, "  "]
+    ) == 1
+    assert identity_count_from_source_id_scan(
+        SOURCE_ID_SCAN_TRUNCATED, ["doc-1"] * 20_000
+    ) is None
+    assert identity_count_from_source_id_scan(SOURCE_ID_SCAN_NO_FIELD, ["x"]) is None
+    assert identity_count_from_source_id_scan(SOURCE_ID_SCAN_UNMEASURED, ["x"]) is None
+
+
+def test_stamp_vector_census_milvus_closes_on_distinct_source_id(monkeypatch):
+    def fake_scan(cfg, *, table_name, max_entities):
+        assert table_name == "docs"
+        assert max_entities >= 5
+        return SOURCE_ID_SCAN_COMPLETE, ["doc-1", "doc-1", "doc-1", "doc-2", "doc-2"]
+
+    monkeypatch.setattr("connectors.milvus_writer.scan_source_ids", fake_scan)
+    stamped = stamp_vector_census(
+        {"target_rows": 10_000, "target_checksum": "writer"},
+        {"host": "127.0.0.1", "port": 19530},
+        schema="",
+        table_name="docs",
+        dest_engine="milvus",
+    )
+    assert stamped[IDENTITY_COUNT_KEY] == 2
+    assert stamped["dest_count_source"] == DEST_COUNT_IDENTITY
+    assert stamped[VECTOR_ROWS_KEY] == 10_000
+    count, source = dest_count_from_recon(stamped)
+    assert count == 2
+    assert source == DEST_IDENTITY_READBACK
+
+
+def test_stamp_vector_census_qdrant_truncated_scan_is_unmeasured(monkeypatch):
+    def fake_scan(cfg, *, table_name, max_entities):
+        return SOURCE_ID_SCAN_TRUNCATED, []
+
+    monkeypatch.setattr("connectors.qdrant_writer.scan_source_ids", fake_scan)
+    stamped = stamp_vector_census(
+        {"target_rows": 5, "target_checksum": "writer"},
+        {"host": "127.0.0.1", "port": 6333},
+        schema="",
+        table_name="docs",
+        dest_engine="qdrant",
+    )
+    assert IDENTITY_COUNT_KEY not in stamped
+    assert stamped.get("dest_count_source") == "skipped_identity_readback"
+    count, source = dest_count_from_recon(stamped)
+    assert count is None
+    assert source == DEST_UNMEASURED
 
 
 def test_current_readback_closes_on_is_current_not_history_count():

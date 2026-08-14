@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -443,6 +444,157 @@ def _ensure_collection(
         if _has_collection(session, base_url, headers, collection_name, db_name=db_name):
             return
         raise RuntimeError(f"Milvus create collection failed: {resp.status_code} {body or resp.text}")
+
+
+# REST query offset+limit must stay below this (Milvus v2 entities/query).
+_MILVUS_QUERY_WINDOW = 16384
+
+
+def _milvus_count_star(data: Any) -> int | None:
+    """Parse entities/query ``count(*)`` — physical entities, never identity."""
+    if isinstance(data, int):
+        return data if data >= 0 else None
+    if isinstance(data, dict):
+        for key in ("rowCount", "row_count", "count(*)", "count"):
+            if key in data:
+                try:
+                    n = int(data[key])
+                except (TypeError, ValueError):
+                    return None
+                return n if n >= 0 else None
+        data = data.get("data")
+    if isinstance(data, list) and data:
+        row = data[0]
+        if isinstance(row, dict):
+            for key, raw in row.items():
+                compact = str(key).lower().replace(" ", "")
+                if "count" in compact:
+                    try:
+                        n = int(raw)
+                    except (TypeError, ValueError):
+                        return None
+                    return n if n >= 0 else None
+        if isinstance(row, (int, float)):
+            n = int(row)
+            return n if n >= 0 else None
+    return None
+
+
+def _entity_source_id(entity: Any) -> Any:
+    if not isinstance(entity, dict):
+        return None
+    if "source_id" in entity:
+        return entity.get("source_id")
+    return entity.get("sourceId")
+
+
+def scan_source_ids(
+    cfg: Mapping[str, Any],
+    *,
+    table_name: str,
+    max_entities: int = 20_000,
+) -> tuple[str, list[Any]]:
+    """Dest-engine ``source_id`` values. Never ``num_entities`` / ``rowCount``.
+
+    Returns ``(state, values)``:
+
+    * ``missing`` — collection absent (create-on-first-write → identity 0)
+    * ``no_field`` — live schema has no ``source_id`` (unmeasured)
+    * ``truncated`` — physical cardinality exceeds the REST/census bound
+    * ``complete`` — every entity's ``source_id`` is in ``values``
+    * ``unmeasured`` — transport / describe / query failure
+
+    A prefix scan is never ``complete``. Callers DISTINCT only on complete.
+    """
+    table = str(table_name or "").strip()
+    if not table:
+        return "unmeasured", []
+    try:
+        session = _requests_session()
+        token = _auth_token(
+            api_key=str(cfg.get("api_key") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+        )
+        base_url = _base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 19530),
+            bool(cfg.get("ssl", False)),
+            str(cfg.get("connection_string") or ""),
+        )
+        hdrs = _headers(token)
+        collection = _collection_name(table or str(cfg.get("database") or "") or "dataflow_chunks")
+        db_name = str(cfg.get("database") or cfg.get("schema") or "").strip()
+        if db_name.lower() in {"", "test_db", "default", "public"}:
+            db_name = ""
+        if not _has_collection(session, base_url, hdrs, collection, db_name=db_name):
+            return "missing", []
+        carriers, _dim = _milvus_describe_collection(
+            session, base_url, hdrs, collection, db_name=db_name
+        )
+        if not carriers:
+            return "unmeasured", []
+        if "source_id" not in {str(k).lower() for k in carriers}:
+            return "no_field", []
+        cap = min(int(max_entities), _MILVUS_QUERY_WINDOW)
+        count_payload: dict[str, Any] = {
+            "collectionName": collection,
+            "filter": 'id != ""',
+            "outputFields": ["count(*)"],
+        }
+        if db_name:
+            count_payload["dbName"] = db_name
+        count_resp = session.post(
+            f"{base_url}/v2/vectordb/entities/query",
+            data=json.dumps(count_payload),
+            headers=hdrs,
+            timeout=30,
+        )
+        count_body = count_resp.json() if count_resp.content else {}
+        physical: int | None = None
+        if _ok_response(
+            count_body if isinstance(count_body, dict) else {}, count_resp.status_code
+        ):
+            physical = _milvus_count_star(
+                count_body.get("data") if isinstance(count_body, dict) else count_body
+            )
+        if physical is None:
+            return "unmeasured", []
+        if physical == 0:
+            return "complete", []
+        if physical > cap:
+            return "truncated", []
+        query_payload: dict[str, Any] = {
+            "collectionName": collection,
+            "filter": 'id != ""',
+            "outputFields": ["source_id"],
+            "limit": physical,
+            "offset": 0,
+        }
+        if db_name:
+            query_payload["dbName"] = db_name
+        query_resp = session.post(
+            f"{base_url}/v2/vectordb/entities/query",
+            data=json.dumps(query_payload),
+            headers=hdrs,
+            timeout=60,
+        )
+        query_body = query_resp.json() if query_resp.content else {}
+        if not _ok_response(
+            query_body if isinstance(query_body, dict) else {}, query_resp.status_code
+        ):
+            return "unmeasured", []
+        rows = query_body.get("data") if isinstance(query_body, dict) else None
+        if not isinstance(rows, list):
+            return "unmeasured", []
+        if len(rows) > cap:
+            return "truncated", []
+        # Fewer rows than count(*) can be a concurrent delete; more is a lie.
+        if len(rows) > physical:
+            return "truncated", []
+        return "complete", [_entity_source_id(row) for row in rows]
+    except Exception:
+        return "unmeasured", []
 
 
 def write_mapped_rows(

@@ -45,10 +45,11 @@ How dest_population is chosen:
   move). Writer ``records_processed`` still counts updates; it never
   closes the identity. Without a dest-engine census the ledger stays
   unproven.
-* **vector / RAG (pgvector)** — one source row becomes N embedding
+* **vector / RAG** — one source row becomes N embedding
   chunks. Physical ``COUNT(*)`` of vectors is **not** dest population
   (2 documents → 5 chunks would invent a surplus). Dest population is
-  dest-engine ``COUNT(DISTINCT source_id)``:
+  dest-engine ``COUNT(DISTINCT source_id)`` (pgvector SQL, Milvus
+  entity query, Qdrant point scroll):
 
       reader == COUNT(DISTINCT source_id) + hold_outs + skipped
 
@@ -725,10 +726,11 @@ def dest_count_from_recon(recon: Mapping[str, Any] | None) -> tuple[int | None, 
     Only that keyed field closes dest population — ``target_rows`` on an
     export report is historically writer ack and never sufficient.
 
-    Vector identity is a fourth axis: Gate-8 ``target_rows`` on pgvector is
-    physical embedding COUNT(*) (chunks). ``identity_rows`` is
-    COUNT(DISTINCT source_id). Only the keyed identity field closes dest
-    population — checksum + stuffed chunk COUNT would invent a surplus.
+    Vector identity is a fourth axis: Gate-8 ``target_rows`` on a vector
+    dest is physical embedding COUNT(*) (chunks) when a SQL engine can
+    answer it. ``identity_rows`` is COUNT(DISTINCT source_id). Only the
+    keyed identity field closes dest population — checksum + stuffed
+    chunk COUNT / collection ``rowCount`` would invent a surplus.
 
     SCD2 current is a fifth axis: Gate-8 ``target_rows`` on SCD2 is the
     writer's ``_active_checksum`` ``active_rows`` (or physical history).

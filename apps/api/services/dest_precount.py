@@ -30,13 +30,17 @@ Lakehouse and object-store destinations already have dest-*after* read-back
 append delta and first-write overwrite (missing table/object = 0) can close.
 Writer ``Table.upsert`` / PUT rowcount is not that proof.
 
-Vector destinations (pgvector) are a 1-source-row → N-chunk identity.
+Vector destinations are a 1-source-row → N-chunk identity.
 Physical ``COUNT(*)`` of embedding rows is **not** dest population — that
 is the Fivetran ``_deleted`` analogue for RAG: 2 documents → 5 chunks
 looks like silent duplication if chunk COUNT closes overwrite. Dest
-population is ``COUNT(DISTINCT source_id)``. Missing table is 0. Writer
-chunk-upsert ack never closes. Milvus/Qdrant/Pinecone/Weaviate stay
-unmeasured until dest-engine DISTINCT source_id exists.
+population is ``COUNT(DISTINCT source_id)`` from the dest engine
+(pgvector SQL, Milvus entity query, Qdrant point scroll). Missing
+collection is 0. Writer chunk-upsert ack and collection ``rowCount`` /
+``num_entities`` / ``points_count`` never close. A truncated scan
+(REST offset cap, census bound) is unmeasured — never DISTINCT of a
+prefix. Pinecone/Weaviate stay unmeasured until dest-engine DISTINCT
+``source_id`` exists; their ``rowCount`` is not identity.
 
 A complete source PK census plus dest-engine key hits splits DMS
 ``MISSING_TARGET`` from ``EXTRA_TARGET``. ``COUNT(*)`` nets one missing
@@ -92,6 +96,13 @@ __all__ = [
     "stamp_vector_census",
     "stamp_keyset_census",
     "stamp_scd2_census",
+    "VECTOR_IDENTITY_ENGINES",
+    "identity_count_from_source_id_scan",
+    "SOURCE_ID_SCAN_MISSING",
+    "SOURCE_ID_SCAN_NO_FIELD",
+    "SOURCE_ID_SCAN_TRUNCATED",
+    "SOURCE_ID_SCAN_COMPLETE",
+    "SOURCE_ID_SCAN_UNMEASURED",
     "count_scd2_current",
     "count_scd2_populations",
     "destination_keyset_census",
@@ -129,7 +140,17 @@ DEST_COUNT_ARTIFACT = "artifact_readback"
 IDENTITY_COUNT_KEY = "identity_rows"
 VECTOR_ROWS_KEY = "vector_rows"
 DEST_COUNT_IDENTITY = "identity_readback"
-_VECTOR_IDENTITY_ENGINES = frozenset({"pgvector"})
+# Dest engines that can answer COUNT(DISTINCT source_id) independently of
+# writer upsert ack. Pinecone / Weaviate are not in this set — their
+# ``rowCount`` is physical vectors, not source identities.
+VECTOR_IDENTITY_ENGINES = frozenset({"pgvector", "milvus", "qdrant"})
+_VECTOR_IDENTITY_ENGINES = VECTOR_IDENTITY_ENGINES
+
+SOURCE_ID_SCAN_MISSING = "missing"
+SOURCE_ID_SCAN_NO_FIELD = "no_field"
+SOURCE_ID_SCAN_TRUNCATED = "truncated"
+SOURCE_ID_SCAN_COMPLETE = "complete"
+SOURCE_ID_SCAN_UNMEASURED = "unmeasured"
 
 # Independent COUNT(*) WHERE is_current of an SCD2 destination.
 # Physical history COUNT(*) is diagnostic (``history_rows``) — never dest
@@ -151,6 +172,8 @@ DEST_KEY_HITS_KEY = "dest_key_hits"
 SOURCE_KEY_COUNT_KEY = "source_key_count"
 LEFTOVER_DELETED_KEY = "leftover_deleted"
 _KEYSET_CENSUS_MAX = 20_000
+# Same bound as dest key listing: a prefix DISTINCT is a lie.
+_IDENTITY_SCAN_MAX = _KEYSET_CENSUS_MAX
 
 _ARTIFACT_FORMATS = frozenset({"csv", "tsv", "json", "jsonl", "parquet"})
 _OBJECT_STORE_DRIVERS = frozenset({
@@ -193,6 +216,53 @@ def _count_distinct_source_id(conn: Any, table_ref: str) -> int:
         return int(row[0]) if row else 0
     finally:
         cur.close()
+
+
+def identity_count_from_source_id_scan(
+    state: str,
+    values: Sequence[Any] | None,
+) -> int | None:
+    """COUNT(DISTINCT source_id) over a dest-engine scan.
+
+    Missing collection is 0 (create-on-first-write). Incomplete scans
+    (REST offset cap, census bound, missing ``source_id`` field, transport
+    failure) are unmeasured — never DISTINCT of a prefix, never physical
+    ``rowCount``. Empty / NULL ``source_id`` is not an identity (SQL
+    COUNT DISTINCT skips NULL).
+    """
+    kind = str(state or "").strip().lower()
+    if kind == SOURCE_ID_SCAN_MISSING:
+        return 0
+    if kind != SOURCE_ID_SCAN_COMPLETE:
+        return None
+    seen: set[str] = set()
+    for raw in values or ():
+        if raw is None:
+            continue
+        s = str(raw).strip()
+        if s:
+            seen.add(s)
+    return len(seen)
+
+
+def _vector_rest_identity_count(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    table_name: str,
+) -> int | None:
+    """Milvus / Qdrant dest-engine DISTINCT source_id. Never collection rowCount."""
+    engine = str(db_type or "").strip().lower()
+    if engine == "milvus":
+        from connectors.milvus_writer import scan_source_ids
+    elif engine == "qdrant":
+        from connectors.qdrant_writer import scan_source_ids
+    else:
+        return None
+    state, values = scan_source_ids(
+        cfg, table_name=table_name, max_entities=_IDENTITY_SCAN_MAX
+    )
+    return identity_count_from_source_id_scan(state, values)
 
 
 def _pgvector_identity_count(
@@ -347,6 +417,9 @@ def destination_row_count(
         if db_type == "pgvector":
             # Identities, not embedding rows. Physical COUNT(*) is not dest.
             return _pgvector_identity_count(cfg, schema=schema, table_name=table)
+
+        if db_type in {"milvus", "qdrant"}:
+            return _vector_rest_identity_count(db_type, cfg, table_name=table)
 
         if db_type in {"iceberg", "apache_iceberg"}:
             return _iceberg_row_count(cfg, schema=schema, table_name=table)
@@ -1341,15 +1414,16 @@ def stamp_vector_census(
 ) -> dict[str, Any]:
     """Stamp COUNT(DISTINCT source_id). Never physical vector COUNT(*) or writer ack.
 
-    Gate-8 ``target_rows`` on pgvector is embedding cardinality (chunks).
-    That figure must not survive as dest population — 2 documents / 5
-    chunks would close overwrite as a surplus. Cell fidelity of opaque
-    embeddings stays with the caller (``skipped_readback`` /
-    ``migration_proven=false``). This only owns identity cardinality.
+    Gate-8 ``target_rows`` on a vector dest is embedding cardinality (chunks)
+    when a SQL engine can COUNT(*) them. That figure must not survive as
+    dest population — 2 documents / 5 chunks would close overwrite as a
+    surplus. Cell fidelity of opaque embeddings stays with the caller
+    (``skipped_readback`` / ``migration_proven=false``). This only owns
+    identity cardinality.
 
-    Engines without dest-engine DISTINCT ``source_id`` (Milvus, Qdrant,
-    Pinecone, Weaviate) are left untouched — their ``rowCount`` is not
-    identity.
+    Engines in ``VECTOR_IDENTITY_ENGINES`` (pgvector, Milvus, Qdrant) run
+    dest-engine DISTINCT ``source_id``. Pinecone / Weaviate ``rowCount`` is
+    not identity and is left untouched.
     """
     out = dict(recon)
     engine = str(dest_engine or "").strip().lower()

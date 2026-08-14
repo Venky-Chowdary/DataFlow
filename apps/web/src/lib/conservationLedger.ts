@@ -344,7 +344,7 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
       return {
         value: Number(ledger.dest_count).toLocaleString(),
         label: running ? "Identities so far" : "Identities at dest",
-        title: ledger.note || "Dest-engine COUNT(DISTINCT source_id). Physical vector COUNT(*) is chunk cardinality, not source-row conservation.",
+        title: ledger.note || "Dest-engine COUNT(DISTINCT source_id). Physical vector COUNT(*) / collection rowCount is chunk cardinality, not source-row conservation.",
         measured: true,
         tone: unbalanced ? "danger" : "ok",
       };

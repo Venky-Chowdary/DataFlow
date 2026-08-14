@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -258,6 +259,111 @@ def build_qdrant_points(
             "payload": payload,
         })
     return points, rejected
+
+
+def _qdrant_points_count(info: dict[str, Any] | None) -> int | None:
+    """Physical points, never identity. Used only as a census bound gate."""
+    if not isinstance(info, dict):
+        return None
+    result = info.get("result") if isinstance(info.get("result"), dict) else info
+    if not isinstance(result, dict):
+        return None
+    raw = result.get("points_count")
+    if raw is None:
+        raw = result.get("pointsCount")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 0 else None
+
+
+def scan_source_ids(
+    cfg: Mapping[str, Any],
+    *,
+    table_name: str,
+    max_entities: int = 20_000,
+) -> tuple[str, list[Any]]:
+    """Dest-engine payload ``source_id`` values. Never ``points_count``.
+
+    Facet aggregation requires a keyword index this writer does not create;
+    mutating dest to index during COUNT is forbidden. Scroll + DISTINCT is
+    the dest-engine analogue of SQL COUNT(DISTINCT). A truncated scroll is
+    never complete.
+    """
+    table = str(table_name or "").strip()
+    if not table:
+        return "unmeasured", []
+    try:
+        session = _requests_session()
+        api_key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+        connection_string = str(cfg.get("connection_string") or "").strip()
+        base_url = connection_string.rstrip("/") if connection_string else _base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 6333),
+            bool(cfg.get("ssl", False)),
+        )
+        hdrs = _headers(api_key)
+        collection = table or "dataflow_vectors"
+        exists = session.get(
+            f"{base_url}/collections/{collection}", headers=hdrs, timeout=10
+        )
+        if exists.status_code == 404:
+            return "missing", []
+        if exists.status_code != 200:
+            return "unmeasured", []
+        try:
+            info = exists.json()
+        except Exception:
+            return "unmeasured", []
+        physical = _qdrant_points_count(info if isinstance(info, dict) else None)
+        cap = int(max_entities)
+        if physical is not None and physical > cap:
+            return "truncated", []
+        if physical == 0:
+            return "complete", []
+        values: list[Any] = []
+        offset: Any = None
+        scanned = 0
+        page = 256
+        while True:
+            body: dict[str, Any] = {
+                "limit": page,
+                "with_payload": ["source_id"],
+                "with_vector": False,
+            }
+            if offset is not None:
+                body["offset"] = offset
+            resp = session.post(
+                f"{base_url}/collections/{collection}/points/scroll",
+                data=json.dumps(body, default=json_default),
+                headers=hdrs,
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                return "unmeasured", []
+            payload = resp.json() if resp.content else {}
+            result = payload.get("result") if isinstance(payload, dict) else None
+            if not isinstance(result, dict):
+                return "unmeasured", []
+            points = result.get("points") or []
+            if not isinstance(points, list):
+                return "unmeasured", []
+            for point in points:
+                scanned += 1
+                if scanned > cap:
+                    return "truncated", []
+                row_payload = point.get("payload") if isinstance(point, dict) else None
+                if isinstance(row_payload, dict):
+                    values.append(row_payload.get("source_id"))
+                else:
+                    values.append(None)
+            nxt = result.get("next_page_offset")
+            if nxt is None:
+                return "complete", values
+            offset = nxt
+    except Exception:
+        return "unmeasured", []
 
 
 def write_mapped_rows(
