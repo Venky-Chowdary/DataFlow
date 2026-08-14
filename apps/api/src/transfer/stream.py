@@ -2025,8 +2025,22 @@ def _stream_database_transfer_impl(
             source_schema_catalog=source_schema_catalog,
             **write_kwargs,
         )
+        if keyed_census_acc is not None:
+            observe_keyed_batch(
+                keyed_census_acc,
+                headers=batch.headers,
+                rows=batch.rows,
+                mappings=mappings,
+                key_columns=pk_target_cols,
+                db_type=dest_type,
+                cfg=dest_cfg,
+                schema=schema_from_cfg(dest_type, dest_cfg),
+                table_name=dest_table,
+            )
         # Phase F1 — fingerprint the mapped rows from this chunk (same policy as
         # post-write re-read) so the write pass can own the source checksum.
+        # Tombstones are already stripped: hashing deleted keys as writes would
+        # fail Gate-8 after a correct hard DELETE.
         inline_fps: list[Any] = []
         try:
             mapped_fp, _ = map_rows_for_fingerprint(
@@ -2052,18 +2066,6 @@ def _stream_database_transfer_impl(
             logger.warning("Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc)
 
         try:
-            if keyed_census_acc is not None:
-                observe_keyed_batch(
-                    keyed_census_acc,
-                    headers=batch.headers,
-                    rows=batch.rows,
-                    mappings=mappings,
-                    key_columns=pk_target_cols,
-                    db_type=dest_type,
-                    cfg=dest_cfg,
-                    schema=schema_from_cfg(dest_type, dest_cfg),
-                    table_name=dest_table,
-                )
             batch_written, last_checksum, dest_summary = with_retry(
                 write_op,
                 budget=RetryBudget(

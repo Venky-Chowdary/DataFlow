@@ -1393,9 +1393,9 @@ def write_destination_database(
     the destination summary for ``reconcile()`` to check the delta against.
     Keyword options are forwarded verbatim to ``_write_destination_database``.
     """
-    from services.dest_precount import PRECOUNT_KEY, destination_key_hits, precount_destination
+    from services.dest_precount import PRECOUNT_KEY, precount_destination
     from services.dialect_profiles import schema_from_cfg
-    from services.row_conservation import CENSUS_KEY, KeyCensus, extract_batch_keys
+    from services.row_conservation import CENSUS_KEY, prepare_keyed_upsert
     from src.transfer.connector_capabilities import resolve_driver_type
 
     cfg = resolve_connector_config(endpoint)
@@ -1403,22 +1403,18 @@ def write_destination_database(
     write_mode = str(options.get("write_mode") or "")
     conflict_columns = list(options.get("conflict_columns") or [])
     census_payload = None
-    if write_mode.lower() == "upsert" and conflict_columns and rows_before:
+    if write_mode.lower() == "upsert" and conflict_columns:
         db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
-        batch_keys = extract_batch_keys(records, conflict_columns, mappings)
-        hits = destination_key_hits(
-            db_type,
-            cfg,
+        records, census_payload = prepare_keyed_upsert(
+            records,
+            key_columns=conflict_columns,
+            mappings=mappings,
+            db_type=db_type,
+            cfg=cfg,
             schema=schema_from_cfg(db_type, cfg),
             table_name=resolve_dest_table(db_type, endpoint, "dt_import"),
-            key_columns=conflict_columns,
-            keys=batch_keys,
+            dest_nonempty=bool(rows_before),
         )
-        if hits is not None:
-            census_payload = KeyCensus(
-                unique_batch_keys=len(batch_keys),
-                dest_preexisting=hits,
-            ).to_dict()
     rows_written, ddl_log, summary = _write_destination_database(
         endpoint, records, columns, schema, mappings, **options
     )

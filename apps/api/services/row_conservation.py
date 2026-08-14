@@ -33,11 +33,13 @@ How dest_population is chosen:
 
       dest_delta == inserts_new_keys - deletes
 
-  where ``inserts_new_keys`` is keys in this batch that dest did not hold
-  before the write. Writer ``records_processed`` still counts updates; it
-  never closes the identity. Without a dest-engine census the ledger stays
-  unproven (the previous honest refusal). Tombstone/CDC delete apply is
-  not claimed until dest-engine delete counts exist.
+  where ``inserts_new_keys`` is *live* keys dest did not hold before the
+  write, and ``deletes`` is dest-engine hits of *tombstone* keys (a
+  tombstone for a key dest does not hold is a no-op — COUNT does not
+  move). Writer ``records_processed`` still counts updates; it never
+  closes the identity. Without a dest-engine census the ledger stays
+  unproven. Soft-delete mirrors (``_deleted`` flag, COUNT stays) are a
+  different identity and are not this ledger.
 
 Writer ack is a diagnostic third number. It never closes the identity.
 A mismatch against dest COUNT is the DMS hole, reported as a note, not as
@@ -67,28 +69,24 @@ KIND_KEYED = "keyed"
 KIND_EMPTY_PASS = "empty_pass"
 KIND_UNMEASURED = "unmeasured"
 
-DEST_READBACK = "gate8_dest_readback"
-DEST_UNMEASURED = "unmeasured"
-DEST_EMPTY_PASS = "empty_pass"
-
-KIND_OVERWRITE = "overwrite"
-KIND_APPEND_DELTA = "append_delta"
-KIND_KEYED = "keyed"
-KIND_EMPTY_PASS = "empty_pass"
-KIND_UNMEASURED = "unmeasured"
-
 
 @dataclass(frozen=True)
 class KeyCensus:
-    """Dest-engine split of a keyed batch: new keys vs keys dest already held.
+    """Dest-engine split of a keyed batch: live new keys vs dest-held deletes.
 
-    ``dest_preexisting`` is COUNT(DISTINCT key) of batch keys already on dest
-    *before* the write — not the writer's ON CONFLICT rowcount.
+    ``unique_batch_keys`` / ``dest_preexisting`` are *live* keys only.
+    Mixing tombstone keys into the live unique set invented inserts for
+    deletes of missing keys (COUNT would not rise; the ledger would lie).
+
+    ``tombstones`` is COUNT(DISTINCT tombstone key) dest already holds —
+    those are the DELETEs that drop ``COUNT(*)``. A tombstone for a key
+    dest does not hold is a no-op, not a delete and not an insert.
     """
 
     unique_batch_keys: int
     dest_preexisting: int
     tombstones: int = 0
+    unique_tombstone_keys: int = 0
 
     @property
     def inserts(self) -> int:
@@ -112,6 +110,7 @@ class KeyCensus:
             "unique_batch_keys": self.unique_batch_keys,
             "dest_preexisting": self.dest_preexisting,
             "tombstones": self.tombstones,
+            "unique_tombstone_keys": self.unique_tombstone_keys,
             "inserts": self.inserts,
             "updates": self.updates,
             "deletes": self.deletes,
@@ -127,13 +126,21 @@ class KeyCensus:
             unique = int(data["unique_batch_keys"])
             preexisting = int(data["dest_preexisting"])
             tombs = int(data.get("tombstones") or 0)
+            tomb_keys = int(data.get("unique_tombstone_keys") or 0)
         except (TypeError, ValueError):
             return None
-        if unique < 0 or preexisting < 0 or tombs < 0:
+        if unique < 0 or preexisting < 0 or tombs < 0 or tomb_keys < 0:
             return None
         if preexisting > unique:
             return None
-        return cls(unique_batch_keys=unique, dest_preexisting=preexisting, tombstones=tombs)
+        if tombs > tomb_keys and tomb_keys > 0:
+            return None
+        return cls(
+            unique_batch_keys=unique,
+            dest_preexisting=preexisting,
+            tombstones=tombs,
+            unique_tombstone_keys=max(tomb_keys, tombs),
+        )
 
 
 def extract_batch_keys(
@@ -173,6 +180,293 @@ def extract_batch_keys(
         seen.add(tup)
         unique.append(tup)
     return unique
+
+
+def _row_key(
+    row: Mapping[str, Any],
+    cols: Sequence[str],
+    tgt_to_src: Mapping[str, str],
+) -> tuple[Any, ...] | None:
+    tup_vals: list[Any] = []
+    for col in cols:
+        val = row.get(col)
+        if val is None and col in tgt_to_src:
+            val = row.get(tgt_to_src[col])
+        if val is None:
+            return None
+        tup_vals.append(val)
+    return tuple(tup_vals)
+
+
+def _mapping_targets(mappings: Sequence[Mapping[str, Any]] | None) -> dict[str, str]:
+    tgt_to_src: dict[str, str] = {}
+    for item in mappings or []:
+        tgt = str(item.get("target") or "").strip()
+        src = str(item.get("source") or "").strip()
+        if tgt and src:
+            tgt_to_src[tgt] = src
+    return tgt_to_src
+
+
+@dataclass(frozen=True)
+class KeyPartition:
+    """Last-op-wins split of a keyed batch.
+
+    The same PK may appear as UPDATE then DELETE (or DELETE then INSERT)
+    inside one batch. Last event owns the key: a recreation is live; a
+    trailing tombstone is a delete. Unkeyed rows are omitted — they cannot
+    be addressed by DELETE and are not invented as inserts.
+    """
+
+    live_records: list[dict[str, Any]]
+    live_keys: list[tuple[Any, ...]]
+    tombstone_keys: list[tuple[Any, ...]]
+
+
+def partition_keyed_records(
+    records: Sequence[Mapping[str, Any]] | None,
+    key_columns: Sequence[str] | None,
+    mappings: Sequence[Mapping[str, Any]] | None = None,
+) -> KeyPartition:
+    """Split live upserts from hard-delete tombstones (last-op-wins per key)."""
+    from services.tombstone import is_row_tombstone
+
+    cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
+    if not cols:
+        return KeyPartition(live_records=[], live_keys=[], tombstone_keys=[])
+    tgt_to_src = _mapping_targets(mappings)
+    live: dict[tuple[Any, ...], dict[str, Any]] = {}
+    tombs: dict[tuple[Any, ...], dict[str, Any]] = {}
+    order_live: list[tuple[Any, ...]] = []
+    order_tomb: list[tuple[Any, ...]] = []
+    unkeyed_live: list[dict[str, Any]] = []
+    for rec in records or []:
+        row = dict(rec or {})
+        key = _row_key(row, cols, tgt_to_src)
+        if is_row_tombstone(row):
+            if key is None:
+                # Cannot address a DELETE; never upsert a tombstone as a live row.
+                continue
+            live.pop(key, None)
+            if key not in tombs:
+                order_tomb.append(key)
+            tombs[key] = row
+            continue
+        if key is None:
+            unkeyed_live.append(row)
+            continue
+        tombs.pop(key, None)
+        if key not in live:
+            order_live.append(key)
+        live[key] = row
+    live_keys = [k for k in order_live if k in live]
+    tomb_keys = [k for k in order_tomb if k in tombs]
+    return KeyPartition(
+        live_records=unkeyed_live + [live[k] for k in live_keys],
+        live_keys=live_keys,
+        tombstone_keys=tomb_keys,
+    )
+
+
+def coerce_pk_part(value: Any) -> Any:
+    """Bind a PK part with integer affinity when the token is an integer.
+
+    CDC ``ChangeBatch.deletes`` are strings. Dest BIGINT columns reject a
+    text bind on PostgreSQL (``operator does not exist: bigint = text``).
+    Boolean stays boolean — ``bool`` is a subclass of ``int`` in Python.
+    """
+    if value is None or isinstance(value, bool) or isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return value
+    if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
+        try:
+            return int(text)
+        except ValueError:
+            return value
+    return value
+
+
+def format_delete_keys(keys: Sequence[tuple[Any, ...]]) -> list[str]:
+    """``delete_by_primary_keys`` addressing: one string per row, composite joined."""
+    from services.cdc_snapshot_window import _PK_SEP
+
+    out: list[str] = []
+    for tup in keys:
+        if any(p is None for p in tup):
+            continue
+        parts = [str(coerce_pk_part(p)) for p in tup]
+        out.append(_PK_SEP.join(parts) if len(parts) > 1 else parts[0])
+    return out
+
+
+def parse_delete_keys(
+    keys: Sequence[str] | None,
+    n_cols: int,
+) -> list[tuple[Any, ...]]:
+    """Inverse of :func:`format_delete_keys` for CDC ``ChangeBatch.deletes``."""
+    from services.cdc_snapshot_window import _PK_SEP
+
+    width = max(int(n_cols or 1), 1)
+    out: list[tuple[Any, ...]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for raw in keys or []:
+        text = str(raw)
+        if not text:
+            continue
+        parts = text.split(_PK_SEP) if width > 1 else [text]
+        if len(parts) != width:
+            continue
+        tup = tuple(coerce_pk_part(p) for p in parts)
+        if tup in seen:
+            continue
+        seen.add(tup)
+        out.append(tup)
+    return out
+
+
+def apply_hard_deletes(
+    *,
+    db_type: str,
+    cfg: Mapping[str, Any],
+    schema: str,
+    table_name: str,
+    key_columns: Sequence[str],
+    keys: Sequence[tuple[Any, ...]],
+) -> int:
+    """Hard-DELETE dest-held keys. Idempotent 0 if dest already lacks them."""
+    cols = [str(c).strip() for c in key_columns if str(c).strip()]
+    formatted = format_delete_keys(keys)
+    if not cols or not formatted:
+        return 0
+    from connectors.table_manager import delete_by_primary_keys
+
+    return delete_by_primary_keys(
+        db_type=db_type,
+        cfg=dict(cfg),
+        table_name=table_name,
+        primary_key_column=cols if len(cols) > 1 else cols[0],
+        keys=formatted,
+        schema=schema or None,
+    )
+
+
+def census_from_partition(
+    partition: KeyPartition,
+    *,
+    db_type: str,
+    cfg: Mapping[str, Any],
+    schema: str,
+    table_name: str,
+    key_columns: Sequence[str],
+) -> KeyCensus | None:
+    """Dest-engine live hits + dest-held tombstones. ``None`` if either probe fails."""
+    from services.dest_precount import destination_key_hits
+
+    cols = [str(c).strip() for c in key_columns if str(c).strip()]
+    live_hits = destination_key_hits(
+        db_type,
+        dict(cfg),
+        schema=schema,
+        table_name=table_name,
+        key_columns=cols,
+        keys=list(partition.live_keys),
+    )
+    tomb_hits = destination_key_hits(
+        db_type,
+        dict(cfg),
+        schema=schema,
+        table_name=table_name,
+        key_columns=cols,
+        keys=list(partition.tombstone_keys),
+    )
+    if live_hits is None or tomb_hits is None:
+        return None
+    return KeyCensus(
+        unique_batch_keys=len(partition.live_keys),
+        dest_preexisting=int(live_hits),
+        tombstones=int(tomb_hits),
+        unique_tombstone_keys=len(partition.tombstone_keys),
+    )
+
+
+def prepare_keyed_upsert(
+    records: list[dict[str, Any]],
+    *,
+    key_columns: Sequence[str] | None,
+    mappings: Sequence[Mapping[str, Any]] | None,
+    db_type: str,
+    cfg: Mapping[str, Any],
+    schema: str,
+    table_name: str,
+    dest_nonempty: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Strip tombstones from the upsert, hard-DELETE dest-held keys, census.
+
+    Census without apply would be a lie: dest COUNT would not drop. Apply
+    without stripping would upsert the tombstone back as a live row.
+    """
+    cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
+    if not cols:
+        return records, None
+    partition = partition_keyed_records(records, cols, mappings)
+    census: KeyCensus | None = None
+    if dest_nonempty or partition.tombstone_keys:
+        census = census_from_partition(
+            partition,
+            db_type=db_type,
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            key_columns=cols,
+        )
+    if partition.tombstone_keys:
+        apply_hard_deletes(
+            db_type=db_type,
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            key_columns=cols,
+            keys=partition.tombstone_keys,
+        )
+        live_out = partition.live_records
+    else:
+        live_out = records
+    payload = census.to_dict() if census is not None else None
+    return live_out, payload
+
+
+def census_change_batch(
+    *,
+    inserts: Sequence[Mapping[str, Any]] | None,
+    updates: Sequence[Mapping[str, Any]] | None,
+    deletes: Sequence[str] | None,
+    key_columns: Sequence[str],
+    db_type: str,
+    cfg: Mapping[str, Any],
+    schema: str,
+    table_name: str,
+    mappings: Sequence[Mapping[str, Any]] | None = None,
+) -> KeyCensus | None:
+    """Dest-engine census for a CDC ``ChangeBatch`` (already split by the reader)."""
+    cols = [str(c).strip() for c in key_columns if str(c).strip()]
+    live_records = [dict(r) for r in list(inserts or []) + list(updates or [])]
+    live_keys = extract_batch_keys(live_records, cols, mappings)
+    tomb_keys = parse_delete_keys(deletes, len(cols))
+    partition = KeyPartition(
+        live_records=live_records,
+        live_keys=live_keys,
+        tombstone_keys=tomb_keys,
+    )
+    return census_from_partition(
+        partition,
+        db_type=db_type,
+        cfg=cfg,
+        schema=schema,
+        table_name=table_name,
+        key_columns=cols,
+    )
 
 
 def hold_outs(rejected_rows: int, coerced_null_rows: int) -> int:
@@ -690,14 +984,20 @@ class KeyCensusAccumulator:
     """Per-batch dest hits, reconstructed as a run-level census.
 
     Each batch is probed *before* it writes. Inserts this run become dest
-    hits for a later batch, so summing ``len(batch) - hits`` equals new keys
-    for the whole stream. ``dest_preexisting`` is unique keys minus those
-    inserts — dest-engine, not writer ON CONFLICT.
+    hits for a later batch, so summing ``len(live) - hits`` equals new keys
+    for the whole stream. ``dest_preexisting`` is unique live keys minus
+    those inserts — dest-engine, not writer ON CONFLICT.
+
+    Tombstone dest-hits sum independently. A key that this run inserted and
+    later deleted stays in the live unique set so ``inserts - deletes``
+    still equals dest COUNT(*) delta (insert then delete nets zero).
     """
 
     def __init__(self) -> None:
         self._seen: set[tuple[Any, ...]] = set()
         self._inserts = 0
+        self._tombstones = 0
+        self._unique_tombstone_keys = 0
         self._failed = False
 
     def add_batch(self, keys: Sequence[tuple[Any, ...]], dest_hits: int | None) -> None:
@@ -714,14 +1014,33 @@ class KeyCensusAccumulator:
         self._inserts += max(len(batch) - int(dest_hits), 0)
         self._seen.update(batch)
 
+    def add_tombstones(
+        self,
+        dest_hits: int | None,
+        *,
+        unique_keys: int = 0,
+    ) -> None:
+        if dest_hits is None:
+            self._failed = True
+            return
+        self._tombstones += max(int(dest_hits), 0)
+        self._unique_tombstone_keys += max(int(unique_keys), 0)
+
     def to_census(self) -> KeyCensus | None:
-        if self._failed or not self._seen:
+        if self._failed:
+            return None
+        if not self._seen and self._tombstones == 0 and self._unique_tombstone_keys == 0:
             return None
         unique = len(self._seen)
         preexisting = unique - self._inserts
         if preexisting < 0:
             return None
-        return KeyCensus(unique_batch_keys=unique, dest_preexisting=preexisting)
+        return KeyCensus(
+            unique_batch_keys=unique,
+            dest_preexisting=preexisting,
+            tombstones=self._tombstones,
+            unique_tombstone_keys=self._unique_tombstone_keys,
+        )
 
 
 def observe_keyed_batch(
@@ -736,17 +1055,56 @@ def observe_keyed_batch(
     schema: str,
     table_name: str,
 ) -> None:
-    """Dest-engine key hits for one stream batch, before that batch writes."""
+    """Dest-engine key hits for one stream batch, before that batch writes.
+
+    Tombstone rows are stripped from ``rows`` in place (the stream writer
+    already bound the same list) and dest-held keys are hard-DELETEd so
+    ``COUNT(*)`` can drop. Census without apply would not be dest population.
+    """
     from services.dest_precount import destination_key_hits
 
+    cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
     records = [dict(zip(headers, row)) for row in rows]
-    keys = extract_batch_keys(records, key_columns, mappings)
-    hits = destination_key_hits(
+    if not cols:
+        acc.add_batch([], 0)
+        return
+    partition = partition_keyed_records(records, cols, mappings)
+    if partition.tombstone_keys:
+        if not isinstance(rows, list):
+            raise TypeError(
+                "Keyed tombstone apply requires a mutable batch row list so "
+                "deleted keys are not upserted back onto the destination"
+            )
+        header_list = list(headers)
+        rows[:] = [
+            [rec.get(h) for h in header_list] for rec in partition.live_records
+        ]
+    live_hits = destination_key_hits(
         db_type,
         dict(cfg),
         schema=schema,
         table_name=table_name,
-        key_columns=[str(c) for c in (key_columns or []) if str(c).strip()],
-        keys=keys,
+        key_columns=cols,
+        keys=partition.live_keys,
     )
-    acc.add_batch(keys, hits)
+    tomb_hits = destination_key_hits(
+        db_type,
+        dict(cfg),
+        schema=schema,
+        table_name=table_name,
+        key_columns=cols,
+        keys=partition.tombstone_keys,
+    )
+    acc.add_batch(partition.live_keys, live_hits)
+    acc.add_tombstones(
+        tomb_hits, unique_keys=len(partition.tombstone_keys)
+    )
+    if partition.tombstone_keys:
+        apply_hard_deletes(
+            db_type=db_type,
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            key_columns=cols,
+            keys=partition.tombstone_keys,
+        )

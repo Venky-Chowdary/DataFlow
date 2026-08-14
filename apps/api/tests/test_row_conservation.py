@@ -422,3 +422,136 @@ def test_stream_accumulator_reconstructs_preexisting_from_per_batch_hits():
     assert census.dest_preexisting == 3
     assert census.inserts == 1
     assert census.updates == 3
+    assert census.deletes == 0
+
+
+def test_partition_last_op_wins_delete_then_insert_is_live():
+    from services.row_conservation import partition_keyed_records
+
+    part = partition_keyed_records(
+        [
+            {"id": 1, "label": "gone", "__deleted": True},
+            {"id": 1, "label": "back", "__deleted": False},
+            {"id": 2, "label": "x", "__deleted": False},
+            {"id": 2, "label": "x2", "__op": "d"},
+        ],
+        ["id"],
+    )
+    assert part.live_keys == [(1,)]
+    assert part.tombstone_keys == [(2,)]
+    assert part.live_records[0]["label"] == "back"
+
+
+def test_keyed_census_tombstone_of_missing_key_is_not_an_insert():
+    from services.row_conservation import KeyCensus
+
+    # 3 live keys dest already holds + 1 tombstone dest does not hold.
+    census = KeyCensus(
+        unique_batch_keys=3,
+        dest_preexisting=3,
+        tombstones=0,
+        unique_tombstone_keys=1,
+    )
+    assert census.inserts == 0
+    assert census.deletes == 0
+    assert census.expected_delta == 0
+
+
+def test_keyed_census_closes_on_insert_minus_dest_held_delete():
+    from services.row_conservation import KeyCensus
+
+    census = KeyCensus(
+        unique_batch_keys=3,
+        dest_preexisting=2,
+        tombstones=1,
+        unique_tombstone_keys=1,
+    )
+    assert census.inserts == 1
+    assert census.updates == 2
+    assert census.deletes == 1
+    assert census.expected_delta == 0
+    ledger = account_population(
+        rows_read=4,
+        dest_count=30,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=30,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=10_000,
+        sync_mode="upsert",
+        census=census,
+    )
+    assert ledger.balanced is True
+    assert ledger.dest_delta == 0
+    assert ledger.rows_written == 0
+    assert ledger.deletes == 1
+    assert ledger.inserts == 1
+    assert ledger.writer_ack_delta == -10_000
+
+
+def test_stream_accumulator_delete_only_batch_is_a_census():
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    acc.add_batch([], dest_hits=0)
+    acc.add_tombstones(2, unique_keys=3)
+    census = acc.to_census()
+    assert census is not None
+    assert census.unique_batch_keys == 0
+    assert census.inserts == 0
+    assert census.deletes == 2
+    assert census.unique_tombstone_keys == 3
+    assert census.expected_delta == -2
+
+
+def test_sqlite_prepare_keyed_upsert_hard_deletes_dest_held_keys(tmp_path: Path):
+    import sqlite3
+
+    from services.row_conservation import prepare_keyed_upsert
+
+    path = tmp_path / "p9_tomb.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        conn.executemany(
+            "INSERT INTO items (id, label) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    live, payload = prepare_keyed_upsert(
+        [
+            {"id": 1, "label": "A", "is_deleted": 0},
+            {"id": 2, "label": "b", "is_deleted": 1},
+            {"id": 4, "label": "d", "is_deleted": 0},
+            {"id": 9, "label": "ghost", "is_deleted": 1},
+        ],
+        key_columns=["id"],
+        mappings=None,
+        db_type="sqlite",
+        cfg={"database": str(path)},
+        schema="",
+        table_name="items",
+        dest_nonempty=True,
+    )
+    assert [r["id"] for r in live] == [1, 4]
+    assert payload is not None
+    assert payload["inserts"] == 1
+    assert payload["updates"] == 1
+    assert payload["deletes"] == 1
+    assert payload["unique_tombstone_keys"] == 2
+    assert payload["expected_delta"] == 0
+
+    conn = sqlite3.connect(str(path))
+    try:
+        rows = list(conn.execute("SELECT id, label FROM items ORDER BY id"))
+        count = conn.execute("SELECT COUNT(*) FROM items").fetchone()[0]
+    finally:
+        conn.close()
+    # Hard-DELETE of dest-held key 2; key 9 was never present (no-op).
+    # Live upserts have not run yet — prepare only strips + deletes.
+    assert count == 2
+    assert rows == [(1, "a"), (3, "c")]

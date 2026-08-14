@@ -35,6 +35,10 @@ from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
 from connectors.table_manager import delete_by_primary_keys
 from connectors.writer_common import DF_LSN_COL, extract_cdc_lsn
 from services.cdc_effectively_once import gate_cdc_destination
+from services.tombstone import (
+    detect_tombstone_column as _detect_tombstone_column,
+    is_tombstone_set as _is_tombstone_set,
+)
 from services.cdc_engine import (
     ChangeBatch,
     WatermarkType,
@@ -505,134 +509,6 @@ def _source_headers(headers: list[str], mappings: list[dict[str, Any]]) -> tuple
     return headers, [m.get("target", m.get("source", "")).strip() for m in mappings if m.get("source")]
 
 
-# Exact column names whose truthy value means "this row is deleted". Matching is
-# exact, never substring: `deleted_by`, `deleted_reason` and `delete_count` are
-# ordinary business columns, and a substring rule turned every row with a
-# non-empty `deleted_by` into a destination DELETE.
-_TOMBSTONE_COLUMNS = frozenset(
-    {
-        "deleted",
-        "deleted_at",
-        "deletedat",
-        "deleted_on",
-        "deleted_ts",
-        "deleted_time",
-        "date_deleted",
-        "is_deleted",
-        "isdeleted",
-        "deleted_flag",
-        "row_deleted",
-        "tombstone",
-        "is_tombstone",
-        "_deleted",
-        "__deleted",
-    }
-)
-
-#: Columns that look deletion-adjacent but are audit metadata, not tombstones.
-#: Listed explicitly so a future rule change cannot quietly re-capture them.
-_TOMBSTONE_LOOKALIKES = frozenset(
-    {
-        "deleted_by",
-        "deleted_by_id",
-        "deleted_by_user",
-        "deleted_reason",
-        "delete_count",
-        "deletes",
-        "deletable",
-        "is_deletable",
-        "can_delete",
-        "soft_delete_enabled",
-    }
-)
-
-#: Tokens that unambiguously mean "not deleted".
-_FALSEY_TOKENS = frozenset({"", "0", "false", "f", "no", "n", "null", "none", "nan"})
-#: Tokens that unambiguously mean "deleted".
-_TRUTHY_TOKENS = frozenset({"1", "true", "t", "yes", "y"})
-
-#: Timestamp-style tombstones follow the well-known `deleted_at IS NULL` pattern,
-#: where *any* value at all means deleted. Boolean-style tombstones do not — an
-#: unrecognised token there is ambiguous and must never be read as "delete".
-_TIMESTAMP_TOMBSTONES = frozenset(
-    {"deleted_at", "deletedat", "deleted_on", "deleted_ts", "deleted_time", "date_deleted"}
-)
-
-
-def _detect_tombstone_column(schema: dict[str, str], columns: list[str]) -> str | None:
-    """Return a soft-delete column name if one is unambiguously present.
-
-    Deliberately conservative, because a false positive here converts live
-    source rows into destination ``DELETE`` statements. Two rules that used to
-    exist have been removed:
-
-    * **Liveness columns are not tombstones.** ``is_active`` was previously
-      treated as a deletion marker with no polarity handling, so every row with
-      ``is_active = 1`` was deleted at the destination and every inactive row
-      was kept — a complete inversion that silently wiped live data. An
-      inactive row is also still a row that *exists* in the source, so even the
-      corrected polarity would be wrong to delete. An operator who genuinely
-      wants that behaviour must configure it explicitly.
-    * **Substring matching is gone.** ``"delete" in name`` captured
-      ``deleted_by`` and ``delete_count``.
-    """
-    del schema  # Detection is by name; type is validated at interpretation time.
-    for c in columns:
-        lowered = (c or "").strip().lower()
-        if not lowered or lowered in _TOMBSTONE_LOOKALIKES:
-            continue
-        if lowered in _TOMBSTONE_COLUMNS:
-            return c
-    return None
-
-
-def _is_tombstone_set(record: dict[str, Any], tombstone_column: str) -> bool:
-    """Whether ``record`` is marked deleted by its soft-delete column.
-
-    Fails safe: an unrecognised value on a boolean-style column returns
-    ``False``. Refusing to delete on ambiguity is recoverable (a stale row that
-    a later sync corrects); deleting on ambiguity is not.
-    """
-    if not tombstone_column:
-        return False
-    value = record.get(tombstone_column)
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
-    text = str(value).strip().lower()
-    if text in _FALSEY_TOKENS:
-        return False
-    if text in _TRUTHY_TOKENS:
-        return True
-    # Timestamp-style soft deletes: any concrete value means deleted. This is
-    # the `deleted_at IS NULL` convention and is safe to read literally.
-    if tombstone_column.strip().lower() in _TIMESTAMP_TOMBSTONES:
-        return _looks_like_timestamp(text)
-    # Boolean-style column carrying something we do not recognise. Do not guess.
-    logger.warning(
-        "Soft-delete column %r held unrecognised value %r; treating the row as "
-        "present rather than deleting it at the destination.",
-        tombstone_column,
-        text[:64],
-    )
-    return False
-
-
-def _looks_like_timestamp(text: str) -> bool:
-    """Whether a value is a real instant rather than a zero/sentinel date.
-
-    ``0000-00-00`` and friends are MySQL's "no date" sentinels; reading them as
-    a deletion timestamp would delete every row that was never soft-deleted.
-    """
-    stripped = text.strip()
-    if not stripped:
-        return False
-    if set(stripped) <= {"0", "-", ":", " ", "/", "."}:
-        return False
-    return True
-
-
 class CdcEngine:
     """Query-based CDC engine."""
 
@@ -863,6 +739,23 @@ def _apply_change_batch(
     deleted = 0
     last_checksum = ""
     dest_summary: dict[str, Any] = {}
+    census_payload: dict[str, Any] | None = None
+    if pk_target_cols:
+        from services.row_conservation import census_change_batch
+
+        census = census_change_batch(
+            inserts=change.inserts,
+            updates=change.updates,
+            deletes=change.deletes,
+            key_columns=pk_target_cols,
+            db_type=dest_type,
+            cfg=dest_cfg,
+            schema=str(dest_cfg.get("schema") or ""),
+            table_name=dest_table,
+            mappings=mappings,
+        )
+        if census is not None:
+            census_payload = census.to_dict()
 
     # CDC asks for upsert, but without a destination primary key most writers
     # degrade to plain inserts. Replaying such a batch after an ambiguous
@@ -994,6 +887,10 @@ def _apply_change_batch(
         # PK tombstones for post-write absence proof (not full after-images).
         dest_summary["reconcile_deletes"] = [str(k) for k in change.deletes[:50]]
         dest_summary["reconcile_delete_count"] = len(change.deletes)
+    if census_payload:
+        from services.row_conservation import CENSUS_KEY
+
+        dest_summary[CENSUS_KEY] = census_payload
 
     return rows_written, last_checksum, dest_summary, deleted
 
