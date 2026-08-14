@@ -1648,6 +1648,21 @@ def _xml_elem_record(elem: Any) -> dict[str, Any]:
     return FileParser._flatten_xml_item(raw)
 
 
+def _xml_source_can_rewind(source: Any) -> bool:
+    """Whether a second StAX pass can ``seek(0)`` after consuming the stream.
+
+    CPython ``GzipFile.seekable()`` is True even when the compressed
+    ``fileobj`` cannot rewind after EOF (a one-shot HTTP GET). Rewind
+    capability is the byte container, not the codec wrapper: local gzip
+    wrapping a file seeks; gzip wrapping a StreamingBody must spool.
+    """
+    inner = source.fileobj if isinstance(source, gzip.GzipFile) else source
+    try:
+        return bool(inner.seekable())
+    except Exception:
+        return False
+
+
 def _xml_rewindable(source: Any) -> tuple[Any, Any]:
     """Rewindable byte source. One-shot GET is spooled; never hash a prefix.
 
@@ -1661,12 +1676,7 @@ def _xml_rewindable(source: Any) -> tuple[Any, Any]:
     """
     import tempfile
 
-    can_rewind = False
-    try:
-        can_rewind = bool(source.seekable())
-    except Exception:
-        can_rewind = hasattr(source, "seek")
-    if can_rewind:
+    if _xml_source_can_rewind(source):
         try:
             source.seek(0)
             return source, None
