@@ -297,17 +297,51 @@ def test_count_artifact_rows_orc_footer_not_writer_ack(tmp_path: Path):
     assert stamped["target_rows"] == 2
 
 
-def test_count_artifact_rows_xml_stays_unmeasured(tmp_path: Path):
-    """XML has no dest-engine record COUNT yet — never invent dest = writer ack."""
+def test_count_artifact_rows_xml_unique_record_path_not_ingest_cap(tmp_path: Path):
+    """XML dest COUNT is the unique repeating record-path, never writer ack.
+
+    parse_xml ingest may refuse max_rows or treat a document as one row.
+    Dest COUNT of the export we wrote does neither.
+    """
+    from services.file_parser import count_xml_records
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="xml",
+    )
     path = tmp_path / "export.xml"
-    path.write_text("<records><record><id>1</id></record></records>", encoding="utf-8")
-    assert count_artifact_rows(path, fmt="xml") is None
-    skipped = stamp_artifact_census(
-        {"target_rows": 10_000},
+    path.write_bytes(content)
+    assert count_xml_records(content) == 3
+    assert count_artifact_rows(path, fmt="xml") == 3
+    one, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"]],
+        source_format="csv",
+        target_format="xml",
+    )
+    assert count_xml_records(one) == 1
+    empty, _ = convert_rows(["id", "v"], [], source_format="csv", target_format="xml")
+    assert count_xml_records(empty) == 0
+    empty_path = tmp_path / "empty.xml"
+    empty_path.write_bytes(empty)
+    assert count_artifact_rows(empty_path, fmt="xml") == 0
+    assert count_xml_records(b"not-xml") is None
+    document = b"<note><to>T</to><from>F</from></note>"
+    assert count_xml_records(document) is None
+    ambiguous = (
+        b"<root><orders><o><id>1</id></o><o><id>2</id></o></orders>"
+        b"<items><i><id>a</id></i><i><id>b</id></i></items></root>"
+    )
+    assert count_xml_records(ambiguous) is None
+    stamped = stamp_artifact_census(
+        {"target_rows": 10_000, "skipped_readback": True},
         {"path": str(path), "format": "xml"},
     )
-    assert ARTIFACT_COUNT_KEY not in skipped
-    assert skipped["target_rows"] is None
+    assert stamped[ARTIFACT_COUNT_KEY] == 3
+    assert stamped["target_rows"] == 3
 
 
 def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(
@@ -333,6 +367,11 @@ def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(
     orc.write_bytes(b"not-orc")
     monkeypatch.setitem(sys.modules, "pyarrow", None)
     assert count_artifact_rows(orc, fmt="orc") is None
+
+    xml = tmp_path / "export.xml"
+    xml.write_bytes(b"<records><record><id>1</id></record></records>")
+    monkeypatch.setitem(sys.modules, "xmltodict", None)
+    assert count_artifact_rows(xml, fmt="xml") is None
 
 
 def test_stamp_artifact_census_never_keeps_writer_target_rows(tmp_path: Path):
@@ -2305,10 +2344,23 @@ def test_object_store_unparseable_part_does_not_sum_prefix(monkeypatch: pytest.M
     )
 
 
-def test_object_store_xml_stays_unmeasured_not_json_empty(monkeypatch: pytest.MonkeyPatch):
+def test_object_store_xml_counts_record_path_not_json_empty(monkeypatch: pytest.MonkeyPatch):
+    """S3 XML GET uses the same record-path COUNT as a local file. Never JSON []."""
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="xml",
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/data.xml", content)])
+    assert (
+        destination_row_count("s3", {"database": "b"}, schema="", table_name="exports/data.xml")
+        == 2
+    )
     _patch_object_store_payloads(
-        monkeypatch,
-        [("exports/data.xml", b"<records><record><id>1</id></record></records>")],
+        monkeypatch, [("exports/data.xml", b"<not><well></formed>")]
     )
     assert (
         destination_row_count("s3", {"database": "b"}, schema="", table_name="exports/data.xml")
@@ -2409,17 +2461,6 @@ def test_object_store_unparseable_part_does_not_sum_prefix(monkeypatch: pytest.M
         destination_row_count(
             "s3", {"database": "b"}, schema="", table_name="exports/data"
         )
-        is None
-    )
-
-
-def test_object_store_xml_stays_unmeasured_not_json_empty(monkeypatch: pytest.MonkeyPatch):
-    _patch_object_store_payloads(
-        monkeypatch,
-        [("exports/data.xml", b"<records><record><id>1</id></record></records>")],
-    )
-    assert (
-        destination_row_count("s3", {"database": "b"}, schema="", table_name="exports/data.xml")
         is None
     )
 

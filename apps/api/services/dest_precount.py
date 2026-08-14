@@ -28,14 +28,18 @@ value-bearing rows (``excel_parser.count_excel_rows``), never
 openpyxl ``max_row`` / used-range. Avro is a streamed record COUNT, not
 ``parse_avro``'s ingest cap. ORC/Parquet footer ``nrows`` is dest-engine
 cardinality of the file we wrote, not a warehouse catalog estimate.
-XML stays unmeasured until a dest-engine record COUNT exists.
+XML dest population is the unique repeating record-path
+(``count_xml_records``), never ``parse_xml`` ingest ``max_rows`` and
+never a whole-document-as-one fallback. Ambiguous sibling collections
+stay unmeasured. Empty ``<records/>`` is 0. Missing parser is
+unmeasured, not dest=0.
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
 append delta and first-write overwrite (missing table/object = 0) can close.
 Writer ``Table.upsert`` / PUT rowcount is not that proof. Object-store dest
 COUNT is the same artifact machine as local file export (Excel value rows,
-streamed Avro, Parquet/ORC footer). A JSON-parse fallback that yields ``[]``
+streamed Avro, Parquet/ORC footer, XML unique record-path). A JSON-parse fallback that yields ``[]``
 is dest=0 — that would close overwrite on Parquet/Excel bytes. Unparseable
 or truncated part listings stay unmeasured; never sum a prefix. Catalog
 SKUs (``amazon_s3``) alias onto ``s3`` the same way Azure SQL aliases onto
@@ -214,7 +218,7 @@ _KEYSET_CENSUS_MAX = 20_000
 _IDENTITY_SCAN_MAX = _KEYSET_CENSUS_MAX
 
 _ARTIFACT_FORMATS = frozenset({
-    "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc",
+    "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc", "xml",
 })
 
 
@@ -1619,6 +1623,8 @@ def _infer_artifact_format(path: Path, fmt: str | None) -> str:
         return "avro"
     if name.endswith(".orc"):
         return "orc"
+    if name.endswith(".xml"):
+        return "xml"
     return ""
 
 
@@ -1781,6 +1787,11 @@ def _count_artifact_kind(kind: str, content: bytes) -> int | None:
             return _count_excel_bytes(content)
         if kind == "avro":
             return _count_avro_bytes(content)
+        if kind == "xml":
+            from services.file_parser import count_xml_records
+
+            n = count_xml_records(content)
+            return None if n is None else int(n)
     except Exception as exc:
         logger.info("artifact count failed for kind %s: %s", kind, exc)
         return None
@@ -1823,7 +1834,8 @@ def count_artifact_rows(
     Missing path, remote URI without a local file, unsupported format, or
     unparseable content stay ``None`` — conservation remains unmeasured.
     Empty but well-formed artifacts are measured zero. Excel counts rows
-    that carry values, not the worksheet used range.
+    that carry values, not the worksheet used range. XML counts the unique
+    repeating record-path, not ingest ``max_rows``.
     """
     raw = str(path or "").strip()
     if not raw:

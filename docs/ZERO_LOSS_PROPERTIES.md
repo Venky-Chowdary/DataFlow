@@ -634,17 +634,20 @@ rowcount is not that proof.
    and COUNTs records (`csv_profiler.count_csv_rows` for CSV/TSV; stream
    JSONL; JSON array length; Parquet footer `num_rows`; Excel
    `count_excel_rows` value-bearing rows, never openpyxl `max_row`;
-   streamed Avro records; ORC footer `nrows`). Writer `rows` /
+   streamed Avro records; ORC footer `nrows`; XML unique repeating
+   record-path via `count_xml_records`, never `parse_xml` ingest
+   `max_rows`, never whole-document-as-one). Writer `rows` /
    bytes-landed never closes dest. File replace is overwrite
    (dest-before 0). Cardinality ≠ cell checksum — Gate-8 stays
    `skipped_readback` / `migration_proven=false`. Remote URI without a
    local path stays unmeasured. Missing parser stays unmeasured, not
-   dest=0. XML stays unmeasured.
+   dest=0. Ambiguous sibling XML collections stay unmeasured.
 10. Lakehouse / object-store dest-before: `destination_row_count` for
     Iceberg (`len` of the leftover-MERGE snapshot — filesystem data
     files or catalog `scan().to_arrow()`, never `scan().count()`) and
     S3/GCS/ADLS GET using the same artifact COUNT as local files
-    (Excel value rows, streamed Avro, Parquet/ORC footer). JSON-parse
+    (Excel value rows, streamed Avro, Parquet/ORC footer, XML unique
+    record-path). JSON-parse
     fallback empty is dest=0 and is forbidden. Unparseable or truncated
     parts stay unmeasured — never sum a prefix. Missing table or
     object is **0**. `amazon_s3` aliases onto `s3`. Iceberg key census

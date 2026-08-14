@@ -1061,12 +1061,16 @@ class FileParser:
         return found
 
     @staticmethod
-    def _extract_xml_records(node: Any, depth: int = 0) -> tuple[list[dict] | None, str | None, str | None]:
-        """Return ``(records, selected_path, ambiguity_error)``.
+    def _unique_xml_collection(
+        node: Any,
+    ) -> tuple[list[dict] | None, str | None, str | None]:
+        """Unique repeating list-of-object, or ambiguity.
 
-        Multiple sibling repeating collections → fail closed (never pick one silently).
+        ``(rows, path, None)`` when one collection wins (including
+        shallowest-path tie-break). ``(None, None, error)`` when sibling
+        collections tie — never pick one silently. ``(None, None, None)``
+        when xmltodict collapsed 0/1 record into a dict (no list yet).
         """
-        del depth  # discovery walks with its own depth
         if isinstance(node, list):
             records = [
                 FileParser._flatten_xml_item(item)
@@ -1076,13 +1080,10 @@ class FileParser:
             if any(isinstance(item, dict) for item in node):
                 return records, "root[]", None
             return None, None, None
-
         if not isinstance(node, dict):
             return None, None, None
-
         collections = FileParser._discover_xml_collections(node)
         if len(collections) > 1:
-            # Prefer the shallowest path; if multiple at same depth, refuse.
             depths = [(p.count("/"), p, rows) for p, rows in collections]
             min_depth = min(d for d, _, _ in depths)
             top = [(p, rows) for d, p, rows in depths if d == min_depth]
@@ -1099,8 +1100,24 @@ class FileParser:
         if len(collections) == 1:
             path, rows = collections[0]
             return rows, path, None
+        return None, None, None
 
-        # Single-record XMLs: a single child dict becomes one row.
+    @staticmethod
+    def _extract_xml_records(node: Any, depth: int = 0) -> tuple[list[dict] | None, str | None, str | None]:
+        """Return ``(records, selected_path, ambiguity_error)``.
+
+        Multiple sibling repeating collections → fail closed (never pick one silently).
+        """
+        del depth  # discovery walks with its own depth
+        rows, path, err = FileParser._unique_xml_collection(node)
+        if err:
+            return None, None, err
+        if rows is not None:
+            return rows, path, None
+        if not isinstance(node, dict):
+            return None, None, None
+        # Ingest fallback: a single child dict becomes one row. Dest COUNT
+        # does not use this — a document XML is not a table of one.
         if len(node) == 1:
             value = list(node.values())[0]
             if isinstance(value, dict):
@@ -1285,4 +1302,74 @@ class FileParser:
 
         schema, _intel = infer_schema_map(samples)
         return schema
+
+
+def count_xml_records(content: bytes | str) -> int | None:
+    """Dest-engine record COUNT of tabular XML. Never ingest ``max_rows``.
+
+    Population is the unique repeating list-of-object the ingest parser
+    already discovers. Empty ``<records/>`` is 0. xmltodict collapsing one
+    ``<record>`` into a dict is 1. Sibling collections at the same depth
+    stay unmeasured — never guess a path. A document (scalar fields under
+    a wrapper, no record element) is unmeasured, not dest=1. Malformed /
+    XXE / missing parser stay unmeasured, not dest=0. ``parse_xml`` ingest
+    fallback that treats the whole document as one row is not this COUNT.
+    """
+    try:
+        text = content.decode("utf-8") if isinstance(content, bytes) else content
+    except UnicodeDecodeError:
+        return None
+    try:
+        from defusedxml import ElementTree as DET
+
+        DET.fromstring(text)  # nosec B314 — defusedxml, not stdlib
+    except ImportError:
+        pass
+    except Exception:
+        return None
+    try:
+        import xmltodict
+    except ImportError:
+        return None
+    try:
+        root = xmltodict.parse(text)
+    except Exception:
+        return None
+    rows, _path, err = FileParser._unique_xml_collection(root)
+    if err:
+        return None
+    if rows is not None:
+        return len(rows)
+    return _count_xml_collapsed_table(root)
+
+
+def _count_xml_collapsed_table(root: Any) -> int | None:
+    """0/1 record after xmltodict collapsed a list. Document XML stays None."""
+    if not isinstance(root, dict) or len(root) != 1:
+        return None
+    value = next(iter(root.values()))
+    if value is None or value == "":
+        return 0
+    if isinstance(value, list):
+        if not value:
+            return 0
+        if all(isinstance(item, dict) for item in value):
+            return len(value)
+        return None
+    if not isinstance(value, dict):
+        return None
+    if len(value) != 1:
+        return None
+    inner = next(iter(value.values()))
+    if inner is None or inner == "":
+        return 1
+    if isinstance(inner, dict):
+        return 1
+    if isinstance(inner, list):
+        if not inner:
+            return 0
+        if all(isinstance(item, dict) for item in inner):
+            return len(inner)
+        return None
+    return None
 
