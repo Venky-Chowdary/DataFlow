@@ -54,11 +54,12 @@ def test_engine_families_are_recognised():
         ("double precision", "float"),
         ("real", "float"),
         ("float", "float"),
-        ("timestamp", "temporal"),
-        ("timestamptz", "temporal"),
-        ("date", "temporal"),
-        ("time", "temporal"),
-        ("datetime", "temporal"),
+        ("timestamp without time zone", "temporal_ts"),
+        ("datetime", "temporal_ts"),
+        ("date", "temporal_ts"),
+        ("timestamp with time zone", "temporal_instant"),
+        ("time without time zone", "temporal_time"),
+        ("time", "temporal_time"),
         ("interval", "other"),
         ("text", "other"),
         ("varchar(255)", "other"),
@@ -69,6 +70,20 @@ def test_engine_families_are_recognised():
 )
 def test_column_classification(declared, expected):
     assert classify_column(declared) == expected
+
+
+def test_timestamp_is_disambiguated_per_engine():
+    """The trap: bare ``timestamp`` is a wall clock in PG, an instant in MySQL."""
+    from services.column_profile import normalize_catalog_type
+
+    assert classify_column(normalize_catalog_type("mysql", "timestamp")) == "temporal_instant"
+    assert classify_column(normalize_catalog_type("mysql", "datetime")) == "temporal_ts"
+    assert classify_column(
+        normalize_catalog_type("postgresql", "timestamp without time zone")
+    ) == "temporal_ts"
+    assert classify_column(
+        normalize_catalog_type("postgresql", "timestamp with time zone")
+    ) == "temporal_instant"
 
 
 def test_sql_takes_sum_only_for_exact_numeric():
@@ -98,9 +113,9 @@ def test_mysql_dialect_quotes_and_casts():
     assert "CAST(sum(`id`) AS CHAR)" in sql
 
 
-def test_cross_engine_normalization_keeps_only_engine_independent_stats():
+def test_cross_engine_decisions_keep_only_engine_independent_stats():
     """The heart of cross-engine safety, provable without a database."""
-    from services.column_profile import _prepare_for_comparison
+    from services.column_profile import _apply_decisions, _comparison_decisions
     from services.verification_ladder import ColumnAggregate
 
     profile = {
@@ -108,38 +123,53 @@ def test_cross_engine_normalization_keeps_only_engine_independent_stats():
                              min_value="10.50", max_value="99.90", sum_value="123.40"),
         "f": ColumnAggregate("f", null_count=0, non_null_count=10, distinct_count=None,
                              min_value="1.5000", max_value="2.5000", sum_value=None),
-        "t": ColumnAggregate("t", null_count=0, non_null_count=10, distinct_count=None,
-                             min_value="2024-01-01 00:00:00", max_value="2024-12-31 23:59:59",
-                             sum_value=None),
+        "ts": ColumnAggregate("ts", null_count=0, non_null_count=10, distinct_count=None,
+                              min_value="2024-01-01T00:00:00.000000",
+                              max_value="2024-12-31T23:59:59.000000", sum_value=None),
+        "inst": ColumnAggregate("inst", null_count=0, non_null_count=10, distinct_count=None,
+                                min_value="2024-01-01 00:00:00+00", max_value="x", sum_value=None),
         "s": ColumnAggregate("s", null_count=2, non_null_count=8, distinct_count=None,
                              min_value=None, max_value=None, sum_value=None),
     }
-    kinds = {"n": "exact_numeric", "f": "float", "t": "temporal", "s": "other"}
-    out = _prepare_for_comparison(profile, kinds, cross_engine=True)
+    kinds = {"n": "exact_numeric", "f": "float", "ts": "temporal_ts",
+             "inst": "temporal_instant", "s": "other"}
+    dec = _comparison_decisions(kinds, kinds, cross_engine=True)
+    out = _apply_decisions(profile, dec)
 
     # NULL rate survives for every kind — the silent-null detector.
-    assert [out[c].null_count for c in ("n", "f", "t", "s")] == [1, 0, 0, 2]
-    # Numeric min/max/sum canonicalized to values.
+    assert [out[c].null_count for c in ("n", "f", "ts", "inst", "s")] == [1, 0, 0, 0, 2]
+    # Numeric canonicalized to values.
     assert out["n"].sum_value == "123.4"
     assert (out["f"].min_value, out["f"].max_value) == ("1.5", "2.5")
-    # Temporal ordering dropped — rendering/tz differ across engines.
-    assert out["t"].min_value is None and out["t"].max_value is None
-    # Same-engine leaves the profile untouched (temporal text still compared).
-    same = _prepare_for_comparison(profile, kinds, cross_engine=False)
-    assert same["t"].min_value == "2024-01-01 00:00:00"
+    # Wall-clock temporal kept (ISO canonical compares across engines).
+    assert out["ts"].min_value == "2024-01-01T00:00:00.000000"
+    # Zone-aware instant dropped cross-engine (offset renders differently).
+    assert out["inst"].min_value is None
+    # Same-engine keeps the instant.
+    same = _apply_decisions(profile, _comparison_decisions(kinds, kinds, cross_engine=False))
+    assert same["inst"].min_value == "2024-01-01 00:00:00+00"
+
+
+def test_mismatched_kinds_are_not_compared():
+    """A source timestamp mapped onto a destination instant is not compared."""
+    from services.column_profile import _comparison_decisions
+
+    dec = _comparison_decisions(
+        {"c": "temporal_ts"}, {"c": "temporal_instant"}, cross_engine=False
+    )
+    assert dec["c"] == "drop"
 
 
 def test_cross_engine_scale_only_numeric_difference_is_not_a_divergence():
-    from services.column_profile import _prepare_for_comparison
+    from services.column_profile import _apply_decisions, _comparison_decisions
     from services.verification_ladder import ColumnAggregate, compare_column_aggregates
 
     src = {"amt": ColumnAggregate("amt", 0, 3, None, "0.10", "9.90", "10.00")}
-    # A widened destination renders the same values with more zeros.
     dst = {"amt": ColumnAggregate("amt", 0, 3, None, "0.1000", "9.9000", "10.0000")}
     kinds = {"amt": "exact_numeric"}
+    dec = _comparison_decisions(kinds, kinds, cross_engine=True)
     l2 = compare_column_aggregates(
-        _prepare_for_comparison(src, kinds, cross_engine=True),
-        _prepare_for_comparison(dst, kinds, cross_engine=True),
+        _apply_decisions(src, dec), _apply_decisions(dst, dec)
     )
     assert l2.passed, l2.details
 
@@ -363,7 +393,9 @@ def cross_tables():
                          password="dataflow", database="dataflow", autocommit=True)
     sfx = uuid.uuid4().hex[:6]
     src, dst = f"xe_src_{sfx}", f"xe_dst_{sfx}"
-    base = datetime(2024, 1, 1, tzinfo=timezone.utc)
+    # Naive wall clock: a PG ``timestamp`` and a MySQL ``datetime`` store these
+    # identical components, which is exactly the cross-engine case under test.
+    base = datetime(2024, 1, 1)  # noqa: DTZ001 — wall-clock, no zone, by design
     rows = [(i, f"e{i}", Decimal(i % 1000) / 100, base + timedelta(seconds=i))
             for i in range(1, 2001)]
     with pg.cursor() as cur:
@@ -408,9 +440,11 @@ def test_cross_engine_identical_populations_pass(cross_tables):
     assert ladder is not None
     assert ladder["cross_engine"] is True
     assert ladder["passed"], ladder["localization"]
-    # Temporal ordering is not trusted across engines and says so.
-    not_compared = " ".join(ladder["layers"]["L2"]["details"]["not_compared"])
-    assert "temporal" in not_compared
+    # Wall-clock temporals ARE compared across engines (ISO-canonical), so a
+    # matching datetime column is not a divergence and not in the declined list.
+    compared = " ".join(ladder["layers"]["L2"]["details"]["compared_statistics"])
+    assert "wall-clock" in compared
+    assert "created_at" not in ladder["localization"]["columns"]
 
 
 @pg
@@ -447,18 +481,67 @@ def test_cross_engine_dropped_row_fails_l1(cross_tables):
 
 @pg
 @my
-def test_cross_engine_does_not_false_flag_temporal_rendering(cross_tables):
-    """A documented boundary: temporal ordering is not compared across engines.
+def test_cross_engine_zone_aware_instant_is_declined_not_false_flagged():
+    """A PG ``timestamptz`` and a MySQL ``timestamp`` render their offset
+    differently, so their min/max is declined cross-engine — never a false flag.
+    NULL and row parity still hold."""
+    psycopg2 = pytest.importorskip("psycopg2")
+    pymysql = pytest.importorskip("pymysql")
+    pgc = psycopg2.connect(host="127.0.0.1", port=5432, dbname="dataflow",
+                           user="dataflow", password="dataflow")
+    pgc.autocommit = True
+    myc = pymysql.connect(host="127.0.0.1", port=3306, user="dataflow",
+                          password="dataflow", database="dataflow", autocommit=True)
+    sfx = uuid.uuid4().hex[:6]
+    src, dst = f"xi_src_{sfx}", f"xi_dst_{sfx}"
+    try:
+        with pgc.cursor() as cur:
+            cur.execute(f'CREATE TABLE "{src}" (id bigint, seen timestamptz)')
+            cur.execute(
+                f"INSERT INTO \"{src}\" SELECT g, timestamptz '2024-01-01 00:00:00+00' "
+                f"+ (g||' seconds')::interval FROM generate_series(1, 500) g"
+            )
+        with myc.cursor() as cur:
+            cur.execute(f"CREATE TABLE `{dst}` (id bigint, seen timestamp NULL)")
+            cur.executemany(
+                f"INSERT INTO `{dst}` (id, seen) VALUES (%s, %s)",
+                [(i, datetime(2024, 1, 1) + timedelta(seconds=i))  # noqa: DTZ001
+                 for i in range(1, 501)],
+            )
+        ladder = engine_profile_ladder(
+            source_engine="postgresql", source_cfg=_PG, source_schema="public",
+            source_table=src, dest_engine="mysql", dest_cfg=_MY, dest_schema="dataflow",
+            dest_table=dst, pairs=[("id", "id"), ("seen", "seen")],
+            types={"id": "bigint", "seen": "timestamp"},
+        )
+        assert ladder is not None and ladder["cross_engine"] is True
+        # Row + NULL parity hold; the instant column is declined, not flagged.
+        assert ladder["layers"]["L1"]["passed"]
+        assert "seen" not in ladder["localization"]["columns"]
+        declined = " ".join(ladder["layers"]["L2"]["details"]["not_compared"])
+        assert "zone-aware" in declined
+    finally:
+        with pgc.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS "{src}"')
+        with myc.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dst}`")
+        pgc.close()
+        myc.close()
 
-    Two engines format and time-zone a timestamp differently, so comparing their
-    text would cry wolf on identical data. This test pins that the profile does
-    NOT flag a temporal-only difference cross-engine — a limit callers must know,
-    not a guarantee — while numeric and NULL parity still hold.
+
+@pg
+@my
+def test_cross_engine_wall_clock_temporal_drift_is_caught(cross_tables):
+    """A timestamp that lost its clock is caught even across engines.
+
+    PostgreSQL ``timestamp`` and MySQL ``datetime`` are both wall-clock; each
+    engine renders min/max to the same ISO shape in SQL, so a datetime moved to a
+    different instant on the destination is a real, localized divergence — the
+    corruption class this increment exists to close.
     """
     _pg, my, src, dst = cross_tables
     with my.cursor() as cur:
         cur.execute(f"UPDATE `{dst}` SET created_at = '1999-01-01 00:00:00' WHERE id = 5")
     ladder = _cross_ladder(src, dst)
-    # created_at diverged, but temporal min/max is not a cross-engine signal.
-    assert ladder["passed"], ladder["localization"]
-    assert "created_at" not in ladder["localization"]["columns"]
+    assert not ladder["passed"]
+    assert "created_at" in ladder["localization"]["columns"]

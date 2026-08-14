@@ -33,12 +33,18 @@ Numeric statistics are canonicalized (``10.50`` == ``10.5000``) so a scale
 difference that carries the same value is not read as a divergence.
 
 The two ends may be *different* engines (PostgreSQL ↔ MySQL/MariaDB). A
-cross-engine route narrows the comparison further to the statistics that survive
-a change of engine — row count, per-column NULL rate, and canonicalized numeric
-min/max/sum — and declines temporal/text ordering, whose rendering, time-zone
-and collation semantics differ. That is the parity primitive a "supervisor"
-needs: attach to a source and a destination that no single tool moved between,
-and still prove — or disprove — that a column carries the same population.
+cross-engine route narrows the comparison to the statistics that survive a change
+of engine — row count, per-column NULL rate, value-canonical numeric min/max/sum,
+and **wall-clock date/time min/max rendered to a fixed ISO shape in SQL** so a
+timestamp that lost its clock is caught even across engines. It declines only
+what genuinely differs by engine: text ordering and distinct counts (collation),
+float sums (order), and *zone-aware* timestamps (a stored offset renders
+differently on each engine). Column kinds are read from each engine's live
+catalog rather than a mapping hint, because ``timestamp`` means a wall clock in
+PostgreSQL and an instant in MySQL, and only the catalog says which. That is the
+parity primitive a "supervisor" needs: attach to a source and a destination that
+no single tool moved between, and still prove — or disprove — that a column
+carries the same population.
 
 This extends the canonical reconcile ladder; it is not a parallel product. The
 result reuses the ``ColumnAggregate`` and ``compare_column_aggregates`` shapes
@@ -86,24 +92,57 @@ def same_profile_family(source_engine: str | None, dest_engine: str | None) -> b
     return bool(fam) and fam == profile_engine_family(dest_engine)
 
 
-def classify_column(type_str: str | None) -> str:
-    """Bucket a declared type into how its aggregates may be trusted.
+def normalize_catalog_type(family: str, data_type: str | None) -> str:
+    """Make a catalog type string unambiguous across engines.
 
-    ``exact_numeric`` — integer/decimal: NULL count, min, max and sum are taken.
-    ``float``         — real/double: NULL count, min, max (sum is order-sensitive).
-    ``temporal``      — date/time/timestamp: NULL count, min, max.
-    ``other``         — text/json/binary/etc.: NULL count only (min/max are
-                        collation- or representation-dependent across a route).
+    ``timestamp`` is the trap: PostgreSQL's catalog spells its zone-aware type
+    ``timestamp with time zone`` and its wall-clock type ``timestamp without
+    time zone``, but MySQL/MariaDB spell an *instant* (UTC-backed) column plainly
+    ``timestamp`` and a wall-clock column ``datetime``. Left as-is, a bare
+    ``timestamp`` would be read as wall-clock and a MySQL instant would be
+    compared as if it had no zone. Rewriting per engine collapses both catalogs
+    onto one vocabulary the classifier can trust.
+    """
+    t = _norm(data_type)
+    if family == "mysql":
+        if t == "timestamp":
+            return "timestamp with time zone"
+        if t == "datetime":
+            return "timestamp without time zone"
+    return t
+
+
+def classify_column(type_str: str | None) -> str:
+    """Bucket a (normalized) type into how its aggregates may be trusted.
+
+    ``exact_numeric``    — integer/decimal: NULL count, min, max and sum.
+    ``float``            — real/double: NULL count, min, max (sum is order-sensitive).
+    ``temporal_ts``      — date / wall-clock timestamp: NULL count and a canonical
+                           ISO min/max that compares across engines.
+    ``temporal_time``    — time of day (no zone): NULL count and canonical min/max.
+    ``temporal_instant`` — zone-aware timestamp/time: NULL count, and min/max that
+                           are comparable only within one engine (a zone offset
+                           renders differently across engines).
+    ``other``            — text/json/binary/etc.: NULL count only.
+
+    Pass values through :func:`normalize_catalog_type` first so ``timestamp`` is
+    unambiguous.
     """
     t = _norm(type_str)
     if not t:
         return "other"
     if "interval" in t:
-        # ``interval`` contains "int"; it is neither a plain integer nor a clean
-        # temporal ordering across dialects, so only its NULL rate is trusted.
+        # ``interval`` contains "int" and has no clean cross-dialect ordering.
         return "other"
-    if any(k in t for k in ("timestamp", "datetime", "date", "time")):
-        return "temporal"
+    # ``with time zone`` marks an instant; note ``without time zone`` does not
+    # contain the substring ``with time zone`` (the "with" is followed by "out").
+    # ``timestamptz``/``timetz`` are the shorthand spellings of the same thing.
+    if "with time zone" in t or "timestamptz" in t or "timetz" in t:
+        return "temporal_instant"
+    if "timestamp" in t or "datetime" in t or t == "date":
+        return "temporal_ts"
+    if t == "time" or "time without time zone" in t or t.startswith("time("):
+        return "temporal_time"
     is_float = any(k in t for k in ("float", "double", "real"))
     is_int = any(k in t for k in ("int", "serial"))
     is_decimal = any(k in t for k in ("decimal", "numeric", "number", "money"))
@@ -112,6 +151,14 @@ def classify_column(type_str: str | None) -> str:
     if is_float:
         return "float"
     return "other"
+
+
+_NUMERIC_KINDS = frozenset({"exact_numeric", "float"})
+_TEMPORAL_KINDS = frozenset({"temporal_ts", "temporal_time", "temporal_instant"})
+#: Temporal kinds whose canonical rendering is identical across engines, so they
+#: can be compared on a cross-engine route. An instant is excluded: its offset
+#: renders differently between PostgreSQL and MySQL.
+_CROSS_ENGINE_TEMPORAL = frozenset({"temporal_ts", "temporal_time"})
 
 
 def _quote_col(family: str, name: str) -> str:
@@ -128,27 +175,48 @@ def _cast_text(family: str, expr: str) -> str:
 class _ColumnPlan:
     """Which statistics this column contributes, and where they land in the row."""
 
-    __slots__ = ("name", "want_minmax", "want_sum")
+    __slots__ = ("name", "kind", "want_minmax", "want_sum")
 
-    def __init__(self, name: str, want_minmax: bool, want_sum: bool) -> None:
+    def __init__(self, name: str, kind: str) -> None:
         self.name = name
-        self.want_minmax = want_minmax
-        self.want_sum = want_sum
+        self.kind = kind
+        self.want_minmax = kind in _NUMERIC_KINDS or kind in _TEMPORAL_KINDS
+        self.want_sum = kind == "exact_numeric"
 
 
-def _plan_columns(columns: list[str], types: dict[str, str] | None) -> list[_ColumnPlan]:
-    types = {str(k): str(v) for k, v in (types or {}).items()}
-    plans: list[_ColumnPlan] = []
-    for col in columns:
-        kind = classify_column(types.get(col))
-        plans.append(
-            _ColumnPlan(
-                name=col,
-                want_minmax=kind in {"exact_numeric", "float", "temporal"},
-                want_sum=kind == "exact_numeric",
-            )
-        )
-    return plans
+def _plan_columns(family: str, columns: list[str], types: dict[str, str] | None) -> list[_ColumnPlan]:
+    resolved = {str(k): str(v) for k, v in (types or {}).items()}
+    return [
+        _ColumnPlan(name=col, kind=classify_column(normalize_catalog_type(family, resolved.get(col))))
+        for col in columns
+    ]
+
+
+def _minmax_exprs(family: str, kind: str, quoted: str) -> tuple[str, str]:
+    """``(min_expr, max_expr)`` rendered so the value compares across engines.
+
+    Temporal columns are formatted to a fixed ISO shape rather than left to each
+    engine's default text: a wall-clock timestamp becomes
+    ``YYYY-MM-DDTHH:MM:SS.ffffff`` (a date lands at midnight, so a
+    date-vs-timestamp pair still lines up), and a time becomes
+    ``HH:MM:SS.ffffff``. An instant keeps its native text — only ever compared
+    within one engine — because its zone offset renders differently elsewhere.
+    """
+    def _fmt(agg: str) -> tuple[str, str]:
+        inner = f"{agg}({quoted})"
+        if kind == "temporal_ts":
+            if family == "mysql":
+                return f"DATE_FORMAT({inner}, '%Y-%m-%dT%H:%i:%s.%f')", ""
+            return f"to_char({inner}, 'YYYY-MM-DD\"T\"HH24:MI:SS.US')", ""
+        if kind == "temporal_time":
+            if family == "mysql":
+                return f"TIME_FORMAT({inner}, '%H:%i:%s.%f')", ""
+            return f"to_char({inner}, 'HH24:MI:SS.US')", ""
+        # numeric or instant: native text is enough (numeric is canonicalized in
+        # the reader; instant is only compared same-engine).
+        return _cast_text(family, inner), ""
+
+    return _fmt("min")[0], _fmt("max")[0]
 
 
 def build_profile_sql(
@@ -160,14 +228,15 @@ def build_profile_sql(
     back to the statistic and column that produced them by position — no aliases
     to collide, no re-parsing of names.
     """
-    plans = _plan_columns(columns, types)
+    plans = _plan_columns(family, columns, types)
     exprs: list[str] = ["count(*)"]
     for plan in plans:
         q = _quote_col(family, plan.name)
         exprs.append(f"count({q})")
         if plan.want_minmax:
-            exprs.append(_cast_text(family, f"min({q})"))
-            exprs.append(_cast_text(family, f"max({q})"))
+            min_expr, max_expr = _minmax_exprs(family, plan.kind, q)
+            exprs.append(min_expr)
+            exprs.append(max_expr)
         if plan.want_sum:
             exprs.append(_cast_text(family, f"sum({q})"))
     sql = "SELECT " + ", ".join(exprs) + f" FROM {table_ref}"  # nosec B608 — identifiers quoted
@@ -225,14 +294,16 @@ def read_column_profile(
             raw_min, raw_max = row[idx], row[idx + 1]
             idx += 2
             if plan.want_sum:
-                # Exact numeric: canonicalize so 10.50 and 10.5000 are one value.
                 sum_v = _canon_numeric(None if row[idx] is None else str(row[idx]))
                 idx += 1
+            if plan.kind in _NUMERIC_KINDS:
+                # Compare by value: 10.50 and 10.5000 are one number, and float
+                # text residue is collapsed.
                 min_v = _canon_numeric(None if raw_min is None else str(raw_min))
                 max_v = _canon_numeric(None if raw_max is None else str(raw_max))
             else:
-                # Float / temporal: identical values render identically on one
-                # engine, so the text is compared as-is; no sum is taken.
+                # Temporal: already canonicalized to a fixed shape by the SQL
+                # (wall-clock/time) or native instant text; store verbatim.
                 min_v = None if raw_min is None else str(raw_min)
                 max_v = None if raw_max is None else str(raw_max)
         out[plan.name] = ColumnAggregate(
@@ -272,42 +343,97 @@ def _table_ref(family: str, schema: str, table: str) -> str:
     return quote_table_ref(table, schema or None, dialect=family)
 
 
-def _prepare_for_comparison(
-    profile: dict[str, Any], kinds: dict[str, str], *, cross_engine: bool
-) -> dict[str, Any]:
-    """Reduce a profile to the statistics that are comparable on this route.
+def _introspect_types(
+    family: str, cur: Any, schema: str, table: str, columns: list[str]
+) -> dict[str, str]:
+    """Read each column's engine-native type from ``information_schema.columns``.
 
-    Same-engine routes render every aggregate identically, so the profile is
-    returned unchanged. Across engines the rules tighten to what is provably
-    engine-independent:
-
-    * numeric min/max/sum are canonicalized to their value, so PostgreSQL's
-      ``10.50`` and MySQL's ``10.5000`` are one number and a float's text
-      residue does not masquerade as a divergence;
-    * temporal min/max are dropped — two engines format a timestamp differently
-      and interpret time zones differently, so a text difference there would be
-      about rendering, not data. Only the NULL rate is trusted for them.
-
-    (Text ``min``/``max`` and ``count(distinct)`` are already ``None`` from the
-    reader because they are collation-dependent even on one engine.)
+    The live catalog is authoritative where a mapping's type hint is a guess, and
+    it is what disambiguates ``timestamp`` (see :func:`normalize_catalog_type`).
+    Returns ``{column_lower: normalized_type}``; an empty dict lets the caller
+    fall back to the hints it was given (a temporary table, for instance, is not
+    in ``information_schema``).
     """
-    if not cross_engine:
-        return profile
+    wanted = {c.lower() for c in columns}
+    try:
+        cur.execute(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s",
+            (schema or ("public" if family != "mysql" else ""), table),
+        )
+        rows = cur.fetchall() or []
+    except Exception as exc:  # noqa: BLE001 — fall back to caller-supplied hints
+        logger.debug("catalog type introspection unavailable for %s.%s: %s", schema, table, exc)
+        return {}
+    out: dict[str, str] = {}
+    for name, data_type in rows:
+        if str(name).lower() in wanted:
+            out[str(name).lower()] = normalize_catalog_type(family, str(data_type))
+    return out
+
+
+def _column_kinds(
+    family: str, cur: Any, schema: str, table: str, columns: list[str], hints: dict[str, str]
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return ``(types_by_column, kinds_by_column)`` for the profile.
+
+    Catalog types win; a column the catalog did not return falls back to the
+    caller's hint (already normalized per engine).
+    """
+    catalog = _introspect_types(family, cur, schema, table, columns)
+    types: dict[str, str] = {}
+    kinds: dict[str, str] = {}
+    for col in columns:
+        t = catalog.get(col.lower()) or normalize_catalog_type(family, hints.get(col, ""))
+        types[col] = t
+        kinds[col] = classify_column(t)
+    return types, kinds
+
+
+def _comparison_decisions(
+    src_kinds: dict[str, str], dst_kinds: dict[str, str], *, cross_engine: bool
+) -> dict[str, str]:
+    """Per target column, decide how its min/max/sum may be compared.
+
+    ``numeric`` — canonicalize both sides and compare by value.
+    ``keep``    — compare the (already canonical) values as-is.
+    ``drop``    — compare only NULL/row counts for this column.
+
+    A column is only kept when both sides agree on its kind, so a source that is
+    a timestamp and a destination that is an instant are never compared as if
+    they meant the same thing. Cross-engine, only wall-clock temporals survive
+    (an instant renders its offset differently on each engine).
+    """
+    decisions: dict[str, str] = {}
+    for col, dst_kind in dst_kinds.items():
+        src_kind = src_kinds.get(col, "other")
+        if dst_kind in _NUMERIC_KINDS and src_kind in _NUMERIC_KINDS:
+            decisions[col] = "numeric"
+        elif dst_kind in _TEMPORAL_KINDS and src_kind == dst_kind:
+            if cross_engine and dst_kind not in _CROSS_ENGINE_TEMPORAL:
+                decisions[col] = "drop"  # instant: offset renders differently
+            else:
+                decisions[col] = "keep"
+        else:
+            decisions[col] = "drop"
+    return decisions
+
+
+def _apply_decisions(profile: dict[str, Any], decisions: dict[str, str]) -> dict[str, Any]:
     from dataclasses import replace as _replace_agg
 
     out: dict[str, Any] = {}
     for col, agg in profile.items():
-        kind = kinds.get(col, "other")
-        if kind in ("exact_numeric", "float"):
-            # Compare by value, not text: canonicalization is idempotent, so this
-            # is correct whether or not the reader already normalized it. Float
-            # sum is already absent (order-dependent) and stays that way.
+        decision = decisions.get(col, "drop")
+        if decision == "numeric":
             out[col] = _replace_agg(
                 agg,
                 min_value=_canon_numeric(agg.min_value),
                 max_value=_canon_numeric(agg.max_value),
                 sum_value=_canon_numeric(agg.sum_value),
             )
+        elif decision == "keep":
+            out[col] = agg
         else:
             out[col] = _replace_agg(agg, min_value=None, max_value=None, sum_value=None)
     return out
@@ -364,35 +490,40 @@ def engine_profile_ladder(
     clean = [(str(s), str(t)) for s, t in pairs if s and t]
     if not clean:
         return None
-    dest_types = {str(k): str(v) for k, v in (types or {}).items()}
+    dest_hints = {str(k): str(v) for k, v in (types or {}).items()}
     source_cols = [s for s, _ in clean]
     target_cols = [t for _, t in clean]
-    # Classify the source side by the destination type so both sides bucket a
-    # column the same way; a same-engine route declares the same type class, and
-    # a cross-engine route is only compared on the value-based statistics anyway.
-    source_types = {s: dest_types.get(t, "") for s, t in clean}
-    kinds = {t: classify_column(dest_types.get(t)) for _, t in clean}
+    rename = {s: t for s, t in clean}
+    # The source hint per column is the destination's declared type — a faithful
+    # migration keeps the class — but the live catalog below overrides it.
+    source_hints = {s: dest_hints.get(t, "") for s, t in clean}
 
     src_conn = dst_conn = None
     try:
         src_conn = _connect(src_family, source_cfg)
         dst_conn = _connect(dst_family, dest_cfg)
+        from dataclasses import replace as _replace_agg
+
         with src_conn.cursor() as sc, dst_conn.cursor() as dc:
+            src_types, src_kinds_by_src = _column_kinds(
+                src_family, sc, source_schema, source_table, source_cols, source_hints
+            )
+            dst_types, dst_kinds = _column_kinds(
+                dst_family, dc, dest_schema, dest_table, target_cols, dest_hints
+            )
             src_rows_obs, src_raw = read_column_profile(
                 source_engine, sc, _table_ref(src_family, source_schema, source_table),
-                source_cols, source_types,
+                source_cols, src_types,
             )
             dst_rows_obs, dst_profile = read_column_profile(
                 dest_engine, dc, _table_ref(dst_family, dest_schema, dest_table),
-                target_cols, dest_types,
+                target_cols, dst_types,
             )
-        # Re-key the source profile onto the destination names so a rename lines
-        # the two profiles up column-for-column.
-        from dataclasses import replace as _replace_agg
-
-        rename = {s: t for s, t in clean}
+        # Re-key the source profile and its kinds onto the destination names so a
+        # rename lines the two sides up column-for-column.
         src_profile = {rename.get(s, s): _replace_agg(agg, column=rename.get(s, s))
                        for s, agg in src_raw.items()}
+        src_kinds = {rename.get(s, s): k for s, k in src_kinds_by_src.items()}
     except Exception as exc:  # noqa: BLE001 — any read failure declines to the caller's fallback
         logger.info("engine column profile unavailable, leaving ladder declined: %s", exc)
         return None
@@ -409,8 +540,10 @@ def engine_profile_ladder(
         layer_l1_row_balance,
     )
 
-    src_profile = _prepare_for_comparison(src_profile, kinds, cross_engine=cross_engine)
-    dst_profile = _prepare_for_comparison(dst_profile, kinds, cross_engine=cross_engine)
+    decisions = _comparison_decisions(src_kinds, dst_kinds, cross_engine=cross_engine)
+    src_profile = _apply_decisions(src_profile, decisions)
+    dst_profile = _apply_decisions(dst_profile, decisions)
+    has_instant = any(k == "temporal_instant" for k in dst_kinds.values())
 
     # A transfer supplies accounted counts; a standalone check trusts the
     # profile's own count(*).
@@ -429,12 +562,20 @@ def engine_profile_ladder(
     l2.details["source"] = "engine_sql_aggregates"
     l2.details["cross_engine"] = cross_engine
     if cross_engine:
-        l2.details["compared_statistics"] = ["null_count", "non_null_count", "numeric min/max/sum"]
-        l2.details["not_compared"] = [
-            "temporal min/max (rendering/time-zone-dependent across engines)",
+        l2.details["compared_statistics"] = [
+            "null_count", "non_null_count",
+            "numeric min/max/sum (value-canonical)",
+            "wall-clock date/time min/max (ISO-canonical)",
+        ]
+        not_compared = [
             "text min/max and distinct_count (collation-dependent)",
             "float sum (order-dependent)",
         ]
+        if has_instant:
+            not_compared.insert(
+                0, "zone-aware timestamp min/max (offset renders differently per engine)"
+            )
+        l2.details["not_compared"] = not_compared
     else:
         l2.details["compared_statistics"] = ["null_count", "non_null_count", "min", "max", "sum"]
         l2.details["not_compared"] = [

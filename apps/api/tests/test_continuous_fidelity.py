@@ -19,7 +19,6 @@ from services.continuous_fidelity import (
     ASSURANCE_ENGINE_PROFILE,
     ASSURANCE_NO_COLUMNS,
     ASSURANCE_UNSUPPORTED,
-    ColumnDivergence,
     FidelityReport,
     _digest_report,
     _pairs_and_types,
@@ -242,7 +241,10 @@ def test_cross_engine_parity_holds_and_declares_its_limits(cross_pair):
     )
     assert report.passed
     assert report.cross_engine is True
-    assert any("temporal" in n for n in report.not_compared)
+    # This dataset has no zone-aware column, so the declined set is the
+    # always-cross-engine set: collation-dependent text and order-dependent sums.
+    declined = " ".join(report.not_compared)
+    assert "collation" in declined and "float sum" in declined
 
 
 @pg
