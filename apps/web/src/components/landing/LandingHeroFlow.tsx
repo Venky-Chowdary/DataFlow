@@ -166,11 +166,11 @@ export function LandingHeroFlow() {
               Source
             </header>
             <strong>PostgreSQL</strong>
-            <p>orders · 12.4k rows</p>
+            <p>orders · three amount columns</p>
             <ul>
               <li>order_amt</li>
-              <li>cust_email</li>
-              <li>cust_id</li>
+              <li>pay_amt</li>
+              <li>tax_amt</li>
             </ul>
           </article>
 
@@ -179,19 +179,35 @@ export function LandingHeroFlow() {
               <span className="lp-hero-flow-dot is-eng" />
               Governed engine
             </header>
-            <strong>Map · Preflight · Prove</strong>
+            <strong>Propose · Review · Pin</strong>
+            <ul className="lp-hero-flow-edges">
+              <li>
+                <code>order_amt</code>
+                <span>→</span>
+                <code>total_amount</code>
+                <em>pin</em>
+              </li>
+              <li>
+                <code>pay_amt</code>
+                <span>→</span>
+                <code>payment_amount</code>
+                <em>pin</em>
+              </li>
+              <li className="is-review">
+                <code>tax_amt</code>
+                <span>→</span>
+                <code>tax_amount</code>
+                <em>review</em>
+              </li>
+            </ul>
             <div className="lp-hero-flow-meters">
               <div>
-                <span>Semantic map</span>
-                <em>96%</em>
+                <span>Same role</span>
+                <em>not identity</em>
               </div>
               <div>
-                <span>Preflight</span>
-                <em>8 / 8</em>
-              </div>
-              <div>
-                <span>Checksum</span>
-                <em>match</em>
+                <span>G4 Map</span>
+                <em className="is-warn">holds 1</em>
               </div>
             </div>
           </article>
@@ -204,9 +220,9 @@ export function LandingHeroFlow() {
             <strong>Snowflake</strong>
             <p>ANALYTICS.ORDERS</p>
             <ul>
+              <li>total_amount</li>
               <li>payment_amount</li>
-              <li>email</li>
-              <li>customer_key</li>
+              <li>tax_amount</li>
             </ul>
           </article>
         </div>
@@ -221,13 +237,13 @@ export function LandingHeroFlow() {
 
         <footer className="lp-hero-flow-proof">
           <span>
-            <em>G1–G8</em> preflight
+            <em>amt</em> is a family, not a column
           </span>
           <span>
-            <em>0</em> silent drops
+            <em>G4</em> holds until Map confirms
           </span>
           <span>
-            <em>Σ</em> checksum MATCH
+            Illustration of the mapper — not a live run
           </span>
         </footer>
       </div>

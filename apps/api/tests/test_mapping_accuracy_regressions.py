@@ -17,6 +17,26 @@ def test_order_amt_does_not_steal_transaction_amount():
     assert by["order_amt"] == "total_amount"
 
 
+def test_landing_amount_family_is_not_payment_identity():
+    """Hero must not auto-pin order_amt → payment_amount at 96%.
+
+    Same NUMERIC amount role is not the same business column. Qualifiers
+    pick total_amount / payment_amount / tax_amount; tax_amt stays in
+    review (G4 hold). A 0.96 headline would skip Map confirmation.
+    """
+    out = map_columns(
+        ["order_amt", "pay_amt", "tax_amt"],
+        ["payment_amount", "tax_amount", "total_amount"],
+    )
+    by = {m["source"]: m for m in out}
+    assert by["order_amt"]["target"] == "total_amount"
+    assert by["pay_amt"]["target"] == "payment_amount"
+    assert by["tax_amt"]["target"] == "tax_amount"
+    assert by["tax_amt"].get("requires_review") is True
+    assert float(by["tax_amt"]["confidence"]) < 0.85
+    assert by["order_amt"]["target"] != "payment_amount"
+
+
 def test_ph_num_maps_to_phone_not_invented_column():
     out = map_columns(
         ["ph_num", "mobile_phone"],

@@ -80,7 +80,7 @@ export function TrustSection() {
             </div>
             <div className="lp-home-trust-panel-row is-ok">
               <span>Preflight</span>
-              <em>8 / 8</em>
+              <em>G1–G8</em>
             </div>
             <div className="lp-home-trust-panel-row is-ok">
               <span>Quarantine</span>
@@ -88,7 +88,7 @@ export function TrustSection() {
             </div>
             <div className="lp-home-trust-panel-row is-ok">
               <span>Reconcile</span>
-              <em>checksum MATCH</em>
+              <em>after write</em>
             </div>
             <div className="lp-home-trust-panel-row">
               <span>Audit</span>

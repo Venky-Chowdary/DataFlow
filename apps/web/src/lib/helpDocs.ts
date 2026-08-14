@@ -1024,7 +1024,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         steps: [
           "Why did preflight gate Data integrity fail on my last transfer?",
           "Which connectors are transfer-ready for Snowflake upsert?",
-          "Suggest a map for order_amt → payment_amount",
+          "Why did order_amt map to total_amount instead of payment_amount?",
           "Show quarantined rows from last night's pipeline",
         ],
       },

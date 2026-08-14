@@ -44,8 +44,8 @@ export function LandingHeroArt() {
             <rect x="36" y="56" width="168" height="100" rx="18" fill="url(#lp-art-glass)" />
             <circle cx="64" cy="84" r="10" fill="#0d9488" />
             <text x="84" y="89" fontSize="12" fontWeight="700" fill="#0f172a">PostgreSQL</text>
-            <text x="52" y="118" fontSize="11" fill="#64748b">orders · live</text>
-            <text x="52" y="138" fontSize="18" fontWeight="750" fill="#0f766e">12,480</text>
+            <text x="52" y="118" fontSize="11" fill="#64748b">orders · schema</text>
+            <text x="52" y="138" fontSize="18" fontWeight="750" fill="#0f766e">3 amts</text>
           </g>
 
           {/* Destination */}
@@ -72,20 +72,20 @@ export function LandingHeroArt() {
           <g className="lp-hero-art-float lp-hero-art-float--c">
             <rect x="88" y="200" width="384" height="200" rx="20" fill="url(#lp-art-glass)" />
             <text x="280" y="236" textAnchor="middle" fontSize="13" fontWeight="750" fill="#0f172a">
-              Semantic map · 96% confidence
+              Proposed map · G4 holds review
             </text>
             <rect x="116" y="256" width="328" height="36" rx="10" fill="#f0fdfa" />
             <text x="136" y="279" fontSize="12" fill="#0f766e">order_amt</text>
             <text x="250" y="279" fontSize="12" fill="#94a3b8">→</text>
-            <text x="280" y="279" fontSize="12" fontWeight="700" fill="#0f172a">payment_amount</text>
-            <rect x="116" y="302" width="328" height="36" rx="10" fill="#f8fafc" />
-            <text x="136" y="325" fontSize="12" fill="#0f766e">cust_id</text>
+            <text x="280" y="279" fontSize="12" fontWeight="700" fill="#0f172a">total_amount</text>
+            <rect x="116" y="302" width="328" height="36" rx="10" fill="#fffbeb" />
+            <text x="136" y="325" fontSize="12" fill="#0f766e">tax_amt</text>
             <text x="250" y="325" fontSize="12" fill="#94a3b8">→</text>
-            <text x="280" y="325" fontSize="12" fontWeight="700" fill="#0f172a">customer_key</text>
-            <rect x="116" y="350" width="140" height="28" rx="8" fill="#ccfbf1" />
-            <text x="186" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#0f766e">9 / 9 gates</text>
-            <rect x="272" y="350" width="172" height="28" rx="8" fill="#ecfdf5" />
-            <text x="358" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#059669">checksum OK</text>
+            <text x="280" y="325" fontSize="12" fontWeight="700" fill="#0f172a">tax_amount</text>
+            <rect x="116" y="350" width="140" height="28" rx="8" fill="#fef3c7" />
+            <text x="186" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#b45309">review</text>
+            <rect x="272" y="350" width="172" height="28" rx="8" fill="#ccfbf1" />
+            <text x="358" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#0f766e">same role ≠ same col</text>
           </g>
 
           {/* Proof chip */}
@@ -93,7 +93,7 @@ export function LandingHeroArt() {
             <rect x="120" y="432" width="320" height="48" rx="14" fill="#042f2e" />
             <circle cx="152" cy="456" r="7" fill="#34d399" />
             <text x="280" y="461" textAnchor="middle" fontSize="13" fontWeight="650" fill="#ecfdf5">
-              Reconciled · 12,480 = 12,480
+              Reconcile after write · not this mock
             </text>
           </g>
         </svg>

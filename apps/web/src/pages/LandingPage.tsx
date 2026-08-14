@@ -331,8 +331,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <div>
                 <h3>String-match mapping</h3>
                 <p>
-                  <code>order_amt</code> and <code>payment_amount</code> miss each other. Bad aliases
-                  write garbage until someone notices in a dashboard.
+                  <code>order_amt</code> and <code>total_amount</code> miss each other on string
+                  match. Blindly aliasing every <code>amt</code> onto <code>payment_amount</code>
+                  writes the wrong money column.
                 </p>
               </div>
             </li>
@@ -380,8 +381,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               </div>
               <h3>Semantic mapping</h3>
               <p>
-                Roles, synonyms, and continuous confidence score every edge — not name equality.
-                Ambiguous matches pause for review before they pin.
+                Roles, synonyms, and qualifiers score every edge — not name equality.
+                Same-role collisions wait for Map review. They do not auto-write.
               </p>
               <ul>
                 <li>Role-aware column matching</li>
@@ -450,8 +451,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <p className="lp-section-kicker">Semantic mapping</p>
             <h2>Every column earns a confidence score</h2>
             <p>
-              Format, role, and type compatibility outrank string similarity. Ambiguous edges wait
-              for review before they pin into workspace synonyms.
+              Format, role, qualifier, and type fit outrank string similarity. Ambiguous edges wait
+              for review before they pin. A 96% headline is not how Map works.
             </p>
           </Reveal>
           <div className="lp-home-proof-grid">
@@ -460,8 +461,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 <span>01</span>
                 <h3>Role-aware matching</h3>
                 <p>
-                  <code>order_amt</code> pairs with <code>payment_amount</code> because both are
-                  amount roles — not because the strings look alike.
+                  <code>order_amt</code> pairs with <code>total_amount</code> because the order
+                  qualifier matches. <code>payment_amount</code> is a different column — both
+                  being NUMERIC amounts is not identity.
                 </p>
               </article>
               <article>

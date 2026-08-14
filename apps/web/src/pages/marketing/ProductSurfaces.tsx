@@ -199,9 +199,9 @@ function TransferStudioMock() {
         <div className="lp-mkt-ui-pane">
           <h4>Semantic map</h4>
           {[
-            ["order_amt", "payment_amount", "0.93"],
-            ["cust_email", "email", "0.91"],
-            ["order_id", "order_key", "0.88"],
+            ["order_amt", "total_amount", "0.92"],
+            ["pay_amt", "payment_amount", "0.99"],
+            ["tax_amt", "tax_amount", "review"],
           ].map(([s, d, c]) => (
             <div key={s} className="lp-mkt-ui-map-row">
               <code>{s}</code>
@@ -337,7 +337,7 @@ function PilotMock() {
           Why did the Orders → BigQuery job fail preflight?
         </div>
         <div className="lp-mkt-ui-bubble is-bot">
-          Gate <strong>Type coercion</strong> blocked <code>order_amt</code> (STRING) → <code>payment_amount</code> (NUMERIC).
+          Gate <strong>Type coercion</strong> blocked <code>pay_amt</code> (STRING) → <code>payment_amount</code> (NUMERIC).
           214 sample values contain currency symbols. Pin a coerce rule or quarantine those rows.
         </div>
         <div className="lp-mkt-ui-chat-actions">
@@ -464,8 +464,10 @@ export function TransferStudioPage({
         <ProofCallout>
           <strong>Why this beats name matching.</strong>
           <p>
-            Source <code>order_amt</code> (NUMERIC) → destination <code>payment_amount</code> scores high on role + type
-            even when names never matched. A STRING with currency symbols trying to land in NUMERIC fails G4/G5 instead of writing garbage.
+            Source <code>order_amt</code> (NUMERIC) → destination <code>total_amount</code> scores on
+            the order qualifier + type. <code>payment_amount</code> is a different money column —
+            both being amounts is not identity. A STRING with currency symbols trying to land in
+            NUMERIC fails G4/G5 instead of writing garbage.
           </p>
         </ProofCallout>
       </Chapter>
@@ -521,7 +523,7 @@ export function TransferStudioPage({
         <div className="lp-mkt-scenario">
           <ol>
             <li>Upload <code>sample-orders.csv</code> and select PostgreSQL <code>public.orders</code> (or Load sample in Studio).</li>
-            <li>Review map: <code>order_amt → payment_amount</code> (high confidence), <code>cust_email → email</code>.</li>
+            <li>Review map: <code>order_amt → total_amount</code> (qualifier pin), <code>tax_amt → tax_amount</code> (review — G4 holds).</li>
             <li>Preflight: G1–G3 pass; G5 flags currency-symbol rows — quarantine policy captures them.</li>
             <li>Write clean rows; Job Theater shows checksum match on written set + quarantined rows with reasons.</li>
           </ol>
@@ -1037,7 +1039,7 @@ export function MigrationsSolutionPage({
       outcomes={[
         {
           title: "Semantic column matching",
-          body: "Roles and type fit outrank string names — order_amt lines up with payment_amount when the meaning matches.",
+          body: "Roles and qualifiers outrank string names — order_amt lines up with total_amount, not payment_amount, when both money columns exist.",
         },
         {
           title: "Human review on ambiguous edges",
@@ -1077,7 +1079,7 @@ export function MigrationsSolutionPage({
       caps={[
         {
           title: "Messy real-world schemas",
-          body: "Amounts, emails, and identifiers align even when column names diverge across ERP, CRM, and warehouse copies.",
+          body: "Amounts, emails, and identifiers align when qualifiers match. Same-role collisions (order vs payment vs tax) wait for Map review.",
         },
         {
           title: "Quarantine you can act on",

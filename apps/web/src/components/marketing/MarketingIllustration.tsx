@@ -217,8 +217,9 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
   }
 
   if (kind === "mapping") {
-    const src = ["order_amt", "cust_email", "order_id", "ts"];
-    const dst = ["payment_amount", "email", "order_key", "created_at"];
+    const src = ["order_amt", "pay_amt", "tax_amt", "cust_email"];
+    const dst = ["total_amount", "payment_amount", "tax_amount", "email"];
+    const scores = ["0.92", "0.99", "rev", "0.79"];
     return (
       <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Semantic column mapping">
         <rect width="480" height="280" rx="16" fill="#f8fafc" stroke="#e2e8f0" />
@@ -234,7 +235,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
               <text x="384" y={y + 23} textAnchor="middle" fontSize="12" fill="#0f766e" fontFamily="ui-monospace, monospace">{dst[i]}</text>
               <path d={`M168 ${y + 18}C220 ${y + 18} 260 ${y + 18} 312 ${y + 18}`} stroke="#0d9488" strokeWidth="2" fill="none" strokeDasharray="5 4" />
               <circle cx="240" cy={y + 18} r="11" fill="#ecfdf5" stroke="#0d9488" />
-              <text x="240" y={y + 22} textAnchor="middle" fontSize="9" fill="#0f766e" fontWeight="700">{96 - i * 3}</text>
+              <text x="240" y={y + 22} textAnchor="middle" fontSize="9" fill="#0f766e" fontWeight="700">{scores[i]}</text>
             </g>
           );
         })}

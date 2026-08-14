@@ -9078,12 +9078,13 @@
 }
 
 .lp-hero-flow-card--engine {
-  left: calc(50% - min(120px, 17%));
-  top: 16%;
-  width: min(240px, 34%);
+  left: calc(50% - min(148px, 20%));
+  top: 10%;
+  width: min(296px, 42%);
   border-color: rgba(13, 148, 136, 0.28);
   background: linear-gradient(180deg, #ffffff 0%, #f0fdfa 100%);
   animation-delay: 0.4s;
+  z-index: 2;
 }
 
 .lp-hero-flow-card--dest {
@@ -9110,10 +9111,59 @@
   color: #64748b;
 }
 
+.lp-hero-flow-edges {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.lp-hero-flow-edges li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1.15fr) auto;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  font-size: 10px;
+  color: #334155;
+  font-family: var(--df-font-mono, "JetBrains Mono", ui-monospace, monospace);
+}
+
+.lp-hero-flow-edges li span {
+  color: #94a3b8;
+  text-align: center;
+}
+
+.lp-hero-flow-edges li em {
+  font-style: normal;
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #0f766e;
+}
+
+.lp-hero-flow-edges li.is-review {
+  border-color: rgba(217, 119, 6, 0.45);
+  background: #fffbeb;
+}
+
+.lp-hero-flow-edges li.is-review em {
+  color: #b45309;
+}
+
 .lp-hero-flow-meters em {
   font-style: normal;
   font-weight: 720;
   color: #0f766e;
+}
+
+.lp-hero-flow-meters em.is-warn {
+  color: #b45309;
 }
 
 .lp-hero-flow-pulse {
@@ -9245,13 +9295,13 @@
 
 .lp-hero--bleed .lp-hero-visual--stage {
   align-self: center !important;
-  min-height: min(48vh, 440px) !important;
-  height: min(48vh, 440px) !important;
+  min-height: min(52vh, 480px) !important;
+  height: min(52vh, 480px) !important;
   margin: 0 0 0 -20px !important;
 }
 
 .lp-hero-flow {
-  min-height: min(48vh, 440px) !important;
+  min-height: min(52vh, 480px) !important;
 }
 
 .lp-hero-flow-card--source {
@@ -9260,8 +9310,9 @@
 }
 
 .lp-hero-flow-card--engine {
-  left: calc(50% - min(104px, 14%)) !important;
-  top: 14% !important;
+  left: calc(50% - min(148px, 20%)) !important;
+  top: 8% !important;
+  width: min(296px, 44%) !important;
 }
 
 .lp-hero-flow-card--dest {

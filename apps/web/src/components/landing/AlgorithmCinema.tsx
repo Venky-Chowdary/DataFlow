@@ -60,10 +60,10 @@ interface MappingEdge {
 }
 
 const MAPPING_EDGES: MappingEdge[] = [
-  { source: "order_amt", target: "payment_amount", confidence: 0.96, role: "amount" },
-  { source: "cust_email", target: "email", confidence: 0.94, role: "email" },
-  { source: "order_id", target: "order_key", confidence: 0.91, role: "identifier" },
-  { source: "created_at", target: "created_at", confidence: 0.99, role: "timestamp" },
+  { source: "order_amt", target: "total_amount", confidence: 0.92, role: "order total" },
+  { source: "pay_amt", target: "payment_amount", confidence: 0.99, role: "payment" },
+  { source: "tax_amt", target: "tax_amount", confidence: 0.75, role: "tax" },
+  { source: "cust_email", target: "email", confidence: 0.79, role: "email" },
 ];
 
 export function MappingCinema() {
@@ -151,14 +151,15 @@ export function MappingCinema() {
           <>
             <span className="lp-cinema-chip is-warn">review</span>
             <span>
-              <code>order_id → order_key</code> · role match, name divergent — human confirms.
+              <code>tax_amt → tax_amount</code> · same amount family, thin qualifier — Map confirms.
+              The engine does not treat every amt as payment.
             </span>
           </>
         ) : pinned ? (
           <>
             <span className="lp-cinema-chip is-ok">pinned</span>
             <span>
-              <code>order_id → order_key</code> added to workspace synonyms.
+              <code>tax_amt → tax_amount</code> stays in review until an operator pins it.
             </span>
           </>
         ) : (
@@ -170,7 +171,7 @@ export function MappingCinema() {
       </div>
 
       <figcaption>
-        Semantic mapping — roles, synonyms, type fit — not string equality.
+        Semantic mapping — qualifiers + review. Same amount role is not the same column.
       </figcaption>
     </figure>
   );
