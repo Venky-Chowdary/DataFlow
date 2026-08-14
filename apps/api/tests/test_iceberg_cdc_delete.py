@@ -215,7 +215,7 @@ def test_iceberg_delete_predicate_composite_is_and_or_not_joined_column() -> Non
         {"id": SimpleNamespace(field_type=StringType())}
     )
     assert _iceberg_typed_literal(string_tbl, "id", "99") == "99"
-    pred_in = _iceberg_delete_predicate(string_tbl, ["id"], {"99"})
+    pred_in = _iceberg_delete_predicate(string_tbl, ["id"], {"99", "1"})
     assert isinstance(pred_in, In)
 
     long_tbl = _Table(

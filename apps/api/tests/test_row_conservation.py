@@ -4838,12 +4838,12 @@ def test_iceberg_overwrite_merge_composite_pk_filesystem(tmp_path: Path):
     mappings = [
         {"source": "order_id", "target": "order_id", "transform": "direct"},
         {"source": "line_id", "target": "line_id", "transform": "direct"},
-        {"source": "qty", "target": "qty", "transform": "direct"},
+        {"source": "note", "target": "note", "transform": "direct"},
     ]
     written = write_mapped_rows(
         connection_string=str(warehouse),
         table_name="lines",
-        headers=["order_id", "line_id", "qty"],
+        headers=["order_id", "line_id", "note"],
         data_rows=[["1", "1", "a"], ["1", "2", "b"], ["9", "9", "ghost"]],
         mappings=mappings,
         write_mode="upsert",
@@ -4927,12 +4927,12 @@ def test_iceberg_composite_delete_arity_mismatch_fail_closed(tmp_path: Path):
     written = write_mapped_rows(
         connection_string=str(warehouse),
         table_name="lines",
-        headers=["order_id", "line_id", "qty"],
+        headers=["order_id", "line_id", "note"],
         data_rows=[["1", "1", "a"], ["9", "9", "ghost"]],
         mappings=[
             {"source": "order_id", "target": "order_id", "transform": "direct"},
             {"source": "line_id", "target": "line_id", "transform": "direct"},
-            {"source": "qty", "target": "qty", "transform": "direct"},
+            {"source": "note", "target": "note", "transform": "direct"},
         ],
         write_mode="upsert",
         conflict_columns=["order_id", "line_id"],
@@ -5515,19 +5515,19 @@ def test_iceberg_sql_catalog_leftover_merge_composite_pk(
     mappings = [
         {"source": "order_id", "target": "order_id", "transform": "direct"},
         {"source": "line_id", "target": "line_id", "transform": "direct"},
-        {"source": "qty", "target": "qty", "transform": "direct"},
+        {"source": "note", "target": "note", "transform": "direct"},
     ]
     written = write_mapped_rows(
         connection_string=uri,
         warehouse=warehouse,
         table_name="default.lines",
-        headers=["order_id", "line_id", "qty"],
+        headers=["order_id", "line_id", "note"],
         data_rows=[["1", "1", "a"], ["1", "2", "b"], ["9", "9", "ghost"]],
         mappings=mappings,
         column_types={
             "order_id": "integer",
             "line_id": "integer",
-            "qty": "string",
+            "note": "string",
         },
         write_mode="append",
         create_table=True,
