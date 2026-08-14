@@ -158,10 +158,20 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
 
 
 def _jsonl_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
-    """Line reader for dest COUNT. Path is opened; bytes/str stay in-memory."""
+    """Line reader for dest COUNT. Path (including gzip) streams; bytes/str stay in RAM."""
     if isinstance(content, Path):
-        handle = content.open("r", encoding="utf-8", errors="strict", newline="")
-        return handle, handle.close
+        from services.dest_precount import open_artifact_binary
+
+        binary, closer = open_artifact_binary(content)
+        try:
+            text = io.TextIOWrapper(
+                binary, encoding="utf-8", errors="strict", newline=""
+            )
+        except Exception:
+            if closer is not None:
+                closer()
+            raise
+        return text, text.close
     if isinstance(content, bytes):
         handle = io.TextIOWrapper(
             io.BytesIO(content), encoding="utf-8", errors="strict", newline=""
@@ -201,8 +211,7 @@ def count_jsonl_records(content: bytes | str | Path) -> int | None:
 
     Walk is one line at a time (O(line), not ``decode`` + ``splitlines`` of
     the document). Path inputs are counted from disk; bytes (object-store
-    GET) stream from a buffer already in RAM. gzip still decompresses
-    first at the artifact dispatcher.
+    GET) stream from a buffer already in RAM. Local gzip JSONL streams.
     """
     closer = None
     try:
@@ -1384,10 +1393,11 @@ def _xml_end_kind(elem: Any, had_element_child: bool) -> str:
 
 
 def _xml_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
-    """Byte source for iterparse. Path is opened; bytes/str stay in-memory."""
+    """Byte source for iterparse. Path (including gzip) streams; bytes/str stay in RAM."""
     if isinstance(content, Path):
-        handle = content.open("rb")
-        return handle, handle.close
+        from services.dest_precount import open_artifact_binary
+
+        return open_artifact_binary(content)
     if isinstance(content, bytes):
         return io.BytesIO(content), None
     if isinstance(content, str):
@@ -1541,7 +1551,8 @@ def count_xml_records(content: bytes | str | Path) -> int | None:
     unmeasured; do not then DOM-parse the same poison file. Writer XML
     has no DTD. xmltodict remains the ImportError fallback when
     defusedxml is absent. Path inputs are counted from disk; bytes
-    (object-store GET) stream from a buffer already in RAM.
+    (object-store GET) stream from a buffer already in RAM. Local gzip
+    XML streams; the ImportError DOM fallback does not slurp a gzip path.
     """
     try:
         from defusedxml.ElementTree import iterparse as xml_iterparse

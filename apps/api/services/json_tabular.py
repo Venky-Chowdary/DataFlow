@@ -396,8 +396,9 @@ def _count_json_records_stax(source: Any, parse: Any) -> int | None:
 
 def _json_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
     if isinstance(content, Path):
-        handle = content.open("rb")
-        return handle, handle.close
+        from services.dest_precount import open_artifact_binary
+
+        return open_artifact_binary(content)
     if isinstance(content, bytes):
         return io.BytesIO(content), None
     if isinstance(content, str):
@@ -434,7 +435,8 @@ def count_json_records(content: bytes | str | Path) -> int | None:
     unmeasured; do not then ``json.loads`` the same poison file. ``json.loads``
     remains the ImportError fallback when ijson is absent. Path inputs are
     counted from disk; bytes (object-store GET) stream from a buffer already
-    in RAM.
+    in RAM. Local gzip JSON streams; the ImportError ``json.loads`` fallback
+    does not slurp a gzip path (stays unmeasured).
     """
     try:
         import ijson

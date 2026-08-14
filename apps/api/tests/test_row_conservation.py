@@ -603,6 +603,95 @@ def test_count_csv_rows_streams_rfc4180_not_line_count(
     assert count_artifact_rows(wide, fmt="csv") == 5000
 
 
+def test_count_artifact_rows_gzip_streams_not_slurp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Local gzip CSV/JSON/JSONL/XML COUNT streams. Never decompress-then-slurp.
+
+    Excel/Avro/Parquet/ORC gzip still decompresses first (byte-image parsers).
+    Object-store GET gzip still decompresses the GET body.
+    """
+    import gzip
+
+    from services.csv_profiler import count_csv_rows
+    from services.file_parser import count_jsonl_records, count_xml_records
+    from services.format_converter import convert_rows
+    from services.json_tabular import count_json_records
+
+    csv_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    csv_gz = tmp_path / "export.csv.gz"
+    csv_gz.write_bytes(gzip.compress(csv_body))
+    assert count_csv_rows(csv_gz) == 3
+    assert count_artifact_rows(csv_gz, fmt="csv") == 3
+
+    jsonl_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="jsonl",
+    )
+    jsonl_gz = tmp_path / "export.jsonl.gz"
+    jsonl_gz.write_bytes(gzip.compress(jsonl_body))
+    assert count_jsonl_records(jsonl_gz) == 2
+    assert count_artifact_rows(jsonl_gz, fmt="jsonl") == 2
+
+    json_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="json",
+    )
+    json_gz = tmp_path / "export.json.gz"
+    json_gz.write_bytes(gzip.compress(json_body))
+    assert count_json_records(json_gz) == 3
+    assert count_artifact_rows(json_gz, fmt="json") == 3
+
+    xml_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="xml",
+    )
+    xml_gz = tmp_path / "export.xml.gz"
+    xml_gz.write_bytes(gzip.compress(xml_body))
+    assert count_xml_records(xml_gz) == 2
+    assert count_artifact_rows(xml_gz, fmt="xml") == 2
+
+    quoted, _ = convert_rows(
+        ["id", "note"],
+        [["1", "hello\nworld"], ["2", "b"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    quoted_gz = tmp_path / "quoted.csv.gz"
+    quoted_gz.write_bytes(gzip.compress(quoted))
+    assert count_csv_rows(quoted_gz) == 2
+    assert count_artifact_rows(quoted_gz, fmt="csv") == 2
+
+    bad = tmp_path / "bad.csv.gz"
+    bad.write_bytes(b"not-gzip")
+    assert count_artifact_rows(bad, fmt="csv") is None
+
+    guarded = {p.resolve() for p in (csv_gz, jsonl_gz, json_gz, xml_gz, quoted_gz)}
+    orig_read_bytes = Path.read_bytes
+
+    def _no_read_bytes(self, *args, **kwargs):
+        if Path(self).resolve() in guarded:
+            raise AssertionError("gzip COUNT must not read_bytes the compressed export")
+        return orig_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", _no_read_bytes)
+    assert count_artifact_rows(csv_gz, fmt="csv") == 3
+    assert count_artifact_rows(jsonl_gz, fmt="jsonl") == 2
+    assert count_artifact_rows(json_gz, fmt="json") == 3
+    assert count_artifact_rows(xml_gz, fmt="xml") == 2
+
+
 def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):

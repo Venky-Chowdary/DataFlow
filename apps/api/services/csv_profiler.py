@@ -33,10 +33,16 @@ def detect_encoding(content: bytes) -> str:
 
 
 def _csv_prefix_bytes(content: bytes | str | Path) -> bytes:
-    """BOM / utf-8 / latin-1 sniff. Path reads a prefix, never the whole file."""
+    """BOM / utf-8 / latin-1 sniff. Path (including gzip) reads a prefix, never the whole file."""
     if isinstance(content, Path):
-        with content.open("rb") as handle:
+        from services.dest_precount import open_artifact_binary
+
+        handle, closer = open_artifact_binary(content)
+        try:
             return handle.read(_ENCODING_PREFIX)
+        finally:
+            if closer is not None:
+                closer()
     if isinstance(content, bytes):
         return content[:_ENCODING_PREFIX]
     if isinstance(content, str):
@@ -47,8 +53,17 @@ def _csv_prefix_bytes(content: bytes | str | Path) -> bytes:
 def _csv_count_open(content: bytes | str | Path, encoding: str) -> io.TextIOBase:
     """Text stream for ``csv.reader``. ``newline=''`` keeps quoted newlines one row."""
     if isinstance(content, Path):
-        binary = content.open("rb")
-        return io.TextIOWrapper(binary, encoding=encoding, errors="replace", newline="")
+        from services.dest_precount import open_artifact_binary
+
+        binary, closer = open_artifact_binary(content)
+        try:
+            return io.TextIOWrapper(
+                binary, encoding=encoding, errors="replace", newline=""
+            )
+        except Exception:
+            if closer is not None:
+                closer()
+            raise
     if isinstance(content, bytes):
         return io.TextIOWrapper(
             io.BytesIO(content), encoding=encoding, errors="replace", newline=""
@@ -117,7 +132,7 @@ def count_csv_rows(content: bytes | str | Path, encoding: str | None = None) -> 
     from a prefix (BOM → utf-8-sig, else utf-8 else latin-1) so a GB
     export is not decoded twice. Path inputs reopen from disk;
     bytes (object-store GET) stream from a buffer already in RAM.
-    gzip still decompresses first at the artifact dispatcher.
+    Local gzip CSV/TSV streams (prefix sniff, then a second gzip open).
     """
     prefix = _csv_prefix_bytes(content)
     enc = encoding or detect_encoding(prefix)

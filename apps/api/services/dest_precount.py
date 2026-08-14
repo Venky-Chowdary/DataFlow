@@ -33,22 +33,25 @@ XML dest population is the unique repeating record-path
 never a whole-document-as-one fallback. Ambiguous sibling collections
 stay unmeasured. Empty ``<records/>`` is 0. Missing parser is
 unmeasured, not dest=0. Local XML is counted from the path; gzip XML
-still decompresses first. JSON dest population is the unique
+streams (never a decompressed slurp). JSON dest population is the unique
 array-of-object (``count_json_records`` ijson StAX), never
 ``json.loads`` of the whole export, never ingest single-object-as-one
 or preferred-wrapper ranking. Empty ``[]`` is 0. Scalar arrays stay
 unmeasured, not dest=N. Local JSON is counted from the path; gzip JSON
-still decompresses first. JSONL dest population is one object per
+streams. JSONL dest population is one object per
 non-blank line (``count_jsonl_records`` line stream), never
 ``decode`` + ``splitlines`` of the whole export, never ingest
 ``parse_jsonl`` (raises, materializes). Empty file / only blank lines
 is 0. A scalar, array, or malformed line stays unmeasured — never
 COUNT of a prefix. Local JSONL is counted from the path; gzip JSONL
-still decompresses first. NDJSON aliases onto JSONL. CSV/TSV dest
+streams. NDJSON aliases onto JSONL. CSV/TSV dest
 population is RFC 4180 ``csv.reader`` rows after the header
 (``count_csv_rows``), never ``wc -l``, never spreadsheet ``,,,,``
 blank lines. Quoted embedded newlines are one record. Local CSV/TSV
-is counted from the path; gzip still decompresses first.
+is counted from the path; gzip CSV/TSV streams. Excel / Avro /
+Parquet / ORC gzip still decompresses first (workbook / footer
+parsers need a byte image). Object-store GET gzip of CSV/JSON/JSONL/XML
+still decompresses the GET body (the GET already paid RAM).
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
@@ -1735,6 +1738,20 @@ def _read_artifact_bytes(path: Path) -> bytes | None:
         return None
 
 
+def open_artifact_binary(path: Path) -> tuple[Any, Any]:
+    """Byte source for dest COUNT. ``*.gz`` is a gzip stream, never a slurp.
+
+    Caller closes via the returned closer. Encoding sniff that needs a
+    prefix must open, read, close, then open again — gzip seek is not
+    this kernel.
+    """
+    if path.name.lower().endswith(".gz"):
+        handle = gzip.open(path, "rb")
+        return handle, handle.close
+    handle = path.open("rb")
+    return handle, handle.close
+
+
 def _count_parquet_bytes(content: bytes) -> int | None:
     import io
 
@@ -1912,7 +1929,8 @@ def count_artifact_rows(
     ``json.loads`` of the whole export. JSONL counts one object per
     non-blank line from disk, not ``decode`` + ``splitlines`` of the
     whole export. CSV/TSV counts RFC 4180 records from disk, not
-    ``wc -l`` and not a slurp of the whole file.
+    ``wc -l`` and not a slurp of the whole file. Local CSV/JSON/JSONL/XML
+    gzip streams; Excel/Avro/Parquet/ORC gzip still decompresses first.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -1927,22 +1945,22 @@ def count_artifact_rows(
         return _count_parquet_path(artifact)
     if kind == "orc":
         return _count_orc_path(artifact)
-    if kind == "xml" and not artifact.name.lower().endswith(".gz"):
+    if kind == "xml":
         from services.file_parser import count_xml_records
 
         n = count_xml_records(artifact)
         return None if n is None else int(n)
-    if kind == "json" and not artifact.name.lower().endswith(".gz"):
+    if kind == "json":
         from services.json_tabular import count_json_records
 
         n = count_json_records(artifact)
         return None if n is None else int(n)
-    if kind == "jsonl" and not artifact.name.lower().endswith(".gz"):
+    if kind == "jsonl":
         from services.file_parser import count_jsonl_records
 
         n = count_jsonl_records(artifact)
         return None if n is None else int(n)
-    if kind in {"csv", "tsv"} and not artifact.name.lower().endswith(".gz"):
+    if kind in {"csv", "tsv"}:
         from services.csv_profiler import count_csv_rows
 
         try:
