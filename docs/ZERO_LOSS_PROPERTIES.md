@@ -13,7 +13,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
-| 8 | Semantic value fidelity | UNPROVEN | — | — | — |
+| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py -q` (11 passed on this host: unit + live PG 16 ↔ MariaDB 10.11) | Collation equality class (case/accent) carried as dest-native CS (`utf8mb4_bin`) so PG UNIQUE `Alpha`+`alpha` both land on MariaDB; CI source UNIQUE is `unsupported` on PG (uniqueness would widen) and dest accepts the pair the source forbade | Timezone instant vs offset; encoding round-trip; decimal rounding; JSON number vs string; UCA 0900 vs 1400; Oracle/SQL Server live COLLATE; generic_sql SA `collation=` |
 | 9 | Every row is accounted for | UNPROVEN | — | — | — |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
@@ -387,4 +387,65 @@ Includes:
   at-least-once upsert)
 * Cross-schema / cross-database references; composite live matrix
 * Exactly-once / 100% of all routes — not claimed
+
+---
+
+## Property 8 — PARTIAL (2026-08-14, collation equality)
+
+### Defect (competitor class)
+
+AWS DMS copies bytes into the destination's **default collation**. MySQL and
+MariaDB default to Unicode case-insensitive equality. A PostgreSQL `UNIQUE`
+that accepted both `Alpha` and `alpha` then loses a row on the destination
+(`MISSING_TARGET` in DMS validation) while checksums of *accepted* rows stay
+green. Airbyte and Fivetran paste a source collation *name* when the dest
+happens to know it, and drop it otherwise — name-copy is not equality.
+SQL Server `CI_AS` (accent-sensitive) mapped to MySQL `unicode_ci`
+(accent-insensitive) would equate `café` and `cafe`.
+
+### Algorithm
+
+1. Classify the source into an **equality class** (case / accent polarity),
+   including engine defaults when the catalog has no `COLLATE` name
+   (PostgreSQL empty = CS; MySQL empty = CI).
+2. Emit a destination-native spelling that preserves that class when one
+   exists: PostgreSQL CS → MySQL `CHARACTER SET utf8mb4 COLLATE utf8mb4_bin`
+   (type-adjacent, before `NOT NULL`).
+3. Refuse a lying stand-in: PostgreSQL has no portable Unicode CI collation
+   (`citext` would change the type); SQLite `NOCASE` is ASCII-only; MySQL
+   `unicode_ci` is not SQL Server `CI_AS`.
+4. Record UNIQUE polarity (`preserved` / `widened` / `tightened`) on the
+   certificate. Widened uniqueness is `unsupported`, not `carried`.
+5. Certify `carried` from the destination catalog (`information_schema` /
+   `pg_collation`), not from emitted DDL.
+
+UCA version (0900 vs 1400) is an extension point on `EqualityClass`, not a
+claim that `utf8mb4_unicode_ci` equals `utf8mb4_0900_ai_ci`.
+
+### Proof output (this host)
+
+```
+cd apps/api && python -m pytest tests/test_collation_equality_carry.py \
+       tests/test_property8_collation_equality.py -q
+11 passed in 1.53s
+
+Includes:
+  Live PG 16 → MariaDB 10.11: UNIQUE (code) with Alpha and alpha both land;
+    dest collation_name contains _bin; schema_fidelity collation=carried.
+  Live MariaDB utf8mb4_unicode_ci UNIQUE (only Alpha) → PG: certificate
+    collation=unsupported (uniqueness would widen); dest INSERT alpha succeeds.
+  Unit: CS→utf8mb4_bin; CI_AS not mapped to unicode_ci; NOCASE refused;
+    COLLATE prepended before NOT NULL (MySQL grammar).
+```
+
+### NOT claimed / remaining for PROVEN
+
+* Timezone instant vs offset-label (policy module exists; not this slice)
+* Encoding round-trip / charset capacity beyond utf8mb3→utf8mb4 promote
+* Decimal rounding, JSON number-vs-string, float binary
+* UCA 0900 vs 1400 linguistic equality
+* Oracle / SQL Server live COLLATE certify (planner covers SQL Server BIN/CI_AS)
+* generic_sql SQLAlchemy `collation=` (native PG/MySQL writers emit suffixes)
+* Exactly-once / 100% of all routes — not claimed
+
 
