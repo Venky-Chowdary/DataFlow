@@ -111,9 +111,13 @@
   overflow: visible;
 }
 
-/* Every authenticated page — same flat canvas (not only Overview) */
+/* Page chrome is the canvas — designed cards keep their own surface */
 .df2-app .df2-page,
-.df2-app [class*="df2-page-"] {
+.df2-app .df2-page-workspace,
+.df2-app .df2-page-untitled,
+.df2-app .df2-page-fluid,
+.df2-app .df2-page-compact,
+.df2-app .df2-page-fit {
   background: transparent;
 }
 
@@ -934,10 +938,29 @@
 .df2-app .df2-metric-glass,
 .df2-app .df2-card,
 .df2-app .df2-settings-section,
-.df2-app .df2-mcp-endpoint-card,
-.df2-app .df2-docs-hero {
+.df2-app .df2-mcp-endpoint-card {
   background: var(--df-surface, #fff);
   border-color: var(--df-border, #e4e8ee);
+}
+
+/* Settings: nav + section cards on canvas — never one page-sized white sheet */
+.df2-app .df2-settings-panel,
+.df2-app .df2-settings-content {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+
+/* Studio + Pilot fill the host — no slate gutter around a white sheet */
+.df2-app .df2-content:has(.df2-content-studio),
+.df2-app .df2-content:has(.df2-content-flush) {
+  background: var(--df-surface, #fff) !important;
+}
+
+.df2-app .df2-content-inner.df2-content-studio,
+.df2-app .df2-content-inner.df2-content-flush {
+  padding: 0 !important;
 }
 
 .df2-app .df2-overview-v3 .df2-metric-glass-teal {
