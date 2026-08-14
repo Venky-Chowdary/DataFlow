@@ -2537,3 +2537,139 @@ def test_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: Path):
     assert ledger.extra_keys == 0
     assert ledger.leftover_deleted == 1
     assert ledger.unaccounted == 1
+
+
+def test_iceberg_destination_key_list_missing_table_is_empty(tmp_path: Path):
+    listed = destination_key_list(
+        "iceberg",
+        _iceberg_cfg(tmp_path / "wh"),
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+    )
+    assert listed == []
+
+
+def test_iceberg_overwrite_merge_deletes_leftover_snapshot_keys(tmp_path: Path):
+    """Lakehouse leftover MERGE: dest {1,2,3,99} vs S {1,2,3} → CoW-delete 99.
+
+    Same identity as SQL leftover MERGE. Metadata record-count and writer
+    upsert ack never close. Incremental remains a hard no-op.
+    """
+    from connectors.iceberg_writer import write_mapped_rows
+    from services.dest_precount import destination_keyset_census, destination_row_count
+
+    warehouse = tmp_path / "wh"
+    cfg = _iceberg_cfg(warehouse)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="orders",
+        headers=["id", "v"],
+        data_rows=[["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert written.ok, written.error
+    listed = destination_key_list(
+        "iceberg", cfg, schema="", table_name="orders", key_columns=["id"]
+    )
+    assert listed is not None
+    assert len(listed) == 4
+    before = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+    )
+    assert before is not None
+    assert before["dest_count"] == 4
+    assert before[EXTRA_KEYS_KEY] == 1
+    assert before[MISSING_KEYS_KEY] == 0
+
+    refused = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+        complete_snapshot=False,
+    )
+    assert refused is None
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 4
+
+    deleted = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    after = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+    )
+    assert after is not None
+    assert after["dest_count"] == 3
+    assert after[EXTRA_KEYS_KEY] == 0
+    assert after[MISSING_KEYS_KEY] == 0
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+
+
+def test_iceberg_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: Path):
+    """Dest {2,3,99} vs S {1,2,3}: delete 99, dest=2, missing=1 still unclosed."""
+    from connectors.iceberg_writer import write_mapped_rows
+    from services.dest_precount import destination_keyset_census
+
+    warehouse = tmp_path / "wh"
+    cfg = _iceberg_cfg(warehouse)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="orders",
+        headers=["id", "v"],
+        data_rows=[["2", "b"], ["3", "c"], ["99", "ghost"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert written.ok, written.error
+    deleted = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    census = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+    )
+    assert census is not None
+    assert census["dest_count"] == 2
+    assert census[EXTRA_KEYS_KEY] == 0
+    assert census[MISSING_KEYS_KEY] == 1

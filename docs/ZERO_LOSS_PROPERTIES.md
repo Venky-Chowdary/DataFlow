@@ -668,6 +668,10 @@ rowcount is not that proof.
     re-sync soft-flags leftovers (`_fivetran_deleted`) so COUNT(*) does
     not drop. Mirror already applies inferred soft-deletes on full
     re-sync. Incremental CDC is a hard no-op (`complete_snapshot=False`).
+    Iceberg leftover MERGE lists current-snapshot PK tuples (filesystem
+    data files or catalog `scan()`), never metadata `record-count`, then
+    CoW-deletes `D \ S` through the existing dest-engine delete. MoR /
+    deletion vectors stay Planned — the identity is still leftover = D \ S.
 13. SCD Type 2 current-row identity: `COUNT(*) WHERE is_current` is dest
     population. Physical history `COUNT(*)` is diagnostic
     (`history_rows`). Writer version-upsert ack and Gate-8 stuffed
@@ -852,7 +856,10 @@ TypeScript does not recompute dest.
 * Inferred deletes on **incremental upsert/CDC** without a tombstone —
   complete overwrite snapshot MERGE-deletes leftover dest keys (`D \ S`).
   Incremental remains a hard no-op (a batch is not `S`). Iceberg leftover
-  MERGE not applied this slice (extra still measured).
+  MERGE is **PARTIAL** on filesystem CoW (same identity as SQL: dest
+  `{1,2,3,99}` vs S `{1,2,3}` CoW-deletes 99, extra=0; missing source
+  keys stay missing). pyiceberg SqlCatalog live leftover not run this
+  host unless catalog is present. MoR / deletion vectors Planned.
 * Stream-path this-run `soft_deleted` / `reactivated` census (module-size freeze on `stream.py`)
 * Oracle / SQL Server live dest COUNT certify
 * dest-only sinks besides dest-engine DISTINCT `source_id`: Pinecone /

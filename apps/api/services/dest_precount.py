@@ -48,10 +48,13 @@ source key and one leftover dest key to a false balance. Incremental
 CDC must not run that split — the batch is not the source key set, and
 leftover would look like almost every dest row. This module **lists**
 dest keys so a complete overwrite snapshot can MERGE-delete ``D \\ S``;
-it never deletes them itself. ``row_conservation.apply_inferred_leftover_deletes``
-applies the anti-join only when the source census is complete overwrite.
-Incremental CDC must not call that apply. Mirror already applies inferred
-soft-deletes on full re-sync.
+it never deletes them itself. Iceberg listing is the current snapshot
+(filesystem data files or catalog ``scan()``), never metadata
+``record-count``. ``row_conservation.apply_inferred_leftover_deletes``
+applies the anti-join only when the source census is complete overwrite
+(SQL and Iceberg CoW). Incremental CDC must not call that apply. Mirror
+already applies inferred soft-deletes on full re-sync. Iceberg MoR /
+deletion vectors stay Planned — the identity is still ``leftover = D \\ S``.
 
 SCD Type 2 is the same 1-source-identity → N-history-row shape as
 vector chunks. Physical ``COUNT(*)`` of versions grows on every
@@ -664,7 +667,8 @@ def destination_key_list(
     only ``|D| − |D ∩ S|``. Dest COUNT larger than ``_KEYSET_CENSUS_MAX``
     stays unlisted rather than scanning an unbounded table. Duplicate dest
     PKs (len(unique) != COUNT(*)) refuse — inferred delete would guess.
-    Missing table is ``[]``. This function never deletes.
+    Missing table is ``[]``. Iceberg lists the current snapshot, never
+    writer ``Table.upsert`` rowcount. This function never deletes.
     """
     cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
     table = (table_name or "").strip()
@@ -683,9 +687,14 @@ def destination_key_list(
         )
         return None
     try:
-        rows = _key_list_sql(
-            db_type, cfg, schema=schema, table_name=table, cols=cols
-        )
+        if db_type in {"iceberg", "apache_iceberg"}:
+            rows = _iceberg_key_list(
+                cfg, schema=schema, table_name=table, cols=cols
+            )
+        else:
+            rows = _key_list_sql(
+                db_type, cfg, schema=schema, table_name=table, cols=cols
+            )
     except Exception as exc:  # pragma: no cover - destination-specific failure
         logger.warning("Dest key list failed: %s", exc)
         return None
@@ -1005,6 +1014,34 @@ def _norm_dest_key(values: Sequence[Any]) -> tuple[str, ...] | None:
             return None
         out.append(str(value))
     return tuple(out)
+
+
+def _iceberg_key_list(
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+) -> list[tuple[Any, ...]] | None:
+    """Current-snapshot PK tuples. Never metadata ``record-count``. Never deletes.
+
+    Same population as dest COUNT(*) / key hits: filesystem data files or
+    catalog ``scan()``. Missing table is ``[]`` (caller already mapped dest
+    COUNT 0). Incomplete / unreadable snapshot is ``None``.
+    """
+    rows = _iceberg_snapshot_rows(cfg, schema=schema, table_name=table_name, cols=cols)
+    if rows is None:
+        return None
+    out: list[tuple[Any, ...]] = []
+    width = len(cols)
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        tup = tuple(row.get(c) for c in cols)
+        if len(tup) != width or any(v is None for v in tup):
+            continue
+        out.append(tup)
+    return out
 
 
 def _iceberg_key_hits(

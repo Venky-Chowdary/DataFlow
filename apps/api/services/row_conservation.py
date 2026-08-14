@@ -489,6 +489,9 @@ def apply_inferred_leftover_deletes(
     Dest without unique PKs, unsupported engines, or an oversized
     census stay ``None`` (unapplied); Gate-8 still *measures* extra.
     Vector destinations own identity COUNT, not this PK anti-join.
+    Iceberg applies the same anti-join through dest-engine snapshot
+    listing + CoW delete (existing ``delete_by_primary_keys``). MoR /
+    deletion vectors are a later encoding of the same leftover set.
     """
     if not complete_snapshot:
         return None
