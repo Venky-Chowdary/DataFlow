@@ -14,7 +14,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py tests/test_unicode_form_carry.py tests/test_property8_unicode_form.py -q` (137 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16 + unicode-form 21; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal unscaled integer; unicode form: PG TEXT / MariaDB `general_ci`/`bin` UNIQUE BOTH_LAND for NFC vs NFD; MariaDB `unicode_ci` SECOND_REJECT; dest HEX `C3A9` vs `CC81`; bind does not NFC | UCA 0900 vs 1400 live MySQL 8; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
-| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py tests/test_stream_append_precount.py tests/test_execute_tracked_sqlite_to_csv_to_sqlite_roundtrip.py -q` (128 passed, 1 skipped moto in 6.50s on this host). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (28 passed); `npm run build` tsc+vite | Overwrite: dest COUNT(*). Complete PK census splits MISSING_TARGET vs EXTRA_TARGET (COUNT(*) can net them). Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**. Dest-before before first write — SQL, Iceberg snapshot, and object-store record COUNT (missing table/object = 0). Mirror: `COUNT(*) WHERE NOT _deleted`. Job closed iff every stream closed. File/object export: independent artifact record COUNT. Vector/RAG: `COUNT(DISTINCT source_id)`, not chunk COUNT(*). SCD2: `COUNT(*) WHERE is_current`, not history COUNT(*). Writer ack never closes. | Inferred deletes on upsert/CDC without tombstone and not mirror (keyset measures leftover on complete snapshot only — does not delete); stream-path this-run `soft_deleted` census; Oracle/SQL Server live COUNT; dest-only sinks besides pgvector identity (Milvus/Qdrant/Pinecone/Weaviate DISTINCT source_id); live moto/MinIO object-store COUNT (algorithm wired; moto absent this host); live shared-reader CDC dest-before on PG logical; exactly-once |
+| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py tests/test_stream_append_precount.py tests/test_execute_tracked_sqlite_to_csv_to_sqlite_roundtrip.py -q` (132 passed, 1 skipped moto in 6.71s on this host). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (29 passed); `npm run build` tsc+vite | Overwrite: dest COUNT(*). Complete PK census splits MISSING_TARGET vs EXTRA_TARGET (COUNT(*) can net them). Complete overwrite snapshot MERGE-deletes dest keys not in S (`leftover = D \\ S`) before Gate-8 COUNT — incremental CDC is a hard no-op. Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**. Dest-before before first write — SQL, Iceberg snapshot, and object-store record COUNT (missing table/object = 0). Mirror: `COUNT(*) WHERE NOT _deleted`. Job closed iff every stream closed. File/object export: independent artifact record COUNT. Vector/RAG: `COUNT(DISTINCT source_id)`, not chunk COUNT(*). SCD2: `COUNT(*) WHERE is_current`, not history COUNT(*). Writer ack never closes. | Inferred deletes on incremental upsert/CDC without tombstone (complete overwrite MERGE applies leftover deletes; incremental remains a no-op); stream-path this-run `soft_deleted` census; Oracle/SQL Server live COUNT; dest-only sinks besides pgvector identity (Milvus/Qdrant/Pinecone/Weaviate DISTINCT source_id); live moto/MinIO object-store COUNT (algorithm wired; moto absent this host); live shared-reader CDC dest-before on PG logical; Iceberg leftover MERGE; exactly-once |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
 | 12 | Adversarial and chaos testing | UNPROVEN | — | — | — |
@@ -656,8 +656,14 @@ rowcount is not that proof.
     `EXTRA_TARGET`. `COUNT(*)` nets one missing source key and one
     leftover dest key to a false balance. Incremental CDC must not pass
     a batch as `S` (that would invent leftover dest keys and look like
-    inferred deletes). This census never deletes leftover keys; mirror
-    already applies inferred deletes on full re-sync.
+    inferred deletes). Measure-without-apply is DMS EXTRA_TARGET.
+    Apply-without-the-complete-S gate is Airbyte issue #6383.
+    A **complete overwrite snapshot** MERGE-deletes `D \ S` (dest-engine
+    anti-join, then `delete_by_primary_keys`) *before* Gate-8 COUNT so
+    extra → 0. Missing source keys stay missing. Fivetran historical
+    re-sync soft-flags leftovers (`_fivetran_deleted`) so COUNT(*) does
+    not drop. Mirror already applies inferred soft-deletes on full
+    re-sync. Incremental CDC is a hard no-op (`complete_snapshot=False`).
 13. SCD Type 2 current-row identity: `COUNT(*) WHERE is_current` is dest
     population. Physical history `COUNT(*)` is diagnostic
     (`history_rows`). Writer version-upsert ack and Gate-8 stuffed
@@ -759,7 +765,16 @@ rowcount is not that proof.
     Duplicate PKs / missing PK cells leave keyset unmeasured.
     Incremental without a complete S does not invent leftover from a batch.
     Live SQLite: dest_count=3, dest_key_hits=2, missing=1, extra=1.
-    Never infer-deletes leftover keys on upsert/CDC.
+    Incremental CDC never infer-deletes leftover keys.
+
+  Overwrite leftover MERGE (this host, after 2026-08-14 slice):
+    132 passed, 1 skipped (moto) in 6.71s.
+    Dest {1,2,3,99} vs S {1,2,3}: MERGE-delete 99 → dest COUNT=3, extra=0.
+    Dest {2,3,99} vs S {1,2,3}: delete 99 → dest=2, extra=0, missing=1
+    still unclosed (does not invent key 1). complete_snapshot=False
+    leaves dest {1,2,3} untouched. pgvector apply is a no-op.
+    Fivetran would keep COUNT(*)=4 via _fivetran_deleted. Writer ack
+    10,000 does not close.
 
   SCD2 current-row identity (this host, after 2026-08-14 slice):
     128 passed, 1 skipped (moto) in 6.50s.
@@ -782,7 +797,7 @@ rowcount is not that proof.
 Frontend (this host):
 ```
 npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts
-  28 passed
+  29 passed
 npm run build  tsc + vite  clean
 ```
 
@@ -809,14 +824,17 @@ never physical history COUNT(*) , never writer version ack, and never
 mirror **Active at dest** (`is_current` is not `_deleted`).
 Overwrite jobs with a complete PK census surface **Missing keys** /
 **Extra dest keys** when COUNT(*) would net DMS MISSING_TARGET and
-EXTRA_TARGET to a false balance. TypeScript does not recompute dest.
+EXTRA_TARGET to a false balance. After leftover MERGE, **Leftover deleted**
+is the dest-engine anti-join apply (overwrite complete snapshot only).
+TypeScript does not recompute dest.
 
 ### NOT claimed / remaining for PROVEN (conservation slice)
 
 * Duplicate CDC events per key — **PARTIAL** on named SQLite fixture: 6 events / 3 keys, dest Δ 0. Stream/CDC run-level accumulator ignores at-least-once redelivery. Multi-batch live log replay still CDC at-least-once (not exactly-once).
-* Inferred deletes on **upsert/CDC** without a tombstone and **not** mirror mode
-  (keyset **measures** leftover dest keys on a complete overwrite snapshot;
-  it does not delete them — that would false-delete on incremental)
+* Inferred deletes on **incremental upsert/CDC** without a tombstone —
+  complete overwrite snapshot MERGE-deletes leftover dest keys (`D \ S`).
+  Incremental remains a hard no-op (a batch is not `S`). Iceberg leftover
+  MERGE not applied this slice (extra still measured).
 * Stream-path this-run `soft_deleted` / `reactivated` census (module-size freeze on `stream.py`)
 * Oracle / SQL Server live dest COUNT certify
 * dest-only sinks besides pgvector identity (Milvus / Qdrant / Pinecone /
