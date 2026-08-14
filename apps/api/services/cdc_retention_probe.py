@@ -4,10 +4,11 @@ Honesty
 -------
 ``ok`` / ``at_risk`` / ``gap`` classify resume against live retention. A ``gap``
 means continuous CDC across the window is impossible. PostgreSQL
-``wal_status=lost`` or a dropped slot is the same class as a purged binlog —
-recreating the slot at current WAL skips the lost window. ``when_needed``
-recovers by blocking-snapshot of current source keys (see ``cdc_snapshot_mode``);
-``initial`` / ``never`` stay fail-closed.
+``wal_status=lost`` or a dropped slot is the same class as a purged binlog or
+SQL Server Change Tracking ``last_sync_version < CHANGE_TRACKING_MIN_VALID_VERSION``
+— ``CHANGETABLE`` on a stale version can return an invalid change set.
+``when_needed`` recovers by blocking-snapshot of current source keys (see
+``cdc_snapshot_mode``); ``initial`` / ``never`` stay fail-closed.
 """
 
 from __future__ import annotations
@@ -108,6 +109,137 @@ def classify_lsn_retention(
         retained=retained,
         cursor_key=cursor_key,
         message=f"Resume LSN is within retention (resume={resume}, min_lsn={retained}).",
+    )
+
+
+def _ct_version_int(value: int | str | None) -> int | None:
+    """Parse a Change Tracking version. ``None`` means not supplied / unknown."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "~"}:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_ct_version_retention(
+    resume_version: int | str | None,
+    min_valid_version: int | str | None,
+    *,
+    current_version: int | str | None = None,
+    ct_enabled: bool | None = None,
+    cursor_key: str = "",
+    dialect: str = "sqlserver",
+) -> RetentionProbeResult:
+    """Compare last_sync_version to ``CHANGE_TRACKING_MIN_VALID_VERSION``.
+
+    Microsoft (Work with Change Tracking / CHANGETABLE):
+
+    - If ``last_sync_version < min_valid_version``, do **not** call
+      ``CHANGETABLE`` — cleaned-up rows make the result set invalid.
+      The client must reinitialize. That is a retention ``gap``.
+    - Equal versions are still enumerable (changes *after* last_sync). Next
+      cleanup may bump min_valid past resume → ``at_risk``.
+    - ``CHANGE_RETENTION`` (default 2 days) and ``TRUNCATE`` both raise min_valid.
+    - ``CHANGETABLE`` with a stale version may return a **partial** change set
+      instead of erroring — skipping this check is silent CDC data loss.
+
+    Honesty: recovery is at-least-once upsert of the **live** population
+    (``when_needed`` blocking snapshot). Purged CT rows are gone. Not
+    continuous CDC. Not ``migration_proven``.
+    """
+    resume = _ct_version_int(resume_version)
+    retained = _ct_version_int(min_valid_version)
+    current = _ct_version_int(current_version)
+    lost_note = (
+        "CHANGE_RETENTION cleanup or TRUNCATE removed change rows. "
+        "when_needed snapshots current source keys then streams from the new "
+        "CHANGE_TRACKING_CURRENT_VERSION. Not continuous CDC, not migration_proven."
+    )
+    details: dict[str, Any] = {
+        "plugin": "sqlserver_change_tracking",
+        "ct_enabled": ct_enabled,
+        "current_version": current,
+    }
+    if resume is None:
+        return RetentionProbeResult(
+            status="no_watermark",
+            dialect=dialect,
+            retained=str(retained) if retained is not None else "",
+            cursor_key=cursor_key,
+            message="No Change Tracking last_sync_version — next run will snapshot.",
+            details=details,
+        )
+    if ct_enabled is False:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume),
+            retained="ct_disabled",
+            cursor_key=cursor_key,
+            message=(
+                "SQL Server Change Tracking is not enabled while a CDC watermark "
+                f"is present (last_sync_version={resume}). {lost_note}"
+            ),
+            details=details,
+        )
+    if retained is None:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect=dialect,
+            resume=str(resume),
+            cursor_key=cursor_key,
+            message="Could not read CHANGE_TRACKING_MIN_VALID_VERSION.",
+            details=details,
+        )
+    if resume < retained:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume),
+            retained=str(retained),
+            cursor_key=cursor_key,
+            message=(
+                f"Change Tracking last_sync_version {resume} is before "
+                f"CHANGE_TRACKING_MIN_VALID_VERSION {retained}. "
+                "Do not call CHANGETABLE — Microsoft requires reinitialize. "
+                f"{lost_note}"
+            ),
+            details=details,
+        )
+    if resume == retained:
+        return RetentionProbeResult(
+            status="at_risk",
+            dialect=dialect,
+            resume=str(resume),
+            retained=str(retained),
+            cursor_key=cursor_key,
+            message=(
+                f"Change Tracking resume sits on min_valid_version={retained}. "
+                "Next CHANGE_RETENTION cleanup may force a gap — "
+                "when_needed snapshot readiness is the recovery path."
+            ),
+            details=details,
+        )
+    return RetentionProbeResult(
+        status="ok",
+        dialect=dialect,
+        resume=str(resume),
+        retained=str(retained),
+        cursor_key=cursor_key,
+        message=(
+            f"Change Tracking last_sync_version {resume} is within retention "
+            f"(min_valid={retained}"
+            f"{f', current={current}' if current is not None else ''})."
+        ),
+        details=details,
     )
 
 
@@ -475,6 +607,28 @@ def _resume_lsn_from_watermark(watermark: str | None) -> str:
     return text
 
 
+def _resume_ct_version_from_watermark(watermark: str | None) -> int | None:
+    """Extract Change Tracking last_sync_version. ``None`` = no streaming cursor."""
+    if not watermark:
+        return None
+    try:
+        from connectors.sqlserver_change_stream import decode_sqlserver_resume_token
+
+        token = decode_sqlserver_resume_token(watermark)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return None
+    phase = str(token.get("phase") or "").strip().lower()
+    version = _ct_version_int(token.get("version"))
+    if phase in {"initial", ""} and (version is None or version <= 0):
+        return None
+    if phase == "snapshot":
+        return None
+    if version is None:
+        return None
+    return version
+
+
 def _resume_scn_from_watermark(watermark: str | None) -> int:
     if not watermark:
         return 0
@@ -529,12 +683,24 @@ def probe_sqlserver_retention(
             cursor_key=ck or None,
         )
         if not cdc.is_available():
+            ct = probe_sqlserver_ct_retention(
+                cfg,
+                table=table,
+                schema=schema,
+                cursor_key=ck,
+                watermark=wm,
+            )
+            if ct.status != "n_a":
+                return ct
             return RetentionProbeResult(
                 status="unknown",
                 dialect="sqlserver",
                 resume=resume,
                 cursor_key=ck,
-                message="SQL Server native CDC capture not available for this table.",
+                message=(
+                    "SQL Server native CDC capture is not available and Change "
+                    "Tracking is not enabled for this table."
+                ),
             )
         with cdc._conn() as conn:
             with conn.cursor() as cur:
@@ -545,6 +711,15 @@ def probe_sqlserver_retention(
         result.details["schema"] = schema
         return result
     except Exception as exc:
+        ct = probe_sqlserver_ct_retention(
+            cfg,
+            table=table,
+            schema=schema,
+            cursor_key=ck,
+            watermark=wm,
+        )
+        if ct.status not in {"unknown", "n_a"}:
+            return ct
         return RetentionProbeResult(
             status="unknown",
             dialect="sqlserver",
@@ -552,6 +727,84 @@ def probe_sqlserver_retention(
             cursor_key=ck,
             message=f"Retention probe failed: {exc}",
             details={"error": str(exc)[:300]},
+        )
+
+
+def probe_sqlserver_ct_retention(
+    cfg: dict[str, Any],
+    *,
+    table: str,
+    schema: str = "dbo",
+    cursor_key: str = "",
+    watermark: str | None = None,
+) -> RetentionProbeResult:
+    """Live probe: last_sync_version vs ``CHANGE_TRACKING_MIN_VALID_VERSION``."""
+    from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
+
+    from services.sync_cursor import get_watermark
+
+    ck = (cursor_key or "").strip()
+    wm = watermark if watermark is not None else (get_watermark(ck) if ck else None)
+    resume = _resume_ct_version_from_watermark(wm)
+    if not table:
+        return RetentionProbeResult(
+            status="n_a",
+            dialect="sqlserver",
+            cursor_key=ck,
+            message="table is required for SQL Server Change Tracking retention probe.",
+        )
+    try:
+        from services.cdc_identity import require_cdc_primary_key
+
+        cdc = SqlServerChangeTrackingCdc(
+            {**cfg, "type": cfg.get("type") or "sqlserver"},
+            table=table,
+            primary_key=require_cdc_primary_key(cfg.get("primary_key"), table=table),
+            schema=schema or "dbo",
+            cursor_key=ck,
+        )
+        catalog = cdc._ct_catalog_status(max_age_sec=0)
+        if catalog.get("error") and catalog.get("ct_enabled") is not True:
+            return RetentionProbeResult(
+                status="unknown",
+                dialect="sqlserver",
+                resume=str(resume) if resume is not None else "",
+                cursor_key=ck,
+                message=f"Change Tracking catalog could not be read: {catalog.get('error')}",
+                details={"plugin": "sqlserver_change_tracking", "error": catalog.get("error")},
+            )
+        if catalog.get("ct_enabled") is False:
+            return classify_ct_version_retention(
+                resume,
+                None,
+                ct_enabled=False,
+                cursor_key=ck,
+            ) if resume is not None else RetentionProbeResult(
+                status="n_a",
+                dialect="sqlserver",
+                cursor_key=ck,
+                message="SQL Server Change Tracking is not enabled for this table.",
+                details={"plugin": "sqlserver_change_tracking", "ct_enabled": False},
+            )
+        result = classify_ct_version_retention(
+            catalog.get("resume_version") if catalog.get("resume_version") is not None else resume,
+            catalog.get("min_valid_version"),
+            current_version=catalog.get("current_version"),
+            ct_enabled=catalog.get("ct_enabled"),
+            cursor_key=ck,
+        )
+        result.details["table"] = table
+        result.details["schema"] = schema
+        result.capture_instance = f"{schema}.{table}"
+        return result
+    except Exception as exc:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect="sqlserver",
+            resume=str(resume) if resume is not None else "",
+            cursor_key=ck,
+            message=f"Change Tracking retention probe failed: {exc}",
+            details={"error": str(exc)[:300], "plugin": "sqlserver_change_tracking"},
         )
 
 
@@ -904,6 +1157,33 @@ def attach_cdc_retention(cdc: Any, src_cfg: dict[str, Any] | None, *, table: str
             cursor_key=cursor_key,
             slot_name=str(getattr(cdc, "slot_name", "") or ""),
         )
+        try:
+            setattr(cdc, "_cdc_retention", probe)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return probe
+    if cdc is not None and hasattr(cdc, "_ct_catalog_status"):
+        catalog: dict[str, Any] = {}
+        try:
+            catalog = dict(cdc._ct_catalog_status(max_age_sec=0) or {})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        if not catalog:
+            probe = RetentionProbeResult(
+                status="unknown",
+                dialect="sqlserver",
+                cursor_key=cursor_key,
+                message="Change Tracking catalog could not be read.",
+                details={"plugin": "sqlserver_change_tracking"},
+            )
+        else:
+            probe = classify_ct_version_retention(
+                catalog.get("resume_version"),
+                catalog.get("min_valid_version"),
+                current_version=catalog.get("current_version"),
+                ct_enabled=catalog.get("ct_enabled"),
+                cursor_key=cursor_key,
+            )
         try:
             setattr(cdc, "_cdc_retention", probe)
         except Exception as exc:

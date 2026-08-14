@@ -51,6 +51,19 @@ function num(value: unknown, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+export const CDC_GAP_ERROR_CODES = [
+  "cdc_cursor_gap",
+  "cdc_lsn_gap",
+  "cdc_scn_gap",
+  "cdc_binlog_gap",
+  "cdc_slot_gap",
+  "cdc_ct_gap",
+] as const;
+
+export function isCdcGapErrorCode(code?: string | null): boolean {
+  return Boolean(code && (CDC_GAP_ERROR_CODES as readonly string[]).includes(String(code)));
+}
+
 export function snapshotModeRecoversGap(mode?: string | null): boolean {
   const m = String(mode || "").trim().toLowerCase().replace(/-/g, "_");
   return m === "when_needed" || m === "always" || m === "initial_only";
@@ -138,9 +151,7 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
   const leaseConflict = Boolean(job?.cdc_lease_conflict);
   const cursorGap =
     Boolean(job?.cdc_cursor_gap)
-    || ["cdc_cursor_gap", "cdc_lsn_gap", "cdc_scn_gap", "cdc_binlog_gap", "cdc_slot_gap"].includes(
-      String(job?.error_code || ""),
-    );
+    || isCdcGapErrorCode(job?.error_code);
   const snapshotMode =
     String(job?.snapshot_mode || job?.snapshot_plan?.snapshot_mode || "").trim();
   const sourceHaRole = String(job?.source_ha_role || "").trim().toUpperCase() || null;

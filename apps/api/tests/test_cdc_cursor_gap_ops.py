@@ -81,6 +81,33 @@ def test_humanize_cdc_slot_gap():
     assert "snapshot" in h["fix"].lower()
 
 
+def test_job_has_cursor_gap_includes_ct_code():
+    from services.cdc_cursor_gap import GAP_ERROR_CODES, job_has_cursor_gap
+
+    assert "cdc_ct_gap" in GAP_ERROR_CODES
+    assert job_has_cursor_gap({"error_code": "cdc_ct_gap"}) is True
+    assert job_has_cursor_gap({"error_code": "cdc_slot_gap"}) is True
+    assert job_has_cursor_gap({"error_code": "other"}) is False
+
+
+def test_humanize_cdc_ct_gap():
+    from services.cdc_cursor_gap import CdcCtGapError
+    from services.error_handling import humanize_transfer_failure
+
+    exc = CdcCtGapError(
+        "last_sync_version before min_valid_version",
+        resume_version=4,
+        min_valid_version=10,
+        cursor_key="mssql-ct:db:dbo.orders",
+    )
+    h = humanize_transfer_failure(exc)
+    assert h["code"] == "cdc_ct_gap"
+    assert h["dialect"] == "sqlserver"
+    assert h["resume"] == "4"
+    assert h["retained"] == "10"
+    assert "snapshot" in h["fix"].lower() or "watermark" in h["fix"].lower()
+
+
 def test_job_failure_fields_stamp_cursor_gap():
     from services.cdc_cursor_gap import CdcLsnGapError
     from src.transfer.engine import _job_failure_fields

@@ -2,11 +2,14 @@
 
 Honesty
 -------
-SQL Server ``min_lsn``, Oracle oldest redo, MySQL purged binlog/GTID, and
-PostgreSQL ``pg_replication_slots.wal_status=lost`` (or a dropped slot) mean
-continuous CDC across the gap is impossible. Recreating a logical slot at
-current WAL while holding an old watermark **skips the lost window** — that is
-silent data loss. ``when_needed`` recovers by dropping an invalidated slot,
+SQL Server ``min_lsn`` / Change Tracking ``CHANGE_TRACKING_MIN_VALID_VERSION``,
+Oracle oldest redo, MySQL purged binlog/GTID, and PostgreSQL
+``pg_replication_slots.wal_status=lost`` (or a dropped slot) mean continuous
+CDC across the gap is impossible. Recreating a logical slot at current WAL
+while holding an old watermark **skips the lost window** — that is silent
+data loss. Calling ``CHANGETABLE`` with a last_sync_version below
+``CHANGE_TRACKING_MIN_VALID_VERSION`` can return **invalid** change sets
+(Microsoft: reinitialize; do not enumerate). ``when_needed`` recovers by
 blocking-snapshot of **current** source keys, then streaming from the new tip.
 ``initial`` / ``never`` stay fail-closed. Not exactly-once. Not continuous CDC.
 """
@@ -22,6 +25,7 @@ GAP_ERROR_CODES = frozenset(
         "cdc_scn_gap",
         "cdc_binlog_gap",
         "cdc_slot_gap",
+        "cdc_ct_gap",
     }
 )
 
@@ -179,3 +183,33 @@ class CdcSlotGapError(CdcCursorGapError):
         self.wal_status = wal_status
         self.restart_lsn = restart_lsn
         self.confirmed_flush_lsn = confirmed_flush_lsn
+
+
+class CdcCtGapError(CdcCursorGapError):
+    """SQL Server Change Tracking: last_sync_version before min valid version.
+
+    Microsoft: if last_sync_version < CHANGE_TRACKING_MIN_VALID_VERSION, do not
+    call CHANGETABLE — results are not valid. Reinitialize (blocking snapshot).
+    CHANGE_RETENTION cleanup and TRUNCATE both raise this class.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resume_version: int | str = "",
+        min_valid_version: int | str = "",
+        cursor_key: str = "",
+        snapshot_plan: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            code="cdc_ct_gap",
+            dialect="sqlserver",
+            resume=str(resume_version if resume_version not in (None, "") else ""),
+            retained=str(min_valid_version if min_valid_version not in (None, "") else ""),
+            cursor_key=cursor_key,
+            snapshot_plan=snapshot_plan,
+        )
+        self.resume_version = resume_version
+        self.min_valid_version = min_valid_version

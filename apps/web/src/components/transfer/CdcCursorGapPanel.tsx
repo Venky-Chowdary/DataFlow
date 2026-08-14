@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { clearCdcCursor, fetchCdcCursor } from "../../lib/api";
-import { snapshotModeRecoversGap } from "../../lib/jobTrustScore";
+import { snapshotModeRecoversGap, isCdcGapErrorCode } from "../../lib/jobTrustScore";
 import { JobProgress } from "../../lib/types";
 import { useToast } from "../Toast";
 import { useConfirm } from "../ui/ConfirmDialog";
@@ -39,12 +39,8 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
 
   const isGap =
     Boolean(job.cdc_cursor_gap)
-    || job.error_code === "cdc_cursor_gap"
-    || job.error_code === "cdc_lsn_gap"
-    || job.error_code === "cdc_scn_gap"
-    || job.error_code === "cdc_binlog_gap"
-    || job.error_code === "cdc_slot_gap"
-    || /before capture retention|before available redo|min_lsn|oldest_available|ora-01291|wal_status=lost|replication slot/i.test(
+    || isCdcGapErrorCode(job.error_code)
+    || /before capture retention|before available redo|min_lsn|min_valid_version|last_sync_version|change tracking|oldest_available|ora-01291|wal_status=lost|replication slot/i.test(
       String(job.error || ""),
     );
 

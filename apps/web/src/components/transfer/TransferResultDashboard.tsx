@@ -17,6 +17,7 @@ import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
+import { isCdcGapErrorCode } from "../../lib/jobTrustScore";
 import { MappingProofDrawer, type MappingProof } from "../MappingProofDrawer";
 import { ConnectionReuseCard } from "./ConnectionReuseCard";
 import { PhaseProfileCard } from "./PhaseProfileCard";
@@ -569,7 +570,7 @@ export function TransferResultDashboard({
         </section>
       )}
 
-      {!result.success && (result.cdc_cursor_gap || result.error_code === "cdc_lsn_gap" || result.error_code === "cdc_scn_gap" || result.error_code === "cdc_binlog_gap" || result.error_code === "cdc_slot_gap" || result.error_code === "cdc_cursor_gap") && (
+      {!result.success && (result.cdc_cursor_gap || isCdcGapErrorCode(result.error_code)) && (
         <CdcCursorGapPanel
           job={{
             _id: result.job_id,

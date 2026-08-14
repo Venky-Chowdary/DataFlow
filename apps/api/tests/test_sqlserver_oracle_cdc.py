@@ -72,7 +72,8 @@ def test_sqlserver_poll_hydrates_and_deletes() -> None:
     )
     conn = MagicMock()
     cur = MagicMock()
-    # CT rows then hydrate SELECT *
+    # min_valid + current, then CT rows, then hydrate SELECT *
+    cur.fetchone.return_value = (1, 100)
     cur.description = [("id",), ("amount",)]
     cur.fetchall.side_effect = [
         [(6, "I", "1"), (7, "U", "2"), (8, "D", "3")],
@@ -92,6 +93,54 @@ def test_sqlserver_poll_hydrates_and_deletes() -> None:
     assert any(r.get("id") == "1" for r in batch.inserts)
     assert any(r.get("id") == "2" for r in batch.updates)
     assert decode_sqlserver_resume_token(batch.resume_token)["version"] == 8
+
+
+def test_sqlserver_poll_raises_ct_gap_before_changetable() -> None:
+    """Microsoft: last_sync_version < min_valid must not call CHANGETABLE."""
+    import pytest
+
+    from services.cdc_cursor_gap import CdcCtGapError
+
+    token = encode_sqlserver_resume_token(5, table="orders", phase="streaming")
+    cdc = SqlServerChangeTrackingCdc(
+        {"host": "localhost", "database": "app"},
+        table="orders",
+        primary_key="id",
+        resume_token=token,
+    )
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.fetchone.return_value = (10, 12)
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        with pytest.raises(CdcCtGapError) as exc:
+            list(cdc.poll())
+
+    assert exc.value.code == "cdc_ct_gap"
+    assert exc.value.resume == "5"
+    assert exc.value.retained == "10"
+    changetable_calls = [
+        str(c.args[0]) for c in cur.execute.call_args_list if c.args and "CHANGETABLE" in str(c.args[0])
+    ]
+    assert changetable_calls == []
+
+
+def test_assert_resume_version_in_retention_allows_edge() -> None:
+    from connectors.sqlserver_change_stream import assert_resume_version_in_retention
+    from services.cdc_cursor_gap import CdcCtGapError
+
+    assert_resume_version_in_retention(10, 5, cursor_key="ck")
+    assert_resume_version_in_retention(5, 5, cursor_key="ck")
+    try:
+        assert_resume_version_in_retention(4, 5, cursor_key="ck")
+    except CdcCtGapError as exc:
+        assert exc.code == "cdc_ct_gap"
+        return
+    raise AssertionError("expected CdcCtGapError")
 
 
 def test_oracle_resume_token_and_snapshot() -> None:

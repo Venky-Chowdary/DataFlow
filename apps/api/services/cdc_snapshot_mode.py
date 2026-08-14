@@ -10,10 +10,12 @@ Modes (aligned with Debezium PostgreSQL connector):
 Retention gap (``when_needed``)
 --------------------------------
 Debezium ``snapshot.mode=when_needed`` snapshots when the slot/resume token is
-missing *or* unusable. A present watermark whose LSN/SCN/binlog has been purged
-is broken resume — not "already snapshotted, skip." Production must pass
-``resume_broken`` from the retention probe (``status=gap``), otherwise
-``when_needed`` silently skips snapshot and the job polls a purged cursor.
+missing *or* unusable. A present watermark whose LSN/SCN/binlog/Change Tracking
+version has been purged is broken resume — not "already snapshotted, skip."
+Production must pass ``resume_broken`` from the retention probe (``status=gap``),
+otherwise ``when_needed`` silently skips snapshot and the job polls a purged
+cursor (or, for SQL Server CT, ``CHANGETABLE`` with a stale last_sync_version
+returns an **invalid** change set).
 
 Honesty
 -------

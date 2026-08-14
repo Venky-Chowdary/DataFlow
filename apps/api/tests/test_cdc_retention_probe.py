@@ -173,3 +173,110 @@ def test_attach_cdc_retention_uses_pg_slot_catalog():
     assert probe is not None
     assert probe.status == "gap"
     assert cdc._cdc_retention.status == "gap"
+
+
+def test_classify_ct_version_ok_at_risk_gap():
+    from services.cdc_retention_probe import classify_ct_version_retention
+
+    ok = classify_ct_version_retention(20, 5, current_version=21)
+    assert ok.status == "ok"
+    assert ok.resume == "20"
+    assert ok.retained == "5"
+    assert ok.details.get("plugin") == "sqlserver_change_tracking"
+
+    edge = classify_ct_version_retention(5, 5)
+    assert edge.status == "at_risk"
+
+    gap = classify_ct_version_retention(4, 5, cursor_key="ck-ct")
+    assert gap.status == "gap"
+    assert gap.cursor_key == "ck-ct"
+    assert "changetable" in gap.message.lower()
+    assert "reinitialize" in gap.message.lower() or "snapshot" in gap.message.lower()
+
+    fresh = classify_ct_version_retention(None, 5)
+    assert fresh.status == "no_watermark"
+
+    disabled = classify_ct_version_retention(9, None, ct_enabled=False)
+    assert disabled.status == "gap"
+    assert disabled.retained == "ct_disabled"
+
+    unknown = classify_ct_version_retention(9, None, ct_enabled=True)
+    assert unknown.status == "unknown"
+
+
+def test_when_needed_ct_gap_is_blocking_snapshot():
+    from services.cdc_retention_probe import classify_ct_version_retention
+    from services.cdc_snapshot_mode import KIND_BLOCKING, classify_snapshot_plan, SnapshotMode
+
+    probe = classify_ct_version_retention(3, 10)
+    plan = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="3", retention_status=probe.status
+    )
+    assert plan["kind"] == KIND_BLOCKING
+    assert plan["lost_window"] is True
+    assert plan["run_snapshot"] is True
+
+
+def test_attach_cdc_retention_uses_ct_catalog():
+    from types import SimpleNamespace
+
+    from services.cdc_retention_probe import attach_cdc_retention
+
+    cdc = SimpleNamespace(
+        table="orders",
+        schema="dbo",
+        cursor_key="mssql-ct:db:dbo.orders",
+        version=4,
+        phase="streaming",
+        _ct_catalog_status=lambda max_age_sec=0: {
+            "plugin": "sqlserver_change_tracking",
+            "ct_enabled": True,
+            "min_valid_version": 10,
+            "current_version": 12,
+            "resume_version": 4,
+        },
+    )
+    probe = attach_cdc_retention(cdc, {"type": "sqlserver", "database": "db"}, table="orders")
+    assert probe is not None
+    assert probe.status == "gap"
+    assert probe.resume == "4"
+    assert probe.retained == "10"
+    assert cdc._cdc_retention.status == "gap"
+
+
+def test_attach_ct_catalog_unreachable_is_unknown_not_gap():
+    """A down SQL Server is not a CHANGE_RETENTION gap — do not snapshot-skip WAL."""
+    from types import SimpleNamespace
+
+    from services.cdc_retention_probe import attach_cdc_retention
+
+    cdc = SimpleNamespace(
+        table="orders",
+        schema="dbo",
+        cursor_key="mssql-ct:db:dbo.orders",
+        version=4,
+        phase="streaming",
+        _ct_catalog_status=lambda max_age_sec=0: {
+            "plugin": "sqlserver_change_tracking",
+            "ct_enabled": None,
+            "min_valid_version": None,
+            "current_version": None,
+            "resume_version": 4,
+            "error": "connection refused",
+        },
+    )
+    probe = attach_cdc_retention(cdc, {"type": "sqlserver", "database": "db"}, table="orders")
+    assert probe is not None
+    assert probe.status == "unknown"
+
+
+def test_resume_ct_version_from_streaming_token():
+    from connectors.sqlserver_change_stream import encode_sqlserver_resume_token
+    from services.cdc_retention_probe import _resume_ct_version_from_watermark
+
+    token = encode_sqlserver_resume_token(42, table="orders", phase="streaming")
+    assert _resume_ct_version_from_watermark(token) == 42
+    snap = encode_sqlserver_resume_token(42, table="orders", phase="snapshot", offset=10)
+    assert _resume_ct_version_from_watermark(snap) is None
+    assert _resume_ct_version_from_watermark(None) is None
+    assert _resume_ct_version_from_watermark("mssql-ct:orders:7") == 7
