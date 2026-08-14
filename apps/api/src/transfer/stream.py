@@ -46,7 +46,11 @@ from .adapters import (
     resolve_dest_table,
 )
 from .connector_capabilities import resolve_driver_type
-from .stream_row_accounting import stamp_incremental_no_op, stamp_source_row_count
+from .stream_row_accounting import (
+    begin_table_population,
+    stamp_incremental_no_op,
+    stamp_source_row_count,
+)
 from .stream_foreign_keys import (
     ForeignKeyContext as _ForeignKeyContext,
     carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
@@ -2757,6 +2761,7 @@ def run_non_cdc_multi_stream_sequential(
             if remaining_limit == 0 and limit > 0:
                 break
             stream_name = (contract.name or "").strip() or "stream"
+            begin_table_population(checkpoint)
             if getattr(source, "format", "") == "mongodb" or original_collection:
                 source.collection = stream_name
             else:

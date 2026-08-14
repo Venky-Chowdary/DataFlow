@@ -485,6 +485,7 @@ def _is_already_present(error: str) -> bool:
         "duplicate foreign key",
         "duplicate object",
         "duplicate constraint",
+        "duplicate key on write or update",  # MariaDB 1005/121: FK index already there
         "there is already an object named",
         "42710",  # PostgreSQL duplicate_object
         "1826",  # MySQL duplicate foreign key constraint name

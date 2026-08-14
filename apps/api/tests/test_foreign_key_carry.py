@@ -331,6 +331,21 @@ def test_duplicate_alter_stays_planned_so_the_catalog_can_certify():
     assert settled[0].integrity_violation is False
 
 
+def test_mariadb_duplicate_fk_index_is_already_present_not_a_failure():
+    """InnoDB reports errno 121 when the nested single-table carry already added it."""
+    plan = _plan(dest_dialect="mysql", dest_schema="")
+
+    def execute(_sql: str) -> None:
+        raise RuntimeError(
+            '(1005, \'Can\\\'t create table `shop`.`orders` '
+            '(errno: 121 "Duplicate key on write or update")\')'
+        )
+
+    settled = apply_foreign_keys(plan, execute)
+    assert settled[0].status == "planned"
+    assert settled[0].integrity_violation is False
+
+
 def test_a_name_too_long_for_oracle_is_shortened_without_colliding():
     long_col = "customer_reference_identifier_column"
     plan = plan_foreign_keys(

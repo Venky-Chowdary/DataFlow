@@ -11,8 +11,8 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 3 | Source reads are snapshot-consistent | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property3_source_snapshot_consistent.py -q` (3 passed) | PostgreSQL full-refresh REPEATABLE READ + LSN/export_snapshot; SQLite deferred txn; inline write-pass fingerprints (no second scan by default) | MySQL consistent snapshot; Mongo majority/clusterTime; Oracle flashback SCN; SQL Server SI; Snowflake/BQ time-travel; incremental sync (watermark by design) |
 | 4 | Writes are exactly-once observable | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property4_observable_exactly_once.py -q` (3 passed) | SQLite+PostgreSQL insert ledger (same-txn; row_start/row_end/attempt); kill-mid-chunk resume = clean checksum | Mongo/Kafka/object-store/warehouse sinks (NOT_GUARANTEED); MySQL live kill proof (Docker down); quarantine salvage path still not same-txn |
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
-| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py -q` (53 passed with generic_sql create-new on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK carried and dest-catalog certified (violating INSERT refused); bare Map VARCHAR inherits source `(n)`; TEXT UNIQUE refused (no invented prefix) | Oracle/SQL Server dedicated-writer DDL carry; FK ordering (Property 7); unportable CHECK stays unsupported; identity RESTART; partitioning |
-| 7 | Referential integrity across multi-table migration | UNPROVEN | — | — | — |
+| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py -q` (53 passed with generic_sql create-new on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK carried and dest-catalog certified (violating INSERT refused); bare Map VARCHAR inherits source `(n)`; TEXT UNIQUE refused (no invented prefix) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; identity RESTART; partitioning |
+| 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | UNPROVEN | — | — | — |
 | 9 | Every row is accounted for | UNPROVEN | — | — | — |
 | 10 | Determinism | UNPROVEN | — | — | — |
@@ -298,10 +298,75 @@ Includes:
 ### NOT claimed / remaining for PROVEN
 * Oracle / SQL Server dedicated-writer create-new constraint carry
   (`generic_sql` already plans; native writers are the remaining hole)
-* FOREIGN KEY ordering (Property 7) — measured on source, not carried on
-  single-table create-new (parent must exist first)
+* FOREIGN KEY carry is Property 7 (post-load ALTER; not on single-table CREATE)
 * Unportable CHECK predicates (casts, subqueries, unknown functions) stay
   `unsupported` by design; no trigger-emulation of CHECK (AWS SCT class)
 * Views, triggers, generated expressions, identity RESTART, partitioning
 * Name-collision remaps under adversarial identifier fixtures (policy coded;
   not yet matrix-proven)
+
+---
+
+## Property 7 — PARTIAL (2026-08-14)
+
+### Defect (competitor class)
+
+AWS DMS does not migrate foreign keys. Full load is alphabetical (or parallel),
+so operators are told to disable enforcement (`FOREIGN_KEY_CHECKS=0` /
+`session_replication_role=replica`) and re-add constraints by hand. Airbyte and
+Fivetran drop FKs. A row-count and a checksum of copied rows stay green while
+orphans exist.
+
+### Algorithm
+
+1. Measure source FKs (`probe_foreign_keys`) — `unavailable` ≠ empty.
+2. Load **parents first**. Operator order and alphabetical order are both
+   ignored when they would insert children first. Each table is its own
+   population on the shared job checkpoint (offset/keyset/quarantine reset).
+3. After every selected table has landed, `ALTER TABLE … ADD CONSTRAINT …
+   FOREIGN KEY`. The engine then validates the loaded rows.
+4. Certify `carried` only from the destination catalog (structural match —
+   child columns, parent table, parent columns — not constraint name).
+5. An ALTER rejected because of orphans is `integrity_violation` (a data
+   finding). Duplicate-object on resume or nested single-table carry stays
+   planned so the catalog can still certify (MariaDB errno 121 included).
+6. SQLite destination cannot ALTER ADD FK without rebuilding the table; that
+   is `unsupported`, never a silent drop.
+
+Identity maps (empty Map document) and parent-key remaps are part of the
+planner. Catalog lookups use `catalog_namespace` (MySQL = database name, never
+leaked `public`).
+
+### Proof output (this host)
+
+```
+cd apps/api && python -m pytest tests/test_foreign_key_carry.py \
+       tests/test_foreign_key_metadata.py \
+       tests/test_property7_referential_integrity.py -q
+44 passed in 2.29s
+
+Includes:
+  SQLite dest: parents-first order (zzz_cust before aaa_ord), ALTER refused
+    (rebuild), dest PRAGMA foreign_key_list empty, rows landed.
+  SQLite→PG: dest information_schema FOREIGN KEY present, orphan INSERT
+    raises IntegrityError.
+  SQLite→MariaDB 10.11: dest CONSTRAINT_TYPE FOREIGN KEY present, orphan
+    INSERT raises 1452.
+  PG→PG via dest schema: source pg_constraint measured, dest schema isolated,
+    orphan INSERT refused.
+  Orphan source rows (SQLite FK defined, enforcement off): dest ALTER
+    rejected, verdict referential_integrity_violated, dest catalog has no FK.
+  Single-table child with parent already on PG dest: FK carried.
+```
+
+### NOT claimed / remaining for PROVEN
+
+* Oracle / SQL Server live `ALTER TABLE ADD CONSTRAINT` (planner covers them;
+  this host has no those engines)
+* SQLite destination ADD FK (table rebuild would rewrite proven rows — refused
+  by design)
+* CDC apply with destination FKs enabled (full-load carry only; CDC remains
+  at-least-once upsert)
+* Cross-schema / cross-database references; composite live matrix
+* Exactly-once / 100% of all routes — not claimed
+

@@ -99,6 +99,8 @@ def carry_foreign_keys_after_load(
         )
         if context.cycle:
             summary["cycle"] = list(context.cycle)
+        if context.order:
+            summary["dependency_order"] = list(context.order)
         return summary
     except Exception as exc:
         logger.warning("foreign key carry failed: %s", exc, exc_info=exc)

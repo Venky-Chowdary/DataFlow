@@ -22,8 +22,20 @@ import pytest
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
+from services.checkpoint_service import Checkpoint
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
+from src.transfer.stream_row_accounting import begin_table_population
+
+
+def test_each_table_starts_its_own_population_on_the_shared_job_checkpoint():
+    """Sequential multi-stream must not inherit the previous table's offset."""
+    ck = Checkpoint(job_id="j", offset=40, chunk_index=3, rows_processed=40, cursor_value="9")
+    begin_table_population(ck)
+    assert ck.offset == 0
+    assert ck.chunk_index == 0
+    assert ck.rows_processed == 0
+    assert ck.cursor_value is None
 
 
 def _run(req: TransferRequest):
@@ -188,9 +200,8 @@ def test_sqlite_dest_orders_parents_first_and_refuses_rebuild(tmp_path: Path):
         )
     )
     assert result.success, result.error
-    ddl = " ".join(result.ddl_executed or [])
-    assert f"FK dependency order: {parent} -> {child}" in ddl
     summary = _fk_summary(result)
+    assert summary.get("dependency_order") == [parent, child], summary
     child_decision = _carried_child(summary, child)
     assert child_decision["status"] == "unsupported"
     assert "rebuild" in child_decision["reason"]
@@ -241,9 +252,8 @@ def test_sqlite_to_pg_carries_fk_and_dest_catalog_rejects_orphans(tmp_path: Path
     )
     try:
         assert result.success, result.error
-        ddl = " ".join(result.ddl_executed or [])
-        assert f"FK dependency order: {parent} -> {child}" in ddl
         summary = _fk_summary(result)
+        assert summary.get("dependency_order") == [parent, child], summary
         assert summary.get("carried") >= 1, summary
         child_decision = _carried_child(summary, child)
         assert child_decision["status"] == "carried"
