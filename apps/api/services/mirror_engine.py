@@ -189,6 +189,23 @@ def _compute_active_checksum(
     )
 
 
+def _dest_engine_count(conn: Any, sql: str) -> int | None:
+    """Dest-engine COUNT(*). Failure is unmeasured — never 0-from-error."""
+    import sqlalchemy as sa
+
+    try:
+        row = conn.execute(sa.text(sql)).fetchone()
+    except Exception as exc:
+        logging.getLogger(__name__).info("mirror transition COUNT failed: %s", exc)
+        return None
+    if row is None or row[0] is None:
+        return None
+    try:
+        return int(row[0])
+    except (TypeError, ValueError):
+        return None
+
+
 def apply_inferred_deletes_via_staging(
     conn: Any,
     target_qualified: str,
@@ -197,32 +214,58 @@ def apply_inferred_deletes_via_staging(
     *,
     soft_delete_column: str = SOFT_DELETE_COLUMN,
     dialect: str = "",
-) -> None:
+) -> dict[str, Any]:
     """Set-based inferred deletes: keys in staging stay active; dest \\ staging soft-delete.
 
-    Fivetran-style full-refresh mirror as one anti-join — not OFFSET pages of
-    dest PKs. Boolean literals follow ``sql_bool_*`` (SQL Server BIT / Oracle
-    NUMBER(1)). Does not close Gate-8 by itself.
+    This-run census is dest-engine COUNT of *transitions* before UPDATE:
+
+    * reactivated = currently deleted AND in staging
+    * soft_deleted = currently active AND not in staging
+
+    Driver ``rowcount`` is not this proof (SQLAlchemy may return -1; a
+    reactivate UPDATE that touches already-active rows is not a reactivate).
+    ``RETURNING`` / ``OUTPUT`` is a future enhancement of this kernel, not a
+    second path. Does not close Gate-8. Unmeasured COUNT stays ``None``.
     """
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
-    from services.dialect_profiles import sql_bool_false_literal, sql_bool_true_literal
+    from services.dialect_profiles import (
+        sql_bool_false_literal,
+        sql_bool_is_not_true,
+        sql_bool_is_true,
+        sql_bool_true_literal,
+    )
 
     _ensure_soft_delete_column(conn, target_qualified, soft_delete_column)
     dialect_name = dialect or str(getattr(getattr(conn, "dialect", None), "name", "") or "")
     col_quoted = quote_sql_identifier(soft_delete_column)
     true_lit = sql_bool_true_literal(dialect_name)
     false_lit = sql_bool_false_literal(dialect_name)
+    deleted_pred = sql_bool_is_true(dialect_name, col_quoted)
+    active_pred = sql_bool_is_not_true(dialect_name, col_quoted)
     join_pred = " AND ".join(
         f"{staging_qualified}.{quote_sql_identifier(c)} = "
         f"{target_qualified}.{quote_sql_identifier(c)}"
         for c in pk_columns
     )
+    reactivated = _dest_engine_count(
+        conn,
+        f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
+        f"WHERE {deleted_pred} "
+        f"AND EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})",
+    )
+    soft_deleted = _dest_engine_count(
+        conn,
+        f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
+        f"WHERE {active_pred} "
+        f"AND NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})",
+    )
     conn.execute(
         sa.text(
             f"UPDATE {target_qualified} "  # nosec B608
             f"SET {col_quoted} = {false_lit} "
-            f"WHERE EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})"
+            f"WHERE EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
+            f"AND {deleted_pred}"
         )
     )
     conn.execute(
@@ -230,9 +273,14 @@ def apply_inferred_deletes_via_staging(
             f"UPDATE {target_qualified} "  # nosec B608
             f"SET {col_quoted} = {true_lit} "
             f"WHERE NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
-            f"AND ({col_quoted} IS NULL OR {col_quoted} = {false_lit})"
+            f"AND {active_pred}"
         )
     )
+    return {
+        "soft_deleted": soft_deleted,
+        "reactivated": reactivated,
+        "soft_delete_column": soft_delete_column,
+    }
 
 
 def apply_inferred_soft_deletes(
@@ -308,6 +356,8 @@ def apply_inferred_soft_deletes(
             from services.reconciliation_api import iter_select_row_dicts
 
             sql = f"SELECT {pk_quoted}, {col_quoted} FROM {qualified}"  # nosec B608
+            from services.tombstone import is_tombstone_set
+
             for rows in iter_select_row_dicts(
                 conn,
                 sa.text(sql),
@@ -315,19 +365,24 @@ def apply_inferred_soft_deletes(
                 itersize=batch_size,
             ):
                 scanned += len(rows)
-                target_keys: set[str] = set()
+                reactivate_keys: list[str] = []
+                delete_keys: list[str] = []
                 for row in rows:
                     pk_val = _compose_key(row, pk_columns)
-                    if pk_val and not all(p == "" for p in pk_val.split(_KEY_SEP)):
-                        target_keys.add(pk_val)
+                    if not pk_val or all(p == "" for p in pk_val.split(_KEY_SEP)):
+                        continue
+                    deleted = is_tombstone_set(row, soft_delete_column)
+                    if pk_val in source_keys:
+                        if deleted:
+                            reactivate_keys.append(pk_val)
+                    elif not deleted:
+                        delete_keys.append(pk_val)
 
-                activate = [k for k in target_keys if k in source_keys]
-                delete = [k for k in target_keys if k not in source_keys]
-                a, d = _update_deleted_batch(
-                    conn, qualified, pk_columns, activate, delete, soft_delete_column
+                _update_deleted_batch(
+                    conn, qualified, pk_columns, reactivate_keys, delete_keys, soft_delete_column
                 )
-                activated_total += a
-                deactivated_total += d
+                activated_total += len(reactivate_keys)
+                deactivated_total += len(delete_keys)
 
             active_rows, active_checksum = _compute_active_checksum(
                 conn, qualified, target_cols, soft_delete_column, batch_size

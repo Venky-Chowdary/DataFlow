@@ -1005,7 +1005,13 @@ TypeScript does not recompute dest.
   extra=0; missing source keys stay missing). Catalog dest COUNT is
   `len` of that snapshot, never `scan().count()`. MoR / deletion
   vectors Planned.
-* Stream-path this-run `soft_deleted` / `reactivated` census (module-size freeze on `stream.py`)
+* Stream-path this-run `soft_deleted` / `reactivated` census — dest-engine
+  COUNT of transitions before the anti-join UPDATE (currently deleted ∩
+  staging = reactivated; currently active \\ staging = inferred delete).
+  Driver `rowcount` is not this proof. Already-active dest keys in the
+  snapshot are not reactivates. `RETURNING` / `OUTPUT` is a future
+  enhancement of this kernel. Stream `extract_mirror_payload` carries
+  top-level census; SCD2 `active_checksum` is not `_deleted`.
 * Oracle / SQL Server dest COUNT + leftover MERGE listing — algorithm in
   `dest_precount` dest-engine `COUNT(*)` / `SELECT pk` (never
   `sys.partitions` / `sys.dm_db_partition_stats.row_count` / Oracle

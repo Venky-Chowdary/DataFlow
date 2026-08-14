@@ -3245,12 +3245,14 @@ def stream_scd2_mirror_transfer(
                     "refuse inventing a conflict key from the first mapped column"
                 )
             with engine.connect() as conn:
-                apply_inferred_deletes_via_staging(
-                    conn,
-                    target_qualified,
-                    staging_qualified,
-                    pk_cols,
-                    dialect=dest_type,
+                dest_summary.update(
+                    apply_inferred_deletes_via_staging(
+                        conn,
+                        target_qualified,
+                        staging_qualified,
+                        pk_cols,
+                        dialect=dest_type,
+                    )
                 )
                 conn.commit()
                 active_count, active_checksum = _compute_active_checksum(

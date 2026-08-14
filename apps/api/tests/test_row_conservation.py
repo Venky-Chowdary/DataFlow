@@ -1767,6 +1767,45 @@ def test_mirror_stream_path_closes_on_top_level_active_rows():
     assert ledger["rows_written_source"] == DEST_ACTIVE_READBACK
 
 
+def test_mirror_stream_path_this_run_census_is_dest_engine_transitions():
+    """This-run inferred deletes are dest-engine transitions, not driver rowcount."""
+    ledger = account_job(
+        {
+            "sync_mode": "mirror",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 3,
+                "target_rows": 3,
+                "target_checksum": "active-digest",
+            },
+            "destination_summary": {
+                "sync_mode": "mirror",
+                "active_rows": 3,
+                "active_checksum": "active-digest",
+                "soft_delete_column": "_deleted",
+                "soft_deleted": 1,
+                "reactivated": 0,
+            },
+        }
+    ).to_dict()
+    assert ledger["conservation_kind"] == KIND_MIRROR
+    assert ledger["inferred_deletes"] == 1
+    assert ledger["reactivated"] == 0
+    assert "this run inferred 1 delete" in ledger["note"].lower()
+
+
+def test_stream_scd2_top_level_active_is_not_a_mirror_payload():
+    from services.row_conservation import extract_mirror_payload
+
+    assert extract_mirror_payload(
+        {
+            "sync_mode": "scd2",
+            "active_rows": 2,
+            "active_checksum": "current-digest",
+        }
+    ) == {}
+
+
 def test_mirror_without_active_census_is_unmeasured():
     ledger = account_job(
         {

@@ -836,9 +836,12 @@ def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
     SCD2 stamps ``active_rows`` + ``active_checksum`` for Gate-8 cell
     fidelity of *current* versions. That is temporal ``is_current``, not
     a tombstone. Do not treat it as ``COUNT(*) WHERE NOT _deleted``.
+    Stream-path this-run ``soft_deleted`` / ``reactivated`` are dest-engine
+    transition counts, not driver rowcount.
     """
     data = dict(dest or {})
-    if str(data.get("mode") or "").lower() == "scd2":
+    sync = str(data.get("sync_mode") or data.get("mode") or "").lower()
+    if _is_scd2_sync(sync) or str(data.get("mode") or "").lower() == "scd2":
         return {}
     if isinstance(data.get("scd2"), dict) and not isinstance(data.get("mirror"), dict):
         return {}
@@ -856,6 +859,9 @@ def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
             "active_rows": data.get("active_rows"),
             "active_checksum": data.get("active_checksum"),
             "soft_delete_column": data.get("soft_delete_column") or "_deleted",
+            "soft_deleted": data.get("soft_deleted"),
+            "reactivated": data.get("reactivated"),
+            "rows_scanned": data.get("rows_scanned"),
             "mode": "mirror",
         }
     return {}

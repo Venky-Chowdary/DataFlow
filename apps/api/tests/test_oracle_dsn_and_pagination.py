@@ -176,7 +176,14 @@ def test_inferred_deletes_via_staging_emits_numeric_bool_on_mssql() -> None:
 
         def execute(self, stmt, params=None):  # noqa: ARG002
             self.sql.append(str(stmt))
-            return type("R", (), {"rowcount": 0})()
+
+            class _R:
+                rowcount = 0
+
+                def fetchone(self):
+                    return (0,)
+
+            return _R()
 
         def commit(self):
             return None
@@ -191,5 +198,6 @@ def test_inferred_deletes_via_staging_emits_numeric_bool_on_mssql() -> None:
     joined = "\n".join(conn.sql).upper()
     assert "FALSE" not in joined
     assert "TRUE" not in joined
+    assert "SELECT COUNT(*)" in joined
     assert "SET" in joined and "= 0" in joined
     assert "= 1" in joined
