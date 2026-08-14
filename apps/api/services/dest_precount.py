@@ -33,7 +33,13 @@ XML stays unmeasured until a dest-engine record COUNT exists.
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
 append delta and first-write overwrite (missing table/object = 0) can close.
-Writer ``Table.upsert`` / PUT rowcount is not that proof.
+Writer ``Table.upsert`` / PUT rowcount is not that proof. Object-store dest
+COUNT is the same artifact machine as local file export (Excel value rows,
+streamed Avro, Parquet/ORC footer). A JSON-parse fallback that yields ``[]``
+is dest=0 — that would close overwrite on Parquet/Excel bytes. Unparseable
+or truncated part listings stay unmeasured; never sum a prefix. Catalog
+SKUs (``amazon_s3``) alias onto ``s3`` the same way Azure SQL aliases onto
+``sqlserver``.
 
 Oracle and SQL Server (Azure SQL, RDS, Autonomous SKUs) answer dest COUNT
 and leftover MERGE listing with dest-engine ``COUNT(*)`` / ``SELECT pk``.
@@ -207,14 +213,6 @@ _IDENTITY_SCAN_MAX = _KEYSET_CENSUS_MAX
 
 _ARTIFACT_FORMATS = frozenset({
     "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc",
-})
-_OBJECT_STORE_DRIVERS = frozenset({
-    "s3",
-    "gcs",
-    "adls",
-    "azure_blob_storage",
-    "azure_data_lake",
-    "azure_data_lake_storage",
 })
 
 
@@ -460,7 +458,7 @@ def destination_row_count(
         if db_type in {"iceberg", "apache_iceberg"}:
             return _iceberg_row_count(cfg, schema=schema, table_name=table)
 
-        if db_type in _OBJECT_STORE_DRIVERS:
+        if _object_store_kind(db_type) in {"s3", "gcs", "adls"}:
             return _object_store_row_count(db_type, cfg, table_name=table)
 
         from services.dialect_profiles import warehouse_sql_quote_dialect
@@ -1380,9 +1378,20 @@ def _iceberg_key_hits(
 
 
 def _object_store_kind(db_type: str) -> str:
-    if db_type in {"adls", "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage"}:
+    """Catalog SKU → dest-engine family. ``amazon_s3`` counts as ``s3``."""
+    key = str(db_type or "").strip().lower()
+    if key in {
+        "adls",
+        "azure_blob_storage",
+        "azure_data_lake",
+        "azure_data_lake_storage",
+    }:
         return "adls"
-    return db_type
+    if key in {"s3", "amazon_s3"}:
+        return "s3"
+    if key == "gcs":
+        return "gcs"
+    return key
 
 
 def _object_store_list_and_get(
@@ -1471,6 +1480,12 @@ def _object_store_get_bytes(
 def _object_store_row_count(
     db_type: str, cfg: dict[str, Any], *, table_name: str
 ) -> int | None:
+    """Dest-engine artifact COUNT of GET bodies. Missing object is 0.
+
+    Same format machine as local ``count_artifact_rows``. A truncated or
+    unparseable part is unmeasured — never JSON-fallback empty, never the
+    sum of a prefix. Writer PUT rowcount is not this proof.
+    """
     bucket = str(cfg.get("database") or "").strip()
     key = str(table_name or "").strip()
     if not bucket or not key:
@@ -1481,12 +1496,15 @@ def _object_store_row_count(
         return None
     if not payloads:
         return 0
-    from services.reconciliation import _rows_from_object_bytes
-
     total = 0
     for obj_key, body in payloads:
-        rows, _headers = _rows_from_object_bytes(body, obj_key)
-        total += len(rows)
+        n = _count_artifact_payload(body, name=str(obj_key))
+        if n is None:
+            logger.info(
+                "object-store dest COUNT unmeasured for %s/%s", bucket, obj_key
+            )
+            return None
+        total += n
     return total
 
 
@@ -1674,6 +1692,23 @@ def _count_json_bytes(content: bytes) -> int | None:
     return None
 
 
+def _count_parquet_bytes(content: bytes) -> int | None:
+    import io
+
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        return None
+    try:
+        metadata = pq.ParquetFile(io.BytesIO(content)).metadata
+        if metadata is None:
+            return None
+        return int(metadata.num_rows)
+    except Exception as exc:
+        logger.info("parquet artifact count unavailable: %s", exc)
+        return None
+
+
 def _count_parquet_path(path: Path) -> int | None:
     try:
         import pyarrow.parquet as pq
@@ -1686,6 +1721,24 @@ def _count_parquet_path(path: Path) -> int | None:
         return int(metadata.num_rows)
     except Exception as exc:
         logger.info("parquet artifact count unavailable at %s: %s", path, exc)
+        return None
+
+
+def _count_orc_bytes(content: bytes) -> int | None:
+    import io
+
+    try:
+        from pyarrow import orc
+    except ImportError:
+        return None
+    try:
+        reader = orc.ORCFile(io.BytesIO(content))
+        n = getattr(reader, "nrows", None)
+        if n is None:
+            n = reader.read().num_rows
+        return int(n)
+    except Exception as exc:
+        logger.info("orc artifact count unavailable: %s", exc)
         return None
 
 
@@ -1736,6 +1789,57 @@ def _count_avro_bytes(content: bytes) -> int | None:
         return None
 
 
+def _count_artifact_kind(kind: str, content: bytes) -> int | None:
+    """Record COUNT for already-decoded artifact bytes. Unknown kind is None."""
+    if kind not in _ARTIFACT_FORMATS:
+        return None
+    if kind == "parquet":
+        return _count_parquet_bytes(content)
+    if kind == "orc":
+        return _count_orc_bytes(content)
+    try:
+        if kind in {"csv", "tsv"}:
+            from services.csv_profiler import count_csv_rows
+
+            return int(count_csv_rows(content))
+        if kind == "jsonl":
+            return _count_jsonl_bytes(content)
+        if kind == "json":
+            return _count_json_bytes(content)
+        if kind == "excel":
+            return _count_excel_bytes(content)
+        if kind == "avro":
+            return _count_avro_bytes(content)
+    except Exception as exc:
+        logger.info("artifact count failed for kind %s: %s", kind, exc)
+        return None
+    return None
+
+
+def _count_artifact_payload(
+    content: bytes,
+    *,
+    name: str,
+    fmt: str | None = None,
+) -> int | None:
+    """Dest-engine COUNT of an object-store GET body. Same machine as a local file.
+
+    Gzip keys decompress first. Unparseable / unsupported / missing parser
+    stay unmeasured — never JSON-fallback empty (that is dest=0).
+    """
+    label = str(name or "")
+    body = content
+    if label.lower().endswith(".gz"):
+        try:
+            body = gzip.decompress(content)
+        except Exception as exc:
+            logger.info("artifact gzip decode failed for %s: %s", label, exc)
+            return None
+        label = label[: -len(".gz")]
+    kind = _infer_artifact_format(Path(label), fmt)
+    return _count_artifact_kind(kind, body)
+
+
 def count_artifact_rows(
     path: str | Path | None,
     *,
@@ -1766,23 +1870,7 @@ def count_artifact_rows(
     content = _read_artifact_bytes(artifact)
     if content is None:
         return None
-    try:
-        if kind in {"csv", "tsv"}:
-            from services.csv_profiler import count_csv_rows
-
-            return int(count_csv_rows(content))
-        if kind == "jsonl":
-            return _count_jsonl_bytes(content)
-        if kind == "json":
-            return _count_json_bytes(content)
-        if kind == "excel":
-            return _count_excel_bytes(content)
-        if kind == "avro":
-            return _count_avro_bytes(content)
-    except Exception as exc:
-        logger.info("artifact count failed for %s (%s): %s", artifact, kind, exc)
-        return None
-    return None
+    return _count_artifact_kind(kind, content)
 
 
 def stamp_artifact_census(
