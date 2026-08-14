@@ -3192,6 +3192,9 @@ def test_object_store_xml_gate8_checksum_is_unique_path_not_json_empty(
     )
     assert nested_n == 3
     assert nested_digest
+    nested_rows = list(iter_xml_dicts(nested))
+    assert [r["id"] for r in nested_rows] == ["1", "2", "3"]
+    assert all("items" in r for r in nested_rows)
 
     document = b"<note><to>T</to><from>F</from></note>"
     _patch_object_store_payloads(monkeypatch, [("exports/doc.xml", document)])

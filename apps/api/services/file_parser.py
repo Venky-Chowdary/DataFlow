@@ -1691,7 +1691,15 @@ def _xml_rewindable(source: Any) -> tuple[Any, Any]:
 def _iter_xml_dicts_at_path(
     source: Any, xml_iterparse: Any, parent_path: str, tag: str
 ) -> Any:
-    """Second StAX pass: emit flattened dicts at the unique COUNT path."""
+    """Second StAX pass: emit flattened dicts at the unique COUNT path.
+
+    Pass 1 (COUNT) may ``elem.clear()`` on every end — it only needs
+    dict/empty/scalar kind. Pass 2 must not: clearing a child before its
+    parent record ends would serialize empty shells (``id=""``) and still
+    COUNT as n. Clear only after the unique-path record is materialized.
+    Empty shells of already-emitted records stay under the parent — the
+    same O(n) COUNT lesson; O(depth) unlink is a future of this kernel.
+    """
     stack: list[str] = []
     for event, elem in xml_iterparse(  # nosec B314
         source,
@@ -1707,7 +1715,7 @@ def _iter_xml_dicts_at_path(
         current_parent = "/" + "/".join(stack) if stack else ""
         if current_parent == parent_path and local == tag:
             yield _xml_elem_record(elem)
-        elem.clear()
+            elem.clear()
 
 
 def _iter_xml_dicts_dom(text: str) -> Any:
