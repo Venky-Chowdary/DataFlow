@@ -361,11 +361,10 @@ def _sqlite_upsert_batch(
 
     table_quoted = quote_sql_identifier(table_name)
     lattice = _sqlite_physical_lattice(cur, table_name)
-    owned = {str(n).casefold() for n in lattice}
-    update_cols = [
-        c for c in target_cols if c not in conflict_cols and str(c).casefold() not in owned
-    ]
-    insert_cols = [c for c in target_cols if str(c).casefold() not in owned]
+    from services.mirror_engine import upsert_insert_columns, upsert_set_columns
+
+    update_cols = upsert_set_columns(target_cols, conflict_cols, lattice)
+    insert_cols = upsert_insert_columns(target_cols, lattice)
     cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
     placeholders = ", ".join("?" for _ in insert_cols)
     conflict_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)

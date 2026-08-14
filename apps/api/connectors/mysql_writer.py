@@ -204,7 +204,11 @@ def _mysql_apply_sparse_upsert(
         return cursor.fetchone()
 
     def update_non_pk(non_pk: dict[str, Any], pk_vals: list[Any]) -> int:
-        set_cols = list(non_pk.keys())
+        from services.mirror_engine import upsert_set_columns
+
+        set_cols = upsert_set_columns(list(non_pk.keys()), [])
+        if not set_cols:
+            return 0
         set_sql = ", ".join(
             f"{quote_sql_identifier(c, '`')}=%s" for c in set_cols
         )
@@ -215,7 +219,11 @@ def _mysql_apply_sparse_upsert(
         return int(cursor.rowcount or 0)
 
     def insert_present(present: dict[str, Any]) -> None:
-        cols = list(present.keys())
+        from services.mirror_engine import upsert_insert_columns
+
+        cols = upsert_insert_columns(list(present.keys()))
+        if not cols:
+            return
         col_sql = ", ".join(quote_sql_identifier(c, "`") for c in cols)
         ph = ", ".join(["%s"] * len(cols))
         cursor.execute(
@@ -272,7 +280,9 @@ def _mysql_insert_sql(
     if write_mode == "upsert" and conflict_columns:
         conflict = [c for c in conflict_columns if c in target_cols]
         if conflict:
-            update_cols = [c for c in target_cols if c not in conflict]
+            from services.mirror_engine import upsert_set_columns
+
+            update_cols = upsert_set_columns(target_cols, conflict)
             if update_cols:
                 if DF_LSN_COL in target_cols:
                     from connectors.writer_common import mysql_lsn_values_newer_sql

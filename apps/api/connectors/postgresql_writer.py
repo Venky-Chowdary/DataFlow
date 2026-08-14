@@ -114,7 +114,11 @@ def _pg_apply_sparse_upsert(
         return cursor.fetchone()
 
     def update_non_pk(non_pk: dict[str, Any], pk_vals: list[Any]) -> int:
-        set_cols = list(non_pk.keys())
+        from services.mirror_engine import upsert_set_columns
+
+        set_cols = upsert_set_columns(list(non_pk.keys()), [])
+        if not set_cols:
+            return 0
         set_clause = sql.SQL(", ").join(
             sql.SQL("{} = %s").format(sql.Identifier(c)) for c in set_cols
         )
@@ -130,7 +134,11 @@ def _pg_apply_sparse_upsert(
         return int(cursor.rowcount or 0)
 
     def insert_present(present: dict[str, Any]) -> None:
-        cols = list(present.keys())
+        from services.mirror_engine import upsert_insert_columns
+
+        cols = upsert_insert_columns(list(present.keys()))
+        if not cols:
+            return
         cursor.execute(
             sql.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
                 sql.Identifier(schema),
@@ -234,6 +242,122 @@ def uses_pg_on_conflict_upsert(engine: str) -> bool:
     return (engine or "postgresql").lower() not in {"redshift", "amazon_redshift", "redshift_serverless"}
 
 
+def _pg_probe_physical_lattice(
+    cursor: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+) -> tuple[str, ...]:
+    """SELECT 1=0 of ``_deleted``. Failure must not abort the write txn."""
+    from services.mirror_engine import SOFT_DELETE_COLUMN
+
+    sp = "df_lat_probe"
+    try:
+        cursor.execute(f"SAVEPOINT {sp}")
+    except Exception:
+        sp = ""
+    try:
+        cursor.execute(
+            sql_mod.SQL("SELECT {} FROM {}.{} WHERE FALSE").format(
+                sql_mod.Identifier(SOFT_DELETE_COLUMN),
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+            )
+        )
+        if sp:
+            cursor.execute(f"RELEASE SAVEPOINT {sp}")
+        return (SOFT_DELETE_COLUMN,)
+    except Exception:
+        if sp:
+            try:
+                cursor.execute(f"ROLLBACK TO SAVEPOINT {sp}")
+            except Exception as exc:
+                logger.debug("Exception suppressed: %s", exc, exc_info=exc)
+        return ()
+
+
+def _pg_family_update_insert_upsert(
+    cursor: Any,
+    sql_mod: Any,
+    *,
+    schema: str,
+    table_name: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    batch: list[Any],
+    lattice: tuple[str, ...],
+) -> list[Any]:
+    """psycopg spelling of ``merge_dialects.update_insert_upsert``. Never DELETE."""
+    from services.mirror_engine import upsert_insert_columns, upsert_set_columns
+
+    update_cols = upsert_set_columns(target_cols, conflict_cols, lattice)
+    insert_cols = upsert_insert_columns(target_cols, lattice)
+
+    def _project(row: Any, cols: list[str]) -> tuple[Any, ...]:
+        if isinstance(row, dict):
+            return tuple(row.get(c) for c in cols)
+        return tuple(row[target_cols.index(c)] for c in cols)
+
+    keys = [_project(row, conflict_cols) for row in batch]
+    existing: set[tuple[Any, ...]] = set()
+    pk_idents = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in conflict_cols)
+    for i in range(0, len(keys), 400):
+        part = keys[i : i + 400]
+        row_ph = sql_mod.SQL(", ").join(
+            sql_mod.SQL("(" + ", ".join(["%s"] * len(conflict_cols)) + ")")
+            for _ in part
+        )
+        cursor.execute(
+            sql_mod.SQL("SELECT {} FROM {}.{} WHERE ({}) IN ({})").format(
+                pk_idents,
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                pk_idents,
+                row_ph,
+            ),
+            [v for key in part for v in key],
+        )
+        existing.update(tuple(found) for found in cursor.fetchall())
+    to_update: list[tuple[Any, ...]] = []
+    to_insert: list[tuple[Any, ...]] = []
+    for row, key in zip(batch, keys):
+        if key in existing:
+            if update_cols:
+                to_update.append(_project(row, update_cols) + key)
+        else:
+            to_insert.append(_project(row, insert_cols))
+    if to_update and update_cols:
+        set_clause = sql_mod.SQL(", ").join(
+            sql_mod.SQL("{} = %s").format(sql_mod.Identifier(c)) for c in update_cols
+        )
+        where = sql_mod.SQL(" AND ").join(
+            sql_mod.SQL("{} = %s").format(sql_mod.Identifier(c)) for c in conflict_cols
+        )
+        cursor.executemany(
+            sql_mod.SQL("UPDATE {}.{} SET {} WHERE {}").format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                set_clause,
+                where,
+            ),
+            to_update,
+        )
+    if to_insert:
+        cols_sql = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in insert_cols)
+        ph = sql_mod.SQL(", ").join(sql_mod.Placeholder() * len(insert_cols))
+        cursor.executemany(
+            sql_mod.SQL("INSERT INTO {}.{} ({}) VALUES ({})").format(
+                sql_mod.Identifier(schema),
+                sql_mod.Identifier(table_name),
+                cols_sql,
+                ph,
+            ),
+            to_insert,
+        )
+    return []
+
+
 def _redshift_delete_by_keys(
     cursor: Any,
     sql_mod: Any,
@@ -246,12 +370,14 @@ def _redshift_delete_by_keys(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
 ) -> list[tuple] | list[list]:
-    """Upsert matching keys on Redshift (MERGE preferred, delete+insert fallback).
+    """Upsert matching keys on Redshift (MERGE preferred).
 
-    Prefer native ``MERGE`` (AWS Redshift) so update+insert is one statement —
-    Airbyte/Fivetran-class. Falls back to TEMP stage DELETE + caller INSERT when
-    MERGE is unavailable. Honors ``_df_lsn`` (stale redelivery skip). Returns
-    rows that still need INSERT (empty when MERGE applied the batch).
+    Prefer native ``MERGE`` so update+insert is one statement. Dest-owned
+    lattice is never SET. When MERGE is unavailable and the dest has lattice
+    columns, portable UPDATE+INSERT runs — never DELETE (INSERT DEFAULT would
+    un-delete). Delete+insert remains only when the dest has no lattice.
+    Honors ``_df_lsn``. Returns rows that still need INSERT (empty when this
+    function applied the batch).
     """
     if not batch or not conflict_cols:
         return list(batch)
@@ -283,9 +409,26 @@ def _redshift_delete_by_keys(
         raise
     except Exception as exc:
         logger.warning(
-            "Redshift MERGE unavailable (%s); falling back to delete+insert",
+            "Redshift MERGE unavailable (%s); falling back",
             exc,
             exc_info=exc,
+        )
+
+    from services.mirror_engine import lattice_column_names
+
+    lattice = lattice_column_names(target_cols) or _pg_probe_physical_lattice(
+        cursor, sql_mod, schema=schema, table_name=table_name
+    )
+    if lattice:
+        return _pg_family_update_insert_upsert(
+            cursor,
+            sql_mod,
+            schema=schema,
+            table_name=table_name,
+            target_cols=target_cols,
+            conflict_cols=conflict_cols,
+            batch=batch,
+            lattice=lattice,
         )
 
     # Set-based path: stage → DELETE USING → return rows that should insert.
@@ -459,17 +602,20 @@ def _redshift_merge_upsert(
     cursor.executemany(insert_sql, rows_out)
 
     # Redshift MERGE: target without alias; source aliased as s.
-    # NULL-safe ON (Airbyte destination-redshift class).
+    # NULL-safe ON (Airbyte destination-redshift class). Lattice is dest-owned
+    # — never SET (Fivetran ``_fivetran_deleted=false`` hole).
+    from services.mirror_engine import upsert_insert_columns, upsert_set_columns
+
     tgt = sql_mod.SQL("{}.{}").format(
         sql_mod.Identifier(schema), sql_mod.Identifier(table_name)
     )
-    set_clause = sql_mod.SQL(", ").join(
-        sql_mod.SQL("{} = s.{}").format(sql_mod.Identifier(c), sql_mod.Identifier(c))
-        for c in target_cols
+    set_cols = upsert_set_columns(target_cols, conflict_cols)
+    insert_cols_src = upsert_insert_columns(target_cols)
+    insert_col_list = sql_mod.SQL(", ").join(
+        sql_mod.Identifier(c) for c in insert_cols_src
     )
-    insert_col_list = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in target_cols)
     insert_val_list = sql_mod.SQL(", ").join(
-        sql_mod.SQL("s.{}").format(sql_mod.Identifier(c)) for c in target_cols
+        sql_mod.SQL("s.{}").format(sql_mod.Identifier(c)) for c in insert_cols_src
     )
     on_parts = []
     for c in conflict_cols:
@@ -480,11 +626,30 @@ def _redshift_merge_upsert(
             ).format(t=tgt, c=col)
         )
     on_sql = sql_mod.SQL(" AND ").join(on_parts)
-    merge_sql = sql_mod.SQL(
-        "MERGE INTO {} USING {} AS s ON {} "
-        "WHEN MATCHED THEN UPDATE SET {} "
-        "WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})"
-    ).format(tgt, sql_mod.Identifier(stage), on_sql, set_clause, insert_col_list, insert_val_list)
+    if set_cols:
+        set_clause = sql_mod.SQL(", ").join(
+            sql_mod.SQL("{} = s.{}").format(sql_mod.Identifier(c), sql_mod.Identifier(c))
+            for c in set_cols
+        )
+        merge_sql = sql_mod.SQL(
+            "MERGE INTO {} USING {} AS s ON {} "
+            "WHEN MATCHED THEN UPDATE SET {} "
+            "WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})"
+        ).format(
+            tgt,
+            sql_mod.Identifier(stage),
+            on_sql,
+            set_clause,
+            insert_col_list,
+            insert_val_list,
+        )
+    else:
+        merge_sql = sql_mod.SQL(
+            "MERGE INTO {} USING {} AS s ON {} "
+            "WHEN NOT MATCHED THEN INSERT ({}) VALUES ({})"
+        ).format(
+            tgt, sql_mod.Identifier(stage), on_sql, insert_col_list, insert_val_list
+        )
     cursor.execute(merge_sql)
     try:
         cursor.execute(sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage)))
@@ -1022,7 +1187,9 @@ def _copy_upsert_batch(
         _copy_rows_temp(cur, stage, target_cols, [tuple(r) for r in batch])
         col_list = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in target_cols)
         conflict = sql_mod.SQL(", ").join(sql_mod.Identifier(c) for c in conflict_cols)
-        update_cols = [c for c in target_cols if c not in conflict_cols]
+        from services.mirror_engine import upsert_set_columns
+
+        update_cols = upsert_set_columns(target_cols, conflict_cols)
         if update_cols:
             set_clause = sql_mod.SQL(", ").join(
                 sql_mod.SQL("{} = EXCLUDED.{}").format(
@@ -1333,7 +1500,9 @@ def write_mapped_rows(
         ):
             conflict = [c for c in conflict_columns if c in target_cols]
             if conflict:
-                update_cols = [c for c in target_cols if c not in conflict]
+                from services.mirror_engine import upsert_set_columns
+
+                update_cols = upsert_set_columns(target_cols, conflict)
                 if update_cols:
                     set_clause = sql.SQL(", ").join(
                         sql.SQL("{} = EXCLUDED.{}").format(

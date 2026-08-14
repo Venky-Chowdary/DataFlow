@@ -41,6 +41,42 @@ def lattice_column_names(columns: Any) -> tuple[str, ...]:
     return tuple(found)
 
 
+def upsert_set_columns(
+    target_cols: list[str],
+    conflict_cols: list[str] | None = None,
+    lattice: tuple[str, ...] | None = None,
+) -> list[str]:
+    """Columns eligible for ON CONFLICT / ON DUPLICATE / MERGE SET.
+
+    Dest-owned lattice is never SET — that is the Fivetran
+    ``_fivetran_deleted=false`` hole. Conflict/PK columns are never SET.
+    Pass a physical probe as ``lattice`` when the mapped column list omits
+    ``_deleted``; otherwise names present on ``target_cols`` are excluded.
+    """
+    names = lattice if lattice is not None else lattice_column_names(target_cols)
+    owned = {str(n).casefold() for n in names}
+    conflict = {str(c) for c in (conflict_cols or [])}
+    return [
+        c
+        for c in target_cols
+        if c not in conflict and str(c).casefold() not in owned
+    ]
+
+
+def upsert_insert_columns(
+    target_cols: list[str],
+    lattice: tuple[str, ...] | None = None,
+) -> list[str]:
+    """INSERT column list with dest-owned lattice removed.
+
+    New keys take dest DEFAULT (active). Existing keys must not be rewritten
+    by INSERT of the lattice column.
+    """
+    names = lattice if lattice is not None else lattice_column_names(target_cols)
+    owned = {str(n).casefold() for n in names}
+    return [c for c in target_cols if str(c).casefold() not in owned]
+
+
 def lattice_columns_on_table(conn: Any, table_obj: Any) -> tuple[str, ...]:
     """Lattice columns on the *physical* dest table, not the mapped write Table.
 

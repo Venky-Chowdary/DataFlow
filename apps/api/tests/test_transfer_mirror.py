@@ -286,3 +286,176 @@ def test_native_upsert_does_not_set_lattice_when_unique_exists(tmp_path: Path) -
     assert row is not None
     assert row[0] == "b"
     assert int(row[1]) == 1
+
+
+def test_upsert_set_columns_excludes_lattice() -> None:
+    from services.mirror_engine import upsert_insert_columns, upsert_set_columns
+
+    assert upsert_set_columns(["id", "name", "_deleted"], ["id"]) == ["name"]
+    assert upsert_insert_columns(["id", "name", "_deleted"]) == ["id", "name"]
+    assert upsert_set_columns(["id", "name"], ["id"], ("_deleted",)) == ["name"]
+
+
+def test_mysql_on_duplicate_sql_does_not_set_lattice() -> None:
+    """Dedicated MySQL writer must not SET dest-owned ``_deleted``."""
+    from connectors.mysql_writer import _mysql_insert_sql
+
+    sql = _mysql_insert_sql(
+        table_q="`dst`",
+        target_cols=["id", "name", "_deleted"],
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    insert, _, dup = sql.partition("ON DUPLICATE KEY UPDATE")
+    assert dup, sql
+    assert "`name`=VALUES(`name`)" in dup.replace(" ", "") or "`name`=VALUES(`name`)" in dup
+    assert "_deleted" not in dup
+
+
+def test_mysql_writer_upsert_does_not_undelete_lattice() -> None:
+    """Live MariaDB/MySQL: payload ``_deleted=0`` must not revive a tombstone."""
+    import socket
+    import uuid
+
+    import pytest
+
+    try:
+        with socket.create_connection(("127.0.0.1", 3306), timeout=1):
+            pass
+    except OSError:
+        pytest.skip("MySQL/MariaDB not reachable on localhost:3306")
+
+    import pymysql
+
+    from connectors.mysql_writer import write_mapped_rows
+
+    table = "mirror_lat_my_" + uuid.uuid4().hex[:8]
+    conn = pymysql.connect(
+        host="127.0.0.1",
+        port=3306,
+        database="dataflow",
+        user="dataflow",
+        password="dataflow",
+        autocommit=True,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE `{table}` ("
+                "id VARCHAR(32) PRIMARY KEY, name VARCHAR(64), "
+                "_deleted TINYINT NOT NULL DEFAULT 0)"
+            )
+            cur.execute(
+                f"INSERT INTO `{table}` (id, name, _deleted) VALUES ('1', 'a', 1)"
+            )
+        result = write_mapped_rows(
+            host="127.0.0.1",
+            port=3306,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            schema="dataflow",
+            connection_string="",
+            ssl=False,
+            table_name=table,
+            headers=["id", "name", "_deleted"],
+            data_rows=[["1", "b", "0"], ["2", "c", "0"]],
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 0.95},
+                {"source": "name", "target": "name", "confidence": 0.95},
+                {"source": "_deleted", "target": "_deleted", "confidence": 0.95},
+            ],
+            column_types={"id": "string", "name": "string", "_deleted": "integer"},
+            create_table=False,
+            write_mode="upsert",
+            conflict_columns=["id"],
+        )
+        assert result.ok, result.error
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT id, name, _deleted FROM `{table}` ORDER BY id")
+            rows = {str(r[0]): (r[1], int(r[2])) for r in cur.fetchall()}
+        assert rows["1"] == ("b", 1)
+        assert rows["2"] == ("c", 0)
+    finally:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+        except Exception:
+            pass
+        conn.close()
+
+
+def test_postgresql_writer_upsert_does_not_undelete_lattice() -> None:
+    """Live PostgreSQL: ON CONFLICT SET must not revive a tombstone."""
+    import socket
+    import uuid
+
+    import pytest
+
+    try:
+        with socket.create_connection(("127.0.0.1", 5432), timeout=1):
+            pass
+    except OSError:
+        pytest.skip("PostgreSQL not reachable on localhost:5432")
+
+    import psycopg2
+
+    from connectors.postgresql_writer import write_mapped_rows
+
+    table = "mirror_lat_pg_" + uuid.uuid4().hex[:8]
+    conn = psycopg2.connect(
+        host="127.0.0.1",
+        port=5432,
+        dbname="dataflow",
+        user="dataflow",
+        password="dataflow",
+    )
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f'CREATE TABLE public."{table}" ('
+                "id TEXT PRIMARY KEY, name TEXT, "
+                "_deleted INTEGER NOT NULL DEFAULT 0)"
+            )
+            cur.execute(
+                f'INSERT INTO public."{table}" (id, name, _deleted) '
+                "VALUES ('1', 'a', 1)"
+            )
+        result = write_mapped_rows(
+            host="127.0.0.1",
+            port=5432,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            schema="public",
+            connection_string="",
+            ssl=False,
+            table_name=table,
+            headers=["id", "name", "_deleted"],
+            data_rows=[["1", "b", "0"], ["2", "c", "0"]],
+            mappings=[
+                {"source": "id", "target": "id", "confidence": 0.95},
+                {"source": "name", "target": "name", "confidence": 0.95},
+                {"source": "_deleted", "target": "_deleted", "confidence": 0.95},
+            ],
+            column_types={"id": "string", "name": "string", "_deleted": "integer"},
+            create_table=False,
+            write_mode="upsert",
+            conflict_columns=["id"],
+        )
+        assert result.ok, result.error
+        with conn.cursor() as cur:
+            cur.execute(
+                f'SELECT id, name, _deleted FROM public."{table}" ORDER BY id'
+            )
+            rows = {str(r[0]): (r[1], int(r[2])) for r in cur.fetchall()}
+        assert rows["1"] == ("b", 1)
+        assert rows["2"] == ("c", 0)
+    finally:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
+        except Exception:
+            pass
+        conn.close()
