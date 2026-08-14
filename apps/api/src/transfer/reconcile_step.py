@@ -235,6 +235,110 @@ def _ladder_declined(report: dict[str, Any], rows: int, budget: int) -> dict[str
     return out
 
 
+def _maybe_engine_profile_ladder(
+    report: dict[str, Any],
+    *,
+    endpoint: EndpointConfig,
+    source_endpoint: EndpointConfig | None,
+    records: list[dict],
+    columns: list[str],
+    dest_summary: dict[str, Any],
+    mappings: list[dict],
+    dest_type: str,
+) -> dict[str, Any] | None:
+    """Engine-side L2 for oversized same-engine SQL routes, at any scale.
+
+    The in-memory ladder refuses above ``VERIFICATION_LADDER_MAX_ROWS`` and only
+    L1/L3 survive — so on exactly the large tables where a migration's stakes are
+    highest, the column-level checks that catch a silently nulled or truncated
+    field stop running. When both ends are the same SQL engine family, the engine
+    can still compute per-column NULL/min/max/sum in SQL over any number of rows,
+    so that signal is restored rather than declined. Returns ``None`` for small
+    populations (the richer in-memory ladder runs) and for any route it cannot
+    profile, leaving the existing decline in charge.
+    """
+    if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
+        return None
+    from services.column_profile import engine_profile_ladder, same_profile_family
+    from services.verification_ladder import (
+        MAX_LADDER_ROWS,
+        attach_ladder_to_reconcile_report,
+    )
+
+    known = max(
+        _as_count(report.get("source_rows")),
+        _as_count(report.get("target_rows")),
+        len(records or []),
+    )
+    if known <= MAX_LADDER_ROWS:
+        return None
+
+    from .connector_capabilities import resolve_driver_type
+
+    source_type = resolve_driver_type(source_endpoint.format or "")
+    if not same_profile_family(source_type, dest_type):
+        return None
+
+    from services.mapping_constraints import is_intentional_omit
+
+    pairs: list[tuple[str, str]] = []
+    types: dict[str, str] = {}
+    for m in mappings or []:
+        if is_intentional_omit(m):
+            continue
+        src = str(m.get("source") or "").strip()
+        tgt = str(m.get("target") or src).strip()
+        if not src or not tgt:
+            continue
+        pairs.append((src, tgt))
+        tt = str(m.get("target_type") or m.get("inferredType") or "").strip()
+        if tt:
+            types[tgt] = tt
+    if not pairs:
+        pairs = [(c, c) for c in (columns or []) if c]
+    if not pairs:
+        return None
+    physical = dest_summary.get("column_types") or dest_summary.get("target_types")
+    if isinstance(physical, dict):
+        for k, v in physical.items():
+            if v:
+                types[str(k)] = str(v)
+
+    src_cfg = resolve_connector_config(source_endpoint)
+    dst_cfg = resolve_connector_config(endpoint)
+    try:
+        ladder = engine_profile_ladder(
+            source_engine=source_type,
+            source_cfg=src_cfg,
+            source_schema=str(source_endpoint.schema or src_cfg.get("schema") or "public"),
+            source_table=str(
+                source_endpoint.table
+                or source_endpoint.collection
+                or src_cfg.get("table")
+                or ""
+            ),
+            dest_engine=dest_type,
+            dest_cfg=dst_cfg,
+            dest_schema=str(dst_cfg.get("schema") or dest_summary.get("schema") or "public"),
+            dest_table=str(
+                endpoint.table or dest_summary.get("table") or dst_cfg.get("table") or ""
+            ),
+            pairs=pairs,
+            types=types,
+            source_rows=_as_count(report.get("source_rows")),
+            target_rows=_as_count(report.get("target_rows")),
+            rejected_rows=_as_count(report.get("rejected_rows")),
+            coerced_null_rows=_as_count(report.get("coerced_null_rows")),
+            rows_skipped=_as_count(report.get("rows_skipped")),
+        )
+    except Exception as exc:  # noqa: BLE001 — any failure declines to the existing skip
+        logging.getLogger(__name__).info("engine profile ladder skipped: %s", exc)
+        return None
+    if ladder is None:
+        return None
+    return attach_ladder_to_reconcile_report(report, ladder)
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -259,6 +363,23 @@ def _maybe_attach_verification_ladder(
     from .connector_capabilities import resolve_driver_type
 
     dest_type = resolve_driver_type(endpoint.format)
+
+    # Oversized same-engine SQL routes: the in-memory ladder below declines, but
+    # the engine can still profile every column at full scale. Purely additive —
+    # only runs when the population exceeds the in-memory budget.
+    engine_profile = _maybe_engine_profile_ladder(
+        report,
+        endpoint=endpoint,
+        source_endpoint=source_endpoint,
+        records=records,
+        columns=columns,
+        dest_summary=dest_summary,
+        mappings=mappings,
+        dest_type=dest_type,
+    )
+    if engine_profile is not None:
+        return engine_profile
+
     if dest_type not in {"sqlite", "postgresql", "redshift"}:
         return report
 
