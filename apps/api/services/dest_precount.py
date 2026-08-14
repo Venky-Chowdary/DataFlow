@@ -49,14 +49,17 @@ population is RFC 4180 ``csv.reader`` rows after the header
 (``count_csv_rows``), never ``wc -l``, never spreadsheet ``,,,,``
 blank lines. Quoted embedded newlines are one record. Local CSV/TSV
 is counted from the path; gzip CSV/TSV streams. Excel / Parquet / ORC gzip
-still decompresses first (workbook / footer parsers need a byte image).
+stream-decompress into one rewindable image (``GzipFile`` +
+``rewindable_byte_source``). Footer/workbook parsers need seek; Hadoop
+GzipCodec is not splittable — this is not a fake sequential COUNT.
+Never ``gzip.decompress(source.read())`` (compressed + decompressed copies).
 Avro is a sequential object-container (header + blocks), not a footer
 format — local and GET gzip Avro stream through ``GzipFile`` like JSONL.
 Object-store GET of CSV/JSON/JSONL/XML/Avro streams the HTTP body
 (gzip through ``GzipFile(fileobj=StreamingBody)``).
 COUNT does not ``Body.read()`` the object, does not hold every part in
 RAM, and does not ``gzip.decompress`` a second copy. Excel/Parquet/ORC
-GET still materializes one object (workbook / footer parsers). Gate-8 cell
+GET gzip uses the same ``GzipFile`` + spool kernel. Gate-8 cell
 checksum of those same GET streams is ``checksum_object_store`` — never
 ``json.loads`` fallback empty (gzip CSV / Parquet as UTF-8 JSON garbage
 was dest=0). JSON root array, JSONL objects, CSV RFC 4180 dicts, streamed
@@ -266,6 +269,7 @@ _ARTIFACT_FORMATS = frozenset({
     "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc", "xml",
 })
 _STREAMING_COUNT_KINDS = frozenset({"csv", "tsv", "json", "jsonl", "xml", "avro"})
+_BYTE_IMAGE_KINDS = frozenset({"parquet", "orc", "excel"})
 
 
 class UnmeasuredArtifact(Exception):
@@ -295,23 +299,12 @@ def source_can_rewind(source: Any) -> bool:
         return False
 
 
-def rewindable_byte_source(source: Any) -> tuple[Any, Any]:
-    """Rewindable byte source. One-shot GET is spooled; never hash a prefix.
+def _spool_byte_source(source: Any) -> tuple[Any, Any]:
+    """Copy a forward-only stream into a seekable image (RAM until 8 MiB).
 
-    Unique-path identity is known only after the document ends. Pass 1
-    discovers; pass 2 emits. Seekable handles (``BytesIO``, local files,
-    gzip wrapping a file) rewind in place. A StreamingBody — including
-    gzip wrapping a non-seekable prefix stream — is copied once to a
-    ``SpooledTemporaryFile`` (RAM until 8 MiB, then disk). Hadoop's
-    local two-pass, not a second parser and not O(n) record buffering
-    of every sibling collection. JSON and XML Gate-8 share this kernel.
+    Hadoop's local two-pass: one sequential read, then cheap ``seek``.
+    Chunked ``read(1 MiB)`` — never unsized ``Body.read()`` of a GET.
     """
-    if source_can_rewind(source):
-        try:
-            source.seek(0)
-            return source, None
-        except (OSError, AttributeError, io.UnsupportedOperation, ValueError):
-            pass
     spool = tempfile.SpooledTemporaryFile(max_size=_ARTIFACT_SPOOL_MAX)
     try:
         while True:
@@ -326,6 +319,27 @@ def rewindable_byte_source(source: Any) -> tuple[Any, Any]:
         spool.close()
         raise
     return spool, spool.close
+
+
+def rewindable_byte_source(source: Any) -> tuple[Any, Any]:
+    """Rewindable uncompressed byte container. One-shot GET is spooled.
+
+    Unique-path identity is known only after the document ends. Pass 1
+    discovers; pass 2 emits. Parquet/ORC footers seek to the end;
+    Excel is a zip workbook. ``GzipFile.seek`` is decompress-from-start
+    (and CPython reports seekable even when the compressed GET cannot
+    rewind). A gzip wrapper is always spooled once — the spool is the
+    byte container. Uncompressed seekable handles (``BytesIO``, local
+    files) rewind in place. JSON/XML Gate-8 and footer/workbook COUNT
+    share this kernel. Never ``gzip.decompress(source.read())``.
+    """
+    if isinstance(source, gzip.GzipFile) or not source_can_rewind(source):
+        return _spool_byte_source(source)
+    try:
+        source.seek(0)
+        return source, None
+    except (OSError, AttributeError, io.UnsupportedOperation, ValueError):
+        return _spool_byte_source(source)
 
 
 def _count(conn: Any, table_ref: str) -> int:
@@ -1670,14 +1684,27 @@ def _sftp_row_count(cfg: dict[str, Any], *, table_name: str) -> int | None:
                 pass
 
 
-def _iter_parquet_records(body: bytes) -> Any:
+def _seek_start(source: Any) -> Any:
+    """Byte 0 of an uncompressed image. Footer/workbook parsers seek."""
+    if isinstance(source, (bytes, bytearray)):
+        return io.BytesIO(bytes(source))
+    try:
+        source.seek(0)
+    except Exception as exc:
+        raise UnmeasuredArtifact("byte_image_not_seekable") from exc
+    return source
+
+
+def _iter_parquet_records(source: Any) -> Any:
     """Cell values of one Parquet object. Footer ``num_rows`` is COUNT, not this."""
     try:
         import pyarrow.parquet as pq
     except ImportError as exc:
         raise UnmeasuredArtifact("parquet_checksum_needs_pyarrow") from exc
     try:
-        table = pq.read_table(io.BytesIO(body))
+        table = pq.read_table(_seek_start(source))
+    except UnmeasuredArtifact:
+        raise
     except Exception as exc:
         raise UnmeasuredArtifact("parquet_unparseable") from exc
     for batch in table.to_batches():
@@ -1687,14 +1714,16 @@ def _iter_parquet_records(body: bytes) -> Any:
             yield rec
 
 
-def _iter_orc_records(body: bytes) -> Any:
+def _iter_orc_records(source: Any) -> Any:
     """Cell values of one ORC object. Footer ``nrows`` is COUNT, not this."""
     try:
         from pyarrow import orc
     except ImportError as exc:
         raise UnmeasuredArtifact("orc_checksum_needs_pyarrow") from exc
     try:
-        table = orc.ORCFile(io.BytesIO(body)).read()
+        table = orc.ORCFile(_seek_start(source)).read()
+    except UnmeasuredArtifact:
+        raise
     except Exception as exc:
         raise UnmeasuredArtifact("orc_unparseable") from exc
     for batch in table.to_batches():
@@ -1704,14 +1733,14 @@ def _iter_orc_records(body: bytes) -> Any:
             yield rec
 
 
-def _iter_excel_records(body: bytes) -> Any:
+def _iter_excel_records(source: Any) -> Any:
     """Value-bearing Excel dicts. Used-range / ``max_row`` is not dest."""
     try:
         from services.excel_parser import iter_excel_dicts
     except ImportError as exc:
         raise UnmeasuredArtifact("excel_checksum_needs_parser") from exc
     try:
-        yield from iter_excel_dicts(body)
+        yield from iter_excel_dicts(source)
     except UnmeasuredArtifact:
         raise
     except Exception as exc:
@@ -1796,18 +1825,57 @@ def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
     raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
 
 
-def _iter_byte_image_kind(kind: str, body: bytes, *, name: str) -> Any:
-    """Parquet/ORC/Excel value walk of one materialized object. Never JSON ``[]``."""
-    if kind == "parquet":
-        yield from _iter_parquet_records(body)
-        return
-    if kind == "orc":
-        yield from _iter_orc_records(body)
-        return
-    if kind == "excel":
-        yield from _iter_excel_records(body)
-        return
-    raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
+def _iter_byte_image_kind(kind: str, source: Any, *, name: str) -> Any:
+    """Parquet/ORC/Excel value walk of one seekable uncompressed image.
+
+    Gzip is already a ``GzipFile`` on entry; ``rewindable_byte_source``
+    spools it once so footer seeks are not decompress-from-start.
+    Never ``gzip.decompress(source.read())``. Never JSON ``[]``.
+    """
+    image, closer = rewindable_byte_source(source)
+    try:
+        if kind == "parquet":
+            yield from _iter_parquet_records(image)
+            return
+        if kind == "orc":
+            yield from _iter_orc_records(image)
+            return
+        if kind == "excel":
+            yield from _iter_excel_records(image)
+            return
+        raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def _artifact_stream_open(
+    source: Any,
+    *,
+    name: str,
+    fmt: str | None = None,
+) -> tuple[str, Any, Any]:
+    """Kind + handle for one GET. Gzip is ``GzipFile``, never ``source.read()``.
+
+    Returns ``(kind, handle, gzip_closer)``. Streaming kinds walk the
+    handle forward-only. Footer/workbook kinds spool via
+    ``rewindable_byte_source``.
+    """
+    label = str(name or "")
+    compressed = label.lower().endswith(".gz")
+    if compressed:
+        label = label[: -len(".gz")]
+    kind = _infer_artifact_format(Path(label), fmt)
+    if not compressed:
+        return kind, source, None
+    try:
+        stream = gzip.GzipFile(fileobj=source, mode="rb")
+    except Exception as exc:
+        raise UnmeasuredArtifact(f"gzip_stream_failed:{name}") from exc
+    return kind, stream, stream.close
 
 
 def _iter_artifact_records(
@@ -1819,46 +1887,27 @@ def _iter_artifact_records(
     """Dest-engine records of an object-store GET. Same gzip machine as COUNT.
 
     CSV/JSON/JSONL/XML/Avro (including gzip) walk ``source`` forward-only.
-    Parquet/ORC/Excel still materialize one object (byte-image /
-    workbook / footer parsers). JSON unique-path cell dicts (root array or wrapped)
-    and XML unique-path cell dicts are a second StAX pass of the COUNT
-    path (one-shot GET is spooled once). Never ``json.loads`` fallback empty.
+    Parquet/ORC/Excel gzip stream-decompress into one rewindable image
+    (footer / workbook parsers). JSON unique-path cell dicts (root array
+    or wrapped) and XML unique-path cell dicts are a second StAX pass of
+    the COUNT path (one-shot GET is spooled once). Never ``json.loads``
+    fallback empty. Never ``gzip.decompress(source.read())``.
     """
-    label = str(name or "")
-    compressed = label.lower().endswith(".gz")
-    if compressed:
-        label = label[: -len(".gz")]
-    kind = _infer_artifact_format(Path(label), fmt)
-    if compressed:
-        if kind in _STREAMING_COUNT_KINDS:
-            try:
-                stream = gzip.GzipFile(fileobj=source, mode="rb")
-            except Exception as exc:
-                raise UnmeasuredArtifact(f"gzip_stream_failed:{name}") from exc
-            try:
-                yield from _iter_streaming_kind(kind, stream, name=name)
-            finally:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
-            return
-        try:
-            body = gzip.decompress(source.read())
-        except Exception as exc:
-            raise UnmeasuredArtifact(f"gzip_decode_failed:{name}") from exc
-        yield from _iter_byte_image_kind(kind, body, name=name)
-        return
-    if kind in _STREAMING_COUNT_KINDS:
-        yield from _iter_streaming_kind(kind, source, name=name)
-        return
+    kind, handle, gz_close = _artifact_stream_open(source, name=name, fmt=fmt)
     try:
-        raw = source.read()
-    except Exception as exc:
-        raise UnmeasuredArtifact(f"artifact_slurp_failed:{name}") from exc
-    if not isinstance(raw, (bytes, bytearray)):
-        raise UnmeasuredArtifact(f"artifact_non_bytes:{name}")
-    yield from _iter_byte_image_kind(kind, bytes(raw), name=name)
+        if kind in _STREAMING_COUNT_KINDS:
+            yield from _iter_streaming_kind(kind, handle, name=name)
+            return
+        if kind in _BYTE_IMAGE_KINDS:
+            yield from _iter_byte_image_kind(kind, handle, name=name)
+            return
+        raise UnmeasuredArtifact(f"{kind or 'unknown'}_checksum_unmeasured:{name}")
+    finally:
+        if gz_close is not None:
+            try:
+                gz_close()
+            except Exception:
+                pass
 
 
 def _checksum_records(
@@ -2212,17 +2261,6 @@ def _infer_artifact_format(path: Path, fmt: str | None) -> str:
     return ""
 
 
-def _read_artifact_bytes(path: Path) -> bytes | None:
-    try:
-        if path.name.lower().endswith(".gz"):
-            with gzip.open(path, "rb") as handle:
-                return handle.read()
-        return path.read_bytes()
-    except OSError as exc:
-        logger.info("artifact bytes unreadable at %s: %s", path, exc)
-        return None
-
-
 def open_artifact_binary(path: Path) -> tuple[Any, Any]:
     """Byte source for dest COUNT. ``*.gz`` is a gzip stream, never a slurp.
 
@@ -2256,18 +2294,19 @@ def artifact_byte_source(content: bytes | str | Path | Any) -> tuple[Any, Any]:
     raise TypeError("artifact COUNT expects bytes, str, Path, or a readable stream")
 
 
-def _count_parquet_bytes(content: bytes) -> int | None:
-    import io
-
+def _count_parquet_handle(source: Any) -> int | None:
+    """Footer ``num_rows`` of a seekable uncompressed Parquet image."""
     try:
         import pyarrow.parquet as pq
     except ImportError:
         return None
     try:
-        metadata = pq.ParquetFile(io.BytesIO(content)).metadata
+        metadata = pq.ParquetFile(_seek_start(source)).metadata
         if metadata is None:
             return None
         return int(metadata.num_rows)
+    except UnmeasuredArtifact:
+        return None
     except Exception as exc:
         logger.info("parquet artifact count unavailable: %s", exc)
         return None
@@ -2288,19 +2327,20 @@ def _count_parquet_path(path: Path) -> int | None:
         return None
 
 
-def _count_orc_bytes(content: bytes) -> int | None:
-    import io
-
+def _count_orc_handle(source: Any) -> int | None:
+    """Footer ``nrows`` of a seekable uncompressed ORC image."""
     try:
         from pyarrow import orc
     except ImportError:
         return None
     try:
-        reader = orc.ORCFile(io.BytesIO(content))
+        reader = orc.ORCFile(_seek_start(source))
         n = getattr(reader, "nrows", None)
         if n is None:
             n = reader.read().num_rows
         return int(n)
+    except UnmeasuredArtifact:
+        return None
     except Exception as exc:
         logger.info("orc artifact count unavailable: %s", exc)
         return None
@@ -2327,12 +2367,12 @@ def _count_orc_path(path: Path) -> int | None:
         return None
 
 
-def _count_excel_bytes(content: bytes) -> int | None:
+def _count_excel_handle(source: Any) -> int | None:
     """Value-bearing rows. Used-range / ``max_row`` is not dest population."""
     try:
         from services.excel_parser import count_excel_rows
 
-        return int(count_excel_rows(content))
+        return int(count_excel_rows(source))
     except Exception as exc:
         logger.info("excel artifact count unavailable: %s", exc)
         return None
@@ -2366,19 +2406,41 @@ def _count_streaming_kind(kind: str, source: Any) -> int | None:
     return None
 
 
+def _count_byte_image_kind(kind: str, source: Any) -> int | None:
+    """Parquet/ORC/Excel COUNT of a (possibly gzip) stream via one rewindable image."""
+    try:
+        image, closer = rewindable_byte_source(source)
+    except Exception as exc:
+        logger.info("byte-image spool failed for kind %s: %s", kind, exc)
+        return None
+    try:
+        if kind == "parquet":
+            return _count_parquet_handle(image)
+        if kind == "orc":
+            return _count_orc_handle(image)
+        if kind == "excel":
+            return _count_excel_handle(image)
+        return None
+    except Exception as exc:
+        logger.info("artifact count failed for kind %s: %s", kind, exc)
+        return None
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
 def _count_artifact_kind(kind: str, content: bytes) -> int | None:
     """Record COUNT for already-decoded artifact bytes. Unknown kind is None."""
     if kind not in _ARTIFACT_FORMATS:
         return None
-    if kind == "parquet":
-        return _count_parquet_bytes(content)
-    if kind == "orc":
-        return _count_orc_bytes(content)
     try:
         if kind in _STREAMING_COUNT_KINDS:
             return _count_streaming_kind(kind, content)
-        if kind == "excel":
-            return _count_excel_bytes(content)
+        if kind in _BYTE_IMAGE_KINDS:
+            return _count_byte_image_kind(kind, io.BytesIO(content))
     except Exception as exc:
         logger.info("artifact count failed for kind %s: %s", kind, exc)
         return None
@@ -2396,53 +2458,31 @@ def _count_artifact_stream(
     CSV/JSON/JSONL/XML/Avro (including gzip) walk ``source`` forward-only —
     ``GzipFile(fileobj=StreamingBody)``, never ``Body.read()`` of the object
     and never ``gzip.decompress`` of a second copy. CSV encoding sniff is
-    prefix-then-rest (no ``seek(0)``). Excel/Parquet/ORC still
-    materialize one object (byte-image / footer parsers). Unparseable /
+    prefix-then-rest (no ``seek(0)``). Excel/Parquet/ORC gzip stream-decompress
+    into one rewindable image (footer / workbook). Unparseable /
     unsupported / missing parser stay unmeasured — never JSON-fallback
     empty (that is dest=0).
     """
-    label = str(name or "")
-    compressed = label.lower().endswith(".gz")
-    if compressed:
-        label = label[: -len(".gz")]
-    kind = _infer_artifact_format(Path(label), fmt)
-    if compressed:
-        if kind in _STREAMING_COUNT_KINDS:
-            try:
-                stream = gzip.GzipFile(fileobj=source, mode="rb")
-            except Exception as exc:
-                logger.info("artifact gzip stream failed for %s: %s", name, exc)
-                return None
-            try:
-                return _count_streaming_kind(kind, stream)
-            except Exception as exc:
-                logger.info("artifact gzip count failed for %s: %s", name, exc)
-                return None
-            finally:
-                try:
-                    stream.close()
-                except Exception:
-                    pass
-        try:
-            body = gzip.decompress(source.read())
-        except Exception as exc:
-            logger.info("artifact gzip decode failed for %s: %s", name, exc)
-            return None
-        return _count_artifact_kind(kind, body)
-    if kind in _STREAMING_COUNT_KINDS:
-        try:
-            return _count_streaming_kind(kind, source)
-        except Exception as exc:
-            logger.info("artifact stream count failed for %s: %s", name, exc)
-            return None
     try:
-        raw = source.read()
+        kind, handle, gz_close = _artifact_stream_open(source, name=name, fmt=fmt)
+    except UnmeasuredArtifact as exc:
+        logger.info("artifact stream open failed for %s: %s", name, exc)
+        return None
+    try:
+        if kind in _STREAMING_COUNT_KINDS:
+            return _count_streaming_kind(kind, handle)
+        if kind in _BYTE_IMAGE_KINDS:
+            return _count_byte_image_kind(kind, handle)
+        return None
     except Exception as exc:
-        logger.info("artifact slurp failed for %s: %s", name, exc)
+        logger.info("artifact stream count failed for %s: %s", name, exc)
         return None
-    if not isinstance(raw, (bytes, bytearray)):
-        return None
-    return _count_artifact_kind(kind, bytes(raw))
+    finally:
+        if gz_close is not None:
+            try:
+                gz_close()
+            except Exception:
+                pass
 
 
 def _count_artifact_payload(
@@ -2474,10 +2514,12 @@ def count_artifact_rows(
     non-blank line from disk, not ``decode`` + ``splitlines`` of the
     whole export. CSV/TSV counts RFC 4180 records from disk, not
     ``wc -l`` and not a slurp of the whole file. Local CSV/JSON/JSONL/XML/Avro
-    gzip streams; Excel/Parquet/ORC gzip still decompresses first.
+    gzip streams. Local Excel/Parquet/ORC gzip stream-decompress into one
+    rewindable image (never ``read_bytes`` of the compressed export).
+    Uncompressed Parquet/ORC still read the footer from the path.
     Object-store GET of CSV/JSON/JSONL/XML/Avro streams the HTTP body through
-    ``GzipFile`` when gzip; Excel/Parquet/ORC GET still materializes
-    one object.
+    ``GzipFile`` when gzip; Excel/Parquet/ORC GET gzip uses the same
+    ``GzipFile`` + spool kernel.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -2488,9 +2530,10 @@ def count_artifact_rows(
     kind = _infer_artifact_format(artifact, fmt)
     if kind not in _ARTIFACT_FORMATS:
         return None
-    if kind == "parquet":
+    gzipped = artifact.name.lower().endswith(".gz")
+    if kind == "parquet" and not gzipped:
         return _count_parquet_path(artifact)
-    if kind == "orc":
+    if kind == "orc" and not gzipped:
         return _count_orc_path(artifact)
     if kind in _STREAMING_COUNT_KINDS:
         try:
@@ -2499,10 +2542,22 @@ def count_artifact_rows(
         except Exception as exc:
             logger.info("artifact count unavailable at %s: %s", artifact, exc)
             return None
-    content = _read_artifact_bytes(artifact)
-    if content is None:
-        return None
-    return _count_artifact_kind(kind, content)
+    if kind in _BYTE_IMAGE_KINDS:
+        closer = None
+        try:
+            source, closer = open_artifact_binary(artifact)
+            n = _count_byte_image_kind(kind, source)
+            return None if n is None else int(n)
+        except Exception as exc:
+            logger.info("artifact count unavailable at %s: %s", artifact, exc)
+            return None
+        finally:
+            if closer is not None:
+                try:
+                    closer()
+                except Exception:
+                    pass
+    return None
 
 
 def stamp_artifact_census(

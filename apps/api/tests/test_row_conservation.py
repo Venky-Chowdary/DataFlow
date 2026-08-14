@@ -716,8 +716,8 @@ def test_count_artifact_payload_gzip_streams_not_decompress_slurp(
     """Object-store GET gzip COUNT streams GzipFile. Never gzip.decompress.
 
     The GET body is already compressed in RAM. A second decompressed copy
-    is the same hole local *.gz had. Excel/Parquet/ORC GET gzip still
-    decompresses (workbook / footer parsers). Avro gzip streams.
+    is the same hole local *.gz had. Excel/Parquet/ORC GET gzip stream
+    decompress into one rewindable image (not ``gzip.decompress``). Avro gzip streams.
     """
     import gzip
 
@@ -2951,9 +2951,10 @@ def test_object_store_avro_gate8_checksum_streams_not_gzip_slurp(
 
     Apache Avro OCF is header + blocks + sync markers — Spark/Hadoop feed
     GzipCodec the GET stream. Gzip Avro is ``GzipFile``, never
-    ``gzip.decompress(source.read())``. Excel/Parquet/ORC stay byte-image
-    (workbook / footer). Empty well-formed is ``(0, "")``; garbage is
-    unmeasured, not dest=0. One-shot GET must not ``Body.read()``.
+    ``gzip.decompress(source.read())``. Excel/Parquet/ORC gzip spool a
+    decompressed image (workbook / footer need seek). Empty well-formed is
+    ``(0, "")``; garbage is unmeasured, not dest=0. One-shot GET must not
+    ``Body.read()``.
     """
     pytest.importorskip("fastavro")
     from services.dest_precount import checksum_artifact_stream, checksum_object_store, iter_avro_dicts
@@ -3579,6 +3580,115 @@ def test_object_store_orc_gate8_checksum_is_value_walk_not_json_empty(
     assert digest
     _patch_object_store_payloads(monkeypatch, [("exports/data.orc", b"not-orc")])
     assert checksum_object_store("s3", cfg, table_name="exports/data.orc") == (-1, "")
+
+
+def test_object_store_gzip_footer_formats_spool_not_decompress_slurp(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Parquet/ORC/Excel gzip is one decompressed image, never Body.read()+decompress.
+
+    Footer/workbook parsers need seek. Hadoop GzipCodec is not splittable —
+    this is not a fake sequential COUNT. ``GzipFile`` + ``rewindable_byte_source``
+    is one uncompressed image (RAM until 8 MiB, then disk). Empty/garbage
+    stay 0 / unmeasured. Local ``*.parquet.gz`` must not ``read_bytes``.
+    """
+    pytest.importorskip("pyarrow.parquet")
+    pytest.importorskip("pyarrow.orc")
+    openpyxl = pytest.importorskip("openpyxl")
+    from services.dest_precount import (
+        checksum_artifact_stream,
+        checksum_object_store,
+        count_artifact_rows,
+    )
+    from services.format_converter import convert_rows
+
+    parquet_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="parquet",
+    )
+    orc_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="orc",
+    )
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["id", "v"])
+    ws.append(["1", "a"])
+    ws.append(["2", "b"])
+    excel_buf = io.BytesIO()
+    wb.save(excel_buf)
+    excel_body = excel_buf.getvalue()
+
+    def _no_decompress(*_a, **_k):
+        raise AssertionError("footer gzip must not gzip.decompress the whole body")
+
+    monkeypatch.setattr("services.dest_precount.gzip.decompress", _no_decompress)
+
+    parquet_gz = tmp_path / "export.parquet.gz"
+    parquet_gz.write_bytes(gzip.compress(parquet_body))
+    orc_gz = tmp_path / "export.orc.gz"
+    orc_gz.write_bytes(gzip.compress(orc_body))
+    excel_gz = tmp_path / "export.xlsx.gz"
+    excel_gz.write_bytes(gzip.compress(excel_body))
+    assert count_artifact_rows(parquet_gz, fmt="parquet") == 2
+    assert count_artifact_rows(orc_gz, fmt="orc") == 2
+    assert count_artifact_rows(excel_gz, fmt="excel") == 2
+
+    orig_read_bytes = Path.read_bytes
+
+    def _no_read_bytes(self, *args, **kwargs):
+        if Path(self).resolve() in {parquet_gz.resolve(), orc_gz.resolve(), excel_gz.resolve()}:
+            raise AssertionError("gzip footer COUNT must not read_bytes the compressed export")
+        return orig_read_bytes(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", _no_read_bytes)
+    assert count_artifact_rows(parquet_gz) == 2
+    assert count_artifact_rows(orc_gz) == 2
+    assert count_artifact_rows(excel_gz) == 2
+
+    cfg = {"database": "b"}
+    for key, body, n_expected in (
+        ("exports/data.parquet.gz", gzip.compress(parquet_body), 2),
+        ("exports/data.orc.gz", gzip.compress(orc_body), 2),
+        ("exports/dump.xlsx.gz", gzip.compress(excel_body), 2),
+    ):
+        listed = [key]
+        monkeypatch.setattr(
+            "services.dest_precount._object_store_list_keys",
+            lambda *_a, listed=listed, **_k: listed,
+        )
+
+        def _open(_kind: str, _cfg: dict, _bucket: str, obj_key: str, payload=body):
+            buf = _NoSlurpGet(payload)
+            return buf, buf.close
+
+        monkeypatch.setattr("services.object_streaming.open_object_store_binary", _open)
+        assert destination_row_count("s3", cfg, schema="", table_name=key) == n_expected
+        n, digest = checksum_object_store("s3", cfg, table_name=key)
+        assert n == n_expected
+        assert digest
+
+    oneshot_n, oneshot_digest = checksum_artifact_stream(
+        _oneshot_gzip(gzip.compress(parquet_body)), name="export.parquet"
+    )
+    assert oneshot_n == 2
+    assert oneshot_digest
+
+    _patch_object_store_payloads(
+        monkeypatch, [("exports/bad.parquet.gz", gzip.compress(b"not-parquet"))]
+    )
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/bad.parquet.gz")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/bad.parquet.gz") == (
+        -1,
+        "",
+    )
 
 
 def test_object_store_poison_jsonl_gate8_does_not_checksum_prefix(

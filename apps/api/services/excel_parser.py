@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import Iterator
+from typing import Any, Iterator
 
 from services.tabular_rows import is_blank_row
 from services.value_serializer import cell_to_string
@@ -27,14 +27,28 @@ def sheet_headers(first_row: tuple) -> list[str]:
     return headers
 
 
-def _load_workbook(content: bytes):
+def _load_workbook(content: bytes | Any):
+    """openpyxl workbook from bytes or a seekable binary handle.
+
+    Dest gzip Excel spools a decompressed image (workbook formats are not
+    sequential). ``load_workbook`` already accepts a file-like; wrapping
+    that image in a second ``BytesIO`` would be a third copy.
+    """
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError(
             "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
-    return load_workbook(BytesIO(content), read_only=True, data_only=True)
+    if isinstance(content, (bytes, bytearray)):
+        stream: Any = BytesIO(content)
+    else:
+        stream = content
+        try:
+            stream.seek(0)
+        except Exception as exc:
+            raise ValueError("Excel workbook source is not seekable") from exc
+    return load_workbook(stream, read_only=True, data_only=True)
 
 
 def parse_excel_preview(content: bytes, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
@@ -65,7 +79,7 @@ def parse_excel_preview(content: bytes, preview_rows: int = 100) -> tuple[list[s
     return headers, preview, total
 
 
-def iter_excel_dicts(content: bytes) -> Iterator[dict]:
+def iter_excel_dicts(content: bytes | Any) -> Iterator[dict]:
     """Value-bearing Excel records. Same population as ``count_excel_rows``.
 
     Header is not a record. ``is_blank_row`` (formatting-only used-range)
@@ -115,7 +129,7 @@ def iter_excel_batches(content: bytes, chunk_size: int) -> Iterator[list[dict]]:
         yield batch
 
 
-def count_excel_rows(content: bytes) -> int:
+def count_excel_rows(content: bytes | Any) -> int:
     """Count rows that carry values.
 
     ``max_row`` is the used range, which formatting inflates; using it as the
