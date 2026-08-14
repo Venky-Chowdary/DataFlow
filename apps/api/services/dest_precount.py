@@ -135,9 +135,9 @@ MERGE project PK columns from those same snapshot files — never
 ``scan().to_arrow()`` of the table. ``row_conservation.apply_inferred_leftover_deletes``
 applies the anti-join only when the source census is complete overwrite
 (SQL and Iceberg CoW). Incremental CDC must not call that apply. Mirror
-already applies inferred soft-deletes on full re-sync. Iceberg MoR /
-deletion vectors stay Planned — apply them in the snapshot population
-once; the identity is still ``leftover = D \\ S``.
+already applies inferred soft-deletes on full re-sync. Iceberg v2 MoR
+(position/equality) is dest − applied deletes; V3 deletion vectors stay
+Planned. The identity is still ``leftover = D \\ S``.
 
 SCD Type 2 is the same 1-source-identity → N-history-row shape as
 vector chunks. Physical ``COUNT(*)`` of versions grows on every

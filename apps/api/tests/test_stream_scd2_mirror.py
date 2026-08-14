@@ -198,6 +198,7 @@ def test_stream_mirror_sqlite_to_sqlite():
         assert ledger3.get("inferred_deletes") == 5, ledger3
         assert ledger3.get("reactivated") == 0, ledger3
         assert ledger3.get("active_count") == 45, ledger3
+        assert ledger3.get("dest_count") == 50, ledger3
 
         with sqlite3.connect(db_path) as conn:
             for i in range(5):
@@ -226,5 +227,6 @@ def test_stream_mirror_sqlite_to_sqlite():
         assert ledger4.get("inferred_deletes") == 0, ledger4
         assert ledger4.get("reactivated") == 5, ledger4
         assert ledger4.get("active_count") == 50, ledger4
+        assert ledger4.get("dest_count") == 50, ledger4
     finally:
         _safe_unlink(db_path)

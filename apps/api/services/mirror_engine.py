@@ -22,6 +22,7 @@ exists.
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 from services.engine_pool import release_engine
@@ -365,7 +366,9 @@ def apply_inferred_deletes_via_staging(
     equals dest-before tombstone ∩ snapshot. Driver ``rowcount`` is not this
     proof (SQLAlchemy may return -1; a reactivate UPDATE that touches
     already-active rows is not a reactivate). ``RETURNING`` / ``OUTPUT`` is
-    a future enhancement of this kernel, not a second path. Does not close
+    a future enhancement of this kernel, not a second path. Physical
+    ``COUNT(*)`` (including ``_deleted`` rows) is dest-engine, never a
+    Python dest scan and never stuffed active COUNT. Does not close
     Gate-8. Unmeasured COUNT stays ``None``.
     """
     import sqlalchemy as sa
@@ -417,11 +420,89 @@ def apply_inferred_deletes_via_staging(
             f"AND {active_pred}"
         )
     )
+    # Physical dest population including tombstones. Soft-delete does not
+    # drop COUNT(*) (Fivetran _fivetran_deleted hole). Dest-engine COUNT(*)
+    # is this figure — never a Python dest scan, never stuffed active COUNT.
+    physical = _dest_engine_count(
+        conn,
+        f"SELECT COUNT(*) FROM {target_qualified}",  # nosec B608
+    )
     return {
         "soft_deleted": soft_deleted,
         "reactivated": reactivated,
         "soft_delete_column": soft_delete_column,
+        "physical_rows": physical,
+        "rows_scanned": physical,
     }
+
+
+def _source_pk_tuples(
+    records: list[dict[str, Any]], pk_sources: list[str]
+) -> list[tuple[Any, ...]]:
+    """Unique complete PK tuples from source records. Incomplete identity is skip."""
+    seen: set[tuple[Any, ...]] = set()
+    out: list[tuple[Any, ...]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        tup = tuple(rec.get(c) for c in pk_sources)
+        if any(v is None or v == "" for v in tup):
+            continue
+        try:
+            if tup in seen:
+                continue
+            seen.add(tup)
+        except TypeError:
+            pass
+        out.append(tup)
+    return out
+
+
+def _create_pk_staging(
+    conn: Any,
+    stg_qualified: str,
+    dest_qualified: str,
+    pk_quoted: str,
+    dialect_name: str,
+) -> None:
+    """Empty staging table with dest PK column types. Never invent TEXT vs INTEGER."""
+    import sqlalchemy as sa
+    from services.dialect_profiles import warehouse_sql_quote_dialect
+
+    family = warehouse_sql_quote_dialect(dialect_name)
+    if family == "sqlserver":
+        sql = (
+            f"SELECT {pk_quoted} INTO {stg_qualified} "  # nosec B608
+            f"FROM {dest_qualified} WHERE 1=0"
+        )
+    else:
+        sql = (
+            f"CREATE TABLE {stg_qualified} AS "  # nosec B608
+            f"SELECT {pk_quoted} FROM {dest_qualified} WHERE 1=0"
+        )
+    conn.execute(sa.text(sql))
+
+
+def _drop_pk_staging(conn: Any, stg_qualified: str) -> None:
+    import sqlalchemy as sa
+
+    try:
+        conn.execute(sa.text(f"DROP TABLE IF EXISTS {stg_qualified}"))  # nosec B608
+        conn.commit()
+        return
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+    try:
+        conn.execute(sa.text(f"DROP TABLE {stg_qualified}"))  # nosec B608
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 def apply_inferred_soft_deletes(
@@ -438,11 +519,13 @@ def apply_inferred_soft_deletes(
     """Soft-delete destination rows that are no longer in ``records``.
 
     ``endpoint`` must be a database ``EndpointConfig`` for an SQLAlchemy-backed
-    destination.  ``conflict_columns`` is the destination primary key.  This
-    function expects the source rows to have already been upserted into the
-    destination table.  It returns both the delete/reactivate counts and an
-    active-row checksum that the reconciliation step can use instead of a
-    full-table scan.
+    destination. ``conflict_columns`` is the destination primary key. Source
+    rows must already be upserted. This-run ``soft_deleted`` / ``reactivated``
+    are dest-engine COUNT of transitions (same staging anti-join as the
+    stream path). Driver ``rowcount`` and a Python dest scan are not this
+    census. Physical dest COUNT is dest-engine ``COUNT(*)`` of the table
+    (tombstones included). Active checksum is still a streamed dest read
+    for Gate-8.
     """
     if not conflict_columns:
         raise ValueError("mirror sync requires a primary key / conflict column")
@@ -464,13 +547,11 @@ def apply_inferred_soft_deletes(
                         break
         pk_sources.append(pk_source)
 
-    source_keys = {
-        _compose_key(r, pk_sources)
-        for r in records
-        if _compose_key(r, pk_sources) and not all(p == "" for p in _compose_key(r, pk_sources).split(_KEY_SEP))
-    }
-    if not source_keys:
-        raise ValueError("mirror sync could not build a non-empty source key set from the primary key")
+    tuples = _source_pk_tuples(records, pk_sources)
+    if not tuples:
+        raise ValueError(
+            "mirror sync could not build a non-empty source key set from the primary key"
+        )
 
     from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
     from src.transfer.adapters import resolve_connector_config
@@ -485,62 +566,70 @@ def apply_inferred_soft_deletes(
 
     target_cols = _target_columns(columns, mappings, schema)
     engine = get_sqlalchemy_engine(cfg)
-    activated_total = 0
-    deactivated_total = 0
-    scanned = 0
+    stg_name = f"_df_mirrorkeys_{uuid.uuid4().hex[:12]}"
+    stg_qualified = _qualified_name(stg_name, schema_name)
+    pk_quoted = ", ".join(quote_sql_identifier(c) for c in pk_columns)
+    placeholders = ", ".join(f":p{i}" for i in range(len(pk_columns)))
+    insert_sql = (
+        f"INSERT INTO {stg_qualified} ({pk_quoted}) VALUES ({placeholders})"  # nosec B608
+    )
+    census: dict[str, Any] = {}
+    active_rows = 0
+    active_checksum = ""
     try:
         with engine.connect() as conn:
             _ensure_soft_delete_column(conn, qualified, soft_delete_column)
-
-            pk_quoted = ", ".join(quote_sql_identifier(c) for c in pk_columns)
-            col_quoted = quote_sql_identifier(soft_delete_column)
-            from services.reconciliation_api import iter_select_row_dicts
-
-            sql = f"SELECT {pk_quoted}, {col_quoted} FROM {qualified}"  # nosec B608
-            from services.tombstone import is_tombstone_set
-
-            for rows in iter_select_row_dicts(
+            dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "")
+            _create_pk_staging(conn, stg_qualified, qualified, pk_quoted, dialect_name)
+            conn.commit()
+            insert_stmt = sa.text(insert_sql)
+            chunk = max(int(batch_size), 1)
+            for offset in range(0, len(tuples), chunk):
+                batch = tuples[offset : offset + chunk]
+                params = [
+                    {f"p{i}": val for i, val in enumerate(tup)} for tup in batch
+                ]
+                conn.execute(insert_stmt, params)
+            conn.commit()
+            census = apply_inferred_deletes_via_staging(
                 conn,
-                sa.text(sql),
-                list(pk_columns) + [soft_delete_column],
-                itersize=batch_size,
-            ):
-                scanned += len(rows)
-                reactivate_keys: list[str] = []
-                delete_keys: list[str] = []
-                for row in rows:
-                    pk_val = _compose_key(row, pk_columns)
-                    if not pk_val or all(p == "" for p in pk_val.split(_KEY_SEP)):
-                        continue
-                    deleted = is_tombstone_set(row, soft_delete_column)
-                    if pk_val in source_keys:
-                        if deleted:
-                            reactivate_keys.append(pk_val)
-                    elif not deleted:
-                        delete_keys.append(pk_val)
-
-                _update_deleted_batch(
-                    conn, qualified, pk_columns, reactivate_keys, delete_keys, soft_delete_column
-                )
-                activated_total += len(reactivate_keys)
-                deactivated_total += len(delete_keys)
-
+                qualified,
+                stg_qualified,
+                pk_columns,
+                soft_delete_column=soft_delete_column,
+                dialect=dialect_name,
+            )
+            conn.commit()
             active_rows, active_checksum = _compute_active_checksum(
                 conn, qualified, target_cols, soft_delete_column, batch_size
             )
-
+            conn.commit()
+            _drop_pk_staging(conn, stg_qualified)
+    except Exception:
+        try:
+            with engine.connect() as conn:
+                _drop_pk_staging(conn, stg_qualified)
+        except Exception as exc:
+            logging.getLogger(__name__).debug(
+                "Exception suppressed: %s", exc, exc_info=exc
+            )
+        raise
     finally:
         release_engine(engine)
 
+    physical = census.get("physical_rows")
+    if physical is None:
+        physical = census.get("rows_scanned")
     return {
-        "soft_deleted": deactivated_total,
-        "reactivated": activated_total,
-        "rows_scanned": scanned,
+        "soft_deleted": census.get("soft_deleted"),
+        "reactivated": census.get("reactivated"),
+        "physical_rows": physical,
+        "rows_scanned": physical,
         "active_rows": active_rows,
         "active_checksum": active_checksum,
         "target_columns": target_cols,
         "primary_key_columns": pk_columns,
-        "soft_delete_column": soft_delete_column,
+        "soft_delete_column": census.get("soft_delete_column") or soft_delete_column,
         "mode": "mirror",
     }
 

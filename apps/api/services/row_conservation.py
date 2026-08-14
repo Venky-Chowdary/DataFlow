@@ -863,6 +863,7 @@ def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
             "soft_delete_column": data.get("soft_delete_column") or "_deleted",
             "soft_deleted": data.get("soft_deleted"),
             "reactivated": data.get("reactivated"),
+            "physical_rows": data.get("physical_rows"),
             "rows_scanned": data.get("rows_scanned"),
             "mode": "mirror",
         }
@@ -1139,13 +1140,15 @@ def _account_mirror(
     inferred = _as_optional_int(payload.get("soft_deleted"))
     reactivated = _as_optional_int(payload.get("reactivated"))
     scanned = _as_optional_int(payload.get("rows_scanned"))
+    physical = _as_optional_int(payload.get("physical_rows"))
+    if physical is None:
+        physical = scanned
     stuffed_active = (
         dest_count is not None
         and active is not None
         and dest_count == active
         and dest_count_source == DEST_READBACK
     )
-    physical = scanned
     if physical is None and dest_count is not None and not stuffed_active:
         physical = dest_count
 

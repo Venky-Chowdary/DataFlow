@@ -6,6 +6,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -164,7 +166,71 @@ def test_staging_inferred_deletes_count_transitions_not_already_active(tmp_path:
         }
     assert census["reactivated"] == 1
     assert census["soft_deleted"] == 1
+    assert census["physical_rows"] == 3
+    assert census["rows_scanned"] == 3
     assert rows == {"1": 0, "2": 1, "3": 0}
+
+
+def test_buffered_mirror_census_is_dest_engine_staging_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Buffered this-run census is dest-engine COUNT, not dest scan + rowcount."""
+    import sqlite3
+
+    from src.transfer.models import EndpointConfig
+    from services.mirror_engine import apply_inferred_soft_deletes
+
+    db = tmp_path / "buffered_mirror.db"
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute(
+            "CREATE TABLE dst (id TEXT, name TEXT, _deleted INTEGER DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO dst (id, name, _deleted) VALUES "
+            "('1','a',0),('2','b',0),('3','c',1)"
+        )
+        conn.commit()
+
+    def _no_scan(*_a, **_k):
+        raise AssertionError("buffered mirror census must not scan dest rows")
+
+    monkeypatch.setattr(
+        "services.reconciliation_api.iter_select_row_dicts", _no_scan
+    )
+    dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        connection_string=str(db),
+        table="dst",
+    )
+    summary = apply_inferred_soft_deletes(
+        dest,
+        [{"id": "1", "name": "a"}, {"id": "3", "name": "c"}, {"id": "4", "name": "d"}],
+        ["id", "name"],
+        {"id": "string", "name": "string"},
+        [
+            {"source": "id", "target": "id", "transform": "direct"},
+            {"source": "name", "target": "name", "transform": "direct"},
+        ],
+        ["id"],
+    )
+    assert summary["reactivated"] == 1
+    assert summary["soft_deleted"] == 1
+    assert summary["physical_rows"] == 3
+    assert summary["rows_scanned"] == 3
+    with sqlite3.connect(str(db)) as conn:
+        rows = {
+            str(r[0]): int(r[1])
+            for r in conn.execute("SELECT id, _deleted FROM dst").fetchall()
+        }
+        leftovers = [
+            n
+            for (n,) in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '_df_mirrorkeys_%'"
+            ).fetchall()
+        ]
+    assert rows == {"1": 0, "2": 1, "3": 0}
+    assert leftovers == []
 
 
 def test_lattice_probe_uses_physical_table_not_mapped_write_table(

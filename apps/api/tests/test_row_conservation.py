@@ -2309,7 +2309,38 @@ def test_mirror_stream_path_this_run_census_is_dest_engine_transitions():
     assert ledger["conservation_kind"] == KIND_MIRROR
     assert ledger["inferred_deletes"] == 1
     assert ledger["reactivated"] == 0
+    assert ledger["dest_count"] is None
     assert "this run inferred 1 delete" in ledger["note"].lower()
+
+
+def test_mirror_physical_rows_is_dest_engine_count_not_stuffed_active():
+    """Ledger dest_count is dest-engine COUNT(*) including tombstones."""
+    ledger = account_job(
+        {
+            "sync_mode": "mirror",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 3,
+                "target_rows": 3,
+                "target_checksum": "active-digest",
+            },
+            "destination_summary": {
+                "sync_mode": "mirror",
+                "active_rows": 3,
+                "active_checksum": "active-digest",
+                "soft_delete_column": "_deleted",
+                "soft_deleted": 1,
+                "reactivated": 0,
+                "physical_rows": 4,
+            },
+        }
+    ).to_dict()
+    assert ledger["conservation_kind"] == KIND_MIRROR
+    assert ledger["balanced"] is True
+    assert ledger["active_count"] == 3
+    assert ledger["rows_written"] == 3
+    assert ledger["dest_count"] == 4
+    assert ledger["inferred_deletes"] == 1
 
 
 def test_stream_scd2_top_level_active_is_not_a_mirror_payload():
