@@ -1304,29 +1304,141 @@ class FileParser:
         return schema
 
 
-def count_xml_records(content: bytes | str) -> int | None:
-    """Dest-engine record COUNT of tabular XML. Never ingest ``max_rows``.
+def _xml_local_name(tag: object) -> str:
+    """Clark ``{ns}local`` → local, so sibling collections still collide on name."""
+    raw = str(tag or "")
+    if raw.startswith("{") and "}" in raw:
+        return raw.rsplit("}", 1)[-1]
+    return raw
 
-    Population is the unique repeating list-of-object the ingest parser
-    already discovers. Empty ``<records/>`` is 0. xmltodict collapsing one
-    ``<record>`` into a dict is 1. Sibling collections at the same depth
-    stay unmeasured — never guess a path. A document (scalar fields under
-    a wrapper, no record element) is unmeasured, not dest=1. Malformed /
-    XXE / missing parser stay unmeasured, not dest=0. ``parse_xml`` ingest
-    fallback that treats the whole document as one row is not this COUNT.
+
+def _xml_end_kind(elem: Any, had_element_child: bool) -> str:
+    """dict / empty / scalar — the same three xmltodict shapes COUNT already used."""
+    if had_element_child or getattr(elem, "attrib", None):
+        return "dict"
+    text = (getattr(elem, "text", None) or "").strip()
+    return "scalar" if text else "empty"
+
+
+def _xml_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
+    """Byte source for iterparse. Path is opened; bytes/str stay in-memory."""
+    if isinstance(content, Path):
+        handle = content.open("rb")
+        return handle, handle.close
+    if isinstance(content, bytes):
+        return io.BytesIO(content), None
+    if isinstance(content, str):
+        return io.BytesIO(content.encode("utf-8")), None
+    raise TypeError("XML COUNT expects bytes, str, or Path")
+
+
+def _xml_count_as_text(content: bytes | str | Path) -> str | None:
+    """ImportError fallback only — never the GB-scale COUNT path."""
+    try:
+        if isinstance(content, Path):
+            return content.read_text(encoding="utf-8")
+        if isinstance(content, bytes):
+            return content.decode("utf-8")
+        if isinstance(content, str):
+            return content
+    except (OSError, UnicodeDecodeError):
+        return None
+    return None
+
+
+def _xml_count_from_parent_stats(
+    parent_stats: dict[str, dict[str, list[int]]],
+    *,
+    root_text_nonempty: bool,
+) -> int | None:
+    """Unique shallowest list-of-object, else collapsed 0/1, else unmeasured.
+
+    A collection is one child tag with ≥2 dict-like occurrences (element
+    children or attributes). Nested inner lists (``items`` under ``record``)
+    lose to the outer path. Sibling collections at the same depth stay
+    unmeasured — never guess. No collection: empty wrapper 0; one empty or
+    dict-like child tag 1 (xmltodict's one-record collapse); scalar-only
+    or mixed sibling fields unmeasured, not dest=1.
     """
-    try:
-        text = content.decode("utf-8") if isinstance(content, bytes) else content
-    except UnicodeDecodeError:
+    collections: list[tuple[int, int]] = []
+    for ppath, tags in parent_stats.items():
+        depth = ppath.count("/")
+        for _tag, row in tags.items():
+            n, dict_n, _empty_n, _scalar_n = row
+            if n >= 2 and dict_n >= 2:
+                collections.append((depth, n))
+    if collections:
+        min_depth = min(depth for depth, _n in collections)
+        at_min = [n for depth, n in collections if depth == min_depth]
+        if len(at_min) != 1:
+            return None
+        return at_min[0]
+    if not parent_stats:
+        return None if root_text_nonempty else 0
+    min_depth = min(path.count("/") for path in parent_stats)
+    roots = [path for path in parent_stats if path.count("/") == min_depth]
+    if len(roots) != 1:
         return None
-    try:
-        from defusedxml import ElementTree as DET
+    children = parent_stats[roots[0]]
+    if len(children) != 1:
+        return None
+    n, _dict_n, _empty_n, scalar_n = next(iter(children.values()))
+    if n == 1 and not scalar_n:
+        return 1
+    return None
 
-        DET.fromstring(text)  # nosec B314 — defusedxml, not stdlib
-    except ImportError:
-        pass
-    except Exception:
+
+def _count_xml_records_stax(source: Any, xml_iterparse: Any) -> int | None:
+    """StAX unique-path COUNT. ``elem.clear()`` drops text; empty shells stay.
+
+    defusedxml/stdlib ``iterparse`` has no lxml ``getprevious()`` sibling
+    unlink, so memory is O(n) empty Element objects under a wide parent,
+    not O(document text). O(depth) unlink is a future enhancement of this
+    kernel, not a second COUNT.
+    """
+    parent_stats: dict[str, dict[str, list[int]]] = {}
+    stack: list[str] = []
+    saw_child: list[bool] = []
+    saw_root = False
+    root_text_nonempty = False
+    for event, elem in xml_iterparse(source, events=("start", "end")):  # nosec B314
+        if event == "start":
+            saw_root = True
+            if saw_child:
+                saw_child[-1] = True
+            stack.append(_xml_local_name(elem.tag))
+            saw_child.append(False)
+            continue
+        kind = _xml_end_kind(elem, bool(saw_child and saw_child[-1]))
+        tag = stack.pop() if stack else _xml_local_name(elem.tag)
+        if saw_child:
+            saw_child.pop()
+        if stack:
+            parent_path = "/" + "/".join(stack)
+            bucket = parent_stats.setdefault(parent_path, {})
+            row = bucket.get(tag)
+            if row is None:
+                row = [0, 0, 0, 0]
+                bucket[tag] = row
+            row[0] += 1
+            if kind == "dict":
+                row[1] += 1
+            elif kind == "empty":
+                row[2] += 1
+            else:
+                row[3] += 1
+        else:
+            root_text_nonempty = bool((elem.text or "").strip())
+        elem.clear()
+    if not saw_root:
         return None
+    return _xml_count_from_parent_stats(
+        parent_stats, root_text_nonempty=root_text_nonempty
+    )
+
+
+def _count_xml_records_dom(text: str) -> int | None:
+    """xmltodict COUNT when defusedxml is absent. Same unique-path identity."""
     try:
         import xmltodict
     except ImportError:
@@ -1341,6 +1453,47 @@ def count_xml_records(content: bytes | str) -> int | None:
     if rows is not None:
         return len(rows)
     return _count_xml_collapsed_table(root)
+
+
+def count_xml_records(content: bytes | str | Path) -> int | None:
+    """Dest-engine record COUNT of tabular XML. Never ingest ``max_rows``.
+
+    Population is the unique repeating list-of-object the ingest parser
+    already discovers. Empty ``<records/>`` is 0. One collapsed
+    ``<record>`` is 1. Sibling collections at the same depth stay
+    unmeasured — never guess a path. A document (scalar fields under a
+    wrapper, no record element) is unmeasured, not dest=1. Malformed /
+    XXE / missing parser stay unmeasured, not dest=0. ``parse_xml`` ingest
+    fallback that treats the whole document as one row is not this COUNT.
+
+    Walk is defusedxml ``iterparse`` (XXE-safe StAX). ``fromstring`` +
+    xmltodict DOM is not the COUNT — a GB export must not become two
+    in-memory trees. A stream error is unmeasured; do not then DOM-parse
+    the same poison file. xmltodict remains the ImportError fallback
+    when defusedxml is absent. Path inputs are counted from disk; bytes
+    (object-store GET) stream from a buffer already in RAM.
+    """
+    try:
+        from defusedxml.ElementTree import iterparse as xml_iterparse
+    except ImportError:
+        text = _xml_count_as_text(content)
+        if text is None:
+            return None
+        return _count_xml_records_dom(text)
+    closer = None
+    try:
+        source, closer = _xml_count_open(content)
+        return _count_xml_records_stax(source, xml_iterparse)
+    except (OSError, UnicodeEncodeError, TypeError):
+        return None
+    except Exception:
+        return None
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
 
 
 def _count_xml_collapsed_table(root: Any) -> int | None:

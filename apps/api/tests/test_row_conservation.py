@@ -344,6 +344,59 @@ def test_count_artifact_rows_xml_unique_record_path_not_ingest_cap(tmp_path: Pat
     assert stamped["target_rows"] == 3
 
 
+def test_count_xml_records_stax_unique_path_not_dom_or_inner_items(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Dest COUNT streams the outer record-path. Inner items do not win.
+
+    parse_xml ingest is unchanged (still DOM + max_rows refuse). xmltodict
+    must not run when defusedxml iterparse is available — a GB export is
+    not two in-memory trees. Missing defusedxml+xmltodict stays unmeasured.
+    """
+    from services.file_parser import count_xml_records
+
+    nested = (
+        b"<records>"
+        b"<record><id>1</id><items><item><sku>a</sku></item>"
+        b"<item><sku>b</sku></item></items></record>"
+        b"<record><id>2</id><items><item><sku>c</sku></item>"
+        b"<item><sku>d</sku></item></items></record>"
+        b"<record><id>3</id><items><item><sku>e</sku></item>"
+        b"<item><sku>f</sku></item></items></record>"
+        b"</records>"
+    )
+    assert count_xml_records(nested) == 3
+    assert count_xml_records(b"<records><record/></records>") == 1
+    assert count_xml_records(b"<root>hello</root>") is None
+    namespaced = (
+        b'<records xmlns="http://example.com/ns">'
+        b"<record><id>1</id></record><record><id>2</id></record>"
+        b"</records>"
+    )
+    assert count_xml_records(namespaced) == 2
+    xxe = (
+        b'<?xml version="1.0"?>'
+        b'<!DOCTYPE r [<!ENTITY e SYSTEM "file:///etc/passwd">]>'
+        b"<records><record>&e;</record></records>"
+    )
+    assert count_xml_records(xxe) is None
+
+    wide = tmp_path / "wide.xml"
+    with wide.open("w", encoding="utf-8") as handle:
+        handle.write("<records>")
+        for i in range(5000):
+            handle.write(f"<record><id>{i}</id></record>")
+        handle.write("</records>")
+    assert count_xml_records(wide) == 5000
+    assert count_artifact_rows(wide, fmt="xml") == 5000
+
+    def _dom_forbidden(*_a, **_k):
+        raise AssertionError("xmltodict DOM must not run when StAX COUNT is available")
+
+    monkeypatch.setattr("xmltodict.parse", _dom_forbidden)
+    assert count_xml_records(nested) == 3
+
+
 def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ):
@@ -370,6 +423,8 @@ def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(
 
     xml = tmp_path / "export.xml"
     xml.write_bytes(b"<records><record><id>1</id></record></records>")
+    monkeypatch.setitem(sys.modules, "defusedxml", None)
+    monkeypatch.setitem(sys.modules, "defusedxml.ElementTree", None)
     monkeypatch.setitem(sys.modules, "xmltodict", None)
     assert count_artifact_rows(xml, fmt="xml") is None
 

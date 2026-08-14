@@ -29,10 +29,11 @@ openpyxl ``max_row`` / used-range. Avro is a streamed record COUNT, not
 ``parse_avro``'s ingest cap. ORC/Parquet footer ``nrows`` is dest-engine
 cardinality of the file we wrote, not a warehouse catalog estimate.
 XML dest population is the unique repeating record-path
-(``count_xml_records``), never ``parse_xml`` ingest ``max_rows`` and
+(``count_xml_records`` StAX), never ``parse_xml`` ingest ``max_rows`` and
 never a whole-document-as-one fallback. Ambiguous sibling collections
 stay unmeasured. Empty ``<records/>`` is 0. Missing parser is
-unmeasured, not dest=0.
+unmeasured, not dest=0. Local XML is counted from the path; gzip XML
+still decompresses first.
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
@@ -1915,7 +1916,7 @@ def count_artifact_rows(
     unparseable content stay ``None`` — conservation remains unmeasured.
     Empty but well-formed artifacts are measured zero. Excel counts rows
     that carry values, not the worksheet used range. XML counts the unique
-    repeating record-path, not ingest ``max_rows``.
+    repeating record-path from disk (StAX), not ingest ``max_rows``.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -1930,6 +1931,11 @@ def count_artifact_rows(
         return _count_parquet_path(artifact)
     if kind == "orc":
         return _count_orc_path(artifact)
+    if kind == "xml" and not artifact.name.lower().endswith(".gz"):
+        from services.file_parser import count_xml_records
+
+        n = count_xml_records(artifact)
+        return None if n is None else int(n)
     content = _read_artifact_bytes(artifact)
     if content is None:
         return None

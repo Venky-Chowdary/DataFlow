@@ -652,8 +652,8 @@ rowcount is not that proof.
    JSONL; JSON array length; Parquet footer `num_rows`; Excel
    `count_excel_rows` value-bearing rows, never openpyxl `max_row`;
    streamed Avro records; ORC footer `nrows`; XML unique repeating
-   record-path via `count_xml_records`, never `parse_xml` ingest
-   `max_rows`, never whole-document-as-one). Writer `rows` /
+   record-path via `count_xml_records` StAX, never `parse_xml` ingest
+   `max_rows`, never `fromstring`+xmltodict DOM, never whole-document-as-one). Writer `rows` /
    bytes-landed never closes dest. File replace is overwrite
    (dest-before 0). Cardinality ≠ cell checksum — Gate-8 stays
    `skipped_readback` / `migration_proven=false`. Remote URI without a
@@ -889,7 +889,20 @@ rowcount is not that proof.
     malformed unmeasured not dest=0. Missing xmltodict unmeasured.
     S3 GET of writer XML = 2, never JSON-empty. Writer ack 10,000
     does not close. Streaming StAX of the same path Planned.
-    Frontend 29 passed; `npm run build` tsc+vite clean.
+
+  XML artifact dest COUNT StAX (this host, after 2026-08-14 slice):
+    Identity unchanged: unique repeating record-path via defusedxml
+    `iterparse`, never `fromstring` + xmltodict DOM, never parse_xml
+    max_rows, never whole-document-as-one. Outer `records` win over
+    nested `items`. Local-name after Clark `}` so sibling collections
+    stay unmeasured. Empty wrapper 0; one collapsed record 1; document
+    / XXE / malformed unmeasured. Missing defusedxml falls back to
+    xmltodict; both missing unmeasured, not dest=0. Local file COUNT
+    opens the path (gzip still decompresses). `elem.clear()` drops
+    text; empty Element shells stay O(n) under a wide parent — lxml
+    O(depth) unlink is a future enhancement of this kernel, not a
+    second COUNT. parse_xml ingest stays DOM. Cardinality ≠ Gate-8.
+    Property 9 command measured after this slice.
 
   Snowflake / BigQuery / DuckDB / Databricks dest COUNT (this host, after 2026-08-14 slice):
     232 passed, 8 skipped in 35.47s (Property 9 command).
