@@ -1438,35 +1438,38 @@ def _xml_count_as_text(content: bytes | str | Path) -> str | None:
     return None
 
 
-def _xml_count_from_parent_stats(
+def _xml_unique_from_parent_stats(
     parent_stats: dict[str, dict[str, list[int]]],
     *,
     root_text_nonempty: bool,
-) -> int | None:
-    """Unique shallowest list-of-object, else collapsed 0/1, else unmeasured.
+) -> tuple[int, str | None, str | None] | None:
+    """Unique shallowest list-of-object as ``(n, parent_path, tag)``.
 
     A collection is one child tag with ≥2 dict-like occurrences (element
     children or attributes). Nested inner lists (``items`` under ``record``)
     lose to the outer path. Sibling collections at the same depth stay
-    unmeasured — never guess. No collection: empty wrapper 0; one empty or
-    dict-like child tag 1 (xmltodict's one-record collapse); scalar-only
-    or mixed sibling fields unmeasured, not dest=1.
+    unmeasured — never guess. No collection: empty wrapper ``(0, None, None)``;
+    one empty or dict-like child tag ``(1, path, tag)`` (xmltodict's
+    one-record collapse); scalar-only or mixed sibling fields ``None``,
+    not dest=1. COUNT and Gate-8 share this identity; COUNT returns ``n``,
+    checksum emits flattened dicts at ``(path, tag)``.
     """
-    collections: list[tuple[int, int]] = []
+    collections: list[tuple[int, int, str, str]] = []
     for ppath, tags in parent_stats.items():
         depth = ppath.count("/")
-        for _tag, row in tags.items():
+        for tag, row in tags.items():
             n, dict_n, _empty_n, _scalar_n = row
             if n >= 2 and dict_n >= 2:
-                collections.append((depth, n))
+                collections.append((depth, n, ppath, tag))
     if collections:
-        min_depth = min(depth for depth, _n in collections)
-        at_min = [n for depth, n in collections if depth == min_depth]
+        min_depth = min(item[0] for item in collections)
+        at_min = [item for item in collections if item[0] == min_depth]
         if len(at_min) != 1:
             return None
-        return at_min[0]
+        _depth, n, ppath, tag = at_min[0]
+        return n, ppath, tag
     if not parent_stats:
-        return None if root_text_nonempty else 0
+        return None if root_text_nonempty else (0, None, None)
     min_depth = min(path.count("/") for path in parent_stats)
     roots = [path for path in parent_stats if path.count("/") == min_depth]
     if len(roots) != 1:
@@ -1474,20 +1477,17 @@ def _xml_count_from_parent_stats(
     children = parent_stats[roots[0]]
     if len(children) != 1:
         return None
-    n, _dict_n, _empty_n, scalar_n = next(iter(children.values()))
+    tag, row = next(iter(children.items()))
+    n, _dict_n, _empty_n, scalar_n = row
     if n == 1 and not scalar_n:
-        return 1
+        return 1, roots[0], tag
     return None
 
 
-def _count_xml_records_stax(source: Any, xml_iterparse: Any) -> int | None:
-    """StAX unique-path COUNT. ``elem.clear()`` drops text; empty shells stay.
-
-    defusedxml/stdlib ``iterparse`` has no lxml ``getprevious()`` sibling
-    unlink, so memory is O(n) empty Element objects under a wide parent,
-    not O(document text). O(depth) unlink is a future enhancement of this
-    kernel, not a second COUNT.
-    """
+def _xml_stax_unique(
+    source: Any, xml_iterparse: Any
+) -> tuple[int, str | None, str | None] | None:
+    """One StAX walk. Unique ``(n, parent_path, tag)``, else unmeasured."""
     parent_stats: dict[str, dict[str, list[int]]] = {}
     stack: list[str] = []
     saw_child: list[bool] = []
@@ -1530,9 +1530,22 @@ def _count_xml_records_stax(source: Any, xml_iterparse: Any) -> int | None:
         elem.clear()
     if not saw_root:
         return None
-    return _xml_count_from_parent_stats(
+    return _xml_unique_from_parent_stats(
         parent_stats, root_text_nonempty=root_text_nonempty
     )
+
+
+def _count_xml_records_stax(source: Any, xml_iterparse: Any) -> int | None:
+    """StAX unique-path COUNT. ``elem.clear()`` drops text; empty shells stay.
+
+    defusedxml/stdlib ``iterparse`` has no lxml ``getprevious()`` sibling
+    unlink, so memory is O(n) empty Element objects under a wide parent,
+    not O(document text). O(depth) unlink is a future enhancement of this
+    kernel, not a second COUNT. Gate-8 cell dicts are a second pass of
+    this same unique path (``iter_xml_dicts``), not a DOM ingest parse.
+    """
+    found = _xml_stax_unique(source, xml_iterparse)
+    return None if found is None else found[0]
 
 
 def _count_xml_records_dom(text: str) -> int | None:
@@ -1573,6 +1586,8 @@ def count_xml_records(content: bytes | str | Path) -> int | None:
     (object-store GET) stream from a buffer already in RAM. Local gzip
     XML streams; the ImportError DOM fallback does not slurp a gzip path.
     Object-store GET gzip streams through a caller-owned ``GzipFile``.
+    Gate-8 cell checksum reuses this uniqueness via ``iter_xml_dicts``
+    (second StAX pass at the discovered path; one-shot GET is spooled).
     """
     try:
         from defusedxml.ElementTree import iterparse as xml_iterparse
@@ -1590,6 +1605,200 @@ def count_xml_records(content: bytes | str | Path) -> int | None:
     except Exception:
         return None
     finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def _xml_elem_value(elem: Any) -> Any:
+    """Element → xmltodict-shaped value (text, attr dict, or nested map/list)."""
+    children = list(elem)
+    attrib = dict(getattr(elem, "attrib", None) or {})
+    text = (getattr(elem, "text", None) or "").strip()
+    if not children:
+        if attrib:
+            rec = {f"@{k}": v for k, v in attrib.items()}
+            if text:
+                rec["#text"] = text
+            return rec
+        return text
+    rec = {f"@{k}": v for k, v in attrib.items()}
+    groups: dict[str, list[Any]] = {}
+    for child in children:
+        groups.setdefault(_xml_local_name(child.tag), []).append(_xml_elem_value(child))
+    for tag, vals in groups.items():
+        rec[tag] = vals if len(vals) > 1 else vals[0]
+    return rec
+
+
+def _xml_elem_record(elem: Any) -> dict[str, Any]:
+    """Same flatten ingest uses — attributes ``@attr``, nested dicts dotted.
+
+    An empty record element (``<record/>``) is one empty object ``{}``,
+    matching xmltodict's collapse and the ImportError DOM fallback — never
+    a synthetic ``value`` cell that would split COUNT=1 from Gate-8.
+    """
+    raw = _xml_elem_value(elem)
+    if not isinstance(raw, dict):
+        if raw in ("", None):
+            return {}
+        return {"value": raw}
+    return FileParser._flatten_xml_item(raw)
+
+
+def _xml_rewindable(source: Any) -> tuple[Any, Any]:
+    """Rewindable byte source. One-shot GET is spooled; never hash a prefix.
+
+    Unique-path identity is known only after the document ends. Pass 1
+    discovers; pass 2 emits. Seekable handles (``BytesIO``, local files,
+    gzip wrapping a file) rewind in place. A StreamingBody — including
+    gzip wrapping a non-seekable prefix stream — is copied once to a
+    ``SpooledTemporaryFile`` (RAM until 8 MiB, then disk). Hadoop's
+    local two-pass, not a second parser and not O(n) record buffering
+    of every sibling collection.
+    """
+    import tempfile
+
+    can_rewind = False
+    try:
+        can_rewind = bool(source.seekable())
+    except Exception:
+        can_rewind = hasattr(source, "seek")
+    if can_rewind:
+        try:
+            source.seek(0)
+            return source, None
+        except (OSError, AttributeError, io.UnsupportedOperation, ValueError):
+            pass
+    spool = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
+    try:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise TypeError("XML stream must yield bytes")
+            spool.write(chunk)
+        spool.seek(0)
+    except Exception:
+        spool.close()
+        raise
+    return spool, spool.close
+
+
+def _iter_xml_dicts_at_path(
+    source: Any, xml_iterparse: Any, parent_path: str, tag: str
+) -> Any:
+    """Second StAX pass: emit flattened dicts at the unique COUNT path."""
+    stack: list[str] = []
+    for event, elem in xml_iterparse(  # nosec B314
+        source,
+        events=("start", "end"),
+        forbid_dtd=True,
+        forbid_entities=True,
+        forbid_external=True,
+    ):
+        if event == "start":
+            stack.append(_xml_local_name(elem.tag))
+            continue
+        local = stack.pop() if stack else _xml_local_name(elem.tag)
+        current_parent = "/" + "/".join(stack) if stack else ""
+        if current_parent == parent_path and local == tag:
+            yield _xml_elem_record(elem)
+        elem.clear()
+
+
+def _iter_xml_dicts_dom(text: str) -> Any:
+    """ImportError fallback when defusedxml is absent. Same unique-path as COUNT."""
+    from services.dest_precount import UnmeasuredArtifact
+
+    try:
+        import xmltodict
+    except ImportError as exc:
+        raise UnmeasuredArtifact("xml_checksum_needs_parser") from exc
+    try:
+        root = xmltodict.parse(text)
+    except Exception as exc:
+        raise UnmeasuredArtifact("xml_unparseable") from exc
+    rows, _path, err = FileParser._unique_xml_collection(root)
+    if err:
+        raise UnmeasuredArtifact("xml_ambiguous_path")
+    if rows is not None:
+        yield from rows
+        return
+    n = _count_xml_collapsed_table(root)
+    if n == 0:
+        return
+    if n == 1 and isinstance(root, dict) and len(root) == 1:
+        wrapper = next(iter(root.values()))
+        if wrapper is None or wrapper == "":
+            yield {}
+            return
+        if isinstance(wrapper, dict) and len(wrapper) == 1:
+            inner = next(iter(wrapper.values()))
+            if inner is None or inner == "":
+                yield {}
+                return
+            if isinstance(inner, dict):
+                yield FileParser._flatten_xml_item(inner)
+                return
+    raise UnmeasuredArtifact("xml_unmeasured")
+
+
+def iter_xml_dicts(content: bytes | str | Path) -> Any:
+    """Same unique-path population as ``count_xml_records``, as dicts for Gate-8.
+
+    Pass 1 is the COUNT StAX unique-path walk. Pass 2 emits flattened
+    records at that path. A one-shot GET is spooled once, then both
+    passes read the spool — never a prefix digest, never ingest
+    ``parse_xml`` (max_rows / document-as-one). Ambiguous siblings,
+    document XML, XXE, and malformed raise ``UnmeasuredArtifact``.
+    Empty well-formed yields nothing.
+    """
+    from services.dest_precount import UnmeasuredArtifact
+
+    try:
+        from defusedxml.ElementTree import iterparse as xml_iterparse
+    except ImportError:
+        text = _xml_count_as_text(content)
+        if text is None:
+            raise UnmeasuredArtifact("xml_unreadable")
+        yield from _iter_xml_dicts_dom(text)
+        return
+    closer = None
+    spool_closer = None
+    try:
+        source, closer = _xml_count_open(content)
+        rewindable, spool_closer = _xml_rewindable(source)
+        found = _xml_stax_unique(rewindable, xml_iterparse)
+        if found is None:
+            raise UnmeasuredArtifact("xml_unmeasured")
+        n, parent_path, tag = found
+        if n == 0 or parent_path is None or tag is None:
+            return
+        rewindable.seek(0)
+        yielded = 0
+        for rec in _iter_xml_dicts_at_path(
+            rewindable, xml_iterparse, parent_path, tag
+        ):
+            yielded += 1
+            yield rec
+        if yielded != n:
+            raise UnmeasuredArtifact("xml_checksum_count_mismatch")
+    except UnmeasuredArtifact:
+        raise
+    except (OSError, UnicodeEncodeError, TypeError) as exc:
+        raise UnmeasuredArtifact("xml_unreadable") from exc
+    except Exception as exc:
+        raise UnmeasuredArtifact("xml_unparseable") from exc
+    finally:
+        if spool_closer is not None:
+            try:
+                spool_closer()
+            except Exception:
+                pass
         if closer is not None:
             try:
                 closer()

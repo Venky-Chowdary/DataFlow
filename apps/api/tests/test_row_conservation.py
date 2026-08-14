@@ -3110,12 +3110,20 @@ def test_object_store_wrapped_json_gate8_unmeasured_count_still_works(
     assert checksum_object_store("s3", cfg, table_name="exports/data.json") == (-1, "")
 
 
-def test_object_store_xml_gate8_unmeasured_count_still_works(
+def test_object_store_xml_gate8_checksum_is_unique_path_not_json_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """XML unique-path COUNT is not a JSON-[] checksum. Cell walk stays unmeasured."""
-    from services.dest_precount import checksum_object_store
+    """XML GET checksum is unique-path cell dicts, not JSON [] and not ingest parse.
+
+    COUNT already streams the outer record-path. Gate-8 is a second StAX
+    pass at that path (one-shot GET is spooled). Ambiguous siblings and
+    document XML stay unmeasured — never guess a path. Inner ``items``
+    must not win. Empty well-formed is ``(0, "")``.
+    """
+    from services.dest_precount import checksum_artifact_stream, checksum_object_store
+    from services.file_parser import iter_xml_dicts
     from services.format_converter import convert_rows
+    from services.reconciliation import canonical_checksum_from_iter, read_target_sample
 
     content, _mime = convert_rows(
         ["id", "v"],
@@ -3129,7 +3137,103 @@ def test_object_store_xml_gate8_unmeasured_count_still_works(
         destination_row_count("s3", cfg, schema="", table_name="exports/data.xml")
         == 2
     )
-    assert checksum_object_store("s3", cfg, table_name="exports/data.xml") == (-1, "")
+    n, digest = checksum_object_store("s3", cfg, table_name="exports/data.xml")
+    assert n == 2
+    assert digest
+    expected = canonical_checksum_from_iter(list(iter_xml_dicts(content)))
+    assert digest == expected
+    rows = read_target_sample(
+        "s3",
+        cfg,
+        schema="",
+        table_name="exports/data.xml",
+        columns=["id", "v"],
+        limit=50,
+    )
+    assert len(rows) == 2
+    assert {r["id"] for r in rows} == {"1", "2"}
+    assert {r["v"] for r in rows} == {"a", "b"}
+
+    empty, _ = convert_rows(["id", "v"], [], source_format="csv", target_format="xml")
+    _patch_object_store_payloads(monkeypatch, [("exports/empty.xml", empty)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/empty.xml")
+        == 0
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/empty.xml") == (0, "")
+
+    collapsed = b"<records><record/></records>"
+    _patch_object_store_payloads(monkeypatch, [("exports/one.xml", collapsed)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/one.xml")
+        == 1
+    )
+    one_n, one_digest = checksum_object_store("s3", cfg, table_name="exports/one.xml")
+    assert one_n == 1
+    assert one_digest
+
+    nested = (
+        b"<records>"
+        b"<record><id>1</id><items><item><sku>a</sku></item>"
+        b"<item><sku>b</sku></item></items></record>"
+        b"<record><id>2</id><items><item><sku>c</sku></item>"
+        b"<item><sku>d</sku></item></items></record>"
+        b"<record><id>3</id><items><item><sku>e</sku></item>"
+        b"<item><sku>f</sku></item></items></record>"
+        b"</records>"
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/nested.xml", nested)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/nested.xml")
+        == 3
+    )
+    nested_n, nested_digest = checksum_object_store(
+        "s3", cfg, table_name="exports/nested.xml"
+    )
+    assert nested_n == 3
+    assert nested_digest
+
+    document = b"<note><to>T</to><from>F</from></note>"
+    _patch_object_store_payloads(monkeypatch, [("exports/doc.xml", document)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/doc.xml")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/doc.xml") == (-1, "")
+
+    ambiguous = (
+        b"<root><orders><o><id>1</id></o><o><id>2</id></o></orders>"
+        b"<items><i><id>a</id></i><i><id>b</id></i></items></root>"
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/amb.xml", ambiguous)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/amb.xml")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/amb.xml") == (-1, "")
+
+    _patch_object_store_payloads(monkeypatch, [("exports/bad.xml", b"not-xml")])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/bad.xml")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/bad.xml") == (-1, "")
+
+    compressed = gzip.compress(content)
+    oneshot_n, oneshot_digest = checksum_artifact_stream(
+        _oneshot_gzip(compressed), name="export.xml"
+    )
+    assert oneshot_n == 2
+    assert oneshot_digest == digest
+
+    _patch_object_store_payloads(
+        monkeypatch, [("exports/data.xml.gz", compressed)]
+    )
+    gz_n, gz_digest = checksum_object_store(
+        "s3", cfg, table_name="exports/data.xml.gz"
+    )
+    assert gz_n == 2
+    assert gz_digest == digest
 
 
 def test_object_store_parquet_gate8_checksum_is_value_walk_not_json_empty(

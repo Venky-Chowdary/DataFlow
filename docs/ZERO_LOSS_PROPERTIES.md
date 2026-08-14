@@ -1255,7 +1255,9 @@ TypeScript does not recompute dest.
   `[]` dest=0). Unparseable JSON is `(-1, "")`, not sha256 of empty.
   Empty `[]` is `(0, "")`. Wrapped JSON / XML unique-path keep COUNT and
   stay checksum-unmeasured on a one-shot GET. Parquet GET checksum is a
-  value walk (n=2), not JSON empty; garbage Parquet unmeasured. Poison
+  value walk (n=2), not JSON empty; garbage Parquet unmeasured. Excel GET
+  checksum is value-bearing rows (n=2, not used-range / `max_row`). ORC
+  GET checksum is a value walk (n=2); footer `nrows` stays COUNT. Poison
   JSONL does not digest the prefix. Dest sample of those GET streams is
   the same walk (`sample_object_store`): gzip CSV returns the RFC 4180
   rows, garbage JSON raises `TargetSampleUnavailable` (never `[]`).

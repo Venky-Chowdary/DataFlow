@@ -59,9 +59,10 @@ checksum of those same GET streams is ``checksum_object_store`` — never
 ``json.loads`` fallback empty (gzip CSV / Parquet as UTF-8 JSON garbage
 was dest=0). JSON root array, JSONL objects, CSV RFC 4180 dicts, and
 Parquet/Avro/ORC/Excel value walks feed ``canonical_checksum_from_iter``.
-Wrapped JSON and XML cell walks stay unmeasured this kernel (COUNT
+Wrapped JSON cell walks stay unmeasured this kernel (COUNT
 still measures cardinality; one-shot unique-path cannot hash cells
-without buffering every element). Empty well-formed is ``(0, "")``. Dest sample
+without buffering every element). XML unique-path cell dicts are a
+second StAX pass of the COUNT path. Empty well-formed is ``(0, "")``. Dest sample
 of those GET streams is ``sample_object_store`` / ``sample_artifact_records``
 — never JSON-fallback ``[]`` (that greens a lost write). SFTP dest COUNT
 and Gate-8 checksum walk the same artifact machine via ``open_sftp_binary``
@@ -269,9 +270,8 @@ class UnmeasuredArtifact(Exception):
     """Dest population cannot be checksummed. Never hash a prefix or JSON ``[]``.
 
     Gate-8 ``json.loads`` fallback empty is dest=0 — the same hole COUNT
-    already refuses. Poison JSONL, ambiguous JSON, and XML unique-path
-    (cell dicts would buffer every element before uniqueness is known)
-    stay unmeasured.
+    already refuses. Poison JSONL, ambiguous JSON, and wrapped JSON
+    stay unmeasured. XML unique-path cell dicts are a second StAX pass.
     """
 
 
@@ -1723,7 +1723,7 @@ def _iter_avro_records(body: bytes) -> Any:
 
 
 def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
-    """CSV/JSON/JSONL records from a forward-only GET. XML cells stay unmeasured."""
+    """CSV/JSON/JSONL/XML records from a forward-only GET."""
     if kind in {"csv", "tsv"}:
         from services.csv_profiler import iter_csv_dicts
 
@@ -1736,6 +1736,11 @@ def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
         return
     if kind == "json":
         yield from _iter_json_root_array_dicts(source)
+        return
+    if kind == "xml":
+        from services.file_parser import iter_xml_dicts
+
+        yield from iter_xml_dicts(source)
         return
     raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
 
@@ -1767,10 +1772,9 @@ def _iter_artifact_records(
 
     CSV/JSON/JSONL (including gzip) walk ``source`` forward-only.
     Parquet/Avro/ORC/Excel still materialize one object (byte-image /
-    workbook parsers). XML and wrapped JSON raise ``UnmeasuredArtifact``
-    — never ``json.loads`` fallback empty. XML unique-path COUNT stays
-    cardinality; cell dicts on a one-shot GET would buffer every element
-    before uniqueness is known (same truncated-DISTINCT lesson).
+    workbook parsers). Wrapped JSON raises ``UnmeasuredArtifact``. XML
+    unique-path cell dicts are a second StAX pass of the COUNT path
+    (one-shot GET is spooled once). Never ``json.loads`` fallback empty.
     """
     label = str(name or "")
     compressed = label.lower().endswith(".gz")
