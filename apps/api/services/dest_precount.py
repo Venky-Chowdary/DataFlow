@@ -38,6 +38,15 @@ population is ``COUNT(DISTINCT source_id)``. Missing table is 0. Writer
 chunk-upsert ack never closes. Milvus/Qdrant/Pinecone/Weaviate stay
 unmeasured until dest-engine DISTINCT source_id exists.
 
+A complete source PK census plus dest-engine key hits splits DMS
+``MISSING_TARGET`` from ``EXTRA_TARGET``. ``COUNT(*)`` nets one missing
+source key and one leftover dest key to a false balance. Incremental
+CDC must not run that split — the batch is not the source key set, and
+leftover would look like almost every dest row. This module never
+infer-deletes leftover keys on upsert/CDC; it only measures them when
+the source census is complete. Mirror already applies inferred deletes
+on full re-sync.
+
 ``None`` means the count is unavailable (unsupported engine, missing table,
 unreachable destination, or an unreadable/unsupported artifact); callers
 must degrade assurance rather than assume zero.
@@ -70,9 +79,14 @@ __all__ = [
     "count_artifact_rows",
     "stamp_artifact_census",
     "stamp_vector_census",
+    "stamp_keyset_census",
+    "destination_keyset_census",
+    "records_to_key_tuples",
     "IDENTITY_COUNT_KEY",
     "VECTOR_ROWS_KEY",
     "DEST_COUNT_IDENTITY",
+    "MISSING_KEYS_KEY",
+    "EXTRA_KEYS_KEY",
     "DestBeforeCensus",
 ]
 
@@ -97,6 +111,18 @@ IDENTITY_COUNT_KEY = "identity_rows"
 VECTOR_ROWS_KEY = "vector_rows"
 DEST_COUNT_IDENTITY = "identity_readback"
 _VECTOR_IDENTITY_ENGINES = frozenset({"pgvector"})
+
+# Dest-engine keyset census (DMS MISSING_TARGET / EXTRA_TARGET).
+# COUNT(*) nets one missing source key and one leftover dest key to a false
+# balance. ``destination_key_hits`` of a *complete* source PK set splits
+# them: missing = |S| − |D ∩ S|, extra = |D| − |D ∩ S|. Incremental CDC
+# must not run this — a batch is not S, and leftover would be almost every
+# dest row (false EXTRA_TARGET / false inferred delete).
+MISSING_KEYS_KEY = "missing_keys"
+EXTRA_KEYS_KEY = "extra_keys"
+DEST_KEY_HITS_KEY = "dest_key_hits"
+SOURCE_KEY_COUNT_KEY = "source_key_count"
+_KEYSET_CENSUS_MAX = 20_000
 
 _ARTIFACT_FORMATS = frozenset({"csv", "tsv", "json", "jsonl", "parquet"})
 _OBJECT_STORE_DRIVERS = frozenset({
@@ -345,6 +371,171 @@ def destination_key_hits(
     except Exception as exc:  # pragma: no cover - destination-specific failure
         logger.warning("Pre-write destination key census failed: %s", exc)
         return None
+
+
+def _unique_key_tuples(
+    keys: Sequence[tuple[Any, ...]] | Sequence[Sequence[Any]],
+    width: int,
+) -> list[tuple[Any, ...]]:
+    unique: list[tuple[Any, ...]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for raw in keys or []:
+        tup = tuple(raw)
+        if len(tup) != width or any(v is None for v in tup):
+            continue
+        if tup in seen:
+            continue
+        seen.add(tup)
+        unique.append(tup)
+    return unique
+
+
+def records_to_key_tuples(
+    records: Sequence[Mapping[str, Any]] | None,
+    key_columns: Sequence[str],
+    mappings: Sequence[Mapping[str, Any]] | None = None,
+) -> list[tuple[Any, ...]] | None:
+    """Complete 1-row-1-key snapshot, or ``None``.
+
+    Duplicate PKs or a missing PK cell mean the keyset identity is not
+    defined against COUNT(*) — leave EXTRA_TARGET unmeasured rather than
+    invent a split. Incremental samples must not call this and then treat
+    the result as S.
+    """
+    cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
+    if not cols or not records:
+        return None
+    source_fields: list[str] = []
+    for target in cols:
+        field = target
+        want = target.lower()
+        for mapping in mappings or []:
+            if str(mapping.get("target") or "").lower() == want and mapping.get("source"):
+                field = str(mapping["source"])
+                break
+        source_fields.append(field)
+    tuples: list[tuple[Any, ...]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for rec in records:
+        if not isinstance(rec, Mapping):
+            return None
+        row: list[Any] = []
+        for field, target in zip(source_fields, cols):
+            raw = rec.get(field)
+            if raw is None and field != target:
+                raw = rec.get(target)
+            if raw is None or raw == "":
+                return None
+            row.append(raw)
+        tup = tuple(row)
+        if tup in seen:
+            return None
+        seen.add(tup)
+        tuples.append(tup)
+    if len(tuples) != len(records):
+        return None
+    return tuples
+
+
+def destination_keyset_census(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    key_columns: list[str],
+    keys: Sequence[tuple[Any, ...]] | Sequence[Sequence[Any]],
+) -> dict[str, int] | None:
+    """Split dest COUNT(*) into MISSING_TARGET vs EXTRA_TARGET.
+
+    Requires a *complete* unique source PK set ``S``. Incremental CDC
+    batches are not ``S`` — callers must not pass them.
+
+        missing = |S| − |D ∩ S|
+        extra   = |D| − |D ∩ S|
+
+    ``extra`` is leftover dest keys (DMS EXTRA_TARGET). This function
+    never deletes them. Dest without unique keys (hits > dest COUNT) is
+    unmeasured, not a guessed leftover. Census larger than
+    ``_KEYSET_CENSUS_MAX`` stays unmeasured rather than running an
+    unbounded IN-list.
+    """
+    cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
+    table = (table_name or "").strip()
+    if not table or not cols:
+        return None
+    unique = _unique_key_tuples(keys, len(cols))
+    if not unique or len(unique) != len(keys):
+        return None
+    if len(unique) > _KEYSET_CENSUS_MAX:
+        logger.info(
+            "Keyset census skipped: %s unique keys exceeds %s",
+            len(unique),
+            _KEYSET_CENSUS_MAX,
+        )
+        return None
+    dest_n = destination_row_count(db_type, cfg, schema=schema, table_name=table)
+    hits = destination_key_hits(
+        db_type,
+        cfg,
+        schema=schema,
+        table_name=table,
+        key_columns=cols,
+        keys=list(unique),
+    )
+    if dest_n is None or hits is None:
+        return None
+    if hits > dest_n:
+        return None
+    missing = len(unique) - hits
+    extra = dest_n - hits
+    if missing < 0:
+        return None
+    return {
+        SOURCE_KEY_COUNT_KEY: len(unique),
+        "dest_count": dest_n,
+        DEST_KEY_HITS_KEY: hits,
+        MISSING_KEYS_KEY: missing,
+        EXTRA_KEYS_KEY: extra,
+    }
+
+
+def stamp_keyset_census(
+    recon: Mapping[str, Any],
+    dest_cfg: Mapping[str, Any] | None,
+    *,
+    schema: str,
+    table_name: str,
+    dest_engine: str,
+    key_columns: Sequence[str],
+    keys: Sequence[tuple[Any, ...]] | Sequence[Sequence[Any]] | None,
+) -> dict[str, Any]:
+    """Stamp dest-engine missing/extra keys. Never infer-delete. Never writer ack.
+
+    Incremental CDC must not call this with a batch key set. Vector
+    destinations own identity COUNT(DISTINCT source_id), not this PK split.
+    """
+    out = dict(recon)
+    engine = str(dest_engine or "").strip().lower()
+    if engine in _VECTOR_IDENTITY_ENGINES:
+        return out
+    if not keys:
+        return out
+    census = destination_keyset_census(
+        engine,
+        dict(dest_cfg or {}),
+        schema=str(schema or ""),
+        table_name=str(table_name or ""),
+        key_columns=[str(c).strip() for c in key_columns if str(c).strip()],
+        keys=keys,
+    )
+    if census is None:
+        return out
+    out[MISSING_KEYS_KEY] = census[MISSING_KEYS_KEY]
+    out[EXTRA_KEYS_KEY] = census[EXTRA_KEYS_KEY]
+    out[DEST_KEY_HITS_KEY] = census[DEST_KEY_HITS_KEY]
+    out[SOURCE_KEY_COUNT_KEY] = census[SOURCE_KEY_COUNT_KEY]
+    return out
 
 
 def _key_hits_sql(

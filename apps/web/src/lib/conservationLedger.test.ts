@@ -147,6 +147,37 @@ describe("destHeadline never falls back to writer ack", () => {
     assert.equal(destProvenCount({ row_accounting: vectorLedger }), 2);
   });
 
+  it("surfaces MISSING_TARGET and EXTRA_TARGET keys when COUNT(*) would net them", () => {
+    const keysetLedger = {
+      ...overwriteLedger,
+      dest_count: 3,
+      rows_read: 3,
+      rows_written: 3,
+      unaccounted: 0,
+      balanced: false,
+      missing_keys: 1,
+      extra_keys: 1,
+      writer_ack: 10_000,
+      writer_ack_delta: -9997,
+      note: "Dest-engine keyset: 1 MISSING_TARGET key(s), 1 EXTRA_TARGET leftover dest key(s).",
+    };
+    const job = {
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: keysetLedger,
+    };
+    const h = destHeadline(job);
+    assert.equal(h.value, "3");
+    assert.equal(h.measured, true);
+    assert.equal(h.tone, "danger");
+    assert.equal(isDestMeasured(keysetLedger), true);
+    const cells = ledgerIdentityCells(keysetLedger);
+    assert.equal(cells.find((c) => c.label === "Missing keys")?.value, "1");
+    assert.equal(cells.find((c) => c.label === "Extra dest keys")?.value, "1");
+    assert.equal(cells.find((c) => c.label === "Dest COUNT(*)")?.value, "3");
+    assert.doesNotMatch(conservationCompleteCopy(job), /10,000/);
+  });
+
   it("shows em dash when dest is unmeasured — never invents dest = writer ack", () => {
     const h = destHeadline({
       status: "completed",

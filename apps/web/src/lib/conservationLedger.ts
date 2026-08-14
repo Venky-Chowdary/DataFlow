@@ -34,6 +34,8 @@ export type ConservationLedger = {
   events_read: number | null;
   identity_count: number | null;
   vector_rows: number | null;
+  missing_keys: number | null;
+  extra_keys: number | null;
   stream_count: number | null;
   measured_streams: number | null;
   summable: boolean | null;
@@ -112,6 +114,8 @@ export function readConservationLedger(
     events_read: num(raw.events_read),
     identity_count: num(raw.identity_count),
     vector_rows: num(raw.vector_rows),
+    missing_keys: num(raw.missing_keys),
+    extra_keys: num(raw.extra_keys),
     stream_count: num(raw.stream_count),
     measured_streams: num(raw.measured_streams),
     summable: raw.summable == null ? null : Boolean(raw.summable),
@@ -511,7 +515,7 @@ export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityC
       { label: "Dest Δ", value: fmt(ledger.dest_delta) },
     ];
   }
-  return [
+  const cells: LedgerIdentityCell[] = [
     { label: "Read", value: fmt(ledger.rows_read) },
     {
       label: isArtifactLedger(ledger) ? "Artifact records" : "Dest COUNT(*)",
@@ -520,4 +524,11 @@ export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityC
     { label: "Held out", value: fmt(ledger.rows_quarantined) },
     { label: "Skipped", value: fmt(ledger.rows_skipped) },
   ];
+  if (ledger.missing_keys != null || ledger.extra_keys != null) {
+    cells.push(
+      { label: "Missing keys", value: fmt(ledger.missing_keys) },
+      { label: "Extra dest keys", value: fmt(ledger.extra_keys) },
+    );
+  }
+  return cells;
 }

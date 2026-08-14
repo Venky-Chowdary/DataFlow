@@ -15,10 +15,15 @@ import pytest
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
     DEST_COUNT_ARTIFACT,
+    EXTRA_KEYS_KEY,
     IDENTITY_COUNT_KEY,
+    MISSING_KEYS_KEY,
     VECTOR_ROWS_KEY,
     count_artifact_rows,
+    destination_keyset_census,
+    records_to_key_tuples,
     stamp_artifact_census,
+    stamp_keyset_census,
     stamp_vector_census,
 )
 from services.row_conservation import (
@@ -343,6 +348,92 @@ def test_stamp_vector_census_milvus_is_not_identity():
     )
     assert IDENTITY_COUNT_KEY not in stamped
     assert stamped.get("dest_count_source") != DEST_IDENTITY_READBACK
+
+
+def test_count_star_nets_missing_and_extra_keys_to_a_false_balance():
+    """DMS hole: dest {2,3,99} vs source {1,2,3} is COUNT(*)=3 but not the same keys."""
+    ledger = account_population(
+        rows_read=3,
+        dest_count=3,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=10_000,
+        sync_mode="full_refresh_overwrite",
+        keyset={MISSING_KEYS_KEY: 1, EXTRA_KEYS_KEY: 1},
+    )
+    assert ledger.conservation_kind == KIND_OVERWRITE
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is False
+    assert ledger.missing_keys == 1
+    assert ledger.extra_keys == 1
+    assert ledger.writer_ack == 10_000
+    assert "MISSING_TARGET" in ledger.note
+    assert "EXTRA_TARGET" in ledger.note
+    assert "inferred" in ledger.note.lower()
+
+
+def test_keyset_closed_when_every_source_key_is_on_dest_and_no_extras():
+    ledger = account_population(
+        rows_read=3,
+        dest_count=3,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="full_refresh_overwrite",
+        keyset={MISSING_KEYS_KEY: 0, EXTRA_KEYS_KEY: 0},
+    )
+    assert ledger.balanced is True
+    assert ledger.missing_keys == 0
+    assert ledger.extra_keys == 0
+    assert "keyset closed" in ledger.note.lower()
+
+
+def test_incremental_without_keyset_does_not_invent_leftover_from_batch():
+    """A CDC batch is not S. dest_count − hits(batch) would be almost every dest row."""
+    ledger = account_population(
+        rows_read=3,
+        dest_count=3,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="full_refresh_overwrite",
+    )
+    assert ledger.balanced is True
+    assert ledger.missing_keys is None
+    assert ledger.extra_keys is None
+
+
+def test_records_to_key_tuples_requires_one_row_one_key():
+    assert records_to_key_tuples(
+        [{"id": 1}, {"id": 2}, {"id": 3}],
+        ["id"],
+    ) == [(1,), (2,), (3,)]
+    assert records_to_key_tuples([{"id": 1}, {"id": 1}], ["id"]) is None
+    assert records_to_key_tuples([{"id": 1}, {"name": "x"}], ["id"]) is None
+    assert records_to_key_tuples([], ["id"]) is None
+
+
+def test_stamp_keyset_census_does_not_run_on_pgvector():
+    stamped = stamp_keyset_census(
+        {"target_rows": 3},
+        {},
+        schema="public",
+        table_name="docs",
+        dest_engine="pgvector",
+        key_columns=["id"],
+        keys=[(1,), (2,)],
+    )
+    assert MISSING_KEYS_KEY not in stamped
+    assert EXTRA_KEYS_KEY not in stamped
 
 
 def test_failed_gate8_still_exposes_independent_dest_count():
@@ -1752,3 +1843,64 @@ def test_pgvector_table_without_source_id_is_unmeasured_not_physical_count():
             cur.execute(f"DROP TABLE IF EXISTS public.{table}")
         conn.commit()
         conn.close()
+
+
+def test_sqlite_keyset_census_splits_missing_from_extra_target(tmp_path: Path):
+    """Dest {2,3,99} vs source {1,2,3}: COUNT(*)=3, missing=1, extra=1."""
+    import sqlite3
+
+    path = tmp_path / "p9_keyset.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        conn.executemany(
+            "INSERT INTO items (id, label) VALUES (?, ?)",
+            [(2, "b"), (3, "c"), (99, "ghost")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    cfg = {"database": str(path)}
+    census = destination_keyset_census(
+        "sqlite",
+        cfg,
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+    )
+    assert census is not None
+    assert census["dest_count"] == 3
+    assert census["dest_key_hits"] == 2
+    assert census[MISSING_KEYS_KEY] == 1
+    assert census[EXTRA_KEYS_KEY] == 1
+
+    stamped = stamp_keyset_census(
+        {"target_rows": 3, "target_checksum": "same-count"},
+        cfg,
+        schema="",
+        table_name="items",
+        dest_engine="sqlite",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+    )
+    assert stamped[MISSING_KEYS_KEY] == 1
+    assert stamped[EXTRA_KEYS_KEY] == 1
+    ledger = account_job(
+        {
+            "sync_mode": "full_refresh_overwrite",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 3,
+                "target_rows": 3,
+                "target_checksum": "same-count",
+                MISSING_KEYS_KEY: 1,
+                EXTRA_KEYS_KEY: 1,
+            },
+        }
+    )
+    assert ledger.balanced is False
+    assert ledger.unaccounted == 0
+    assert ledger.missing_keys == 1
+    assert ledger.extra_keys == 1
+    assert ledger.writer_ack == 10_000

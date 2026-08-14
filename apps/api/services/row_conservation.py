@@ -56,6 +56,17 @@ How dest_population is chosen:
   without a this-run source_id key census stays unproven — chunk ``id``
   PK conflict is not source identity. Writer chunk-upsert ack never
   closes. Cardinality ≠ embedding cell checksum: Gate-8 stays unproven.
+* **complete source PK census (overwrite)** — dest COUNT(*) nets one
+  missing source key and one leftover dest key to a false balance (DMS
+  ``MISSING_TARGET`` + ``EXTRA_TARGET``). Dest-engine key hits of the
+  *complete* unique source PK set split them:
+
+      missing = |S| − |D ∩ S|
+      extra   = |D| − |D ∩ S|
+
+  Incremental CDC must not run this split (the batch is not ``S``) and
+  must not infer-delete leftover dest keys. Mirror already applies
+  inferred deletes on full re-sync.
 * **mirror (inferred deletes)** — Fivetran-style ``_deleted`` flag:
   physical ``COUNT(*)`` does **not** drop. The identity is the dest-engine
   **active** population:
@@ -92,7 +103,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from services.dest_precount import ARTIFACT_COUNT_KEY, IDENTITY_COUNT_KEY, PRECOUNT_KEY, VECTOR_ROWS_KEY
+from services.dest_precount import (
+    ARTIFACT_COUNT_KEY,
+    EXTRA_KEYS_KEY,
+    IDENTITY_COUNT_KEY,
+    MISSING_KEYS_KEY,
+    PRECOUNT_KEY,
+    VECTOR_ROWS_KEY,
+)
 from services.reconcile_coverage import is_unproven_export
 from services.sync_cursor import is_append_sync, is_overwrite_sync
 
@@ -721,6 +739,8 @@ class ConservationLedger:
     events_read: int | None = None
     identity_count: int | None = None
     vector_rows: int | None = None
+    missing_keys: int | None = None
+    extra_keys: int | None = None
     stream_count: int | None = None
     measured_streams: int | None = None
     summable: bool | None = None
@@ -755,6 +775,8 @@ class ConservationLedger:
             "events_read": self.events_read,
             "identity_count": self.identity_count,
             "vector_rows": self.vector_rows,
+            "missing_keys": self.missing_keys,
+            "extra_keys": self.extra_keys,
         }
         if self.stream_count is not None:
             payload["stream_count"] = self.stream_count
@@ -1056,6 +1078,27 @@ def extract_vector_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
     return {}
 
 
+def extract_keyset_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Dest-engine MISSING_TARGET / EXTRA_TARGET split, or empty."""
+    data = dict(dest or {})
+    nested = data.get("keyset")
+    if isinstance(nested, dict) and (
+        nested.get(MISSING_KEYS_KEY) is not None
+        or nested.get(EXTRA_KEYS_KEY) is not None
+    ):
+        return dict(nested)
+    missing = data.get(MISSING_KEYS_KEY)
+    extra = data.get(EXTRA_KEYS_KEY)
+    if missing is not None or extra is not None:
+        return {
+            MISSING_KEYS_KEY: missing,
+            EXTRA_KEYS_KEY: extra,
+            "dest_key_hits": data.get("dest_key_hits"),
+            "source_key_count": data.get("source_key_count"),
+        }
+    return {}
+
+
 def _account_vector(
     *,
     read: int,
@@ -1199,6 +1242,7 @@ def account_population(
     census: KeyCensus | None = None,
     mirror: Mapping[str, Any] | None = None,
     vector: Mapping[str, Any] | None = None,
+    keyset: Mapping[str, Any] | None = None,
 ) -> ConservationLedger:
     """Close ``reader == dest_population + hold_outs + skipped`` or say why not."""
     quarantined = hold_outs(rejected_rows, coerced_null_rows)
@@ -1410,6 +1454,25 @@ def account_population(
             f" Writer acknowledged {ack:,}; {dest_short} accounts for "
             f"{written:,} ({abs(ack_delta):,} {sign} than the writer claimed)."
         )
+    missing = _as_optional_int((keyset or {}).get(MISSING_KEYS_KEY))
+    extra = _as_optional_int((keyset or {}).get(EXTRA_KEYS_KEY))
+    balanced = unaccounted == 0
+    if missing is not None and extra is not None:
+        if missing or extra:
+            balanced = False
+            note += (
+                f" Dest-engine keyset: {missing} MISSING_TARGET key(s), "
+                f"{extra} EXTRA_TARGET leftover dest key(s). COUNT(*) can net "
+                "missing+extra to a false balance — that is the DMS validation "
+                "hole after Full Load success. Leftover keys are not inferred "
+                "deletes; incremental CDC must not delete dest keys the source "
+                "did not send."
+            )
+        else:
+            note += (
+                " Dest-engine keyset closed: every source key is on dest and "
+                "dest holds no extra keys."
+            )
     return ConservationLedger(
         rows_read=read,
         rows_written=written,
@@ -1420,12 +1483,14 @@ def account_population(
         dest_count=dest_count,
         dest_count_before=dest_count_before,
         unaccounted=unaccounted,
-        balanced=unaccounted == 0,
+        balanced=balanced,
         rows_read_source="gate8_source_count",
         rows_written_source=written_source,
         conservation_kind=kind,
         note=note,
         writer_ack_delta=ack_delta,
+        missing_keys=missing,
+        extra_keys=extra,
     )
 
 
@@ -1458,6 +1523,9 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     vector = extract_vector_payload(dest)
     if not vector:
         vector = extract_vector_payload(recon)
+    keyset = extract_keyset_payload(dest)
+    if not keyset:
+        keyset = extract_keyset_payload(recon)
     return account_population(
         rows_read=_as_optional_int(recon.get("source_rows")),
         dest_count=dest_count,
@@ -1481,6 +1549,7 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
         census=census,
         mirror=mirror or None,
         vector=vector or None,
+        keyset=keyset or None,
     )
 
 

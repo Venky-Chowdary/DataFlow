@@ -10,7 +10,13 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
-from services.dest_precount import PRECOUNT_KEY, stamp_artifact_census, stamp_vector_census
+from services.dest_precount import (
+    PRECOUNT_KEY,
+    records_to_key_tuples,
+    stamp_artifact_census,
+    stamp_keyset_census,
+    stamp_vector_census,
+)
 from services.reconcile_coverage import (
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
@@ -792,6 +798,7 @@ def run_reconciliation(
     # Late-bound: populated once driver/schema/table are resolved. _finalize
     # is defined before those names exist; file-export returns must not stamp.
     vector_stamp_ctx: dict[str, Any] = {}
+    keyset_stamp_ctx: dict[str, Any] = {}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
         if digest_provenance["source"] and "source_checksum_provenance" not in payload:
@@ -809,6 +816,16 @@ def run_reconciliation(
                 schema=str(vector_stamp_ctx.get("schema") or ""),
                 table_name=str(vector_stamp_ctx.get("table_name") or ""),
                 dest_engine=str(vector_stamp_ctx.get("engine") or ""),
+            )
+        if keyset_stamp_ctx:
+            stamped = stamp_keyset_census(
+                stamped,
+                keyset_stamp_ctx.get("cfg"),
+                schema=str(keyset_stamp_ctx.get("schema") or ""),
+                table_name=str(keyset_stamp_ctx.get("table_name") or ""),
+                dest_engine=str(keyset_stamp_ctx.get("engine") or ""),
+                key_columns=list(keyset_stamp_ctx.get("key_columns") or []),
+                keys=keyset_stamp_ctx.get("keys"),
             )
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:
@@ -990,6 +1007,37 @@ def run_reconciliation(
         except Exception as exc:
             logging.getLogger(__name__).debug(
                 "Gate-8 identity resolve skipped: %s", exc, exc_info=exc
+            )
+    # Complete overwrite snapshot + dest PK: split MISSING_TARGET from
+    # EXTRA_TARGET. Incremental CDC must not pass a batch as S (that would
+    # invent leftover dest keys and look like inferred deletes).
+    from services.sync_cursor import is_overwrite_sync
+
+    if (
+        is_overwrite_sync(
+            str(
+                dest_summary.get("sync_mode")
+                or dest_summary.get("effective_sync_mode")
+                or ""
+            )
+        )
+        and pk_cols
+        and db_type
+        not in {"pgvector", "pinecone", "qdrant", "weaviate", "milvus", "email"}
+        and records
+        and isinstance(source_rows, int)
+        and source_rows == len(records)
+        and not resumed_from
+    ):
+        key_tuples = records_to_key_tuples(records, [str(c) for c in pk_cols], mapping_dicts)
+        if key_tuples:
+            keyset_stamp_ctx.update(
+                cfg=cfg,
+                schema=schema,
+                table_name=table_name,
+                engine=db_type,
+                key_columns=[str(c) for c in pk_cols],
+                keys=key_tuples,
             )
     try:
         identity_state = _identity_watermark_evidence(

@@ -74,7 +74,9 @@ export function ConservationLedgerCard({
         ? "Rows read do not equal independent artifact record count plus hold-outs and skips."
         : isVector
           ? "Rows read do not equal dest-engine COUNT(DISTINCT source_id) plus hold-outs and skips."
-          : "Rows read do not equal dest COUNT(*) plus hold-outs and skips."
+          : ledger && (ledger.missing_keys || ledger.extra_keys)
+            ? "COUNT(*) balanced or not, dest-engine keyset found MISSING_TARGET or EXTRA_TARGET keys. COUNT(*) can net missing+extra to a false balance."
+            : "Rows read do not equal dest COUNT(*) plus hold-outs and skips."
     : measured
       ? isJob
         ? dest.value === "—"
