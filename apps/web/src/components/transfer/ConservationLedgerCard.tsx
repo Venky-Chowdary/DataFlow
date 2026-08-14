@@ -46,6 +46,7 @@ export function ConservationLedgerCard({
   const isJob = ledger?.conservation_kind === "job_rollup";
   const isArtifact = ledger?.rows_written_source === "artifact_readback";
   const isVector = ledger?.conservation_kind === "vector" || ledger?.rows_written_source === "identity_readback";
+  const isScd2 = ledger?.conservation_kind === "scd2" || ledger?.rows_written_source === "current_readback";
   const leftover =
     isMirror && ledger?.dest_count != null && ledger.active_count != null
       ? Math.max(ledger.dest_count - ledger.active_count, 0)
@@ -59,7 +60,7 @@ export function ConservationLedgerCard({
       ? { label: "Open Validate", onClick: onOpenValidate }
       : null;
 
-  const unit = isMirror ? "ACTIVE" : isJob && dest.value === "—" ? "STREAMS" : isArtifact ? "RECORDS" : isVector ? "IDENTITIES" : "COUNT(*)";
+  const unit = isMirror ? "ACTIVE" : isJob && dest.value === "—" ? "STREAMS" : isArtifact ? "RECORDS" : isVector ? "IDENTITIES" : isScd2 ? "CURRENT" : "COUNT(*)";
   const nextTitle = unbalanced
     ? "Ledger unbalanced"
     : measured
@@ -74,9 +75,11 @@ export function ConservationLedgerCard({
         ? "Rows read do not equal independent artifact record count plus hold-outs and skips."
         : isVector
           ? "Rows read do not equal dest-engine COUNT(DISTINCT source_id) plus hold-outs and skips."
-          : ledger && (ledger.missing_keys || ledger.extra_keys)
-            ? "COUNT(*) balanced or not, dest-engine keyset found MISSING_TARGET or EXTRA_TARGET keys. COUNT(*) can net missing+extra to a false balance."
-            : "Rows read do not equal dest COUNT(*) plus hold-outs and skips."
+          : isScd2
+            ? "Rows read do not equal dest-engine COUNT(*) WHERE is_current plus hold-outs and skips."
+            : ledger && (ledger.missing_keys || ledger.extra_keys)
+              ? "COUNT(*) balanced or not, dest-engine keyset found MISSING_TARGET or EXTRA_TARGET keys. COUNT(*) can net missing+extra to a false balance."
+              : "Rows read do not equal dest COUNT(*) plus hold-outs and skips."
     : measured
       ? isJob
         ? dest.value === "—"
@@ -90,7 +93,9 @@ export function ConservationLedgerCard({
           ? "Every source row is in the export artifact, quarantined, or skipped. Cell fidelity is unproven."
           : isVector
             ? "Every source row is a dest identity, quarantined, or skipped. Physical vector COUNT(*) is chunk cardinality, not source-row conservation."
-            : "Every source row is at destination, quarantined, or skipped."
+            : isScd2
+              ? "Every source row is current at destination, quarantined, or skipped. Physical history COUNT(*) grows on every attribute change."
+              : "Every source row is at destination, quarantined, or skipped."
       : "Do not treat writer events as rows at destination.";
 
   return (
@@ -105,7 +110,9 @@ export function ConservationLedgerCard({
               ? "Export artifact population conservation"
               : isVector
                 ? "Vector identity population conservation"
-                : "Destination population conservation"
+                : isScd2
+                  ? "SCD2 current-row population conservation"
+                  : "Destination population conservation"
       }
     >
       <div className="df2-conservation-ledger-head">
@@ -124,7 +131,9 @@ export function ConservationLedgerCard({
                     ? "Export artifact population"
                     : isVector
                       ? "Vector identity population"
-                      : "Destination population"}
+                      : isScd2
+                        ? "Current destination population"
+                        : "Destination population"}
             </h3>
             <span className="df2-conservation-ledger-kind">
               {conservationKindLabel(ledger?.conservation_kind)}
@@ -142,19 +151,23 @@ export function ConservationLedgerCard({
                   ? "Independent record count of the written file. Writer acknowledgement is diagnostic only. Gate-8 cell fidelity remains unproven."
                   : isVector
                     ? "Dest-engine COUNT(DISTINCT source_id). Physical vector COUNT(*) and writer chunk-upsert acknowledgement are diagnostic only. Embedding cell fidelity remains unproven."
-                    : "Independent dest-engine read-back. Writer acknowledgement is diagnostic only."
+                    : isScd2
+                      ? "Dest-engine COUNT(*) WHERE is_current. Physical history COUNT(*) and writer version-upsert acknowledgement are diagnostic only."
+                      : "Independent dest-engine read-back. Writer acknowledgement is diagnostic only."
               : isMirror
                 ? "Active dest population was not captured. Writer ack is not COUNT(*) WHERE NOT _deleted."
                 : isJob
                   ? "Not every stream has a dest-engine ledger. Last-table COUNT(*) and writer ack are not the job."
                   : isVector
                     ? "Identity COUNT(DISTINCT source_id) was not captured. Vector COUNT(*) and writer ack are not destination proof."
-                    : "Dest COUNT(*) was not captured. Writer ack is not destination proof."}
+                    : isScd2
+                      ? "Current COUNT(*) WHERE is_current was not captured. History COUNT(*) and writer ack are not destination proof."
+                      : "Dest COUNT(*) was not captured. Writer ack is not destination proof."}
           </p>
         </div>
       </div>
 
-      <div className="df2-conservation-ledger-compare" aria-label={isMirror ? "Active dest versus writer acknowledgement" : isArtifact ? "Artifact records versus writer acknowledgement" : isVector ? "Identities versus writer acknowledgement" : "Dest COUNT versus writer acknowledgement"}>
+      <div className="df2-conservation-ledger-compare" aria-label={isMirror ? "Active dest versus writer acknowledgement" : isArtifact ? "Artifact records versus writer acknowledgement" : isVector ? "Identities versus writer acknowledgement" : isScd2 ? "Current rows versus writer acknowledgement" : "Dest COUNT versus writer acknowledgement"}>
         <article className={measured ? "is-dest" : "is-muted"}>
           <span>{dest.label}</span>
           <strong title={dest.title}>{dest.value}</strong>

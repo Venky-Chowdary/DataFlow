@@ -15,6 +15,7 @@ from services.dest_precount import (
     records_to_key_tuples,
     stamp_artifact_census,
     stamp_keyset_census,
+    stamp_scd2_census,
     stamp_vector_census,
 )
 from services.reconcile_coverage import (
@@ -799,6 +800,7 @@ def run_reconciliation(
     # is defined before those names exist; file-export returns must not stamp.
     vector_stamp_ctx: dict[str, Any] = {}
     keyset_stamp_ctx: dict[str, Any] = {}
+    scd2_stamp_ctx: dict[str, Any] = {}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
         if digest_provenance["source"] and "source_checksum_provenance" not in payload:
@@ -826,6 +828,14 @@ def run_reconciliation(
                 dest_engine=str(keyset_stamp_ctx.get("engine") or ""),
                 key_columns=list(keyset_stamp_ctx.get("key_columns") or []),
                 keys=keyset_stamp_ctx.get("keys"),
+            )
+        if scd2_stamp_ctx:
+            stamped = stamp_scd2_census(
+                stamped,
+                scd2_stamp_ctx.get("cfg"),
+                schema=str(scd2_stamp_ctx.get("schema") or ""),
+                table_name=str(scd2_stamp_ctx.get("table_name") or ""),
+                dest_engine=str(scd2_stamp_ctx.get("engine") or ""),
             )
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:
@@ -955,6 +965,22 @@ def run_reconciliation(
     table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""
     if db_type == "pgvector":
         vector_stamp_ctx.update(
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            engine=db_type,
+        )
+    from services.sync_cursor import normalize_sync_mode
+
+    if normalize_sync_mode(
+        str(
+            dest_summary.get("sync_mode")
+            or dest_summary.get("effective_sync_mode")
+            or ""
+        ),
+        default="",
+    ) == "scd2":
+        scd2_stamp_ctx.update(
             cfg=cfg,
             schema=schema,
             table_name=table_name,

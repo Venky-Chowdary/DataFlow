@@ -56,6 +56,21 @@ How dest_population is chosen:
   without a this-run source_id key census stays unproven — chunk ``id``
   PK conflict is not source identity. Writer chunk-upsert ack never
   closes. Cardinality ≠ embedding cell checksum: Gate-8 stays unproven.
+* **SCD Type 2** — one source identity becomes N history versions.
+  Physical ``COUNT(*)`` of versions is **not** dest population (2
+  identities → 3 history rows after one attribute change would invent a
+  surplus). Dest population is dest-engine ``COUNT(*) WHERE is_current``:
+
+      reader == COUNT(*) WHERE is_current + hold_outs + skipped
+
+  Empty dest (dest-before 0) is first-load overwrite on current
+  identities. Dest-before is physical history, not current-before —
+  dest Δ must not mix them. Incremental watermarked SCD2 (a changed
+  subset) stays unproven: this-run rows are version changes, not the
+  current population. A full snapshot whose reader equals current
+  closes (historical re-sync analogue). Writer version-upsert ack and
+  Gate-8 stuffed ``active_rows`` never close. ``is_current`` is
+  temporal, not a tombstone — do not reuse mirror ``_deleted``.
 * **complete source PK census (overwrite)** — dest COUNT(*) nets one
   missing source key and one leftover dest key to a false balance (DMS
   ``MISSING_TARGET`` + ``EXTRA_TARGET``). Dest-engine key hits of the
@@ -105,7 +120,9 @@ from typing import Any, Mapping, Sequence
 
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
+    CURRENT_ROWS_KEY,
     EXTRA_KEYS_KEY,
+    HISTORY_ROWS_KEY,
     IDENTITY_COUNT_KEY,
     MISSING_KEYS_KEY,
     PRECOUNT_KEY,
@@ -134,14 +151,16 @@ KIND_EMPTY_PASS = "empty_pass"
 KIND_UNMEASURED = "unmeasured"
 KIND_MIRROR = "mirror"
 KIND_VECTOR = "vector"
+KIND_SCD2 = "scd2"
 KIND_JOB = "job_rollup"
 DEST_ACTIVE_READBACK = "gate8_dest_active_readback"
+DEST_CURRENT_READBACK = "current_readback"
 DEST_PER_STREAM = "per_stream"
-# Dest COUNT(*) / active / identity population is additive only when every
-# stream closed the *same* population identity. Mixing overwrite COUNT(*)
-# with keyed dest-delta invents a fake job-level table.
+# Dest COUNT(*) / active / identity / current population is additive only
+# when every stream closed the *same* population identity. Mixing
+# overwrite COUNT(*) with keyed dest-delta invents a fake job-level table.
 _SUMMABLE_KINDS = frozenset(
-    {KIND_OVERWRITE, KIND_MIRROR, KIND_EMPTY_PASS, KIND_VECTOR}
+    {KIND_OVERWRITE, KIND_MIRROR, KIND_EMPTY_PASS, KIND_VECTOR, KIND_SCD2}
 )
 
 
@@ -620,6 +639,12 @@ def dest_count_from_recon(recon: Mapping[str, Any] | None) -> tuple[int | None, 
     physical embedding COUNT(*) (chunks). ``identity_rows`` is
     COUNT(DISTINCT source_id). Only the keyed identity field closes dest
     population — checksum + stuffed chunk COUNT would invent a surplus.
+
+    SCD2 current is a fifth axis: Gate-8 ``target_rows`` on SCD2 is the
+    writer's ``_active_checksum`` ``active_rows`` (or physical history).
+    ``current_rows`` is COUNT(*) WHERE is_current. Only the keyed current
+    field closes dest population — checksum + stuffed active / history
+    COUNT would invent a surplus after the first attribute change.
     """
     report = dict(recon or {})
     source = str(report.get("dest_count_source") or "").strip()
@@ -633,7 +658,18 @@ def dest_count_from_recon(recon: Mapping[str, Any] | None) -> tuple[int | None, 
         if counted is not None and counted >= 0:
             return counted, DEST_IDENTITY_READBACK
         return None, DEST_UNMEASURED
+    if source == DEST_CURRENT_READBACK:
+        counted = _as_optional_int(report.get(CURRENT_ROWS_KEY))
+        if counted is None:
+            nested = report.get("scd2")
+            if isinstance(nested, Mapping):
+                counted = _as_optional_int(nested.get("current_rows"))
+        if counted is not None and counted >= 0:
+            return counted, DEST_CURRENT_READBACK
+        return None, DEST_UNMEASURED
     if source == "skipped_identity_readback":
+        return None, DEST_UNMEASURED
+    if source == "skipped_current_readback":
         return None, DEST_UNMEASURED
     msg = str(report.get("message") or "").lower()
     if report.get("skipped_readback") is True:
@@ -668,9 +704,16 @@ def conservation_kind(
     Mirror is not overwrite and not keyed hard-delete: physical COUNT(*)
     stays while dest-engine ``COUNT(*) WHERE NOT _deleted`` is the
     population identity.
+
+    SCD2 is not overwrite, not keyed, and not mirror: physical history
+    COUNT(*) grows on every attribute change. Dest-engine
+    ``COUNT(*) WHERE is_current`` is the population identity.
+    ``is_current`` is temporal current-version, not a tombstone.
     """
     if _is_mirror_sync(sync_mode):
         return KIND_MIRROR
+    if _is_scd2_sync(sync_mode):
+        return KIND_SCD2
     if is_overwrite_sync(sync_mode):
         return KIND_OVERWRITE
     if is_append_sync(sync_mode):
@@ -686,9 +729,24 @@ def _is_mirror_sync(mode: str | None) -> bool:
     return normalize_sync_mode(mode or "", default="") == "mirror"
 
 
+def _is_scd2_sync(mode: str | None) -> bool:
+    from services.sync_cursor import normalize_sync_mode
+
+    return normalize_sync_mode(mode or "", default="") == "scd2"
+
+
 def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Nested ``destination_summary.mirror`` or stream-path top-level active census."""
+    """Nested ``destination_summary.mirror`` or stream-path top-level active census.
+
+    SCD2 stamps ``active_rows`` + ``active_checksum`` for Gate-8 cell
+    fidelity of *current* versions. That is temporal ``is_current``, not
+    a tombstone. Do not treat it as ``COUNT(*) WHERE NOT _deleted``.
+    """
     data = dict(dest or {})
+    if str(data.get("mode") or "").lower() == "scd2":
+        return {}
+    if isinstance(data.get("scd2"), dict) and not isinstance(data.get("mirror"), dict):
+        return {}
     nested = data.get("mirror")
     if isinstance(nested, dict) and (
         nested.get("mode") == "mirror"
@@ -739,6 +797,8 @@ class ConservationLedger:
     events_read: int | None = None
     identity_count: int | None = None
     vector_rows: int | None = None
+    current_count: int | None = None
+    history_rows: int | None = None
     missing_keys: int | None = None
     extra_keys: int | None = None
     stream_count: int | None = None
@@ -775,6 +835,8 @@ class ConservationLedger:
             "events_read": self.events_read,
             "identity_count": self.identity_count,
             "vector_rows": self.vector_rows,
+            "current_count": self.current_count,
+            "history_rows": self.history_rows,
             "missing_keys": self.missing_keys,
             "extra_keys": self.extra_keys,
         }
@@ -1228,6 +1290,206 @@ def _account_vector(
     )
 
 
+def extract_scd2_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Nested ``scd2`` census or top-level current/history row fields."""
+    data = dict(dest or {})
+    nested = data.get("scd2")
+    if isinstance(nested, dict) and (
+        nested.get("current_rows") is not None
+        or nested.get("history_rows") is not None
+        or nested.get(CURRENT_ROWS_KEY) is not None
+    ):
+        payload = dict(nested)
+        if payload.get("current_rows") is None and nested.get(CURRENT_ROWS_KEY) is not None:
+            payload["current_rows"] = nested.get(CURRENT_ROWS_KEY)
+        if payload.get("history_rows") is None and nested.get(HISTORY_ROWS_KEY) is not None:
+            payload["history_rows"] = nested.get(HISTORY_ROWS_KEY)
+        return payload
+    current = data.get(CURRENT_ROWS_KEY)
+    history = data.get(HISTORY_ROWS_KEY)
+    if current is not None or history is not None:
+        return {
+            "current_rows": current,
+            "history_rows": history,
+        }
+    return {}
+
+
+def _account_scd2(
+    *,
+    read: int,
+    dest_count: int | None,
+    dest_count_source: str,
+    dest_count_before: int | None,
+    quarantined: int,
+    skipped: int,
+    coerced: int,
+    ack: int | None,
+    scd2: Mapping[str, Any] | None,
+) -> ConservationLedger:
+    """Close COUNT(*) WHERE is_current, not physical history COUNT(*).
+
+    Empty dest (dest-before 0) is first-load overwrite on current
+    identities. Dest-before is physical history — never mix it with
+    current-after as dest Δ. Incremental watermarked SCD2 stays
+    unproven. Writer version-upsert ack never closes. ``is_current`` is
+    not a tombstone.
+    """
+    payload = dict(scd2 or {})
+    current = dest_count
+    history = _as_optional_int(payload.get("history_rows"))
+    current_count = _as_optional_int(payload.get("current_rows"))
+    if current_count is None:
+        current_count = current
+    base = dict(
+        rows_read=read,
+        rows_quarantined=quarantined,
+        rows_skipped=skipped,
+        rows_coerced_null=coerced,
+        writer_ack=ack,
+        dest_count=current,
+        dest_count_before=dest_count_before,
+        rows_read_source="gate8_source_count",
+        conservation_kind=KIND_SCD2,
+        current_count=current_count,
+        history_rows=history,
+        dest_delta=None,
+        active_count=None,
+    )
+    if current is None or dest_count_source != DEST_CURRENT_READBACK:
+        return ConservationLedger(
+            **base,
+            rows_written=None,
+            unaccounted=None,
+            balanced=False,
+            rows_written_source=DEST_UNMEASURED,
+            note=(
+                "SCD2 current-row identity is unproven: dest-engine "
+                "COUNT(*) WHERE is_current was not captured. Physical "
+                "history COUNT(*) grows on every attribute change (1 "
+                "source identity → N versions). Writer version-upsert "
+                "acknowledgement and Gate-8 stuffed active_rows are not "
+                "destination proof. is_current is temporal, not a "
+                "tombstone (_deleted)."
+            ),
+            writer_ack_delta=None,
+        )
+    history_note = (
+        f" Physical history COUNT(*) is {history} (diagnostic)."
+        if history is not None
+        else " Physical history COUNT(*) is diagnostic."
+    )
+    ack_delta = (int(current) - ack) if ack is not None else None
+    accounted = int(current) + quarantined + skipped
+    unaccounted = read - accounted
+
+    if dest_count_before is None:
+        return ConservationLedger(
+            **base,
+            rows_written=int(current),
+            unaccounted=None,
+            balanced=False,
+            rows_written_source=DEST_CURRENT_READBACK,
+            note=(
+                "SCD2 dest-before was not measured, so "
+                f"COUNT(*) WHERE is_current={current} cannot prove this "
+                "run's identities versus pre-existing history. Incremental "
+                "watermarked SCD2 must not close reader == current when "
+                "the batch is a changed subset."
+                + history_note
+            ),
+            writer_ack_delta=ack_delta,
+        )
+
+    if dest_count_before == 0:
+        if unaccounted == 0:
+            note = (
+                "SCD2 current-row identity closed (first load): dest-engine "
+                f"COUNT(*) WHERE is_current = {current} equals rows read "
+                "minus hold-outs and skips."
+                + history_note
+                + " Writer version ack is diagnostic."
+            )
+        elif unaccounted > 0:
+            note = (
+                f"{unaccounted} source row(s) are not in dest-engine "
+                "COUNT(*) WHERE is_current, quarantined, or skipped. Treat "
+                "as potential silent loss — version-upsert acknowledgement "
+                "is not evidence they landed."
+                + history_note
+            )
+        else:
+            note = (
+                f"{abs(unaccounted)} more current dest identit(ies) than "
+                "were read. Pre-existing current rows on a first-load "
+                "proof, or duplicate current accounting."
+                + history_note
+            )
+        if ack_delta:
+            sign = "more" if ack_delta > 0 else "fewer"
+            note += (
+                f" Writer acknowledged {ack:,} version row(s); current "
+                f"COUNT is {current:,} ({abs(ack_delta):,} {sign} than "
+                "the writer claimed)."
+            )
+        return ConservationLedger(
+            **base,
+            rows_written=int(current),
+            unaccounted=unaccounted,
+            balanced=unaccounted == 0,
+            rows_written_source=DEST_CURRENT_READBACK,
+            note=note,
+            writer_ack_delta=ack_delta,
+        )
+
+    # dest-before is physical history of a table that already existed.
+    # Close only when this run's reader equals the current population —
+    # a full snapshot re-sync of current identities, not a watermarked
+    # change batch. Do not invent dest Δ from physical-before vs current-after.
+    if unaccounted == 0:
+        note = (
+            "SCD2 current-row identity closed (full snapshot re-sync): "
+            f"dest-engine COUNT(*) WHERE is_current = {current} equals "
+            "rows read minus hold-outs and skips. Dest-before was physical "
+            "history, not current-before — dest Δ is not mixed."
+            + history_note
+            + " Writer version ack is diagnostic."
+        )
+        if ack_delta:
+            sign = "more" if ack_delta > 0 else "fewer"
+            note += (
+                f" Writer acknowledged {ack:,} version row(s); current "
+                f"COUNT is {current:,} ({abs(ack_delta):,} {sign} than "
+                "the writer claimed)."
+            )
+        return ConservationLedger(
+            **base,
+            rows_written=int(current),
+            unaccounted=unaccounted,
+            balanced=True,
+            rows_written_source=DEST_CURRENT_READBACK,
+            note=note,
+            writer_ack_delta=ack_delta,
+        )
+    return ConservationLedger(
+        **base,
+        rows_written=int(current),
+        unaccounted=None,
+        balanced=False,
+        rows_written_source=DEST_CURRENT_READBACK,
+        note=(
+            "SCD2 incremental identity is unproven: this run read "
+            f"{read} row(s) but dest holds {current} current identit(ies). "
+            "A watermarked change batch is not the current population "
+            "(historical re-sync analogue requires a full snapshot of "
+            "current identities). Physical history COUNT(*) and writer "
+            "version ack never close."
+            + history_note
+        ),
+        writer_ack_delta=ack_delta,
+    )
+
+
 def account_population(
     *,
     rows_read: int | None,
@@ -1243,6 +1505,7 @@ def account_population(
     mirror: Mapping[str, Any] | None = None,
     vector: Mapping[str, Any] | None = None,
     keyset: Mapping[str, Any] | None = None,
+    scd2: Mapping[str, Any] | None = None,
 ) -> ConservationLedger:
     """Close ``reader == dest_population + hold_outs + skipped`` or say why not."""
     quarantined = hold_outs(rejected_rows, coerced_null_rows)
@@ -1259,6 +1522,10 @@ def account_population(
     # operator's SQL sync-mode label. Physical embedding COUNT(*) is not dest.
     if dest_count_source == DEST_IDENTITY_READBACK:
         kind = KIND_VECTOR
+    # SCD2 current identities regardless of the operator's SQL sync-mode
+    # label. Physical history COUNT(*) is not dest.
+    if dest_count_source == DEST_CURRENT_READBACK:
+        kind = KIND_SCD2
 
     if rows_read is None:
         return ConservationLedger(
@@ -1313,6 +1580,21 @@ def account_population(
             coerced=coerced,
             ack=ack,
             vector=vector,
+        )
+
+    if kind == KIND_SCD2:
+        # Empty-pass must not fire: leftover current identities stay as
+        # history versions, so a zero-read watermark is still a current census.
+        return _account_scd2(
+            read=read,
+            dest_count=dest_count,
+            dest_count_source=dest_count_source,
+            dest_count_before=dest_count_before,
+            quarantined=quarantined,
+            skipped=skipped,
+            coerced=coerced,
+            ack=ack,
+            scd2=scd2,
         )
 
     if (
@@ -1526,6 +1808,9 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     keyset = extract_keyset_payload(dest)
     if not keyset:
         keyset = extract_keyset_payload(recon)
+    scd2 = extract_scd2_payload(dest)
+    if not scd2:
+        scd2 = extract_scd2_payload(recon)
     return account_population(
         rows_read=_as_optional_int(recon.get("source_rows")),
         dest_count=dest_count,
@@ -1550,6 +1835,7 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
         mirror=mirror or None,
         vector=vector or None,
         keyset=keyset or None,
+        scd2=scd2 or None,
     )
 
 
@@ -1627,6 +1913,8 @@ def stream_dest_measured(ledger: Mapping[str, Any] | None) -> bool:
         return data.get("active_count") is not None and source == DEST_ACTIVE_READBACK
     if kind == KIND_VECTOR:
         return data.get("dest_count") is not None and source == DEST_IDENTITY_READBACK
+    if kind == KIND_SCD2:
+        return data.get("dest_count") is not None and source == DEST_CURRENT_READBACK
     if kind == KIND_EMPTY_PASS:
         return True
     if kind == KIND_JOB:
@@ -1727,6 +2015,14 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_IDENTITY_READBACK
+        unaccounted = rows_read - (rows_written + quarantined + skipped)
+    elif summable and only == KIND_SCD2:
+        dest_count = sum(int(item["dest_count"] or 0) for item in per)
+        rows_written = dest_count
+        rows_read = sum(int(item["rows_read"] or 0) for item in per)
+        quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
+        skipped = sum(int(item["rows_skipped"] or 0) for item in per)
+        written_source = DEST_CURRENT_READBACK
         unaccounted = rows_read - (rows_written + quarantined + skipped)
     elif summable and only == KIND_EMPTY_PASS:
         dest_count = 0

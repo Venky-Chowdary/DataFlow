@@ -47,6 +47,15 @@ infer-deletes leftover keys on upsert/CDC; it only measures them when
 the source census is complete. Mirror already applies inferred deletes
 on full re-sync.
 
+SCD Type 2 is the same 1-source-identity → N-history-row shape as
+vector chunks. Physical ``COUNT(*)`` of versions grows on every
+attribute change. Dest population is ``COUNT(*) WHERE is_current``.
+Missing table is 0. A live table without ``is_current`` cannot prove
+current identities — return ``None``, never fall back to history
+``COUNT(*)``. Writer version-upsert ack and Gate-8 stuffed
+``active_rows`` never close. Incremental watermarked SCD2 must not
+treat a change batch as the current population.
+
 ``None`` means the count is unavailable (unsupported engine, missing table,
 unreachable destination, or an unreadable/unsupported artifact); callers
 must degrade assurance rather than assume zero.
@@ -80,11 +89,17 @@ __all__ = [
     "stamp_artifact_census",
     "stamp_vector_census",
     "stamp_keyset_census",
+    "stamp_scd2_census",
+    "count_scd2_current",
+    "count_scd2_populations",
     "destination_keyset_census",
     "records_to_key_tuples",
     "IDENTITY_COUNT_KEY",
     "VECTOR_ROWS_KEY",
     "DEST_COUNT_IDENTITY",
+    "CURRENT_ROWS_KEY",
+    "HISTORY_ROWS_KEY",
+    "DEST_COUNT_CURRENT",
     "MISSING_KEYS_KEY",
     "EXTRA_KEYS_KEY",
     "DestBeforeCensus",
@@ -111,6 +126,14 @@ IDENTITY_COUNT_KEY = "identity_rows"
 VECTOR_ROWS_KEY = "vector_rows"
 DEST_COUNT_IDENTITY = "identity_readback"
 _VECTOR_IDENTITY_ENGINES = frozenset({"pgvector"})
+
+# Independent COUNT(*) WHERE is_current of an SCD2 destination.
+# Physical history COUNT(*) is diagnostic (``history_rows``) — never dest
+# population. Analogous to vector identity vs chunk COUNT(*). SCD2
+# ``is_current`` is temporal current-version, not a tombstone (``_deleted``).
+CURRENT_ROWS_KEY = "current_rows"
+HISTORY_ROWS_KEY = "history_rows"
+DEST_COUNT_CURRENT = "current_readback"
 
 # Dest-engine keyset census (DMS MISSING_TARGET / EXTRA_TARGET).
 # COUNT(*) nets one missing source key and one leftover dest key to a false
@@ -139,6 +162,17 @@ def _count(conn: Any, table_ref: str) -> int:
     cur = conn.cursor()
     try:
         cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        cur.close()
+
+
+def _count_where(conn: Any, table_ref: str, where_sql: str) -> int:
+    """Population under an already-quoted predicate. Identifier-only WHERE."""
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT COUNT(*) FROM {table_ref} WHERE {where_sql}")  # nosec B608
         row = cur.fetchone()
         return int(row[0]) if row else 0
     finally:
@@ -1205,4 +1239,242 @@ def stamp_vector_census(
     physical = out.get("target_rows")
     if isinstance(physical, int) and physical >= 0:
         out[VECTOR_ROWS_KEY] = physical
+    return out
+
+
+def _scd2_current_predicate(dialect: str, quoted_column: str) -> str:
+    """Match ``scd2_engine``: SQLite stores boolean as 0/1; others use IS TRUE."""
+    if dialect == "sqlite":
+        return f"{quoted_column} = 1"
+    return f"{quoted_column} IS TRUE"
+
+
+def _sqlite_column_names(conn: Any, table: str) -> set[str]:
+    rows = conn.execute(f'PRAGMA table_info("{table}")').fetchall()  # nosec B608
+    names: set[str] = set()
+    for row in rows:
+        name = row[1] if not isinstance(row, Mapping) else row.get("name")
+        if name:
+            names.add(str(name).lower())
+    return names
+
+
+def count_scd2_current(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> int | None:
+    """``COUNT(*) WHERE is_current`` — current identities, not history versions.
+
+    Missing table is 0 (create-on-first-write). A live table without
+    ``is_current`` cannot prove current identities — return ``None``,
+    never fall back to physical history ``COUNT(*)``.
+    """
+    pop = count_scd2_populations(
+        db_type, cfg, schema=schema, table_name=table_name
+    )
+    if pop is None:
+        return None
+    return int(pop[CURRENT_ROWS_KEY])
+
+
+def count_scd2_populations(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> dict[str, int] | None:
+    """Current and history populations from one dest-engine session.
+
+    ``None`` means current is unmeasurable (unsupported engine, missing
+    ``is_current``, or unreachable dest). Missing table is measured zero
+    on both axes.
+    """
+    table = (table_name or "").strip()
+    if not table:
+        return None
+    kind = str(db_type or "").strip().lower()
+    try:
+        if kind == "sqlite":
+            return _sqlite_scd2_populations(cfg, table_name=table)
+        if kind in {"postgresql", "redshift"}:
+            return _pg_scd2_populations(cfg, schema=schema, table_name=table)
+        if kind in {"mysql", "mariadb"}:
+            return _mysql_scd2_populations(cfg, table_name=table)
+    except Exception as exc:  # pragma: no cover - destination-specific failure
+        logger.warning("SCD2 current-row count failed: %s", exc)
+        return None
+    return None
+
+
+def _sqlite_scd2_populations(
+    cfg: dict[str, Any],
+    *,
+    table_name: str,
+) -> dict[str, int] | None:
+    import sqlite3
+
+    from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+    from services.scd2_engine import IS_CURRENT_COLUMN
+
+    database = str(cfg.get("database") or "")
+    if not database:
+        return None
+    with sqlite3.connect(database) as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        if not exists:
+            return {CURRENT_ROWS_KEY: 0, HISTORY_ROWS_KEY: 0}
+        if IS_CURRENT_COLUMN.lower() not in _sqlite_column_names(conn, table_name):
+            return None
+        table_ref = quote_table_ref(table_name, dialect="sqlite")
+        current_q = quote_sql_identifier(IS_CURRENT_COLUMN)
+        current = _count_where(
+            conn, table_ref, _scd2_current_predicate("sqlite", current_q)
+        )
+        history = _count(conn, table_ref)
+        return {CURRENT_ROWS_KEY: current, HISTORY_ROWS_KEY: history}
+
+
+def _pg_scd2_populations(
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> dict[str, int] | None:
+    from connectors.postgresql_conn import get_connection
+    from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+    from services.scd2_engine import IS_CURRENT_COLUMN
+
+    conn = get_connection(
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 5432),
+        database=str(cfg.get("database") or ""),
+        username=str(cfg.get("username") or ""),
+        password=str(cfg.get("password") or ""),
+        connection_string=str(cfg.get("connection_string") or ""),
+        ssl=bool(cfg.get("ssl", False)),
+    )
+    try:
+        sch = schema or "public"
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f'"{sch}"."{table_name}"',))
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return {CURRENT_ROWS_KEY: 0, HISTORY_ROWS_KEY: 0}
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s "
+                "AND column_name = %s",
+                (sch, table_name, IS_CURRENT_COLUMN),
+            )
+            if cur.fetchone() is None:
+                return None
+        table_ref = quote_table_ref(table_name, sch, dialect="postgresql")
+        current_q = quote_sql_identifier(IS_CURRENT_COLUMN)
+        current = _count_where(
+            conn, table_ref, _scd2_current_predicate("postgresql", current_q)
+        )
+        history = _count(conn, table_ref)
+        return {CURRENT_ROWS_KEY: current, HISTORY_ROWS_KEY: history}
+    finally:
+        conn.close()
+
+
+def _mysql_scd2_populations(
+    cfg: dict[str, Any],
+    *,
+    table_name: str,
+) -> dict[str, int] | None:
+    from connectors.mysql_conn import get_connection
+    from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+    from services.scd2_engine import IS_CURRENT_COLUMN
+
+    conn = get_connection(
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 3306),
+        database=str(cfg.get("database") or ""),
+        username=str(cfg.get("username") or ""),
+        password=str(cfg.get("password") or ""),
+        connection_string=str(cfg.get("connection_string") or ""),
+        ssl=bool(cfg.get("ssl", False)),
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table_name,),
+            )
+            row = cur.fetchone()
+            if not row or not int(row[0]):
+                return {CURRENT_ROWS_KEY: 0, HISTORY_ROWS_KEY: 0}
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = %s "
+                "AND column_name = %s",
+                (table_name, IS_CURRENT_COLUMN),
+            )
+            if cur.fetchone() is None:
+                return None
+        table_ref = quote_table_ref(table_name, dialect="mysql")
+        current_q = quote_sql_identifier(IS_CURRENT_COLUMN, "`")
+        current = _count_where(
+            conn, table_ref, _scd2_current_predicate("mysql", current_q)
+        )
+        history = _count(conn, table_ref)
+        return {CURRENT_ROWS_KEY: current, HISTORY_ROWS_KEY: history}
+    finally:
+        conn.close()
+
+
+def stamp_scd2_census(
+    recon: Mapping[str, Any],
+    dest_cfg: Mapping[str, Any] | None,
+    *,
+    schema: str,
+    table_name: str,
+    dest_engine: str,
+) -> dict[str, Any]:
+    """Stamp COUNT(*) WHERE is_current. Never history COUNT(*) or writer ack.
+
+    Gate-8 ``target_rows`` on SCD2 is the writer's ``_active_checksum``
+    ``active_rows`` (versions read during merge). That figure must not
+    survive as dest population — physical history COUNT(*) would close
+    overwrite as a surplus after the first attribute change. Cell
+    fidelity of current versions stays with the caller. This only owns
+    current-row cardinality.
+
+    Vector destinations own identity COUNT(DISTINCT source_id), not this
+    temporal current census. ``is_current`` is not a tombstone.
+    """
+    out = dict(recon)
+    engine = str(dest_engine or "").strip().lower()
+    if engine in _VECTOR_IDENTITY_ENGINES:
+        return out
+    if not dest_cfg or not str(table_name or "").strip():
+        return out
+    pop = count_scd2_populations(
+        engine or str(dict(dest_cfg).get("type") or dict(dest_cfg).get("db_type") or ""),
+        dict(dest_cfg),
+        schema=str(schema or ""),
+        table_name=str(table_name or ""),
+    )
+    if pop is None:
+        out[DEST_COUNT_SOURCE_KEY] = "skipped_current_readback"
+        return out
+    current = int(pop[CURRENT_ROWS_KEY])
+    history = int(pop[HISTORY_ROWS_KEY])
+    out[CURRENT_ROWS_KEY] = current
+    out[HISTORY_ROWS_KEY] = history
+    out[DEST_COUNT_SOURCE_KEY] = DEST_COUNT_CURRENT
+    nested = dict(out.get("scd2") or {}) if isinstance(out.get("scd2"), dict) else {}
+    nested["current_rows"] = current
+    nested["history_rows"] = history
+    out["scd2"] = nested
     return out

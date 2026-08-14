@@ -14,21 +14,27 @@ import pytest
 
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
+    CURRENT_ROWS_KEY,
     DEST_COUNT_ARTIFACT,
+    DEST_COUNT_CURRENT,
     EXTRA_KEYS_KEY,
+    HISTORY_ROWS_KEY,
     IDENTITY_COUNT_KEY,
     MISSING_KEYS_KEY,
     VECTOR_ROWS_KEY,
     count_artifact_rows,
+    count_scd2_current,
     destination_keyset_census,
     records_to_key_tuples,
     stamp_artifact_census,
     stamp_keyset_census,
+    stamp_scd2_census,
     stamp_vector_census,
 )
 from services.row_conservation import (
     DEST_ACTIVE_READBACK,
     DEST_ARTIFACT_READBACK,
+    DEST_CURRENT_READBACK,
     DEST_IDENTITY_READBACK,
     DEST_PER_STREAM,
     DEST_READBACK,
@@ -39,6 +45,7 @@ from services.row_conservation import (
     KIND_KEYED,
     KIND_MIRROR,
     KIND_OVERWRITE,
+    KIND_SCD2,
     KIND_VECTOR,
     account_job,
     account_job_streams,
@@ -348,6 +355,353 @@ def test_stamp_vector_census_milvus_is_not_identity():
     )
     assert IDENTITY_COUNT_KEY not in stamped
     assert stamped.get("dest_count_source") != DEST_IDENTITY_READBACK
+
+
+def test_current_readback_closes_on_is_current_not_history_count():
+    """SCD2 hole: 2 current / 3 history / writer 10,000 never closes dest as 3."""
+    count, source = dest_count_from_recon(
+        {
+            "target_rows": 3,
+            "target_checksum": "writer-active",
+            "skipped_readback": True,
+            "unproven": True,
+            "migration_proven": False,
+            "dest_count_source": DEST_CURRENT_READBACK,
+            CURRENT_ROWS_KEY: 2,
+            HISTORY_ROWS_KEY: 3,
+            "message": "SCD2 merge — Gate-8 stuffed active_rows is writer-path",
+        }
+    )
+    assert count == 2
+    assert source == DEST_CURRENT_READBACK
+
+
+def test_current_source_without_current_rows_is_unmeasured():
+    """Forged dest_count_source + stuffed history COUNT(*) is still not dest."""
+    count, source = dest_count_from_recon(
+        {
+            "target_rows": 10_000,
+            "target_checksum": "abc123",
+            "skipped_readback": True,
+            "dest_count_source": DEST_CURRENT_READBACK,
+        }
+    )
+    assert count is None
+    assert source == DEST_UNMEASURED
+
+
+def test_skipped_current_readback_refuses_physical_history_count():
+    count, source = dest_count_from_recon(
+        {
+            "target_rows": 3,
+            "target_checksum": "abc123",
+            "dest_count_source": "skipped_current_readback",
+        }
+    )
+    assert count is None
+    assert source == DEST_UNMEASURED
+
+
+def test_scd2_first_load_closes_on_current_not_history_or_writer_ack():
+    ledger = account_population(
+        rows_read=2,
+        dest_count=2,
+        dest_count_source=DEST_CURRENT_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=10_000,
+        sync_mode="scd2",
+        scd2={"current_rows": 2, "history_rows": 2},
+    )
+    assert ledger.conservation_kind == KIND_SCD2
+    assert ledger.rows_written == 2
+    assert ledger.rows_written_source == DEST_CURRENT_READBACK
+    assert ledger.current_count == 2
+    assert ledger.history_rows == 2
+    assert ledger.dest_count == 2
+    assert ledger.active_count is None
+    assert ledger.dest_delta is None
+    assert ledger.writer_ack == 10_000
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.writer_ack_delta == -9998
+    assert "is_current" in ledger.note.lower() or "current" in ledger.note.lower()
+    assert "history" in ledger.note.lower()
+
+
+def test_scd2_physical_history_does_not_close_as_overwrite_surplus():
+    """2 identities / 3 history rows must not close overwrite as dest=3."""
+    ledger = account_population(
+        rows_read=2,
+        dest_count=3,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=10_000,
+        sync_mode="scd2",
+        scd2={"current_rows": 2, "history_rows": 3},
+    )
+    assert ledger.conservation_kind == KIND_SCD2
+    assert ledger.balanced is False
+    assert ledger.rows_written is None
+    assert ledger.rows_written_source == DEST_UNMEASURED
+    assert ledger.active_count is None
+
+
+def test_scd2_incremental_change_batch_stays_unproven():
+    """Watermarked SCD2: reader=1 changed row, current=2, history=3."""
+    ledger = account_population(
+        rows_read=1,
+        dest_count=2,
+        dest_count_source=DEST_CURRENT_READBACK,
+        dest_count_before=3,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=1,
+        sync_mode="scd2",
+        scd2={"current_rows": 2, "history_rows": 3},
+    )
+    assert ledger.conservation_kind == KIND_SCD2
+    assert ledger.balanced is False
+    assert ledger.unaccounted is None
+    assert ledger.rows_written_source == DEST_CURRENT_READBACK
+    assert ledger.dest_count == 2
+    assert ledger.history_rows == 3
+    assert ledger.dest_delta is None
+    assert "incremental" in ledger.note.lower()
+
+
+def test_scd2_full_snapshot_resync_closes_when_reader_equals_current():
+    ledger = account_population(
+        rows_read=2,
+        dest_count=2,
+        dest_count_source=DEST_CURRENT_READBACK,
+        dest_count_before=3,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=1,
+        sync_mode="scd2",
+        scd2={"current_rows": 2, "history_rows": 3},
+    )
+    assert ledger.conservation_kind == KIND_SCD2
+    assert ledger.balanced is True
+    assert ledger.unaccounted == 0
+    assert ledger.dest_count == 2
+    assert ledger.history_rows == 3
+    assert ledger.dest_delta is None
+    assert "re-sync" in ledger.note.lower() or "resync" in ledger.note.lower()
+
+
+def test_scd2_writer_active_checksum_is_not_mirror_and_does_not_close():
+    """SCD2 dest_summary stamps active_rows + active_checksum — that is not _deleted."""
+    ledger = account_job(
+        {
+            "sync_mode": "scd2",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 2,
+                "target_rows": 2,
+                "target_checksum": "writer-active",
+            },
+            "destination_summary": {
+                "active_rows": 2,
+                "active_checksum": "writer-active",
+                "scd2": {"active_rows": 2, "rows_written": 1},
+            },
+        }
+    )
+    assert ledger.conservation_kind == KIND_SCD2
+    assert ledger.balanced is False
+    assert ledger.rows_written is None
+    assert ledger.rows_written_source == DEST_UNMEASURED
+    assert ledger.active_count is None
+
+
+def test_scd2_kind_is_not_overwrite_or_keyed_even_when_dest_is_empty():
+    assert conservation_kind("scd2", dest_count_before=0) == KIND_SCD2
+    assert conservation_kind("scd2", dest_count_before=3) == KIND_SCD2
+    assert conservation_kind("slowly_changing_dimension", dest_count_before=0) == KIND_SCD2
+
+
+def test_stamp_scd2_census_pgvector_is_a_noop():
+    stamped = stamp_scd2_census(
+        {"target_rows": 5, "target_checksum": "abc"},
+        {"host": "127.0.0.1"},
+        schema="public",
+        table_name="docs",
+        dest_engine="pgvector",
+    )
+    assert CURRENT_ROWS_KEY not in stamped
+    assert stamped.get("dest_count_source") != DEST_COUNT_CURRENT
+
+
+def test_scd2_live_sqlite_current_not_history(tmp_path: Path):
+    """apply_scd2 twice: current=2, history=3; conservation uses 2 not 3."""
+    from src.transfer.models import EndpointConfig
+
+    from services.scd2_engine import apply_scd2
+
+    db = tmp_path / "scd2_current.db"
+    endpoint = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        connection_string=f"sqlite:///{db}",
+        database=str(db),
+        table="products",
+    )
+    columns = ["id", "name", "price"]
+    schema = {"id": "string", "name": "string", "price": "decimal"}
+    first = [
+        {"id": "1", "name": "A", "price": "10.00"},
+        {"id": "2", "name": "B", "price": "20.00"},
+    ]
+    apply_scd2(endpoint, first, columns, schema, None, ["id"])
+    missing = count_scd2_current("sqlite", {"database": str(db)}, schema="", table_name="gone")
+    assert missing == 0
+    first_current = count_scd2_current(
+        "sqlite", {"database": str(db)}, schema="", table_name="products"
+    )
+    assert first_current == 2
+    changed = [
+        {"id": "1", "name": "A-updated", "price": "10.00"},
+        {"id": "2", "name": "B", "price": "20.00"},
+    ]
+    apply_scd2(endpoint, changed, columns, schema, None, ["id"])
+    stamped = stamp_scd2_census(
+        {
+            "source_rows": 2,
+            "target_rows": 10_000,
+            "target_checksum": "writer-active",
+            "skipped_readback": True,
+        },
+        {"database": str(db), "type": "sqlite"},
+        schema="",
+        table_name="products",
+        dest_engine="sqlite",
+    )
+    assert stamped[CURRENT_ROWS_KEY] == 2
+    assert stamped[HISTORY_ROWS_KEY] == 3
+    assert stamped["dest_count_source"] == DEST_COUNT_CURRENT
+    assert stamped["target_rows"] == 10_000
+    count, source = dest_count_from_recon(stamped)
+    assert count == 2
+    assert source == DEST_CURRENT_READBACK
+    ledger = account_population(
+        rows_read=2,
+        dest_count=count,
+        dest_count_source=source,
+        dest_count_before=2,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=10_000,
+        sync_mode="scd2",
+        scd2={"current_rows": 2, "history_rows": 3},
+    )
+    assert ledger.balanced is True
+    assert ledger.dest_count == 2
+    assert ledger.history_rows == 3
+    assert ledger.writer_ack == 10_000
+
+    bare = stamp_scd2_census(
+        {"target_rows": 4},
+        {"database": str(db), "type": "sqlite"},
+        schema="",
+        table_name="products",
+        dest_engine="sqlite",
+    )
+    # Table without is_current: create a non-SCD2 table.
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE plain (id TEXT PRIMARY KEY)")
+        conn.execute("INSERT INTO plain (id) VALUES ('x')")
+        conn.commit()
+    none = count_scd2_current(
+        "sqlite", {"database": str(db)}, schema="", table_name="plain"
+    )
+    assert none is None
+    skipped = stamp_scd2_census(
+        {"target_rows": 1},
+        {"database": str(db)},
+        schema="",
+        table_name="plain",
+        dest_engine="sqlite",
+    )
+    assert skipped.get("dest_count_source") == "skipped_current_readback"
+    assert CURRENT_ROWS_KEY not in skipped
+    assert bare[CURRENT_ROWS_KEY] == 2
+
+
+def test_job_rollup_two_scd2_streams_sums_current_not_history():
+    def _scd2(name: str, current: int, history: int) -> dict:
+        return {
+            "name": name,
+            "row_accounting": account_population(
+                rows_read=current,
+                dest_count=current,
+                dest_count_source=DEST_CURRENT_READBACK,
+                dest_count_before=0,
+                rejected_rows=0,
+                coerced_null_rows=0,
+                rows_skipped=0,
+                writer_ack=history * 100,
+                sync_mode="scd2",
+                scd2={"current_rows": current, "history_rows": history},
+            ).to_dict(),
+        }
+
+    job = {
+        "records_processed": 10_000,
+        "destination_summary": {
+            "streams": [
+                _scd2("dim_a", 2, 3),
+                _scd2("dim_b", 3, 5),
+            ],
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.conservation_kind == KIND_JOB
+    assert ledger.balanced is True
+    assert ledger.summable is True
+    assert ledger.dest_count == 5
+    assert ledger.rows_written == 5
+    assert ledger.rows_written_source == DEST_CURRENT_READBACK
+    assert ledger.active_count is None
+    assert ledger.per_stream[0]["dest_count"] == 2
+    assert ledger.per_stream[1]["dest_count"] == 3
+
+
+def test_account_job_scd2_recon_never_uses_writer_or_history_count():
+    ledger = account_job(
+        {
+            "sync_mode": "scd2",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 2,
+                "target_rows": 3,
+                "target_checksum": "history",
+                "skipped_readback": True,
+                "dest_count_source": DEST_CURRENT_READBACK,
+                CURRENT_ROWS_KEY: 2,
+                HISTORY_ROWS_KEY: 3,
+                "target_rows_before": 0,
+            },
+        }
+    )
+    assert ledger.conservation_kind == KIND_SCD2
+    assert ledger.dest_count == 2
+    assert ledger.current_count == 2
+    assert ledger.history_rows == 3
+    assert ledger.writer_ack == 10_000
+    assert ledger.balanced is True
+    assert ledger.active_count is None
 
 
 def test_count_star_nets_missing_and_extra_keys_to_a_false_balance():

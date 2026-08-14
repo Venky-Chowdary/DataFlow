@@ -147,6 +147,50 @@ describe("destHeadline never falls back to writer ack", () => {
     assert.equal(destProvenCount({ row_accounting: vectorLedger }), 2);
   });
 
+  it("shows current COUNT, never history COUNT(*) or 'Active at dest', for SCD2 dest", () => {
+    const scd2Ledger = {
+      ...overwriteLedger,
+      dest_count: 2,
+      rows_written: 2,
+      rows_read: 2,
+      writer_ack: 10_000,
+      writer_ack_delta: -9998,
+      rows_written_source: "current_readback",
+      conservation_kind: "scd2",
+      current_count: 2,
+      history_rows: 3,
+      active_count: null,
+      note: "SCD2 current-row identity closed: dest-engine COUNT(*) WHERE is_current = 2.",
+    };
+    const h = destHeadline({
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: scd2Ledger,
+    });
+    assert.equal(h.value, "2");
+    assert.equal(h.measured, true);
+    assert.equal(h.label, "Current at dest");
+    assert.equal(destMetricCompact(h), "2 current");
+    const copy = conservationCompleteCopy({
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: scd2Ledger,
+    });
+    assert.match(copy, /2 current at dest/);
+    assert.doesNotMatch(copy, /at destination/);
+    assert.doesNotMatch(copy, /Active at dest/);
+    assert.doesNotMatch(copy, /10,000/);
+    const cells = ledgerIdentityCells(scd2Ledger);
+    assert.equal(cells.find((c) => c.label === "Current")?.value, "2");
+    assert.equal(cells.find((c) => c.label === "History")?.value, "3");
+    assert.equal(cells.find((c) => c.label === "Writer ack")?.value, "10,000");
+    assert.equal(cells.find((c) => c.label === "Dest COUNT(*)"), undefined);
+    assert.equal(cells.find((c) => c.label === "Active"), undefined);
+    assert.match(ledgerEquation(scd2Ledger), /current 2/);
+    assert.equal(destProvenCount({ row_accounting: scd2Ledger }), 2);
+    assert.equal(isDestMeasured(scd2Ledger), true);
+  });
+
   it("surfaces MISSING_TARGET and EXTRA_TARGET keys when COUNT(*) would net them", () => {
     const keysetLedger = {
       ...overwriteLedger,
