@@ -3064,6 +3064,161 @@ def test_iceberg_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: P
     assert census[MISSING_KEYS_KEY] == 1
 
 
+def test_iceberg_dest_count_is_len_of_snapshot_population(monkeypatch):
+    """Catalog and filesystem dest COUNT are |snapshot|, never scan().count()."""
+    from services import dest_precount as dp
+
+    monkeypatch.setattr(
+        dp,
+        "_iceberg_snapshot_rows",
+        lambda *a, **k: [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+    )
+    assert (
+        dp.destination_row_count(
+            "iceberg", {"type": "iceberg"}, schema="default", table_name="orders"
+        )
+        == 4
+    )
+    monkeypatch.setattr(dp, "_iceberg_snapshot_rows", lambda *a, **k: [])
+    assert (
+        dp.destination_row_count(
+            "iceberg", {"type": "iceberg"}, schema="default", table_name="orders"
+        )
+        == 0
+    )
+    monkeypatch.setattr(dp, "_iceberg_snapshot_rows", lambda *a, **k: None)
+    assert (
+        dp.destination_row_count(
+            "iceberg", {"type": "iceberg"}, schema="default", table_name="orders"
+        )
+        is None
+    )
+
+
+def _iceberg_sql_catalog(tmp_path: Path) -> tuple[str, str]:
+    pytest.importorskip("pyiceberg")
+    pytest.importorskip("pyarrow")
+    return str(tmp_path / "wh"), f"sqlite:///{tmp_path / 'catalog.db'}"
+
+
+def _iceberg_sql_cfg(warehouse: str, uri: str) -> dict:
+    return {
+        "type": "iceberg",
+        "connection_string": uri,
+        "warehouse": warehouse,
+        "table": "orders",
+        "schema": "default",
+    }
+
+
+def test_iceberg_sql_catalog_missing_table_is_measured_zero(tmp_path: Path):
+    """Create-on-first-write for SqlCatalog is dest-before 0, not scan().count()."""
+    warehouse, uri = _iceberg_sql_catalog(tmp_path)
+    assert (
+        destination_row_count(
+            "iceberg",
+            _iceberg_sql_cfg(warehouse, uri),
+            schema="default",
+            table_name="orders",
+        )
+        == 0
+    )
+
+
+def test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len(
+    tmp_path: Path,
+):
+    """SqlCatalog leftover MERGE: dest {1,2,3,99} vs S {1,2,3} → delete 99.
+
+    Dest COUNT is len(snapshot rows), never pyiceberg scan().count()
+    metadata. Incremental remains a hard no-op.
+    """
+    from connectors.iceberg_writer import write_mapped_rows
+    from services.dest_precount import _iceberg_snapshot_rows, destination_keyset_census
+
+    warehouse, uri = _iceberg_sql_catalog(tmp_path)
+    cfg = _iceberg_sql_cfg(warehouse, uri)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=uri,
+        warehouse=warehouse,
+        table_name="default.orders",
+        headers=["id", "v"],
+        data_rows=[["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]],
+        mappings=mappings,
+        write_mode="append",
+        create_table=True,
+    )
+    assert written.ok, written.error
+    snapshot = _iceberg_snapshot_rows(
+        cfg, schema="default", table_name="orders", cols=("id",)
+    )
+    assert snapshot is not None
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="orders"
+    ) == len(snapshot)
+    before = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="default",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+    )
+    assert before is not None
+    assert before["dest_count"] == 4
+    assert before[EXTRA_KEYS_KEY] == 1
+    assert before[MISSING_KEYS_KEY] == 0
+
+    refused = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="default",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+        complete_snapshot=False,
+    )
+    assert refused is None
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="orders"
+    ) == 4
+
+    deleted = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="default",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    after = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="default",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+    )
+    assert after is not None
+    assert after["dest_count"] == 3
+    assert after[EXTRA_KEYS_KEY] == 0
+    assert after[MISSING_KEYS_KEY] == 0
+    remaining = _iceberg_snapshot_rows(
+        cfg, schema="default", table_name="orders", cols=("id",)
+    )
+    assert remaining is not None
+    assert {str(row.get("id")) for row in remaining} == {"1", "2", "3"}
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="orders"
+    ) == len(remaining)
+
+
 class _ScriptedWarehouseEngine:
     """In-process dest engine: COUNT(*) / SELECT pk / named-bind hits. No stats views."""
 

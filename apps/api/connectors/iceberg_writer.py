@@ -2623,7 +2623,7 @@ def _delete_pyiceberg(
 
     config = parse_iceberg_catalog_config(endpoint)
     catalog = load_catalog(endpoint)
-    identifier = config.table_identifier
+    identifier = config["namespace"] + (config["table_name"],)
     tbl = catalog.load_table(identifier)
     scanned = tbl.scan().to_arrow()
     rows: list[dict[str, Any]] = []

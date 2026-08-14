@@ -641,7 +641,8 @@ rowcount is not that proof.
    local path stays unmeasured. Missing parser stays unmeasured, not
    dest=0. XML stays unmeasured.
 10. Lakehouse / object-store dest-before: `destination_row_count` for
-    Iceberg (filesystem snapshot rows or catalog `scan().count()`) and
+    Iceberg (`len` of the leftover-MERGE snapshot — filesystem data
+    files or catalog `scan().to_arrow()`, never `scan().count()`) and
     S3/GCS/ADLS GET using the same artifact COUNT as local files
     (Excel value rows, streamed Avro, Parquet/ORC footer). JSON-parse
     fallback empty is dest=0 and is forbidden. Unparseable or truncated
@@ -676,9 +677,11 @@ rowcount is not that proof.
     not drop. Mirror already applies inferred soft-deletes on full
     re-sync. Incremental CDC is a hard no-op (`complete_snapshot=False`).
     Iceberg leftover MERGE lists current-snapshot PK tuples (filesystem
-    data files or catalog `scan()`), never metadata `record-count`, then
-    CoW-deletes `D \ S` through the existing dest-engine delete. MoR /
-    deletion vectors stay Planned — the identity is still leftover = D \ S.
+    data files or catalog `scan().to_arrow()`), never metadata
+    `record-count` / `scan().count()`, then CoW-deletes `D \ S` through
+    the existing dest-engine delete. Catalog dest COUNT is `len` of that
+    same listing. MoR / deletion vectors stay Planned — apply them in
+    the snapshot population once; the identity is still leftover = D \ S.
 13. SCD Type 2 current-row identity: `COUNT(*) WHERE is_current` is dest
     population. Physical history `COUNT(*)` is diagnostic
     (`history_rows`). Writer version-upsert ack and Gate-8 stuffed

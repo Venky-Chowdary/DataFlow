@@ -2552,8 +2552,8 @@ def verify_iceberg_table(
         catalog = load_catalog(endpoint)
         identifier = cfg["namespace"] + (cfg["table_name"],)
         tbl = catalog.load_table(identifier)
-        count = tbl.scan().count()
         arrow = tbl.scan().to_arrow()
+        count = len(arrow)
         if limit and len(arrow) > limit:
             arrow = arrow.slice(0, limit)
         rows = arrow.to_pylist()
