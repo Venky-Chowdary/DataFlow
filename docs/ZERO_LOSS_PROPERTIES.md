@@ -13,7 +13,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
-| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py -q` (100 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label: dest TIMESTAMPTZ is `unsupported` not `carried`; encoding: dest `OCTET_LENGTH` of 😀 is 4 (`F09F9880`), utf8mb3 INSERT errors under strict SQL (never `?`) | Decimal rounding; UCA 0900 vs 1400; NFC/NFD; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
+| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py -q` (116 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal: dest `NUMERIC(10,2)` / MariaDB `DECIMAL(10,2)` STRICT store `1.23` for `INSERT 1.225` (unscaled integer does not land); `2**53+1` digits survive dest `CAST AS CHAR` | UCA 0900 vs 1400; NFC/NFD; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
 | 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py -q` (40 passed on this host: identity 14 + live execute_tracked 2 + certificate 24; SQLite always + live PG 16 → MariaDB 10.11) | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Writer `records_processed` cannot hide a dest shortfall (DMS MISSING_TARGET class). Append uses dest delta. Empty incremental pass is a measured zero. | Upsert/CDC keyed conservation; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
@@ -440,7 +440,6 @@ Includes:
 
 ### NOT claimed / remaining for PROVEN (collation slice)
 
-* Decimal rounding, float binary
 * UCA 0900 vs 1400 linguistic equality
 * Oracle / SQL Server live COLLATE certify (planner covers SQL Server BIN/CI_AS)
 * generic_sql SQLAlchemy `collation=` (native PG/MySQL writers emit suffixes)
@@ -735,5 +734,66 @@ into utf8mb3 raises and the write matrix quarantines.
 * GB18030 / Shift-JIS live
 * NFC vs NFD uniqueness (UAX #15) — classified, not normalized silently
 * SQL Server VARCHAR code-page matrix beyond cp1252 default
+* Exactly-once / 100% of all routes — not claimed
+
+## Property 8 — PARTIAL (2026-08-14, decimal identity)
+
+**Claim:** Exact decimal identity is an unscaled integer and a scale, not a
+float and not "fits after the destination rounds." `1.2300` (money scale 4)
+and `1.23` are different stored identities. PostgreSQL `NUMERIC(10,2)` and
+MariaDB `DECIMAL(10,2)` under `STRICT_TRANS_TABLES` both store `1.23` for
+`INSERT 1.225`. Bind may still match dest rounding (`fits_decimal` /
+`coerce_decimal_wire`) so INSERT succeeds — the certificate must not say
+`carried` for a narrower scale or a FLOAT dest. SQLite `DECIMAL` affinity
+is IEEE `REAL`; create-new emits TEXT.
+
+**Why this is the unique product:** Airbyte's JSON `number` and Fivetran
+unspecified BIGDECIMAL→FLOAT push money through binary64 (`2**53`). AWS DMS
+documents FLOAT as approximate and still lets DECIMAL→FLOAT look green.
+Python `float()` then `Decimal(str(x))` invents a spelling. Strict SQL is
+not a guarantee — MariaDB 10.11 rounds excess DECIMAL scale with no error
+and no warning. DataFlow classifies exact vs approximate vs SQLite
+affinity, keeps trailing zeros as the money contract, refuses to claim
+FLOAT or narrower scale as `carried`, and certifies digits from dest
+`::text` / `CAST AS CHAR`. Integers past `2**53` are the same mantissa
+bound as JSON polarity.
+
+**Algorithm (canonical, one place):** `apps/api/services/decimal_identity.py`
+
+1. `extract_decimal_identity` — `(sign, unscaled digits, scale)` before
+   `float()`. Trailing zeros stay. `float` input is marked approximate.
+2. `classify_storage` — exact DECIMAL/NUMERIC/MONEY, approximate
+   FLOAT/REAL/DOUBLE, SQLite NUMERIC affinity (IEEE), SQLite create-new
+   TEXT (digit-text). Unmeasured dest is `unsupported`.
+3. Fidelity aspect `decimal`: source FLOAT → `skipped` (never had an
+   exact identity); DECIMAL → FLOAT / narrower declared scale / SQLite
+   affinity → `unsupported`; dest that can store the source scale →
+   `carried`. No companion integer-cents column.
+4. Certify from dest-engine text, not Python `Decimal` after a second parse.
+
+Bind compatibility is unchanged: PostgreSQL still rounds excess scale at
+INSERT so quarantine≡bind; MySQL still refuses integer overflow. Identity
+is a different axis.
+
+**Measured (this host, PostgreSQL 16 + MariaDB 10.11):**
+```
+116 passed in 5.78s  (Property 8 combined, including this slice)
+  Live PG NUMERIC(10,2): INSERT 1.225; amt::text is 1.23 — dest rounded.
+  Live MariaDB DECIMAL(10,2) + STRICT_TRANS_TABLES: INSERT 1.225
+    succeeds; CAST AS CHAR is 1.23 — strict mode is not exact identity.
+  Live PG NUMERIC(20,4) 1.2300 + (2**53+1).25 → MariaDB DECIMAL:
+    dest DATA_TYPE decimal; CAST AS CHAR matches magnitude; beyond-IEEE
+    digits survive; SQL NULL stays SQL NULL; decimal aspect carried.
+  Unit: 1.2300 ≠ 1.23 as identity; DECIMAL→DOUBLE unsupported;
+    NUMERIC(10,4)→DECIMAL(10,2) unsupported; FLOAT source skipped;
+    SQLite affinity unsupported, create-new TEXT carried.
+```
+
+### NOT claimed / remaining for PROVEN (decimal slice)
+
+* Oracle `NUMBER` live `TO_CHAR` certify
+* SQL Server `MONEY` / `DECIMAL` live
+* Banker's rounding (ROUND_HALF_EVEN) vs commercial ROUND_HALF_UP as an
+  operator-selectable policy — dest engines here round ties away from zero
 * Exactly-once / 100% of all routes — not claimed
 

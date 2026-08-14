@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
 from services.collation_carry import destination_column_collations, plan_collation_carry
+from services.decimal_identity import plan_decimal_identity_carry
 from services.encoding_capacity import plan_encoding_carry
 from services.identity_carry import plan_identity_carry
 from services.offset_label import plan_offset_label_carry
@@ -43,6 +44,7 @@ REQUIRED_ASPECTS: tuple[str, ...] = (
     "collation",
     "offset_label",
     "encoding",
+    "decimal",
     "charset",
     "index",
     "partitioning",
@@ -949,6 +951,17 @@ def plan_create_new_fidelity(
     for decision in encoding_plan:
         report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
 
+    decimal_plan = plan_decimal_identity_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+    )
+    for decision in decimal_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
     # --- CARRY: physical placement (partitioning / tablespace / clustering) ---
     placement = plan_physical_placement(
         source_storage=catalog.physical_storage,
@@ -974,6 +987,7 @@ def plan_create_new_fidelity(
         skip_collation=bool(collation_plan.decisions),
         skip_offset_label=bool(offset_plan),
         skip_encoding=bool(encoding_plan),
+        skip_decimal=bool(decimal_plan),
         skip_charset=charset_emitted,
     )
 
@@ -2519,6 +2533,7 @@ def _emit_unsupported_catalog(
     skip_collation: bool = False,
     skip_offset_label: bool = False,
     skip_encoding: bool = False,
+    skip_decimal: bool = False,
     skip_charset: bool = False,
 ) -> None:
     if catalog.foreign_keys:
@@ -2652,6 +2667,13 @@ def _emit_unsupported_catalog(
             bool(catalog.charsets),
             "Unicode encoding capacity could not be planned for this destination.",
             "No character columns on the source catalog.",
+        )
+    if not skip_decimal:
+        _aspect_list(
+            "decimal",
+            False,
+            "Exact decimal identity could not be planned for this destination.",
+            "No decimal/float columns on the source catalog.",
         )
     if not skip_charset:
         if catalog.charsets:
