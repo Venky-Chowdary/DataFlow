@@ -157,6 +157,69 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
     return headers, rows, len(objects)
 
 
+def _jsonl_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
+    """Line reader for dest COUNT. Path is opened; bytes/str stay in-memory."""
+    if isinstance(content, Path):
+        handle = content.open("r", encoding="utf-8", errors="strict", newline="")
+        return handle, handle.close
+    if isinstance(content, bytes):
+        handle = io.TextIOWrapper(
+            io.BytesIO(content), encoding="utf-8", errors="strict", newline=""
+        )
+        return handle, handle.close
+    if isinstance(content, str):
+        return io.StringIO(content), None
+    raise TypeError("JSONL COUNT expects bytes, str, or Path")
+
+
+def _count_jsonl_records_stream(reader: Any) -> int | None:
+    """One JSON object per non-blank line. A poison line is unmeasured, not a prefix."""
+    count = 0
+    for raw in reader:
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        count += 1
+    return count
+
+
+def count_jsonl_records(content: bytes | str | Path) -> int | None:
+    """Dest-engine record COUNT of JSON Lines / NDJSON. Never ingest ``parse_jsonl``.
+
+    Population is one JSON object per non-blank line — the same grain
+    streaming ingest already writes. Empty file / only blank lines is 0.
+    A scalar, array, or malformed line makes the whole artifact
+    unmeasured — never COUNT of a prefix (truncated DISTINCT lesson).
+    ``parse_jsonl`` ingest raises and materializes; this COUNT streams
+    and returns ``None``. Writer JSONL is ``json.dumps`` + newline.
+
+    Walk is one line at a time (O(line), not ``decode`` + ``splitlines`` of
+    the document). Path inputs are counted from disk; bytes (object-store
+    GET) stream from a buffer already in RAM. gzip still decompresses
+    first at the artifact dispatcher.
+    """
+    closer = None
+    try:
+        reader, closer = _jsonl_count_open(content)
+        return _count_jsonl_records_stream(reader)
+    except (OSError, UnicodeDecodeError, UnicodeEncodeError, TypeError):
+        return None
+    except Exception:
+        return None
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
 def parse_json(content: bytes) -> tuple[list[str], list[list[str]], int]:
     from services.json_tabular import load_json_records
 

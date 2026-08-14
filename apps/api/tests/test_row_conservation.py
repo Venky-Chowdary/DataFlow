@@ -187,6 +187,18 @@ def test_count_artifact_rows_csv_jsonl_json_independent_of_writer(tmp_path: Path
     jsonl_path = tmp_path / "export.jsonl"
     jsonl_path.write_text('{"id":1}\n{"id":2}\n', encoding="utf-8")
     assert count_artifact_rows(jsonl_path, fmt="jsonl") == 2
+    empty_jsonl = tmp_path / "empty.jsonl"
+    empty_jsonl.write_text("\n\n", encoding="utf-8")
+    assert count_artifact_rows(empty_jsonl, fmt="jsonl") == 0
+    ndjson_path = tmp_path / "export.ndjson"
+    ndjson_path.write_text('{"id":1}\n{"id":2}\n{"id":3}\n', encoding="utf-8")
+    assert count_artifact_rows(ndjson_path, fmt="ndjson") == 3
+
+    import gzip
+
+    gz_jsonl = tmp_path / "export.jsonl.gz"
+    gz_jsonl.write_bytes(gzip.compress(b'{"id":1}\n{"id":2}\n'))
+    assert count_artifact_rows(gz_jsonl, fmt="jsonl") == 2
 
     json_path = tmp_path / "export.json"
     json_path.write_text('[{"id":1},{"id":2},{"id":3}]', encoding="utf-8")
@@ -200,8 +212,6 @@ def test_count_artifact_rows_csv_jsonl_json_independent_of_writer(tmp_path: Path
     scalar_json = tmp_path / "scalars.json"
     scalar_json.write_text("[1,2,3]", encoding="utf-8")
     assert count_artifact_rows(scalar_json, fmt="json") is None
-
-    import gzip
 
     gz_path = tmp_path / "export.csv.gz"
     gz_path.write_bytes(gzip.compress(b"id\n1\n2\n"))
@@ -405,6 +415,91 @@ def test_count_xml_records_stax_unique_path_not_dom_or_inner_items(
 
     monkeypatch.setattr("xmltodict.parse", _dom_forbidden)
     assert count_xml_records(nested) == 3
+
+
+def test_count_jsonl_records_streams_objects_not_prefix_or_ingest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Dest COUNT streams one object per line. Ingest parse_jsonl stays ingest.
+
+    A scalar / array / malformed line is unmeasured — never dest=prefix.
+    Empty / blank-only is 0. parse_jsonl still raises on empty and still
+    materializes; this COUNT must not decode the whole path as one string.
+    """
+    from services.file_parser import count_jsonl_records, parse_jsonl
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="jsonl",
+    )
+    path = tmp_path / "export.jsonl"
+    path.write_bytes(content)
+    assert count_jsonl_records(content) == 3
+    assert count_artifact_rows(path, fmt="jsonl") == 3
+    one, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"]],
+        source_format="csv",
+        target_format="jsonl",
+    )
+    assert count_jsonl_records(one) == 1
+    empty, _ = convert_rows(["id", "v"], [], source_format="csv", target_format="jsonl")
+    assert count_jsonl_records(empty) == 0
+    empty_path = tmp_path / "empty.jsonl"
+    empty_path.write_bytes(empty)
+    assert count_artifact_rows(empty_path, fmt="jsonl") == 0
+    assert count_jsonl_records(b"") == 0
+    assert count_jsonl_records(b"\n\n  \n") == 0
+    assert count_jsonl_records(b'{"id":1}\r\n{"id":2}\r\n') == 2
+    assert count_jsonl_records(b'  {"id":1}\n\n{"id":2}\n') == 2
+    assert count_jsonl_records(b'{"id":1}\n42\n{"id":3}\n') is None
+    assert count_jsonl_records(b'{"id":1}\n[1,2]\n') is None
+    assert count_jsonl_records(b'{"id":1}\nnull\n') is None
+    assert count_jsonl_records(b'{"id":1}\n{not json\n') is None
+    assert count_jsonl_records(b'{"id": 1}\n{"id": "\xff"}') is None
+    with pytest.raises(ValueError, match="at least one"):
+        parse_jsonl(b"")
+    with pytest.raises(ValueError, match="JSON object"):
+        parse_jsonl(b'{"id":1}\n42\n')
+
+    wide = tmp_path / "wide.jsonl"
+    with wide.open("w", encoding="utf-8") as handle:
+        for i in range(5000):
+            handle.write(f'{{"id":{i}}}\n')
+    assert count_jsonl_records(wide) == 5000
+    assert count_artifact_rows(wide, fmt="jsonl") == 5000
+
+    stamped = stamp_artifact_census(
+        {"target_rows": 10_000, "skipped_readback": True},
+        {"path": str(path), "format": "jsonl"},
+    )
+    assert stamped[ARTIFACT_COUNT_KEY] == 3
+    assert stamped["target_rows"] == 3
+
+    orig_read_bytes = Path.read_bytes
+    orig_read_text = Path.read_text
+
+    def _no_read_bytes(self, *args, **kwargs):
+        if Path(self).resolve() == wide.resolve():
+            raise AssertionError(
+                "JSONL COUNT must not read_bytes the whole export"
+            )
+        return orig_read_bytes(self, *args, **kwargs)
+
+    def _no_read_text(self, *args, **kwargs):
+        if Path(self).resolve() == wide.resolve():
+            raise AssertionError(
+                "JSONL COUNT must not read_text the whole export"
+            )
+        return orig_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", _no_read_bytes)
+    monkeypatch.setattr(Path, "read_text", _no_read_text)
+    assert count_jsonl_records(wide) == 5000
+    assert count_artifact_rows(wide, fmt="jsonl") == 5000
 
 
 def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(

@@ -38,14 +38,21 @@ array-of-object (``count_json_records`` ijson StAX), never
 ``json.loads`` of the whole export, never ingest single-object-as-one
 or preferred-wrapper ranking. Empty ``[]`` is 0. Scalar arrays stay
 unmeasured, not dest=N. Local JSON is counted from the path; gzip JSON
-still decompresses first.
+still decompresses first. JSONL dest population is one object per
+non-blank line (``count_jsonl_records`` line stream), never
+``decode`` + ``splitlines`` of the whole export, never ingest
+``parse_jsonl`` (raises, materializes). Empty file / only blank lines
+is 0. A scalar, array, or malformed line stays unmeasured — never
+COUNT of a prefix. Local JSONL is counted from the path; gzip JSONL
+still decompresses first. NDJSON aliases onto JSONL.
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
 append delta and first-write overwrite (missing table/object = 0) can close.
 Writer ``Table.upsert`` / PUT rowcount is not that proof. Object-store dest
 COUNT is the same artifact machine as local file export (Excel value rows,
-streamed Avro, Parquet/ORC footer, XML unique record-path). A JSON-parse fallback that yields ``[]``
+streamed Avro, Parquet/ORC footer, XML unique record-path, JSON unique
+array-of-object, JSONL object-per-line). A JSON-parse fallback that yields ``[]``
 is dest=0 — that would close overwrite on Parquet/Excel bytes. Unparseable
 or truncated part listings stay unmeasured; never sum a prefix. Catalog
 SKUs (``amazon_s3``) alias onto ``s3`` the same way Azure SQL aliases onto
@@ -123,7 +130,6 @@ must degrade assurance rather than assume zero.
 from __future__ import annotations
 
 import gzip
-import json
 import logging
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -1725,26 +1731,6 @@ def _read_artifact_bytes(path: Path) -> bytes | None:
         return None
 
 
-def _count_jsonl_bytes(content: bytes) -> int | None:
-    try:
-        text = content.decode("utf-8")
-    except UnicodeDecodeError:
-        return None
-    count = 0
-    for raw in text.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            return None
-        if not isinstance(obj, dict):
-            return None
-        count += 1
-    return count
-
-
 def _count_parquet_bytes(content: bytes) -> int | None:
     import io
 
@@ -1856,7 +1842,10 @@ def _count_artifact_kind(kind: str, content: bytes) -> int | None:
 
             return int(count_csv_rows(content))
         if kind == "jsonl":
-            return _count_jsonl_bytes(content)
+            from services.file_parser import count_jsonl_records
+
+            n = count_jsonl_records(content)
+            return None if n is None else int(n)
         if kind == "json":
             from services.json_tabular import count_json_records
 
@@ -1916,7 +1905,9 @@ def count_artifact_rows(
     that carry values, not the worksheet used range. XML counts the unique
     repeating record-path from disk (StAX), not ingest ``max_rows``. JSON
     counts the unique array-of-object from disk (ijson StAX), not
-    ``json.loads`` of the whole export.
+    ``json.loads`` of the whole export. JSONL counts one object per
+    non-blank line from disk, not ``decode`` + ``splitlines`` of the
+    whole export.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -1940,6 +1931,11 @@ def count_artifact_rows(
         from services.json_tabular import count_json_records
 
         n = count_json_records(artifact)
+        return None if n is None else int(n)
+    if kind == "jsonl" and not artifact.name.lower().endswith(".gz"):
+        from services.file_parser import count_jsonl_records
+
+        n = count_jsonl_records(artifact)
         return None if n is None else int(n)
     content = _read_artifact_bytes(artifact)
     if content is None:
