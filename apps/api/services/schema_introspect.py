@@ -3698,6 +3698,9 @@ def _introspect_sqlite(
                 columns.append(col_out)
 
             unique_meta = _sqlite_fetch_unique_keys(cur, table_q, info_rows)
+            foreign_keys, foreign_keys_meta = _fetch_foreign_keys("sqlite", cur, "", table)
+            check_meta = probe_check_constraints("sqlite", cur, "", table).to_dict()
+            indexes_meta = probe_secondary_indexes("sqlite", cur, "", table).to_dict()
             return {
                 "ok": True,
                 "tables": [table],
@@ -3705,6 +3708,10 @@ def _introspect_sqlite(
                 "schema": "",
                 "primary_key_columns": unique_meta.get("primary_key_columns") or [],
                 "unique_keys": unique_meta.get("unique_keys") or [],
+                "foreign_keys": foreign_keys,
+                "foreign_keys_meta": foreign_keys_meta,
+                "check_constraints_meta": check_meta,
+                "indexes_meta": indexes_meta,
             }
         finally:
             conn.close()

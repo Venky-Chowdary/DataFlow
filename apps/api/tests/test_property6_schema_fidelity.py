@@ -89,7 +89,7 @@ def test_plan_carries_pk_not_null_default_unique_and_certifies_check_fk():
     assert "carried" in _aspect_status(report, "not_null")
     assert "carried" in _aspect_status(report, "default")
     assert "carried" in _aspect_status(report, "unique")
-    assert "unsupported" in _aspect_status(report, "check")
+    assert "carried" in _aspect_status(report, "check")
     assert "unsupported" in _aspect_status(report, "foreign_key")
     assert "unsupported" in _aspect_status(report, "view")
     assert "unsupported" in _aspect_status(report, "trigger")
@@ -106,7 +106,7 @@ def test_plan_carries_pk_not_null_default_unique_and_certifies_check_fk():
     assert "NOT NULL" in ddl.upper()
     assert "DEFAULT" in ddl.upper()
     assert "UNIQUE" in ddl.upper()
-    assert "CHECK" not in ddl.upper()
+    assert "CHECK" in ddl.upper()
     assert "FOREIGN KEY" not in ddl.upper()
 
 
@@ -152,7 +152,8 @@ def test_sqlite_create_new_carries_constraints_end_to_end(tmp_path: Path):
               status TEXT NOT NULL DEFAULT 'active',
               note TEXT,
               PRIMARY KEY (id),
-              UNIQUE (email)
+              UNIQUE (email),
+              CHECK (status IN ('active', 'inactive'))
             )
             """
         )
@@ -227,6 +228,7 @@ def test_sqlite_create_new_carries_constraints_end_to_end(tmp_path: Path):
     assert "carried" in _aspect_status(fid, "not_null")
     assert "carried" in _aspect_status(fid, "default")
     assert "carried" in _aspect_status(fid, "unique")
+    assert "carried" in _aspect_status(fid, "check"), fid
 
     dst = sqlite3.connect(str(dst_path))
     try:
@@ -249,6 +251,14 @@ def test_sqlite_create_new_carries_constraints_end_to_end(tmp_path: Path):
         assert rows == [(1, "a@x.com", "active"), (2, "b@x.com", "active")]
         notes = list(dst.execute('SELECT note FROM "people_out" ORDER BY id'))
         assert notes == [(None,), ("hello",)]
+        ddl = dst.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='people_out'"
+        ).fetchone()[0]
+        assert "CHECK" in str(ddl).upper()
+        with pytest.raises(sqlite3.IntegrityError):
+            dst.execute(
+                "INSERT INTO people_out (id, email, status) VALUES (3, 'c@x.com', 'nope')"
+            )
     finally:
         dst.close()
 
@@ -281,7 +291,8 @@ def test_pg_create_new_carries_pk_not_null_default_live():
                   status text NOT NULL DEFAULT 'active',
                   note text,
                   PRIMARY KEY (id),
-                  UNIQUE (email)
+                  UNIQUE (email),
+                  CONSTRAINT status_allowed CHECK (status IN ('active', 'inactive'))
                 )
                 '''
             )
@@ -364,6 +375,7 @@ def test_pg_create_new_carries_pk_not_null_default_live():
         assert "carried" in _aspect_status(fid, "primary_key")
         assert "carried" in _aspect_status(fid, "not_null")
         assert "carried" in _aspect_status(fid, "default")
+        assert "carried" in _aspect_status(fid, "check"), fid
 
         conn = psycopg2.connect(
             host=creds["host"],
@@ -399,6 +411,30 @@ def test_pg_create_new_carries_pk_not_null_default_live():
                 ctypes = {r[0] for r in cur.fetchall()}
                 assert "PRIMARY KEY" in ctypes
                 assert "UNIQUE" in ctypes
+                assert "CHECK" in ctypes
+                cur.execute(
+                    """
+                    SELECT cc.check_clause
+                    FROM information_schema.check_constraints cc
+                    JOIN information_schema.table_constraints tc
+                      ON cc.constraint_schema = tc.constraint_schema
+                     AND cc.constraint_name = tc.constraint_name
+                    WHERE tc.table_schema='public' AND tc.table_name=%s
+                      AND tc.constraint_type='CHECK'
+                    """,
+                    (dst_table,),
+                )
+                clauses = " ".join(str(r[0] or "") for r in cur.fetchall()).lower()
+                assert "status" in clauses
+                try:
+                    cur.execute(
+                        f'''INSERT INTO public."{dst_table}"
+                            (id, email, status) VALUES (3, 'c@x.com', 'nope')'''
+                    )
+                    conn.commit()
+                    raise AssertionError("destination CHECK did not reject status='nope'")
+                except psycopg2.IntegrityError:
+                    conn.rollback()
         finally:
             conn.close()
     finally:
@@ -571,7 +607,8 @@ def test_mysql_create_new_carries_pk_not_null_default_unique_live():
                   status VARCHAR(32) NOT NULL DEFAULT 'active',
                   note TEXT,
                   PRIMARY KEY (id),
-                  UNIQUE (email)
+                  UNIQUE (email),
+                  CONSTRAINT status_allowed CHECK (status IN ('active', 'inactive'))
                 )
                 """
             )
@@ -655,6 +692,7 @@ def test_mysql_create_new_carries_pk_not_null_default_unique_live():
         assert "carried" in _aspect_status(fid, "not_null"), fid
         assert "carried" in _aspect_status(fid, "default"), fid
         assert "carried" in _aspect_status(fid, "unique"), fid
+        assert "carried" in _aspect_status(fid, "check"), fid
 
         conn = pymysql.connect(
             host=creds["host"],
@@ -690,6 +728,21 @@ def test_mysql_create_new_carries_pk_not_null_default_unique_live():
                 ctypes = {r[0] for r in cur.fetchall()}
                 assert "PRIMARY KEY" in ctypes
                 assert "UNIQUE" in ctypes
+                assert "CHECK" in ctypes
+                try:
+                    cur.execute(
+                        f"INSERT INTO `{dst_table}` (id, email, status) "
+                        "VALUES (3, 'c@x.com', 'nope')"
+                    )
+                    conn.commit()
+                    raise AssertionError("destination CHECK did not reject status='nope'")
+                except pymysql.err.IntegrityError:
+                    conn.rollback()
+                except pymysql.err.OperationalError as exc:
+                    # MariaDB CHECK: ER_CONSTRAINT_FAILED 4025 (not IntegrityError).
+                    conn.rollback()
+                    if not exc.args or exc.args[0] != 4025:
+                        raise
                 cur.execute(
                     f"SELECT id, email, status, note FROM `{dst_table}` ORDER BY id"
                 )
@@ -750,7 +803,8 @@ def test_mysql_create_new_bare_varchar_inherits_width_and_unique_live():
                   status VARCHAR(32) NOT NULL DEFAULT 'active',
                   note TEXT,
                   PRIMARY KEY (id),
-                  UNIQUE (email)
+                  UNIQUE (email),
+                  CONSTRAINT status_allowed CHECK (status IN ('active', 'inactive'))
                 )
                 """
             )
@@ -832,6 +886,7 @@ def test_mysql_create_new_bare_varchar_inherits_width_and_unique_live():
         assert fid, "schema_fidelity missing on MySQL destination_summary"
         assert "carried" in _aspect_status(fid, "primary_key"), fid
         assert "carried" in _aspect_status(fid, "unique"), fid
+        assert "carried" in _aspect_status(fid, "check"), fid
         assert "carried" in _aspect_status(fid, "not_null"), fid
         assert "carried" in _aspect_status(fid, "default"), fid
 
@@ -873,6 +928,21 @@ def test_mysql_create_new_bare_varchar_inherits_width_and_unique_live():
                 ctypes = {r[0] for r in cur.fetchall()}
                 assert "PRIMARY KEY" in ctypes
                 assert "UNIQUE" in ctypes
+                assert "CHECK" in ctypes
+                try:
+                    cur.execute(
+                        f"INSERT INTO `{dst_table}` (id, email, status) "
+                        "VALUES (3, 'c@x.com', 'nope')"
+                    )
+                    conn.commit()
+                    raise AssertionError("destination CHECK did not reject status='nope'")
+                except pymysql.err.IntegrityError:
+                    conn.rollback()
+                except pymysql.err.OperationalError as exc:
+                    # MariaDB CHECK: ER_CONSTRAINT_FAILED 4025 (not IntegrityError).
+                    conn.rollback()
+                    if not exc.args or exc.args[0] != 4025:
+                        raise
                 cur.execute(
                     f"SELECT id, email, status, note FROM `{dst_table}` ORDER BY id"
                 )

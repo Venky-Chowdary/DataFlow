@@ -2086,7 +2086,24 @@ def _emit_check_aspect(
 
     payload = catalog.check_constraints_meta
     if not payload:
-        return False
+        # Legacy catalog shape: a list of predicate strings, no meta envelope.
+        # Same planner — never a second "v1 unsupported" path that drops a
+        # portable IN/comparison CHECK the meta path would carry.
+        raw = [
+            str(pred).strip()
+            for pred in (catalog.check_constraints or [])
+            if str(pred).strip()
+        ]
+        if not raw:
+            return False
+        payload = {
+            "dialect": catalog.dialect,
+            "status": "measured",
+            "items": [
+                {"name": f"check_{idx}", "predicate": pred, "columns": []}
+                for idx, pred in enumerate(raw, start=1)
+            ],
+        }
     status = str(payload.get("status") or "")
     if status != "measured":
         report.items.append(
@@ -2375,27 +2392,17 @@ def _emit_unsupported_catalog(
 
     if skip_check:
         pass
-    elif catalog.check_constraints:
-        for chk in catalog.check_constraints[:20]:
-            report.items.append(
-                SchemaFidelityItem(
-                    aspect="check",
-                    name="check",
-                    status="unsupported",
-                    reason="CHECK constraints are not carried on create-new in v1.",
-                    source_detail=str(chk)[:240],
-                )
-            )
     else:
-        # CHECK is not loaded from PG/SQLite catalogs yet — never certify absence.
+        # No CHECK catalog was measured (dialect without a reader, or probe
+        # never ran). Absence is unproven — never a silent skip.
         report.items.append(
             SchemaFidelityItem(
                 aspect="check",
                 name="*",
                 status="unsupported",
                 reason=(
-                    "CHECK constraints are not introspected for this source dialect "
-                    "in v1; refuse to certify absence."
+                    "CHECK constraints were not measured on this source catalog; "
+                    "refuse to certify absence."
                 ),
             )
         )

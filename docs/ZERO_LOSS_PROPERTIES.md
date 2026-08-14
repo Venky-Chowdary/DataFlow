@@ -11,7 +11,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 3 | Source reads are snapshot-consistent | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property3_source_snapshot_consistent.py -q` (3 passed) | PostgreSQL full-refresh REPEATABLE READ + LSN/export_snapshot; SQLite deferred txn; inline write-pass fingerprints (no second scan by default) | MySQL consistent snapshot; Mongo majority/clusterTime; Oracle flashback SCN; SQL Server SI; Snowflake/BQ time-travel; incremental sync (watermark by design) |
 | 4 | Writes are exactly-once observable | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property4_observable_exactly_once.py -q` (3 passed) | SQLite+PostgreSQL insert ledger (same-txn; row_start/row_end/attempt); kill-mid-chunk resume = clean checksum | Mongo/Kafka/object-store/warehouse sinks (NOT_GUARANTEED); MySQL live kill proof (Docker down); quarantine salvage path still not same-txn |
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
-| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py -q` (10 passed) | SQLite create-new PK/NOT NULL/DEFAULT/UNIQUE + certificate; live PG PK/NOT NULL/DEFAULT/UNIQUE; live MySQL/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + destination catalog certify; missing-catalog / unprobed CHECK·FK never silent; MySQL TEXT/BLOB UNIQUE refused (no invented prefix) | Oracle/SQL Server dedicated-writer DDL carry (generic_sql planner exists); CHECK/FK carry (certified unsupported); identity RESTART; partitioning |
+| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py -q` (53 passed with generic_sql create-new on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK carried and dest-catalog certified (violating INSERT refused); bare Map VARCHAR inherits source `(n)`; TEXT UNIQUE refused (no invented prefix) | Oracle/SQL Server dedicated-writer DDL carry; FK ordering (Property 7); unportable CHECK stays unsupported; identity RESTART; partitioning |
 | 7 | Referential integrity across multi-table migration | UNPROVEN | — | — | — |
 | 8 | Semantic value fidelity | UNPROVEN | — | — | — |
 | 9 | Every row is accounted for | UNPROVEN | — | — | — |
@@ -270,27 +270,38 @@ line — operators could not tell carry from loss.
    dest-type resolution, CREATE, generic_sql, and DDL identity. Over-cap widths
    promote to LONGTEXT/CLOB/MAX; explicit TEXT/CLOB stay unbounded; bounded
    Map `VARCHAR(10)` stays Map≡CREATE.
+8. Portable CHECK predicates are planned (dialect rewrite + whitelist), emitted
+   on CREATE, and **certified from the destination catalog**. SQLite introspect
+   now measures CHECK/FK/index catalogs (same contract as PG/MySQL). Unportable
+   CHECKs stay `unsupported` — never a lying predicate. Live SQLite / PG /
+   MariaDB dest CHECK rejects violating rows.
 
 ### Proof output (this host)
 
 ```
-pytest tests/test_inherit_measured_string_width.py tests/test_property6_schema_fidelity.py -q
-24 passed in 2.06s
-  (unit inherit matrix + SQLite E2E + live PG + live MariaDB typed-stamp
-   Property 6 + live MariaDB bare-VARCHAR inherit UNIQUE/COLUMN_TYPE)
+pytest tests/test_inherit_measured_string_width.py \
+       tests/test_property6_schema_fidelity.py \
+       tests/test_check_constraint_carry.py \
+       tests/test_generic_sql_create_new_fidelity.py -q
+53 passed in 2.32s
 
-Broader related suite (generic_sql create-new, CHECK carry, DDL identity,
-Map≡CREATE, invent SSOT, SaaS/Kafka dest-types): 87 passed in 2.90s.
-Module-size freeze: writer_common 5082/5120, generic_sql 5460/5600,
-type_system 7422/7450 — no ceiling raised.
+Includes:
+  SQLite E2E CHECK (status IN (...)) carried, sqlite_master has CHECK,
+    violating INSERT raises IntegrityError.
+  Live PG: CHECK carried, information_schema CHECK present, violating
+    INSERT raises IntegrityError.
+  Live MariaDB 10.11: CHECK carried, CONSTRAINT_TYPE CHECK present,
+    violating INSERT raises ER_CONSTRAINT_FAILED 4025.
+  Bare Map VARCHAR inherit still proven (dest varchar(n) + UNIQUE).
 ```
 
 ### NOT claimed / remaining for PROVEN
 * Oracle / SQL Server dedicated-writer create-new constraint carry
   (`generic_sql` already plans; native writers are the remaining hole)
-* FOREIGN KEY ordering (Property 7) and CHECK expression rewrite
+* FOREIGN KEY ordering (Property 7) — measured on source, not carried on
+  single-table create-new (parent must exist first)
+* Unportable CHECK predicates (casts, subqueries, unknown functions) stay
+  `unsupported` by design; no trigger-emulation of CHECK (AWS SCT class)
 * Views, triggers, generated expressions, identity RESTART, partitioning
 * Name-collision remaps under adversarial identifier fixtures (policy coded;
   not yet matrix-proven)
-* Live CHECK certify on MariaDB/PG create-new (planner emits portable CHECKs;
-  destination catalog certify is coded, not yet a live Property 6 matrix row)
