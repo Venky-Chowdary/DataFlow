@@ -97,6 +97,8 @@ _ALIASES: dict[str, str] = {
     "amazon_rds_oracle": "oracle",
     "autonomous_database": "oracle",
     "bq": "bigquery",
+    "motherduck": "duckdb",
+    "databricks_sql": "databricks",
     "amazon_s3": "s3",
     "azure_blob_storage": "adls",
     "azure_data_lake": "adls",
@@ -287,18 +289,19 @@ def uses_fetch_first_pagination(driver: str | None) -> bool:
 
 
 def warehouse_sql_quote_dialect(driver: str | None) -> str | None:
-    """Exact dest-engine COUNT(*) family: ``sqlserver`` or ``oracle``.
+    """Exact dest-engine COUNT(*) family. Stats views never this path.
 
-    Catalog SKUs (Azure SQL, RDS Oracle, Autonomous) alias onto these two.
-    Snowflake / BigQuery clustering stats and ``INFORMATION_SCHEMA``
-    approximations are not this path — those COUNT identities stay
-    unmeasured until proven exact.
+    SQL Server / Oracle (catalog SKUs alias). Snowflake, BigQuery, DuckDB,
+    and Databricks: ``SELECT COUNT(*)`` is exact; ``INFORMATION_SCHEMA`` /
+    ``__TABLES__.row_count`` / clustering stats never close.
     """
     key = dialect_profile(driver).driver
     if key in {"sqlserver", "mssql"}:
         return "sqlserver"
     if key == "oracle":
         return "oracle"
+    if key in {"snowflake", "bigquery", "duckdb", "databricks"}:
+        return key
     return None
 
 

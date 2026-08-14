@@ -96,9 +96,13 @@ def test_warehouse_sql_quote_dialect_aliases_onto_exact_engines():
         assert warehouse_sql_quote_dialect(sku) == "oracle", sku
         assert is_oracle_like(sku)
         assert quote_char_for(sku) == '"'
-    assert warehouse_sql_quote_dialect("snowflake") is None
+    assert warehouse_sql_quote_dialect("snowflake") == "snowflake"
+    assert warehouse_sql_quote_dialect("motherduck") == "duckdb"
     assert warehouse_sql_quote_dialect("postgresql") is None
-    assert warehouse_sql_quote_dialect("bigquery") is None
+    assert warehouse_sql_quote_dialect("bigquery") == "bigquery"
+    assert warehouse_sql_quote_dialect("duckdb") == "duckdb"
+    assert warehouse_sql_quote_dialect("databricks") == "databricks"
+    assert warehouse_sql_quote_dialect("databricks_sql") == "databricks"
     assert normalize_schema("azure_sql_database", "public") == "dbo"
     assert normalize_schema("amazon_rds_oracle", None, username="app") == "APP"
 
@@ -139,3 +143,7 @@ def test_quote_matrix_no_postgres_leak():
     assert "[dbo].[t]" == quote_table_ref("t", schema_from_cfg("sqlserver", {"schema": "public"}), dialect="sqlserver")
     assert "`t`" == quote_table_ref("t", None, dialect="mysql")
     assert '"public"."t"' == quote_table_ref("t", "public", dialect="postgresql")
+    assert "`default`.`jobs`" == quote_table_ref("jobs", "default", dialect="databricks")
+    assert "`p1.analytics.jobs`" == quote_table_ref(
+        "jobs", "analytics", dialect="bigquery", project="p1"
+    )

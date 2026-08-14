@@ -50,7 +50,10 @@ and leftover MERGE listing with dest-engine ``COUNT(*)`` / ``SELECT pk``.
 ``sys.partitions`` / ``sys.dm_db_partition_stats.row_count`` and Oracle
 ``ALL_TABLES.num_rows`` are estimates or stale optimizer stats — they never
 close conservation. Missing table is 0. Catalog aliases quote as
-``sqlserver`` / ``oracle`` (brackets vs folded double-quotes). Composite
+``sqlserver`` / ``oracle`` (brackets vs folded double-quotes). Snowflake /
+BigQuery / DuckDB / Databricks use the same dest-engine ``COUNT(*)`` —
+never ``INFORMATION_SCHEMA`` / ``__TABLES__.row_count`` / clustering
+stats. Composite
 key hits use portable AND/OR equality, not row-value ``IN`` (Oracle 19c
 has no tuple IN). Incremental leftover MERGE stays a hard no-op.
 
@@ -791,14 +794,19 @@ def _warehouse_sql_table_ref(
         schema or cfg.get("schema"),
         username=cfg.get("username"),
     )
-    return quote_table_ref(table_name, sch, dialect=dialect)
+    project = None
+    if dialect == "bigquery":
+        project = str(cfg.get("project") or cfg.get("database") or "") or None
+    return quote_table_ref(table_name, sch, dialect=dialect, project=project)
 
 
 def _is_missing_warehouse_relation(exc: BaseException, dialect: str) -> bool:
     """True only for 'no such table'. Login/network/privilege-other stay unmeasured.
 
-    SQL Server 208 / 42S02 / Invalid object name. Oracle ORA-00942. Never
-    ``sys.partitions`` absence, never a truncated catalog.
+    SQL Server 208 / 42S02 / Invalid object name. Oracle ORA-00942.
+    Snowflake object-does-not-exist (not 250001 auth). BigQuery
+    ``Not found: Table``. DuckDB catalog table-missing. Databricks
+    ``TABLE_OR_VIEW_NOT_FOUND``. Never stats-view absence.
     """
     text = str(exc).lower()
     orig = getattr(exc, "orig", None)
@@ -806,6 +814,14 @@ def _is_missing_warehouse_relation(exc: BaseException, dialect: str) -> bool:
     combined = f"{text} {orig_text}"
     if dialect == "oracle":
         return "ora-00942" in combined
+    if dialect == "snowflake":
+        return "does not exist" in combined and "250001" not in combined and "password" not in combined
+    if dialect == "bigquery":
+        return "not found: table" in combined
+    if dialect == "duckdb":
+        return "catalog error" in combined and "does not exist" in combined
+    if dialect == "databricks":
+        return "table_or_view_not_found" in combined or "table or view not found" in combined
     args = getattr(orig, "args", ()) if orig is not None else ()
     if args and str(args[0]) in {"208", "42S02"}:
         return True
@@ -819,8 +835,8 @@ def _is_missing_warehouse_column(exc: BaseException, dialect: str) -> bool:
     """True only for 'no such column'. Missing table is a different classifier.
 
     SQL Server 207 / 42S22 / Invalid column name. Oracle ORA-00904.
-    Never treat a missing ``is_current`` as current=0 — that would close
-    overwrite on a non-SCD2 table by counting history as empty current.
+    Snowflake invalid identifier. BigQuery unrecognized name. DuckDB
+    missing column. Databricks unresolved column. Never current=0.
     """
     text = str(exc).lower()
     orig = getattr(exc, "orig", None)
@@ -828,6 +844,14 @@ def _is_missing_warehouse_column(exc: BaseException, dialect: str) -> bool:
     combined = f"{text} {orig_text}"
     if dialect == "oracle":
         return "ora-00904" in combined
+    if dialect == "snowflake":
+        return "invalid identifier" in combined
+    if dialect == "bigquery":
+        return "unrecognized name" in combined
+    if dialect == "duckdb":
+        return "referenced column" in combined or "does not have a column" in combined
+    if dialect == "databricks":
+        return "unresolved_column" in combined or "cannot be resolved" in combined
     args = getattr(orig, "args", ()) if orig is not None else ()
     if args and str(args[0]) in {"207", "42S22"}:
         return True
@@ -1980,7 +2004,9 @@ def count_scd2_populations(
     ``None`` means current is unmeasurable (unsupported engine, missing
     ``is_current``, or unreachable dest). Missing table is measured zero
     on both axes. Oracle / SQL Server (and catalog SKUs) use the warehouse
-    dest-engine session; Snowflake / BigQuery stay unmeasured.
+    dest-engine session; Snowflake / BigQuery / DuckDB / Databricks use
+    the same ``COUNT(*)`` machine (BOOLEAN ``IS TRUE``), never catalog
+    stats.
     """
     table = (table_name or "").strip()
     if not table:
@@ -1996,7 +2022,7 @@ def count_scd2_populations(
         from services.dialect_profiles import warehouse_sql_quote_dialect
 
         dialect = warehouse_sql_quote_dialect(kind)
-        if dialect in {"sqlserver", "oracle"}:
+        if dialect:
             return _warehouse_sql_scd2_populations(
                 kind, cfg, schema=schema, table_name=table, dialect=dialect
             )

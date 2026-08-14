@@ -3312,7 +3312,14 @@ class _ScriptedWarehouseEngine:
         if self.error is not None:
             raise self.error
         upper = sql.upper()
-        if "SYS.PARTITIONS" in upper or "DM_DB_PARTITION_STATS" in upper or "NUM_ROWS" in upper:
+        if (
+            "SYS.PARTITIONS" in upper
+            or "DM_DB_PARTITION_STATS" in upper
+            or "NUM_ROWS" in upper
+            or "INFORMATION_SCHEMA" in upper
+            or "__TABLES__" in upper
+            or "TABLE_STORAGE" in upper
+        ):
             raise AssertionError(f"warehouse COUNT must not use stats views: {sql}")
         if self._mentions_is_current(sql):
             if self.column_error is not None:
@@ -3418,13 +3425,143 @@ def test_sqlserver_login_failure_is_unmeasured_not_empty(monkeypatch: pytest.Mon
     assert engine.sql
 
 
-def test_snowflake_and_bigquery_dest_count_stay_unmeasured():
-    """Clustering / INFORMATION_SCHEMA approximations are not COUNT(*). Leave unproven."""
+def test_snowflake_dest_count_is_engine_count_not_information_schema(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Snowflake dest COUNT is SELECT COUNT(*), never INFORMATION_SCHEMA.ROW_COUNT."""
+    from sqlalchemy.exc import ProgrammingError
+
+    missing = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            error=ProgrammingError(
+                "SELECT",
+                {},
+                Exception("SQL compilation error: Object 'T' does not exist or not authorized."),
+            ),
+        ),
+    )
+    assert destination_row_count("snowflake", {"host": "h"}, schema="PUBLIC", table_name="T") == 0
+    assert any('"PUBLIC"."T"' in sql for sql in missing.sql)
+    assert all("INFORMATION_SCHEMA" not in sql.upper() for sql in missing.sql)
+
+    engine = _patch_warehouse(monkeypatch, _ScriptedWarehouseEngine(count=2, rows=[(1,), (2,)]))
+    cfg = {"host": "h", "schema": "PUBLIC"}
+    assert destination_row_count("snowflake", cfg, schema="PUBLIC", table_name="ORDERS") == 4
+    assert any("COUNT(*)" in sql.upper() for sql in engine.sql)
+    listed = destination_key_list(
+        "snowflake", cfg, schema="PUBLIC", table_name="ORDERS", key_columns=["id"]
+    )
+    assert listed == [(1,), (2,)]
+
+
+def test_snowflake_auth_failure_is_unmeasured_not_empty(monkeypatch: pytest.MonkeyPatch):
+    _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(error=RuntimeError("250001: Failed to connect to DB. Incorrect username or password")),
+    )
     assert destination_row_count("snowflake", {"host": "h"}, schema="PUBLIC", table_name="T") is None
-    assert destination_row_count("bigquery", {"project": "p"}, schema="ds", table_name="T") is None
-    assert destination_key_list(
-        "snowflake", {"host": "h"}, schema="PUBLIC", table_name="T", key_columns=["id"]
-    ) is None
+
+
+def test_bigquery_dest_count_quotes_project_dataset_not_tables_row_count(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from sqlalchemy.exc import ProgrammingError
+
+    missing = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            error=ProgrammingError("SELECT", {}, Exception("Not found: Table proj:ds.fresh")),
+        ),
+    )
+    cfg = {"project": "proj", "schema": "ds"}
+    assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") == 0
+    assert any("`proj.ds.fresh`" in sql for sql in missing.sql)
+
+    denied = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(error=RuntimeError("403 Access Denied")),
+    )
+    assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") is None
+    assert denied.sql
+
+
+def test_databricks_missing_table_is_zero(monkeypatch: pytest.MonkeyPatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            error=ProgrammingError("SELECT", {}, Exception("[TABLE_OR_VIEW_NOT_FOUND] The table or view `gone` cannot be found.")),
+        ),
+    )
+    n = destination_row_count("databricks", {"host": "h"}, schema="default", table_name="gone")
+    assert n == 0
+    assert any("`default`.`gone`" in sql for sql in engine.sql)
+
+
+def test_snowflake_connect_failure_without_engine_is_unmeasured():
+    """No scripted dest: missing snowflake-sqlalchemy / account is unmeasured, not dest=0."""
+    assert destination_row_count("snowflake", {"host": "h"}, schema="PUBLIC", table_name="T") is None
+
+
+def test_duckdb_overwrite_leftover_merge_deletes_extra_and_dest_count(tmp_path: Path):
+    """Live DuckDB: dest {1,2,3,99} vs S {1,2,3} → DELETE 99, COUNT(*)=3.
+
+    Same warehouse COUNT(*) machine Snowflake/BQ use. Catalog stats do not exist.
+    Incremental leftover MERGE stays a hard no-op.
+    """
+    pytest.importorskip("duckdb")
+    from connectors.generic_sql import get_sqlalchemy_engine
+    import sqlalchemy as sa
+
+    path = str(tmp_path / "p9.duckdb")
+    cfg = {"type": "duckdb", "database": path}
+    try:
+        engine = get_sqlalchemy_engine(cfg)
+    except Exception as exc:
+        pytest.skip(f"DuckDB engine unavailable: {exc}")
+    with engine.connect() as conn:
+        conn.execute(sa.text('CREATE TABLE "main"."orders" (id INTEGER PRIMARY KEY, v VARCHAR)'))
+        conn.execute(
+            sa.text("INSERT INTO \"main\".\"orders\" VALUES (1, 'a'), (2, 'b'), (3, 'c'), (99, 'ghost')")
+        )
+        conn.commit()
+    assert destination_row_count("duckdb", cfg, schema="main", table_name="orders") == 4
+    assert destination_row_count("duckdb", cfg, schema="main", table_name="gone") == 0
+    refused = apply_inferred_leftover_deletes(
+        db_type="duckdb",
+        cfg=cfg,
+        schema="main",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=False,
+    )
+    assert refused is None
+    assert destination_row_count("duckdb", cfg, schema="main", table_name="orders") == 4
+    deleted = apply_inferred_leftover_deletes(
+        db_type="duckdb",
+        cfg=cfg,
+        schema="main",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    after = destination_keyset_census(
+        "duckdb",
+        cfg,
+        schema="main",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+    )
+    assert after is not None
+    assert after["dest_count"] == 3
+    assert after[EXTRA_KEYS_KEY] == 0
+    assert after[MISSING_KEYS_KEY] == 0
 
 
 def test_oracle_composite_key_hits_use_and_or_not_tuple_in(monkeypatch: pytest.MonkeyPatch):
@@ -3512,6 +3649,49 @@ def test_amazon_rds_oracle_leftover_merge_routes_delete(monkeypatch: pytest.Monk
     assert n == 1
     assert seen["db_type"] == "amazon_rds_oracle"
     assert seen["keys"] == ["99"]
+
+
+@pytest.mark.parametrize(
+    "engine",
+    ["snowflake", "bigquery", "databricks", "motherduck"],
+)
+def test_cloud_warehouse_leftover_merge_routes_delete(
+    monkeypatch: pytest.MonkeyPatch, engine: str
+):
+    """Warehouse leftover MERGE is dest-engine DELETE, never catalog stats."""
+    monkeypatch.setattr(
+        "services.dest_precount.destination_key_list",
+        lambda *a, **k: [(1,), (99,)],
+    )
+    seen: dict[str, object] = {}
+
+    def _delete(**kwargs: object) -> int:
+        seen.update(kwargs)
+        return 1
+
+    monkeypatch.setattr("connectors.table_manager.delete_by_primary_keys", _delete)
+    n = apply_inferred_leftover_deletes(
+        db_type=engine,
+        cfg={"host": "h"},
+        schema="PUBLIC",
+        table_name="ORDERS",
+        key_columns=["id"],
+        keys=[(1,)],
+        complete_snapshot=True,
+    )
+    assert n == 1
+    assert seen["db_type"] == engine
+    assert seen["keys"] == ["99"]
+    refused = apply_inferred_leftover_deletes(
+        db_type=engine,
+        cfg={"host": "h"},
+        schema="PUBLIC",
+        table_name="ORDERS",
+        key_columns=["id"],
+        keys=[(1,)],
+        complete_snapshot=False,
+    )
+    assert refused is None
 
 
 def test_sqlserver_live_leftover_merge_when_reachable():
@@ -3816,10 +3996,41 @@ def test_sqlserver_scd2_login_failure_is_unmeasured_not_empty(monkeypatch: pytes
     ) is None
 
 
-def test_snowflake_and_bigquery_scd2_current_stay_unmeasured():
-    assert count_scd2_populations(
-        "snowflake", {"host": "h"}, schema="PUBLIC", table_name="T"
-    ) is None
+def test_snowflake_scd2_current_is_true_not_catalog_stats(monkeypatch: pytest.MonkeyPatch):
+    """Snowflake BOOLEAN is_current uses IS TRUE. Never INFORMATION_SCHEMA."""
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(count=3, count_current=2),
+    )
+    pop = count_scd2_populations(
+        "snowflake", {"host": "h"}, schema="PUBLIC", table_name="PRODUCTS"
+    )
+    assert pop is not None
+    assert pop[CURRENT_ROWS_KEY] == 2
+    assert pop[HISTORY_ROWS_KEY] == 3
+    current_sql = [sql for sql in engine.sql if "IS_CURRENT" in sql.upper().replace('"', "")]
+    assert current_sql
+    assert any("IS TRUE" in sql.upper() for sql in current_sql)
+    assert all("= 1" not in sql for sql in current_sql)
+    assert all("INFORMATION_SCHEMA" not in sql.upper() for sql in engine.sql)
+
+
+def test_snowflake_scd2_missing_column_is_unmeasured(monkeypatch: pytest.MonkeyPatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            count=4,
+            column_error=ProgrammingError(
+                "SELECT", {}, Exception("invalid identifier 'IS_CURRENT'")
+            ),
+        ),
+    )
+    assert count_scd2_current("snowflake", {"host": "h"}, schema="PUBLIC", table_name="PLAIN") is None
+
+
+def test_bigquery_scd2_connect_failure_is_unmeasured():
     assert count_scd2_current("bigquery", {"project": "p"}, schema="ds", table_name="T") is None
 
 

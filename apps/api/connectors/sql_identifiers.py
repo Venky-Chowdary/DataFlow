@@ -123,7 +123,7 @@ def quote_table_ref(
         dialect = normalize_driver(dialect) or dialect
     except Exception:
         pass
-    if dialect in ("mysql", "mariadb", "clickhouse"):
+    if dialect in ("mysql", "mariadb", "clickhouse", "databricks"):
         q = "`"
         tbl = require_safe_identifier(table, preserve_case=True) if sanitize else require_safe_identifier(
             table, allow_raw=True, max_len=64

@@ -971,8 +971,11 @@ TypeScript does not recompute dest.
   failure stays unmeasured. Composite key hits are portable AND/OR
   (Oracle 19c has no row-value `IN`). Live leftover MERGE
   skip-if-unreachable (`:1433` / `:1521`). Incremental leftover MERGE
-  stays a hard no-op. Snowflake / BigQuery COUNT stay unmeasured
-  (clustering / INFORMATION_SCHEMA approximations).
+  stays a hard no-op. Snowflake / BigQuery / DuckDB / Databricks dest
+  COUNT is dest-engine `SELECT COUNT(*)` (never `INFORMATION_SCHEMA` /
+  `__TABLES__.row_count` / clustering stats). Auth/network failure stays
+  unmeasured. Live DuckDB leftover MERGE on this host; live Snowflake /
+  BigQuery / Databricks skip-if-unreachable.
 * dest-only sinks besides dest-engine DISTINCT `source_id`: Pinecone
   list+fetch and Weaviate object listing use the same complete /
   truncated / missing / no_field machine as Milvus / Qdrant.
@@ -992,8 +995,10 @@ TypeScript does not recompute dest.
   catalog SKUs alias). Live `:1433` / `:1521` skip-if-unreachable this
   host. Incremental watermarked SCD2 stays unproven (change batch is
   not the current population). Writer `active_rows` is not dest.
-  `is_current` is not a tombstone. Snowflake / BigQuery SCD2 COUNT
-  stay unmeasured.
+  `is_current` is not a tombstone. Snowflake / BigQuery / DuckDB /
+  Databricks SCD2 current COUNT uses dest-engine `COUNT(*) WHERE
+  is_current` (BOOLEAN `IS TRUE`, never catalog stats). Connect failure
+  stays unmeasured.
 * Object-store dest COUNT — **PARTIAL**: GET bodies use the same artifact
   COUNT as local files (Excel value-bearing rows, streamed Avro, Parquet/ORC
   footer, XML unique record-path). JSON-fallback empty is forbidden.
