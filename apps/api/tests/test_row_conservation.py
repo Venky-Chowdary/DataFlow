@@ -4984,6 +4984,241 @@ def test_iceberg_sql_catalog_count_is_file_footer_not_scan_count(
     )
 
 
+def test_parse_object_store_uri_iceberg_schemes() -> None:
+    """Iceberg file_path schemes alias onto the dest-engine GET families."""
+    from services.object_streaming import parse_object_store_uri
+
+    s3 = parse_object_store_uri("s3://lake/wh/ns/table/data/part-0.parquet")
+    assert s3 is not None
+    assert s3.kind == "s3"
+    assert s3.bucket == "lake"
+    assert s3.key == "wh/ns/table/data/part-0.parquet"
+    s3a = parse_object_store_uri("s3a://lake/wh/a.parquet")
+    assert s3a is not None and s3a.kind == "s3" and s3a.key == "wh/a.parquet"
+    gcs = parse_object_store_uri("gs://bkt/n/t/data/f.parquet")
+    assert gcs is not None and gcs.kind == "gcs" and gcs.bucket == "bkt"
+    adls = parse_object_store_uri(
+        "abfss://cont@acct.dfs.core.windows.net/wh/data/f.parquet"
+    )
+    assert adls is not None
+    assert adls.kind == "adls"
+    assert adls.bucket == "cont"
+    assert adls.key == "wh/data/f.parquet"
+    assert adls.account == "acct"
+    assert parse_object_store_uri("file:///tmp/wh/data/f.parquet") is None
+    assert parse_object_store_uri("hdfs://nn:8020/wh/data/f.parquet") is None
+    assert parse_object_store_uri("s3://lake") is None
+
+
+def _fake_iceberg_inspect_catalog(file_paths: list[str], *, delete_rows: int = 0):
+    class _Col:
+        def __init__(self, values: list[str]) -> None:
+            self._values = values
+
+        def to_pylist(self) -> list[str]:
+            return list(self._values)
+
+    class _Deletes:
+        num_rows = delete_rows
+
+    class _DataFiles:
+        num_rows = len(file_paths)
+
+        def column(self, name: str) -> _Col:
+            assert name == "file_path"
+            return _Col(file_paths)
+
+    class _Inspect:
+        def delete_files(self) -> _Deletes:
+            return _Deletes()
+
+        def data_files(self) -> _DataFiles:
+            return _DataFiles()
+
+    class _Table:
+        inspect = _Inspect()
+
+    class _Catalog:
+        def load_table(self, _ident: object) -> _Table:
+            return _Table()
+
+    return _Catalog()
+
+
+def test_iceberg_catalog_object_store_count_is_range_footer_not_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Catalog s3/gs/abfss data files COUNT via Range GET. Never scan().count().
+
+    Spark COUNT(*) still uses manifest record-count. A snapshot file that
+    404s is unmeasured — dest=0 would close overwrite on a truncated lake.
+    Relative manifest paths join the warehouse URI. hdfs stays unmeasured.
+    """
+    pytest.importorskip("pyiceberg")
+    pytest.importorskip("pyarrow.parquet")
+    from pyiceberg.table import DataScan
+    from services.format_converter import convert_rows
+    from services.object_streaming import RangeGetSource
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="parquet",
+    )
+    cfg = {
+        "type": "iceberg",
+        "connection_string": f"sqlite:///{tmp_path / 'catalog.db'}",
+        "warehouse": "s3://lake/wh",
+        "table": "orders",
+        "schema": "default",
+        "username": "AKIA",
+        "password": "secret",
+        "host": "us-east-1",
+        "extra": {
+            "s3.endpoint": "http://127.0.0.1:9000",
+            "s3.path-style-access": True,
+            "s3.access-key-id": "AKIA",
+            "s3.secret-access-key": "secret",
+            "s3.region": "us-east-1",
+        },
+    }
+    seen: dict[str, object] = {}
+
+    def _open_seekable(kind: str, store_cfg: dict, bucket: str, key: str):
+        seen["kind"] = kind
+        seen["bucket"] = bucket
+        seen["key"] = key
+        seen["endpoint"] = store_cfg.get("endpoint_url")
+        seen["path_style"] = store_cfg.get("path_style")
+        src = RangeGetSource(len(content), lambda start, n: content[start : start + n])
+        return src, src.close
+
+    def _no_get(*_a, **_k):
+        raise AssertionError("Iceberg parquet COUNT must Range-GET, not sequential spool")
+
+    def _no_count(self):
+        raise AssertionError("Iceberg dest COUNT must not scan().count()")
+
+    def _no_arrow(self):
+        raise AssertionError("Iceberg dest COUNT must not to_arrow the table")
+
+    monkeypatch.setattr(DataScan, "count", _no_count)
+    monkeypatch.setattr(DataScan, "to_arrow", _no_arrow)
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_catalog(
+            ["s3://lake/wh/ns/orders/data/part-0.parquet"]
+        ),
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_seekable", _open_seekable
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_binary", _no_get
+    )
+    assert (
+        destination_row_count("iceberg", cfg, schema="default", table_name="orders")
+        == 2
+    )
+    assert seen["kind"] == "s3"
+    assert seen["bucket"] == "lake"
+    assert seen["key"] == "wh/ns/orders/data/part-0.parquet"
+    assert seen["endpoint"] == "http://127.0.0.1:9000"
+    assert seen["path_style"] is True
+
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_catalog(["data/part-0.parquet"]),
+    )
+    seen.clear()
+    assert (
+        destination_row_count("iceberg", cfg, schema="default", table_name="orders")
+        == 2
+    )
+    assert seen["bucket"] == "lake"
+    assert seen["key"] == "wh/data/part-0.parquet"
+
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_catalog(
+            ["s3://lake/wh/ns/orders/data/gone.parquet"]
+        ),
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_seekable",
+        lambda *_a, **_k: False,
+    )
+    assert (
+        destination_row_count("iceberg", cfg, schema="default", table_name="orders")
+        is None
+    )
+
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_catalog(
+            ["hdfs://nn:8020/wh/data/part-0.parquet"]
+        ),
+    )
+    assert (
+        destination_row_count("iceberg", cfg, schema="default", table_name="orders")
+        is None
+    )
+
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_catalog(
+            ["s3://lake/wh/data/part-0.parquet"], delete_rows=1
+        ),
+    )
+    assert (
+        destination_row_count("iceberg", cfg, schema="default", table_name="orders")
+        is None
+    )
+
+    gcs_cfg = dict(cfg)
+    gcs_cfg["warehouse"] = "gs://bkt/wh"
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_catalog(
+            ["gs://bkt/wh/data/part-0.parquet"]
+        ),
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_seekable", _open_seekable
+    )
+    seen.clear()
+    assert (
+        destination_row_count("iceberg", gcs_cfg, schema="default", table_name="orders")
+        == 2
+    )
+    assert seen["kind"] == "gcs"
+    assert seen["bucket"] == "bkt"
+
+    adls_cfg = dict(cfg)
+    adls_cfg["warehouse"] = "abfss://cont@acct.dfs.core.windows.net/wh"
+    adls_cfg["extra"] = {
+        "adls.account-name": "acct",
+        "adls.account-key": "key",
+    }
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_catalog(
+            ["abfss://cont@acct.dfs.core.windows.net/wh/data/part-0.parquet"]
+        ),
+    )
+    seen.clear()
+    assert (
+        destination_row_count(
+            "iceberg", adls_cfg, schema="default", table_name="orders"
+        )
+        == 2
+    )
+    assert seen["kind"] == "adls"
+    assert seen["bucket"] == "cont"
+    assert seen["key"] == "wh/data/part-0.parquet"
+
+
 def test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len(
     tmp_path: Path,
 ):

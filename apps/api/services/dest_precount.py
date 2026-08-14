@@ -126,7 +126,9 @@ dest keys so a complete overwrite snapshot can MERGE-delete ``D \\ S``;
 it never deletes them itself. Iceberg dest COUNT is dest-engine
 population of current-snapshot data files (Parquet footer / JSONL
 stream), never metadata ``record-count`` / ``scan().count()`` /
-``len(to_pylist())``. Key list and leftover MERGE still read snapshot
+``len(to_pylist())``. Catalog ``s3://`` / ``gs://`` / ``abfss://``
+data files Range-GET the footer through the object-store kernel;
+a snapshot file that 404s is unmeasured, not dest=0. Key list and leftover MERGE still read snapshot
 rows. ``row_conservation.apply_inferred_leftover_deletes``
 applies the anti-join only when the source census is complete overwrite
 (SQL and Iceberg CoW). Incremental CDC must not call that apply. Mirror
@@ -1436,7 +1438,9 @@ def _iceberg_row_count(
     is writer-stamped — the same honesty hole as ``sys.partitions``. Dest
     COUNT opens each live data file and uses the dest-engine population
     already proven for artifacts (Parquet footer ``num_rows``, JSONL
-    object-per-line). MoR / deletion vectors stay unmeasured — equality
+    object-per-line). Catalog object-store URIs use the same Range-GET
+    footer kernel as S3/GCS/ADLS dest. A listed data-file that is gone
+    is unmeasured, not dest=0. MoR / deletion vectors stay unmeasured — equality
     deletes and overlapping position deletes make ``data − deletes`` a
     lie (Iceberg #14864). Missing table is 0. Unreadable snapshot is
     ``None``. Key list / leftover MERGE still materialize snapshot rows.
@@ -1453,9 +1457,174 @@ def _iceberg_row_count(
     return _iceberg_filesystem_file_count(cfg, schema=schema, table_name=table_name)
 
 
+def _iceberg_data_warehouse(endpoint: dict[str, Any], parsed: dict[str, Any]) -> str:
+    """Warehouse URI for joining relative snapshot paths.
+
+    SqlCatalog ``properties.warehouse`` may be a local Path invented from
+    ``s3://`` by ``_warehouse_root``. Join relative ``file_path`` values
+    against the endpoint warehouse URI instead, so COUNT can Range-GET.
+    """
+    from services.object_streaming import parse_object_store_uri
+
+    for raw in (
+        str(endpoint.get("warehouse") or "").strip(),
+        str(endpoint.get("database") or "").strip(),
+        str(parsed.get("warehouse") or "").strip(),
+    ):
+        if not raw:
+            continue
+        lower = raw.lower()
+        if lower.startswith(
+            ("s3://", "s3a://", "s3n://", "gs://", "gcs://", "abfs://", "abfss://", "wasb://", "wasbs://")
+        ):
+            return raw.rstrip("/")
+        if parse_object_store_uri(raw) is not None:
+            return raw.rstrip("/")
+        if raw.startswith("file:") or "://" not in raw:
+            return raw
+    return str(parsed.get("warehouse") or "").strip()
+
+
 def _count_iceberg_data_file(path: Path) -> int | None:
     """Dest-engine population of one snapshot data file. Never manifest record-count."""
     return count_artifact_rows(path)
+    """Dest-engine population of one snapshot data file. Never manifest record-count."""
+    return count_artifact_rows(path)
+
+
+def _resolve_iceberg_data_uri(uri: str, warehouse: str) -> str:
+    """Join a relative snapshot path onto the warehouse URI. Absolute URIs stay."""
+    raw = str(uri or "").strip()
+    if not raw:
+        return ""
+    if "://" in raw or raw.startswith("file:"):
+        return raw
+    if raw.startswith("/") or raw.startswith("\\\\"):
+        return raw
+    if len(raw) >= 3 and raw[1] == ":" and raw[0].isalpha():
+        return raw
+    root = str(warehouse or "").strip().rstrip("/")
+    if not root:
+        return raw
+    return f"{root}/{raw.lstrip('/')}"
+
+
+def _iceberg_object_store_cfg(
+    endpoint: dict[str, Any], location: Any
+) -> dict[str, Any]:
+    """Map Iceberg catalog extra (``s3.*`` / ``gcs.*`` / ``adls.*``) onto GET cfg."""
+    extra = endpoint.get("extra")
+    extra = extra if isinstance(extra, dict) else {}
+    cfg = dict(endpoint)
+    kind = str(getattr(location, "kind", "") or "")
+    if kind == "s3":
+        cfg["username"] = str(
+            extra.get("s3.access-key-id")
+            or extra.get("s3.access-key")
+            or extra.get("client.access-key-id")
+            or cfg.get("username")
+            or ""
+        ).strip()
+        cfg["password"] = str(
+            extra.get("s3.secret-access-key")
+            or extra.get("s3.secret-key")
+            or extra.get("client.secret-access-key")
+            or cfg.get("password")
+            or ""
+        ).strip()
+        cfg["host"] = str(
+            extra.get("s3.region")
+            or extra.get("client.region")
+            or extra.get("region")
+            or cfg.get("host")
+            or "us-east-1"
+        ).strip()
+        endpoint_url = str(
+            extra.get("s3.endpoint") or extra.get("s3.endpoint-url") or ""
+        ).strip()
+        if endpoint_url.startswith(("http://", "https://")):
+            cfg["endpoint_url"] = endpoint_url.rstrip("/")
+            cfg["connection_string"] = cfg["endpoint_url"]
+        else:
+            cs = str(cfg.get("connection_string") or "")
+            if not cs.startswith(("http://", "https://")):
+                cfg["connection_string"] = ""
+        path_style = extra.get("s3.path-style-access")
+        if path_style in (True, "true", "True", 1, "1"):
+            cfg["path_style"] = True
+        return cfg
+    if kind == "gcs":
+        project = str(
+            extra.get("gcs.project-id") or extra.get("gcs.project") or cfg.get("host") or ""
+        ).strip()
+        if project:
+            cfg["host"] = project
+        creds = str(
+            extra.get("gcs.credentials")
+            or extra.get("gcs.oauth2.token")
+            or cfg.get("service_account")
+            or cfg.get("password")
+            or ""
+        ).strip()
+        if creds:
+            cfg["service_account"] = creds
+        return cfg
+    if kind == "adls":
+        account = str(
+            extra.get("adls.account-name")
+            or extra.get("azure.account-name")
+            or getattr(location, "account", "")
+            or cfg.get("account_name")
+            or cfg.get("username")
+            or ""
+        ).strip()
+        if account:
+            cfg["username"] = account
+            cfg["account_name"] = account
+        key = str(
+            extra.get("adls.account-key")
+            or extra.get("azure.account-key")
+            or cfg.get("account_key")
+            or cfg.get("password")
+            or ""
+        ).strip()
+        if key:
+            cfg["password"] = key
+            cfg["account_key"] = key
+        conn = str(
+            extra.get("adls.connection-string") or extra.get("azure.connection-string") or ""
+        ).strip()
+        if conn:
+            cfg["connection_string"] = conn
+        elif not str(cfg.get("connection_string") or "").startswith(("http://", "https://")):
+            if "AccountName" not in str(cfg.get("connection_string") or ""):
+                cfg["connection_string"] = ""
+        return cfg
+    return cfg
+
+
+def _count_iceberg_data_uri(
+    uri: str, *, endpoint: dict[str, Any], warehouse: str = ""
+) -> int | None:
+    """Dest-engine COUNT of one snapshot data-file URI. Missing remote is unmeasured."""
+    from services.object_streaming import parse_object_store_uri
+
+    local = _iceberg_local_path(str(uri or ""), warehouse=warehouse)
+    if local is not None:
+        return _count_iceberg_data_file(local)
+    resolved = _resolve_iceberg_data_uri(uri, warehouse)
+    if resolved != str(uri or "").strip():
+        local = _iceberg_local_path(resolved, warehouse=warehouse)
+        if local is not None:
+            return _count_iceberg_data_file(local)
+    loc = parse_object_store_uri(resolved)
+    if loc is None:
+        logger.info("iceberg catalog data-file not a local path or object URI: %s", uri)
+        return None
+    store_cfg = _iceberg_object_store_cfg(endpoint, loc)
+    return _count_object_store_key(
+        loc.kind, store_cfg, loc.bucket, loc.key, missing=None
+    )
 
 
 def _iceberg_local_path(uri: str, *, warehouse: str = "") -> Path | None:
@@ -1514,7 +1683,11 @@ def _iceberg_filesystem_file_count(
 
 
 def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
-    """Sql/REST catalog COUNT via live data-file footers. Never ``scan().count()``."""
+    """Sql/REST catalog COUNT via live data-file footers. Never ``scan().count()``.
+
+    Local ``file:`` URIs footer from disk. ``s3://`` / ``gs://`` / ``abfss://``
+    use the object-store Range kernel. Missing remote files are unmeasured.
+    """
     from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
 
     parsed = parse_iceberg_catalog_config(endpoint)
@@ -1546,11 +1719,11 @@ def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
         return None
     total = 0
     for uri in paths:
-        local = _iceberg_local_path(uri, warehouse=str(parsed.get("warehouse") or ""))
-        if local is None:
-            logger.info("iceberg catalog data-file not a local path: %s", uri)
-            return None
-        n = _count_iceberg_data_file(local)
+        n = _count_iceberg_data_uri(
+            uri,
+            endpoint=endpoint,
+            warehouse=_iceberg_data_warehouse(endpoint, parsed),
+        )
         if n is None:
             return None
         total += n
@@ -1733,10 +1906,17 @@ def _object_store_footer_kind(obj_key: str) -> str | None:
 
 
 def _count_object_store_key(
-    store: str, cfg: dict[str, Any], bucket: str, obj_key: str
+    store: str,
+    cfg: dict[str, Any],
+    bucket: str,
+    obj_key: str,
+    *,
+    missing: int | None = 0,
 ) -> int | None:
-    """COUNT of one listed key. Missing is 0. Unparseable is unmeasured.
+    """COUNT of one listed key. Object-store dest missing is 0.
 
+    Iceberg snapshot files that 404 are unmeasured (``missing=None``) —
+    dest=0 would close overwrite on a truncated lakehouse snapshot.
     Uncompressed Parquet/ORC prefer ``open_object_store_seekable`` (footer
     Range GET). HEAD/Range setup failure falls back to sequential GET +
     spool — still correct. Gzip / Excel / CSV / JSON / Avro stay sequential.
@@ -1751,7 +1931,7 @@ def _count_object_store_key(
     if footer_kind is not None:
         opened = open_object_store_seekable(store, cfg, bucket, str(obj_key))
         if opened is False:
-            return 0
+            return missing
         if opened is not None:
             stream, closer = opened
             try:
@@ -1775,7 +1955,7 @@ def _count_object_store_key(
         # Range unavailable — sequential spool is still dest-engine COUNT.
     opened = open_object_store_binary(store, cfg, bucket, str(obj_key))
     if opened is False:
-        return 0
+        return missing
     if opened is None:
         return None
     stream, closer = opened

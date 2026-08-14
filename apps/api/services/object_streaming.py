@@ -17,7 +17,8 @@ import re
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any, Callable
+from urllib.parse import unquote, urlparse
+from typing import Any, Callable, NamedTuple
 
 from services.value_serializer import cell_to_string
 
@@ -43,6 +44,64 @@ _SPILL_LOCK = threading.Lock()
 _SPILL_TTL_SECONDS = int(getenv_brand("SPILL_TTL", "300"))
 
 _STREAMABLE = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
+
+_S3_URI_SCHEMES = frozenset({"s3", "s3a", "s3n"})
+_GCS_URI_SCHEMES = frozenset({"gs", "gcs"})
+_ADLS_URI_SCHEMES = frozenset({"abfs", "abfss", "wasb", "wasbs"})
+
+
+class ObjectStoreLocation(NamedTuple):
+    """Object-store address of one blob. ``account`` is ADLS account from the URI."""
+
+    kind: str
+    bucket: str
+    key: str
+    account: str = ""
+
+
+def parse_object_store_uri(uri: str) -> ObjectStoreLocation | None:
+    """``s3://`` / ``gs://`` / ``abfss://`` → (kind, bucket, key). Else None.
+
+    Iceberg catalog ``file_path`` is typically an object URI. Dest COUNT
+    Range-GETs that blob through the same opener as S3/GCS/ADLS dest.
+    ``file:`` / ``hdfs:`` / relative paths are not this helper.
+    """
+    raw = str(uri or "").strip()
+    if not raw:
+        return None
+    parsed = urlparse(raw)
+    scheme = (parsed.scheme or "").lower()
+    if scheme in _S3_URI_SCHEMES:
+        bucket = unquote(parsed.netloc or "")
+        key = unquote((parsed.path or "").lstrip("/"))
+        if not bucket or not key:
+            return None
+        return ObjectStoreLocation("s3", bucket, key)
+    if scheme in _GCS_URI_SCHEMES:
+        bucket = unquote(parsed.netloc or "")
+        key = unquote((parsed.path or "").lstrip("/"))
+        if not bucket or not key:
+            return None
+        return ObjectStoreLocation("gcs", bucket, key)
+    if scheme in _ADLS_URI_SCHEMES:
+        container = unquote(parsed.username or "")
+        host = (parsed.hostname or "").strip()
+        account = host.split(".")[0] if host else ""
+        if not container:
+            container = unquote((parsed.netloc or "").split("@", 1)[0])
+        key = unquote((parsed.path or "").lstrip("/"))
+        if not container or not key:
+            return None
+        return ObjectStoreLocation("adls", container, key, account)
+    if scheme in {"http", "https"}:
+        host = (parsed.hostname or "").lower()
+        if host.endswith(".blob.core.windows.net") or host.endswith(".dfs.core.windows.net"):
+            account = host.split(".")[0]
+            parts = [unquote(p) for p in (parsed.path or "").split("/") if p]
+            if len(parts) < 2:
+                return None
+            return ObjectStoreLocation("adls", parts[0], "/".join(parts[1:]), account)
+    return None
 
 
 def _spill_directory() -> Path:
