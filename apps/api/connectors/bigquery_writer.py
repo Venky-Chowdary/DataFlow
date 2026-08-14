@@ -633,6 +633,7 @@ def write_mapped_rows(
         # Deny-create must match existing DDL; create-new keeps empty dest types.
         # Unknown existence must stay None — never invent True on append.
         table_exists=False if create_table else None,
+        dest_db="bigquery",
     )
     if not target_cols:
         return WriteResult(
@@ -650,6 +651,7 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest_types if isinstance(live_dest_types, dict) else None,
         product="BigQuery",
+        dest_db="bigquery",
     )
 
     try:

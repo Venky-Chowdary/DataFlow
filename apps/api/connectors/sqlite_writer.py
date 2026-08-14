@@ -454,6 +454,7 @@ def write_mapped_rows(
         preserve_case=True,
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
+        dest_db="sqlite",
     )
     if not target_cols:
         return WriteResult(
@@ -495,6 +496,7 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="SQLite",
+        dest_db="sqlite",
     )
     # ddl_types → CREATE/ALTER affinity; tgt_types → Map carriers for quarantine/bind
     # (DATETIME must not collapse to TEXT before TZ→NTZ refuse — audit §2.7).
@@ -659,6 +661,8 @@ def write_mapped_rows(
                     col in ex
                     or str(col).lower() in {str(k).lower() for k in ex}
                 ),
+                dest_db="sqlite",
+                column_types=column_types,
             )
             if add_err:
                 return WriteResult(
@@ -1000,6 +1004,8 @@ def write_mapped_rows(
                         studio_err=studio_err,
                         product="SQLite",
                         materialize_stamp=sqlite_type,
+                        dest_db="sqlite",
+                        column_types=column_types,
                     )
                     if add_err:
                         return WriteResult(

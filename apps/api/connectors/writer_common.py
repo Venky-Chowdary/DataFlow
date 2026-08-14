@@ -1955,6 +1955,7 @@ def resolve_studio_or_map_dest_types(
     logical_types: list[str] | None = None,
     studio_types: dict[str, Any] | None = None,
     product: str = "destination",
+    dest_db: str = "",
 ) -> tuple[dict[str, str], str | None]:
     """Studio present → fail-closed coverage; else Map stamps for create-new.
 
@@ -1995,6 +1996,7 @@ def resolve_studio_or_map_dest_types(
             logical_types=logical_types,
             live_types=None,
             default="VARCHAR",
+            dest_db=dest_db,
         ),
         None,
     )
@@ -2010,12 +2012,15 @@ def gate_additive_types_under_partial_studio(
     product: str,
     materialize_stamp: Any,
     col_in_existing: Any = None,
+    dest_db: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> tuple[list[str], str | None]:
     """Under partial Studio, additive ADD must use explicit Map ``target_type``.
 
     Existing columns keep ``target_types`` (rematerialize/physical owns them).
     New columns without an operator Map stamp refuse — never invent from
-    source DDL / bare VARCHAR (BigQuery / generic_sql parity).
+    source DDL / bare VARCHAR (BigQuery / generic_sql parity). Widthless
+    VARCHAR family stamps inherit measured source ``(n)`` before ADD.
     """
     if not studio_err:
         return list(target_types), None
@@ -2036,6 +2041,10 @@ def gate_additive_types_under_partial_studio(
             by_tgt[tgt] = mapping
             by_tgt.setdefault(tgt.lower(), mapping)
     contains = col_in_existing or (lambda col, ex: col in ex)
+    ctypes = column_types or {}
+    inherit = None
+    if dest_db:
+        from services.decision_kernel import inherit_measured_string_width as inherit
     for i, col in enumerate(target_cols):
         if not col or contains(col, existing):
             continue
@@ -2049,6 +2058,13 @@ def gate_additive_types_under_partial_studio(
                 "Map target_type under partial Studio — refuse Map VARCHAR ADD "
                 "invent. Stamp the column on Map or disable backfill_new_fields."
             )
+        if inherit is not None:
+            src_type = str(
+                mapping.get("source_type")
+                or ctypes.get(str(mapping.get("source") or ""))
+                or ""
+            )
+            explicit = inherit(explicit, src_type, dest_db=dest_db) or explicit
         stamped = materialize_stamp(explicit)
         if not str(stamped or "").strip():
             return out, (
@@ -2101,6 +2117,7 @@ def resolve_mapping_dest_types(
     logical_types: list[str] | None = None,
     live_types: dict[str, str] | None = None,
     default: str = "VARCHAR",
+    dest_db: str = "",
 ) -> dict[str, str]:
     """Resolve per-column carriers for quarantine / coerce (SaaS + Kafka).
 
@@ -2110,6 +2127,9 @@ def resolve_mapping_dest_types(
     3. ``resolve_target_columns`` logical types
     4. source ``column_types``
     5. ``default`` (never invent unbounded ``string`` when typed Map exists)
+
+    Widthless Map VARCHAR-family stamps inherit measured source ``(n)`` so
+    create-new MySQL UNIQUE/PK stay indexable (Airbyte TEXT cliff).
 
     For rematerialize over live DDL/Registry/AttrDefs, prefer
     ``rematerialize_live_dest_types`` so gaps never soft-fill Map VARCHAR.
@@ -2129,6 +2149,8 @@ def resolve_mapping_dest_types(
         if tgt and tgt not in by_tgt:
             by_tgt[tgt] = mapping
             by_tgt.setdefault(tgt.lower(), mapping)
+    from services.decision_kernel import inherit_measured_string_width
+
     out: dict[str, str] = {}
     for i, col in enumerate(cols):
         live_hit = live.get(str(col).lower())
@@ -2138,13 +2160,19 @@ def resolve_mapping_dest_types(
         m = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
         mapped = str(m.get("target_type") or m.get("dest_type") or "").strip()
         src = str(m.get("source") or "")
-        out[col] = (
+        src_type = str(ctypes.get(src) or m.get("source_type") or "")
+        chosen = (
             mapped
             or (logical[i] if i < len(logical) else "")
             or ctypes.get(src)
             or ctypes.get(col)
             or default
         )
+        if mapped:
+            chosen = inherit_measured_string_width(
+                mapped, src_type, dest_db=dest_db
+            ) or mapped
+        out[col] = chosen
     return out
 
 
@@ -2156,6 +2184,7 @@ def resolve_target_columns(
     *,
     sample_values_by_source: dict[str, list[str]] | None = None,
     table_exists: bool | None = None,
+    dest_db: str = "",
 ) -> tuple[list[str], list[str]]:
     """Return target column names and their intended logical target types.
 
@@ -2164,6 +2193,7 @@ def resolve_target_columns(
 
     Create-new (``table_exists is False``): Map ``target_type`` is preserved
     (Map≡CREATE) — unfit values quarantine on write instead of rewriting DDL.
+    Widthless VARCHAR-family stamps inherit measured source ``(n)``.
 
     Enterprise GA: create-new without an explicit Map ``target_type`` must **not**
     invent BOOLEAN/INTEGER/DECIMAL from head samples. Keep the source/carrier
@@ -2207,6 +2237,14 @@ def resolve_target_columns(
             src = str(m.get("source") or "")
             src_type = column_types.get(src) or m.get("source_type")
             if table_exists is False:
+                if explicit_target:
+                    from services.decision_kernel import inherit_measured_string_width
+
+                    proposed = inherit_measured_string_width(
+                        str(proposed),
+                        str(src_type) if src_type else None,
+                        dest_db=dest_db,
+                    ) or proposed
                 # Explicit Map stamp OR non-explicit source/carrier proposal:
                 # honor_explicit=True prevents sample-driven invent of tighter types.
                 proposed = safe_ddl_logical_type(

@@ -1145,6 +1145,7 @@ def _write_mapped_rows_pyiceberg(
         logical_types=target_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="Iceberg",
+        dest_db="iceberg",
     )
     policy = transform_error_policy(error_policy)
     # Partial Studio: defer Map until create-new refuse / live Arrow rematerialize
@@ -1934,6 +1935,7 @@ def _write_mapped_rows_filesystem(
         logical_types=target_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="Iceberg",
+        dest_db="iceberg",
     )
     policy = transform_error_policy(error_policy)
     # Partial Studio: defer Map until create-new refuse / committed rematerialize.

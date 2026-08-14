@@ -4067,7 +4067,11 @@ def write_mapped_rows(
         # uses Decision Kernel invent_dest_type (same CREATE_NEW as Validate) —
         # never a second materialize(source) invent authority.
         if explicit:
-            derived = materialize_dest_ddl(dest_db, explicit) if dest_db else str(explicit)
+            derived = (
+                materialize_dest_ddl(dest_db, explicit, source_type=source_type)
+                if dest_db
+                else str(explicit)
+            )
             # A stamp that only echoes the destination catalog is not an
             # operator ceiling; under backfill it may widen to the source.
             if stamp_is_operator_ceiling(mapping) or not backfill_new_fields:
@@ -4486,8 +4490,14 @@ def write_mapped_rows(
                             rejected_details=rejected_details,
                             warnings=transform_errors,
                         )
+                    add_source = (
+                        column_types.get(str(mapping.get("source") or ""))
+                        or mapping.get("source_type")
+                    )
                     derived = (
-                        materialize_dest_ddl(dest_db, explicit)
+                        materialize_dest_ddl(
+                            dest_db, explicit, source_type=add_source
+                        )
                         if dest_db
                         else str(explicit)
                     )

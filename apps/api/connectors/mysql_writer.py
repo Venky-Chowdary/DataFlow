@@ -499,6 +499,7 @@ def write_mapped_rows(
         preserve_case=True,
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
+        dest_db="mysql",
     )
     if not target_cols:
         return WriteResult(
@@ -546,6 +547,7 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="MySQL",
+        dest_db="mysql",
     )
     policy = transform_error_policy(error_policy)
 
@@ -803,6 +805,8 @@ def write_mapped_rows(
                 studio_err=studio_err,
                 product="MySQL",
                 materialize_stamp=mysql_type,
+                dest_db="mysql",
+                column_types=column_types,
             )
             if add_err:
                 additive_refuse = add_err

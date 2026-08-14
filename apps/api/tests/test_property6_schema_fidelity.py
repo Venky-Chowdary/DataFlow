@@ -717,6 +717,189 @@ def test_mysql_create_new_carries_pk_not_null_default_unique_live():
             conn.close()
 
 
+@pytest.mark.skipif(not _mysql_up(), reason="MySQL/MariaDB not listening on 3306")
+def test_mysql_create_new_bare_varchar_inherits_width_and_unique_live():
+    """Studio/Map default VARCHAR (no length) must inherit source VARCHAR(n).
+
+    Airbyte class: bare VARCHAR lands as TEXT and UNIQUE disappears. DataFlow
+    inherits measured (n) so UNIQUE is carried and COLUMN_TYPE stays varchar(n).
+    """
+    pymysql = pytest.importorskip("pymysql")
+
+    creds = _mysql_creds()
+    suffix = uuid.uuid4().hex[:8]
+    src_table = f"p6_vw_src_{suffix}"
+    dst_table = f"p6_vw_dst_{suffix}"
+    conn = pymysql.connect(
+        host=creds["host"],
+        port=creds["port"],
+        database=creds["database"],
+        user=creds["username"],
+        password=creds["password"],
+        autocommit=True,
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{dst_table}`")
+            cur.execute(f"DROP TABLE IF EXISTS `{src_table}`")
+            cur.execute(
+                f"""
+                CREATE TABLE `{src_table}` (
+                  id BIGINT NOT NULL,
+                  email VARCHAR(255) NOT NULL,
+                  status VARCHAR(32) NOT NULL DEFAULT 'active',
+                  note TEXT,
+                  PRIMARY KEY (id),
+                  UNIQUE (email)
+                )
+                """
+            )
+            cur.execute(
+                f"""INSERT INTO `{src_table}` (id, email, status, note)
+                    VALUES (1, 'a@x.com', 'active', NULL),
+                           (2, 'b@x.com', DEFAULT, 'hello')"""
+            )
+    finally:
+        conn.close()
+
+    req = TransferRequest(
+        source=EndpointConfig(
+            kind="database",
+            format="mysql",
+            host=creds["host"],
+            port=creds["port"],
+            database=creds["database"],
+            username=creds["username"],
+            password=creds["password"],
+            schema="",
+            table=src_table,
+            ssl=False,
+        ),
+        destination=EndpointConfig(
+            kind="database",
+            format="mysql",
+            host=creds["host"],
+            port=creds["port"],
+            database=creds["database"],
+            username=creds["username"],
+            password=creds["password"],
+            schema="",
+            table=dst_table,
+            ssl=False,
+        ),
+        mappings=[
+            {
+                "source": "id",
+                "target": "id",
+                "source_type": "BIGINT",
+                "target_type": "BIGINT",
+                "approved": True,
+                "confidence": 0.99,
+            },
+            {
+                "source": "email",
+                "target": "email",
+                "source_type": "VARCHAR(255)",
+                "target_type": "VARCHAR",
+                "approved": True,
+                "confidence": 0.99,
+            },
+            {
+                "source": "status",
+                "target": "status",
+                "source_type": "VARCHAR(32)",
+                "target_type": "VARCHAR",
+                "approved": True,
+                "confidence": 0.99,
+            },
+            {
+                "source": "note",
+                "target": "note",
+                "source_type": "TEXT",
+                "target_type": "TEXT",
+                "approved": True,
+                "confidence": 0.99,
+            },
+        ],
+        sync_mode="full_refresh_overwrite",
+        validation_mode="warn",
+        skip_preflight=True,
+    )
+    try:
+        result = _run(req)
+        assert result.success, result.error
+        fid = (result.destination_summary or {}).get("schema_fidelity") or {}
+        assert fid, "schema_fidelity missing on MySQL destination_summary"
+        assert "carried" in _aspect_status(fid, "primary_key"), fid
+        assert "carried" in _aspect_status(fid, "unique"), fid
+        assert "carried" in _aspect_status(fid, "not_null"), fid
+        assert "carried" in _aspect_status(fid, "default"), fid
+
+        conn = pymysql.connect(
+            host=creds["host"],
+            port=creds["port"],
+            database=creds["database"],
+            user=creds["username"],
+            password=creds["password"],
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_DEFAULT
+                    FROM information_schema.columns
+                    WHERE table_schema = DATABASE() AND table_name = %s
+                    ORDER BY ORDINAL_POSITION
+                    """,
+                    (dst_table,),
+                )
+                cols = {r[0]: r for r in cur.fetchall()}
+                email_typ = str(cols["email"][1]).lower()
+                status_typ = str(cols["status"][1]).lower()
+                assert email_typ.startswith("varchar(255)"), cols["email"]
+                assert status_typ.startswith("varchar(32)"), cols["status"]
+                assert "text" not in email_typ
+                assert cols["email"][2] == "NO"
+                assert cols["status"][2] == "NO"
+                assert cols["status"][3] is not None and "active" in str(cols["status"][3])
+                cur.execute(
+                    """
+                    SELECT CONSTRAINT_TYPE
+                    FROM information_schema.table_constraints
+                    WHERE table_schema = DATABASE() AND table_name = %s
+                    """,
+                    (dst_table,),
+                )
+                ctypes = {r[0] for r in cur.fetchall()}
+                assert "PRIMARY KEY" in ctypes
+                assert "UNIQUE" in ctypes
+                cur.execute(
+                    f"SELECT id, email, status, note FROM `{dst_table}` ORDER BY id"
+                )
+                rows = list(cur.fetchall())
+                assert rows == [
+                    (1, "a@x.com", "active", None),
+                    (2, "b@x.com", "active", "hello"),
+                ]
+        finally:
+            conn.close()
+    finally:
+        conn = pymysql.connect(
+            host=creds["host"],
+            port=creds["port"],
+            database=creds["database"],
+            user=creds["username"],
+            password=creds["password"],
+            autocommit=True,
+        )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP TABLE IF EXISTS `{dst_table}`")
+                cur.execute(f"DROP TABLE IF EXISTS `{src_table}`")
+        finally:
+            conn.close()
+
+
 def test_build_catalog_filters_primary_unique_entry():
     cat = build_catalog_from_introspect(
         dialect="sqlite",

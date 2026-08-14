@@ -388,7 +388,12 @@ def ddl_identity_columns(
         if not src or not tgt:
             continue
         stamp = str(m.get("target_type") or m.get("dest_type") or "").strip()
-        wire = str(materialize_dest_ddl(dest_db, stamp) or "") if stamp else ""
+        src_type = str(m.get("source_type") or m.get("inferred_type") or "")
+        wire = (
+            str(materialize_dest_ddl(dest_db, stamp, source_type=src_type) or "")
+            if stamp
+            else ""
+        )
         if stamp and not wire:
             wire = f"unmaterialized:{stamp}"
         rows.append({"source": src, "target": tgt, "materialized_ddl": wire})

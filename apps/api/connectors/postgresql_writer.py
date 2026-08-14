@@ -1157,6 +1157,7 @@ def write_mapped_rows(
         preserve_case=True,
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
+        dest_db="postgresql",
     )
     if not target_cols:
         return WriteResult(
@@ -1217,6 +1218,7 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="PostgreSQL",
+        dest_db="redshift" if engine == "redshift" else "postgresql",
     )
     policy = transform_error_policy(error_policy)
 
@@ -1591,6 +1593,8 @@ def write_mapped_rows(
                 studio_err=studio_err,
                 product="PostgreSQL",
                 materialize_stamp=lambda stamp: pg_type(stamp, engine=engine),
+                dest_db="redshift" if engine == "redshift" else "postgresql",
+                column_types=column_types,
             )
             if add_err:
                 additive_refuse = add_err

@@ -1086,6 +1086,7 @@ def write_mapped_rows(
         preserve_case=True,
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
+        dest_db="snowflake",
     )
     if not target_cols:
         return WriteResult(
@@ -1113,6 +1114,7 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest_types if isinstance(live_dest_types, dict) else None,
         product="Snowflake",
+        dest_db="snowflake",
     )
     account = normalize_account(host)
     policy = transform_error_policy(error_policy)
@@ -1401,6 +1403,8 @@ def write_mapped_rows(
                     product="Snowflake",
                     materialize_stamp=sf_type,
                     col_in_existing=lambda col, ex: str(col).upper() in ex,
+                    dest_db="snowflake",
+                    column_types=column_types,
                 )
                 if add_err:
                     return WriteResult(
