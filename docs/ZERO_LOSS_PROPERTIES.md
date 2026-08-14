@@ -896,15 +896,13 @@ TypeScript does not recompute dest.
   skip-if-unreachable (`:1433` / `:1521`). Incremental leftover MERGE
   stays a hard no-op. Snowflake / BigQuery COUNT stay unmeasured
   (clustering / INFORMATION_SCHEMA approximations).
-* dest-only sinks besides dest-engine DISTINCT `source_id`: Pinecone /
-  Weaviate `rowCount` is not identity (no queryable DISTINCT). Milvus /
-  Qdrant identity is **PARTIAL** (unit: 5 chunks / 2 `source_id`s close
-  as dest 2; missing collection = 0; no `source_id` field / truncated
-  REST scan unmeasured, not physical `rowCount`; Gate-8 no longer
-  closes Qdrant on writer ack). Live Milvus not run this host (no
-  cluster). Live Qdrant skipped (localhost:6333 unreachable).
-  pgvector identity remains **PARTIAL** on live PG 16. Writer
-  chunk-upsert ack never closes. Truncated DISTINCT is unmeasured.
+* dest-only sinks besides dest-engine DISTINCT `source_id`: Pinecone
+  list+fetch and Weaviate object listing use the same complete /
+  truncated / missing / no_field machine as Milvus / Qdrant.
+  `vectorCount` / Aggregate `meta.count` is physical chunks, never
+  identity. Pod indexes without `/vectors/list` stay unmeasured (not
+  `vectorCount`). Live Pinecone / Weaviate skip-if-unreachable.
+  Writer chunk-upsert ack never closes. Truncated DISTINCT is unmeasured.
 * SCD2 current-row identity — **PARTIAL** on live SQLite: `apply_scd2`
   twice, current=2, history=3, dest=2 not 3. Incremental watermarked
   SCD2 stays unproven (change batch is not the current population).

@@ -190,12 +190,12 @@ def test_strict_g8_fails_without_verifier_non_dest_only():
 def test_strict_g8_writer_ack_for_dest_only():
     """dest_only sinks without dest-engine DISTINCT still accept matched writer-ack.
 
-    Pinecone/Weaviate have no COUNT(DISTINCT source_id) yet. The pass is
-    labelled ``writer_ack`` rather than verified: it proves the writer
-    acknowledged as many rows as the reader counted, never that the
-    destination cells match. Milvus/Qdrant no longer take this path.
+    Email has no COUNT(DISTINCT source_id). The pass is labelled ``writer_ack``
+    rather than verified: it proves the writer acknowledged as many rows as
+    the reader counted, never that the destination cells match. Pinecone /
+    Weaviate / Milvus / Qdrant no longer take this path.
     """
-    report = _strict_reconcile("pinecone", dict(_MEASURED_SOURCE))
+    report = _strict_reconcile("email", dict(_MEASURED_SOURCE))
     assert report["passed"] is True
     assert report.get("assurance_level") == "writer_ack"
     assert "writer" in report["message"].lower() or "read-back" in report["message"].lower()
@@ -214,3 +214,29 @@ def test_strict_g8_qdrant_does_not_close_on_writer_ack(monkeypatch):
     assert "source_id" in str(report.get("message") or "").lower()
     assert report.get("dest_count_source") == "skipped_identity_readback"
     assert "identity_rows" not in report
+
+
+def test_strict_g8_pinecone_does_not_close_on_writer_ack(monkeypatch):
+    monkeypatch.setattr(
+        "connectors.pinecone_writer.scan_source_ids",
+        lambda cfg, *, table_name, max_entities: ("unmeasured", []),
+    )
+    report = _strict_reconcile("pinecone", dict(_MEASURED_SOURCE))
+    assert report.get("assurance_level") != "writer_ack"
+    assert report.get("skipped_readback") is True
+    assert report.get("migration_proven") is False
+    assert "source_id" in str(report.get("message") or "").lower()
+    assert report.get("dest_count_source") == "skipped_identity_readback"
+    assert "identity_rows" not in report
+
+
+def test_strict_g8_weaviate_does_not_close_on_writer_ack(monkeypatch):
+    monkeypatch.setattr(
+        "connectors.weaviate_writer.scan_source_ids",
+        lambda cfg, *, table_name, max_entities: ("unmeasured", []),
+    )
+    report = _strict_reconcile("weaviate", dict(_MEASURED_SOURCE))
+    assert report.get("assurance_level") != "writer_ack"
+    assert report.get("skipped_readback") is True
+    assert report.get("migration_proven") is False
+    assert report.get("dest_count_source") == "skipped_identity_readback"

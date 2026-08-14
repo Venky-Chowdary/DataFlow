@@ -1348,10 +1348,9 @@ def run_reconciliation(
         })
 
     if db_type in VECTOR_IDENTITY_ENGINES:
-        # dest-only REST engines (Milvus, Qdrant): no SQL chunk COUNT.
+        # dest-only REST engines: no SQL chunk COUNT.
         # Never stuff writer upsert ack into target_rows — that is the
         # dest_only writer_ack lie. Identity is stamped in _finalize.
-        # Pinecone / Weaviate are not in VECTOR_IDENTITY_ENGINES.
         return _finalize({
             "passed": True,
             "unproven": True,

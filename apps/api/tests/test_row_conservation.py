@@ -369,19 +369,63 @@ def test_stamp_vector_census_milvus_unreachable_is_skipped_identity_not_rowcount
     assert stamped["target_rows"] == 5
 
 
-def test_stamp_vector_census_pinecone_rowcount_is_not_identity():
-    """Pinecone has no dest-engine DISTINCT source_id — leave rowCount alone."""
+def test_stamp_vector_census_pinecone_closes_on_distinct_source_id(monkeypatch):
+    """Pinecone identity is DISTINCT source_id, never describe_index_stats vectorCount."""
+
+    def fake_scan(cfg, *, table_name, max_entities):
+        assert table_name == "docs"
+        return SOURCE_ID_SCAN_COMPLETE, ["doc-1", "doc-1", "doc-1", "doc-2", "doc-2"]
+
+    monkeypatch.setattr("connectors.pinecone_writer.scan_source_ids", fake_scan)
+    stamped = stamp_vector_census(
+        {"target_rows": 10_000, "target_checksum": "writer"},
+        {"host": "https://idx.svc.pinecone.io", "api_key": "k"},
+        schema="",
+        table_name="docs",
+        dest_engine="pinecone",
+    )
+    assert stamped[IDENTITY_COUNT_KEY] == 2
+    assert stamped["dest_count_source"] == DEST_COUNT_IDENTITY
+    assert stamped[VECTOR_ROWS_KEY] == 10_000
+    count, source = dest_count_from_recon(stamped)
+    assert count == 2
+    assert source == DEST_IDENTITY_READBACK
+    assert "pinecone" in VECTOR_IDENTITY_ENGINES
+    assert "weaviate" in VECTOR_IDENTITY_ENGINES
+
+
+def test_stamp_vector_census_weaviate_truncated_scan_is_unmeasured(monkeypatch):
+    def fake_scan(cfg, *, table_name, max_entities):
+        return SOURCE_ID_SCAN_TRUNCATED, []
+
+    monkeypatch.setattr("connectors.weaviate_writer.scan_source_ids", fake_scan)
     stamped = stamp_vector_census(
         {"target_rows": 5, "target_checksum": "abc"},
-        {},
+        {"host": "127.0.0.1", "port": 8080},
+        schema="",
+        table_name="docs",
+        dest_engine="weaviate",
+    )
+    assert IDENTITY_COUNT_KEY not in stamped
+    assert stamped.get("dest_count_source") == "skipped_identity_readback"
+    assert stamped["target_rows"] == 5
+
+
+def test_stamp_vector_census_pinecone_unreachable_is_skipped_identity_not_vectorcount(monkeypatch):
+    def fake_scan(cfg, *, table_name, max_entities):
+        return SOURCE_ID_SCAN_UNMEASURED, []
+
+    monkeypatch.setattr("connectors.pinecone_writer.scan_source_ids", fake_scan)
+    stamped = stamp_vector_census(
+        {"target_rows": 5, "target_checksum": "abc"},
+        {"host": "https://idx.svc.pinecone.io"},
         schema="",
         table_name="docs",
         dest_engine="pinecone",
     )
     assert IDENTITY_COUNT_KEY not in stamped
-    assert stamped.get("dest_count_source") != DEST_COUNT_IDENTITY
-    assert "pinecone" not in VECTOR_IDENTITY_ENGINES
-    assert "weaviate" not in VECTOR_IDENTITY_ENGINES
+    assert stamped.get("dest_count_source") == "skipped_identity_readback"
+    assert stamped["target_rows"] == 5
 
 
 def test_identity_count_from_source_id_scan_is_distinct_not_chunk_count():

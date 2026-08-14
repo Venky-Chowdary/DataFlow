@@ -48,8 +48,10 @@ population is ``COUNT(DISTINCT source_id)`` from the dest engine
 collection is 0. Writer chunk-upsert ack and collection ``rowCount`` /
 ``num_entities`` / ``points_count`` never close. A truncated scan
 (REST offset cap, census bound) is unmeasured — never DISTINCT of a
-prefix. Pinecone/Weaviate stay unmeasured until dest-engine DISTINCT
-``source_id`` exists; their ``rowCount`` is not identity.
+prefix. Pinecone list+fetch and Weaviate object listing use the same
+state machine as Milvus/Qdrant; their ``vectorCount`` / Aggregate
+``meta.count`` is physical chunks, not identity. Writer chunk-upsert
+ack never closes.
 
 A complete source PK census plus dest-engine key hits splits DMS
 ``MISSING_TARGET`` from ``EXTRA_TARGET``. ``COUNT(*)`` nets one missing
@@ -154,9 +156,11 @@ IDENTITY_COUNT_KEY = "identity_rows"
 VECTOR_ROWS_KEY = "vector_rows"
 DEST_COUNT_IDENTITY = "identity_readback"
 # Dest engines that can answer COUNT(DISTINCT source_id) independently of
-# writer upsert ack. Pinecone / Weaviate are not in this set — their
-# ``rowCount`` is physical vectors, not source identities.
-VECTOR_IDENTITY_ENGINES = frozenset({"pgvector", "milvus", "qdrant"})
+# writer upsert ack. Physical collection ``rowCount`` / ``vectorCount`` /
+# Aggregate ``meta.count`` is never identity.
+VECTOR_IDENTITY_ENGINES = frozenset(
+    {"pgvector", "milvus", "qdrant", "pinecone", "weaviate"}
+)
 _VECTOR_IDENTITY_ENGINES = VECTOR_IDENTITY_ENGINES
 
 SOURCE_ID_SCAN_MISSING = "missing"
@@ -264,12 +268,16 @@ def _vector_rest_identity_count(
     *,
     table_name: str,
 ) -> int | None:
-    """Milvus / Qdrant dest-engine DISTINCT source_id. Never collection rowCount."""
+    """Dest-engine DISTINCT source_id. Never collection rowCount / vectorCount."""
     engine = str(db_type or "").strip().lower()
     if engine == "milvus":
         from connectors.milvus_writer import scan_source_ids
     elif engine == "qdrant":
         from connectors.qdrant_writer import scan_source_ids
+    elif engine == "pinecone":
+        from connectors.pinecone_writer import scan_source_ids
+    elif engine == "weaviate":
+        from connectors.weaviate_writer import scan_source_ids
     else:
         return None
     state, values = scan_source_ids(
@@ -431,7 +439,7 @@ def destination_row_count(
             # Identities, not embedding rows. Physical COUNT(*) is not dest.
             return _pgvector_identity_count(cfg, schema=schema, table_name=table)
 
-        if db_type in {"milvus", "qdrant"}:
+        if db_type in {"milvus", "qdrant", "pinecone", "weaviate"}:
             return _vector_rest_identity_count(db_type, cfg, table_name=table)
 
         if db_type in {"iceberg", "apache_iceberg"}:
@@ -1679,9 +1687,10 @@ def stamp_vector_census(
     (``skipped_readback`` / ``migration_proven=false``). This only owns
     identity cardinality.
 
-    Engines in ``VECTOR_IDENTITY_ENGINES`` (pgvector, Milvus, Qdrant) run
-    dest-engine DISTINCT ``source_id``. Pinecone / Weaviate ``rowCount`` is
-    not identity and is left untouched.
+    Engines in ``VECTOR_IDENTITY_ENGINES`` (pgvector, Milvus, Qdrant,
+    Pinecone, Weaviate) run dest-engine DISTINCT ``source_id``. Physical
+    ``rowCount`` / ``vectorCount`` / Aggregate ``meta.count`` is not
+    identity and is left as diagnostic ``vector_rows``.
     """
     out = dict(recon)
     engine = str(dest_engine or "").strip().lower()
