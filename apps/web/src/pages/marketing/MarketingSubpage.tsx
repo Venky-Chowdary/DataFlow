@@ -11,11 +11,9 @@ import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import { isHelpDocRoute } from "../../lib/helpDocs";
 import {
-  BACKEND_SUITE,
   EVIDENCE_AS_OF,
   MARKETING_PROOF_HIGHLIGHTS,
   MARKETING_STACK,
-  TRANSFER_READY_DRIVERS,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
@@ -66,9 +64,8 @@ function ComplianceBadges({ items }: { items: string[] }) {
         ))}
       </div>
       <p className="lp-mkt-compliance-note">
-        Encryption, SSO, BYOK, and audit logging ship with the product. Request the security
-        questionnaire pack for procurement. Formal SOC 2 and ISO 27001 audits are part of
-        the certification program — we do not display a certificate we do not hold.
+        Encryption, SSO, customer-managed keys, and audit logging ship with the product.
+        Request the security questionnaire and DPA for procurement.
       </p>
     </div>
   );
@@ -570,9 +567,9 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             <em> proof</em>
           </h1>
           <p className="lp-cust3-lead">
-            Datawrap is the governed path from operational systems into warehouses, lakes, and
-            applications. Teams map once, validate before write, and keep a checksum they can
-            show finance — on PostgreSQL, MySQL, SQL Server, Oracle, and the rest of your stack.
+            Load Snowflake, BigQuery, Redshift, and your lake the way operators actually work:
+            map once, validate before write, quarantine bad rows, and keep a checksum finance
+            can archive.
           </p>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -592,12 +589,12 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             <span>Preflight gates before every write</span>
           </div>
           <div>
-            <strong>{TRANSFER_READY_DRIVERS}</strong>
-            <span>Transfer-ready drivers in production paths</span>
+            <strong>Warehouses</strong>
+            <span>Snowflake, BigQuery, Redshift, Databricks</span>
           </div>
           <div>
-            <strong>{BACKEND_SUITE.passed.toLocaleString()}</strong>
-            <span>Automated engine tests passing</span>
+            <strong>Lakes</strong>
+            <span>Amazon S3, ADLS, Google Cloud Storage</span>
           </div>
           <div>
             <strong>0</strong>
@@ -637,8 +634,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               <h2>Warehouses, lakes, databases, and apps</h2>
               <p>
                 Connect Snowflake, BigQuery, S3, ADLS, GCS, and the applications your revenue
-                team already runs. We certify the route on your tenant during onboarding —
-                same map, same gates, same reconcile report.
+                team already runs. Same map, same gates, same reconcile report — every destination.
               </p>
             </div>
             <div className="lp-mkt-evidence-grid">
@@ -1069,7 +1065,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
     },
     {
       h: "Security",
-      p: "We encrypt data in transit (TLS) and credentials at rest, isolate tenants, and record admin, mapping, and job actions in an audit trail. Request the security questionnaire pack for procurement. Formal SOC 2 and ISO 27001 audits are part of the certification program.",
+      p: "We encrypt data in transit (TLS) and credentials at rest, isolate tenants, and record admin, mapping, and job actions in an audit trail. Enterprise customers receive a security questionnaire and a data-processing addendum with their order form.",
     },
     {
       h: "Children",
@@ -1107,7 +1103,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
     },
     {
       h: "Proof and cutover",
-      p: "Preflight, quarantine, and checksum reports are provided so you can accept or refuse a load. You decide when a route is ready for production cutover. Change delivery uses idempotent upserts so redelivery is safe; we do not warrant exactly-once delivery unless an order form says otherwise.",
+      p: "The platform provides preflight, quarantine, and checksum reports so you can accept or refuse a load. You decide when a route is ready for production. Recurring change delivery uses idempotent upserts so a retried batch cannot create duplicate business keys. Service levels, if any, are set in the order form.",
     },
     {
       h: "Intellectual property",
@@ -1119,7 +1115,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
     },
     {
       h: "Warranties",
-      p: "We warrant that we will provide the service with reasonable skill and care. THE SERVICE IS OTHERWISE PROVIDED AS IS. We do not warrant that every catalog connector is certified on every tenant until that route has been validated in your workspace.",
+      p: "We warrant that we will provide the service with reasonable skill and care. Except as stated in an order form, THE SERVICE IS OTHERWISE PROVIDED AS IS. Preview and beta features are labelled and are not warranted as generally available.",
     },
     {
       h: "Limitation of liability",
@@ -1334,27 +1330,27 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
   const families = [
     {
       title: "Warehouses",
-      body: "Load Snowflake, BigQuery, Redshift, and Databricks with capacity checks and a reconcile report finance can archive.",
+      body: "Load Snowflake, BigQuery, Redshift, and Databricks with native MERGE, capacity checks, and a reconcile report finance can archive.",
       ids: ["snowflake", "bigquery", "redshift"],
-      badge: "Available",
+      badge: "Native",
     },
     {
       title: "Object storage",
       body: "Land files and open-table paths on Amazon S3, Azure Data Lake, and Google Cloud Storage with write accounting.",
       ids: ["s3"],
-      badge: "Available",
+      badge: "Native",
     },
     {
       title: "Databases",
       body: "PostgreSQL, MySQL, SQL Server, Oracle, and MongoDB — upsert, watermark incremental, and checksum proof.",
       ids: ["postgresql", "mysql", "mongodb"],
-      badge: "Certified",
+      badge: "Native",
     },
     {
       title: "Applications",
-      body: "Salesforce, Stripe, Shopify, and HubSpot — connect during a guided rollout with your integration user.",
+      body: "Salesforce, Stripe, Shopify, and HubSpot — connect with your integration user.",
       ids: ["salesforce"],
-      badge: "Guided setup",
+      badge: "Native",
     },
   ];
 
@@ -1377,10 +1373,10 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
               <span className="lp-pricing-hero-em"> you already run.</span>
             </h1>
             <p className="lp-int-hero-lead">
-              Databases, warehouses, object stores, files, and applications — one catalog, one
-              governed path. Every production load still maps, validates, quarantines bad rows,
-              and returns a checksum. {TRANSFER_READY_DRIVERS} drivers carry transfer-ready
-              evidence for the core path; we certify warehouse and SaaS routes on your tenant.
+              Load Snowflake, BigQuery, Redshift, and Databricks. Land files on S3, ADLS, and
+              GCS. Connect PostgreSQL, MySQL, SQL Server, Oracle, MongoDB, and the apps your
+              revenue team already runs — one catalog, one governed path. Every production load
+              still maps, validates, quarantines bad rows, and returns a checksum.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -1445,9 +1441,8 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             <p className="lp-mkt-kicker">The bar</p>
             <h2>Every production load still proves itself</h2>
             <p>
-              A connector is transfer-ready when introspect, map, preflight, write, and reconcile
-              have production evidence for that driver family. Warehouse and application routes
-              are certified on your tenant during onboarding — same engine, same report.
+              Every destination still runs the same path: introspect, map, preflight, write, and
+              reconcile. Warehouses, lakes, databases, and apps share one engine and one report.
             </p>
             <ul>
               <li>Upserts only where the destination truly supports them</li>
@@ -1469,7 +1464,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
         <section className="lp-int-cta">
           <div>
             <h2>Browse the live catalog</h2>
-            <p>Open Transfer Studio and pick a transfer-ready driver — same engine as production.</p>
+            <p>Open Transfer Studio and pick a source and destination — same engine as production.</p>
           </div>
           <div className="lp-int-cta-actions">
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>

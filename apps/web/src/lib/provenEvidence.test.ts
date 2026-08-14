@@ -56,7 +56,8 @@ test("public pages hold no certification claim we cannot show a certificate for"
 });
 
 test("marketing pages never publish CI blockers as product gaps", () => {
-  const forbidden = /build machine|No credentials provisioned|What we will not claim yet/i;
+  const forbidden =
+    /build machine|No credentials provisioned|What we will not claim yet|certify (the route|those routes|warehouse)|on your tenant during onboarding|we do not display a certificate|Formal SOC 2/i;
   const marketingDirs = [
     path.join(SRC, "pages", "marketing"),
     path.join(SRC, "pages", "LandingPage.tsx"),

@@ -842,6 +842,52 @@ def _load_rows_into_table(
     return "insert"
 
 
+def build_snowflake_merge_sql(
+    target_table: str,
+    staging_table: str,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    *,
+    lsn_column: str | None = None,
+) -> str:
+    """Build a Snowflake MERGE for PK upsert with optional monotonic LSN guard."""
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
+    if not conflict:
+        raise ValueError("Snowflake MERGE requires conflict_columns present in target_cols")
+    on_clause = null_safe_merge_on(
+        conflict,
+        left_alias="t",
+        right_alias="s",
+        quote_column=quote_sql_identifier,
+    )
+    col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
+    source_cols = ", ".join(f"s.{quote_sql_identifier(c)}" for c in target_cols)
+    update_cols = [c for c in target_cols if c not in conflict]
+    lsn_guard = ""
+    if lsn_column and lsn_column in target_cols:
+        lsn_guard = f" AND {snowflake_lsn_match_predicate()}"
+    tgt_q = quote_sql_identifier(target_table)
+    tmp_q = quote_sql_identifier(staging_table)
+    if update_cols:
+        set_clause = ", ".join(
+            f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}"
+            for c in update_cols
+        )
+        return (
+            f"MERGE INTO {tgt_q} t "
+            f"USING {tmp_q} s "
+            f"ON {on_clause} "
+            f"WHEN MATCHED{lsn_guard} THEN UPDATE SET {set_clause} "
+            f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
+        )
+    return (
+        f"MERGE INTO {tgt_q} t "
+        f"USING {tmp_q} s "
+        f"ON {on_clause} "
+        f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
+    )
+
+
 def _merge_batch_via_temp(
     cur: Any,
     table_name: str,
@@ -888,41 +934,13 @@ def _merge_batch_via_temp(
             policy=policy,
             mappings=mappings,
         )
-        on_clause = null_safe_merge_on(
+        merge_sql = build_snowflake_merge_sql(
+            table_name,
+            temp,
+            target_cols,
             conflict,
-            left_alias="t",
-            right_alias="s",
-            quote_column=quote_sql_identifier,
+            lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
         )
-        col_list = ", ".join(quote_sql_identifier(c) for c in target_cols)
-        source_cols = ", ".join(f"s.{quote_sql_identifier(c)}" for c in target_cols)
-        update_cols = [c for c in target_cols if c not in conflict]
-        lsn_guard = (
-            f" AND {snowflake_lsn_match_predicate()}"
-            if DF_LSN_COL in target_cols
-            else ""
-        )
-        tgt_q = quote_sql_identifier(table_name)
-        tmp_q = quote_sql_identifier(temp)
-        if update_cols:
-            set_clause = ", ".join(
-                f"t.{quote_sql_identifier(c)} = s.{quote_sql_identifier(c)}"
-                for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE INTO {tgt_q} t "  # nosec B608
-                f"USING {tmp_q} s "
-                f"ON {on_clause} "
-                f"WHEN MATCHED{lsn_guard} THEN UPDATE SET {set_clause} "
-                f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {tgt_q} t "
-                f"USING {tmp_q} s "
-                f"ON {on_clause} "
-                f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"
-            )
         cur.execute(merge_sql)
         return len(mapped_rows)
     finally:

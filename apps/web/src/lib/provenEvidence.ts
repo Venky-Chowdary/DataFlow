@@ -189,7 +189,7 @@ export const MARKETING_STACK = [
   {
     family: "Warehouses",
     items: "Snowflake, BigQuery, Redshift, Databricks",
-    note: "Bulk load with capacity checks and a reconcile report you can archive.",
+    note: "Native MERGE loaders, capacity checks, and a reconcile report finance can archive.",
   },
   {
     family: "Object storage",
@@ -199,12 +199,12 @@ export const MARKETING_STACK = [
   {
     family: "Databases",
     items: "PostgreSQL, MySQL, SQL Server, Oracle, MongoDB",
-    note: "Live-matrix certified for schema carry, identity, keys, and checksum reconcile.",
+    note: "Schema carry, identity, keys, and checksum reconcile on every cutover.",
   },
   {
     family: "Applications",
     items: "Salesforce, Stripe, Shopify, HubSpot",
-    note: "Connect during a guided rollout with your integration user.",
+    note: "Connect CRM and commerce systems with your integration user.",
   },
 ] as const;
 

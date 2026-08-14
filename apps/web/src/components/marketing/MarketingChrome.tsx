@@ -233,7 +233,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>
                     <strong>Connector catalog</strong>
-                    <span>Honest transfer-ready labels</span>
+                    <span>Warehouses, lakes, and apps</span>
                   </a>
                 </div>
               </div>

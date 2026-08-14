@@ -112,7 +112,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   customers: {
     title: "Customers",
-    description: "How Datawrap proves every load — mapping, preflight, quarantine, and checksums on databases, warehouses, and applications.",
+    description: "Load Snowflake, BigQuery, and your lake with mapping, preflight, quarantine, and a checksum finance can archive.",
     keywords: "Datawrap customers, data migration proof, warehouse loading, schema drift testing",
     canonicalPath: "#/customers",
   },
@@ -124,13 +124,13 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   privacy: {
     title: "Privacy",
-    description: "Datawrap privacy policy — workspace data, encrypted credentials, retention, subprocessors, and your rights.",
+    description: "How Datawrap handles workspace data, encrypted credentials, retention, subprocessors, and your rights.",
     keywords: "Datawrap privacy policy, data processor, credential encryption",
     canonicalPath: "#/privacy",
   },
   terms: {
     title: "Terms of service",
-    description: "Datawrap terms of service — accounts, customer data, acceptable use, liability, and enterprise agreements.",
+    description: "Terms of service for the Datawrap platform — accounts, customer data, acceptable use, and enterprise agreements.",
     keywords: "Datawrap terms of service, acceptable use",
     canonicalPath: "#/terms",
   },
@@ -184,7 +184,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   integrations: {
     title: "Connectors",
-    description: "Native drivers and SQLAlchemy generics with honest transfer-ready labels.",
+    description: "Snowflake, BigQuery, S3, ADLS, GCS, PostgreSQL, and the rest of your stack — one catalog.",
     keywords: "Datawrap connectors, PostgreSQL MySQL MongoDB Snowflake BigQuery S3 Iceberg",
     canonicalPath: "#/integrations",
   },

@@ -349,8 +349,8 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           ))}
         </ul>
         <p className="docs-space-evidence-lead">
-          Warehouses, object stores, and applications are in the catalog. We certify those routes
-          on your tenant during onboarding — same map, gates, and reconcile report.
+          Warehouses, object stores, and applications share the same map, gates, and reconcile
+          report as the database engines above.
         </p>
         <ul className="docs-space-evidence-list">
           {MARKETING_STACK.map((row) => (

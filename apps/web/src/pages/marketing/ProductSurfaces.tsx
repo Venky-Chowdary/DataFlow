@@ -1007,8 +1007,8 @@ export function McpServerPage({
       <Chapter id="mcp-tools" kicker="Tooling" title="Representative tool groups">
         <div className="lp-mkt-prose">
           <p>
-            Tools group cleanly around <strong>catalog &amp; connectors</strong> (transfer-ready drivers and
-            connection health), <strong>transfer plans</strong> (create/update maps without skipping review flags
+            Tools group cleanly around <strong>catalog &amp; connectors</strong> (warehouses, lakes, databases, and
+            apps), <strong>transfer plans</strong> (create/update maps without skipping review flags
             on ambiguous edges), <strong>run &amp; status</strong> (enqueue governed runs and poll phases + proof),
             and <strong>quarantine read</strong> (sample bad rows for agent-assisted fixes, still policy-scoped).
             The API surface is thin on purpose — the engine, not the wrapper, decides what is safe.
@@ -1122,8 +1122,8 @@ export function WarehouseSolutionPage({
             <p className="lp-mkt-kicker">Solution · Warehouse loading</p>
             <h1>Bulk loads finance can archive</h1>
             <p className="lp-wh-lead">
-              Snowflake, BigQuery, and Redshift — with destination probes, capacity checks, and
-              reconciliation reports. Same nine core gates as every other Datawrap path.
+              Snowflake, BigQuery, Redshift, and Databricks — native MERGE loaders, destination
+              probes, capacity checks, and a reconcile report finance can archive.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -1143,7 +1143,7 @@ export function WarehouseSolutionPage({
           <span>Snowflake</span>
           <span>BigQuery</span>
           <span>Redshift</span>
-          <span>Native drivers</span>
+          <span>Databricks</span>
           <span>Checksum MATCH</span>
         </div>
       </section>

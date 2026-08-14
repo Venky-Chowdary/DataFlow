@@ -600,6 +600,72 @@ def test_s3_acl_deny_matrix():
     assert evaluate_s3_acl_grants([{"Permission": "WRITE"}]) == (True, True)
 
 
+def test_gcs_iam_deny_matrix():
+    from services.destination_privilege_probe import evaluate_gcs_iam_bindings
+
+    assert evaluate_gcs_iam_bindings([{"role": "roles/storage.objectAdmin"}]) == (True, False)
+    assert evaluate_gcs_iam_bindings([{"role": "roles/storage.admin"}]) == (True, True)
+    assert evaluate_gcs_iam_bindings([{"role": "roles/storage.objectViewer"}]) == (False, False)
+    assert evaluate_gcs_iam_bindings(
+        [{"role": "roles/custom", "permissions": ["storage.objects.create"]}]
+    ) == (True, False)
+
+
+def test_gcs_probe_mocked_iam_deny():
+    mock_bucket = MagicMock()
+    mock_bucket.get_iam_policy.return_value = {
+        "bindings": [{"role": "roles/storage.objectViewer", "members": ["user:a@b"]}],
+    }
+    mock_client = MagicMock()
+    mock_client.get_bucket.return_value = mock_bucket
+    with patch("connectors.gcs_common.gcs_client", return_value=mock_client):
+        result = probe_destination_privileges(
+            "google_cloud_storage",
+            host="my-project",
+            database="landing",
+            table="exports/out.json",
+            table_exists=True,
+        )
+    assert result.status == "denied"
+    assert result.can_write is False
+    assert result.method == "get_iam_policy"
+    assert result.engine == "gcs"
+
+
+def test_adls_access_account_key_is_full_control():
+    from services.destination_privilege_probe import evaluate_adls_access
+
+    assert evaluate_adls_access(has_account_key=True, container_exists=True) == (True, True)
+    assert evaluate_adls_access(has_account_key=False, roles=["Reader"]) == (False, False)
+    assert evaluate_adls_access(
+        has_account_key=False,
+        roles=["Storage Blob Data Contributor"],
+    ) == (True, False)
+    assert evaluate_adls_access(has_account_key=False, acl_permissions="racwdl") == (True, True)
+
+
+def test_adls_probe_mocked_account_key():
+    mock_container = MagicMock()
+    mock_container.get_container_properties.return_value = {"name": "landing"}
+    mock_container.get_container_access_policy.return_value = {}
+    mock_client = MagicMock()
+    mock_client.get_container_client.return_value = mock_container
+    with patch("connectors.adls_common.blob_service_client", return_value=mock_client):
+        result = probe_destination_privileges(
+            "adls",
+            host="acct",
+            database="landing",
+            table="exports/out.json",
+            username="acct",
+            password="fake-account-key",
+            table_exists=True,
+        )
+    assert result.status == "ok"
+    assert result.can_write is True
+    assert result.can_create_table is True
+    assert result.engine == "adls"
+
+
 def test_s3_probe_mocked_acl():
     mock_client = MagicMock()
     mock_client.head_bucket.return_value = {}

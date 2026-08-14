@@ -19,6 +19,8 @@ Implemented engines
 * Kafka — AdminClient ``describe_acls`` (never produce)
 * Elasticsearch — ``security.has_privileges`` (never index a probe doc)
 * S3 — ``GetBucketAcl`` grant parse (never PutObject)
+* GCS — bucket IAM bindings (never upload)
+* ADLS — container metadata + role/account-key posture (never PutBlob)
 
 Contract
 --------
@@ -60,6 +62,8 @@ _SUPPORTED = frozenset({
     "opensearch",
     "s3",
     "minio",
+    "gcs",
+    "adls",
     "sftp",
 })
 
@@ -78,6 +82,36 @@ _KAFKA_CREATE_OPS = frozenset({"CREATE", "ALL", "ANY"})
 _ES_WRITE_PRIVS = frozenset({"index", "write", "create", "create_doc"})
 _ES_CREATE_PRIVS = frozenset({"create_index", "manage"})
 _S3_WRITE_PERMS = frozenset({"FULL_CONTROL", "WRITE", "WRITE_ACP"})
+_GCS_WRITE_ROLES = frozenset({
+    "roles/storage.admin",
+    "roles/storage.objectAdmin",
+    "roles/storage.objectCreator",
+    "roles/storage.objectUser",
+    "roles/storage.legacyBucketOwner",
+    "roles/storage.legacyBucketWriter",
+})
+_GCS_CREATE_ROLES = frozenset({
+    "roles/storage.admin",
+    "roles/storage.legacyBucketOwner",
+})
+_GCS_WRITE_PERMS = frozenset({
+    "storage.objects.create",
+    "storage.objects.update",
+    "storage.objects.delete",
+})
+_ADLS_WRITE_ROLES = frozenset({
+    "storage blob data contributor",
+    "storage blob data owner",
+    "storage blob data writer",
+    "contributor",
+    "owner",
+})
+_ADLS_CREATE_ROLES = frozenset({
+    "storage blob data owner",
+    "contributor",
+    "owner",
+})
+_ADLS_WRITE_ACL = frozenset({"w", "c", "a"})
 
 _BQ_WRITE_ROLES = frozenset({
     "OWNER",
@@ -140,6 +174,10 @@ def _normalize_engine(db_type: str) -> str:
         return "elasticsearch"
     if engine in {"minio", "wasabi", "backblaze_b2", "digitalocean_spaces", "cloudflare_r2", "amazon_s3"}:
         return "s3"
+    if engine in {"gcs", "google_cloud_storage", "google_gcs"}:
+        return "gcs"
+    if engine in {"adls", "adls_gen2", "azure_data_lake", "azure_blob", "azure_blob_storage"}:
+        return "adls"
     return engine
 
 
@@ -398,6 +436,30 @@ def probe_destination_privileges(
                 password=password,
                 connection_string=connection_string,
                 ssl=ssl,
+                key_prefix=tbl or sch,
+                table_exists=table_exists,
+            )
+        if engine == "gcs":
+            return _probe_gcs(
+                host=host,
+                port=port,
+                bucket=database or tbl,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                service_account=service_account or password,
+                key_prefix=tbl or sch,
+                table_exists=table_exists,
+            )
+        if engine == "adls":
+            return _probe_adls(
+                host=host,
+                port=port,
+                container=database or sch or tbl,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                service_account=service_account,
                 key_prefix=tbl or sch,
                 table_exists=table_exists,
             )
@@ -2223,6 +2285,302 @@ def evaluate_s3_acl_grants(
     if not table_exists:
         can_write = can_create
     return can_write, can_create
+
+
+def evaluate_gcs_iam_bindings(
+    bindings: list[Any],
+    *,
+    table_exists: bool = True,
+) -> tuple[bool, bool]:
+    """Parse GCS IAM bindings → (can_write, can_create). Public for tests."""
+    can_write = False
+    can_create = False
+    for binding in bindings or []:
+        role = ""
+        perms: list[str] = []
+        if isinstance(binding, dict):
+            role = str(binding.get("role") or binding.get("Role") or "")
+            raw_perms = binding.get("permissions") or binding.get("Permissions") or []
+            if isinstance(raw_perms, (list, tuple, set)):
+                perms = [str(p) for p in raw_perms]
+        else:
+            role = str(getattr(binding, "role", "") or "")
+            raw_perms = getattr(binding, "permissions", None) or []
+            if isinstance(raw_perms, (list, tuple, set)):
+                perms = [str(p) for p in raw_perms]
+        role_l = role.strip()
+        if role_l in _GCS_WRITE_ROLES:
+            can_write = True
+        if role_l in _GCS_CREATE_ROLES:
+            can_create = True
+        if any(p in _GCS_WRITE_PERMS for p in perms):
+            can_write = True
+        if "storage.buckets.create" in perms:
+            can_create = True
+    if not table_exists:
+        can_write = can_write or can_create
+    return can_write, can_create
+
+
+def evaluate_adls_access(
+    *,
+    has_account_key: bool,
+    roles: list[str] | None = None,
+    acl_permissions: str = "",
+    container_exists: bool = True,
+) -> tuple[bool, bool]:
+    """Parse ADLS/Blob access posture → (can_write, can_create). Public for tests.
+
+    An account key is the Azure equivalent of full-control — never probe PutBlob.
+    Role names and container ACL letters are evaluated when a service principal
+    is used instead of a key.
+    """
+    if has_account_key:
+        return True, True
+    can_write = False
+    can_create = False
+    for raw in roles or []:
+        role = str(raw or "").strip().lower()
+        if role in _ADLS_WRITE_ROLES:
+            can_write = True
+        if role in _ADLS_CREATE_ROLES:
+            can_create = True
+    perms = {ch.lower() for ch in (acl_permissions or "") if ch.isalpha()}
+    if perms & _ADLS_WRITE_ACL:
+        can_write = True
+    if "c" in perms:
+        can_create = True
+    if not container_exists:
+        can_write = can_write or can_create
+    return can_write, can_create
+
+
+def _probe_gcs(
+    *,
+    host: str,
+    port: int,
+    bucket: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    service_account: str,
+    key_prefix: str,
+    table_exists: bool,
+) -> PrivilegeProbeResult:
+    from connectors.gcs_common import gcs_client
+
+    bucket_name = (bucket or "").strip()
+    if not bucket_name:
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail="GCS bucket name required for privilege probe",
+            engine="gcs",
+        )
+
+    cfg = {
+        "host": host,
+        "port": port,
+        "database": bucket_name,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+        "service_account": service_account,
+    }
+    client = gcs_client(cfg)
+    exists = bool(table_exists)
+    try:
+        bucket_obj = client.get_bucket(bucket_name)
+        exists = True
+    except Exception as exc:
+        code = str(getattr(exc, "code", "") or getattr(exc, "status_code", "") or "")
+        name = str(getattr(exc, "message", "") or exc)
+        if "404" in f"{code} {name}" or "NotFound" in type(exc).__name__:
+            exists = False
+            return PrivilegeProbeResult(
+                can_write=None,
+                can_create_table=None,
+                status="unavailable",
+                detail=f"GCS bucket `{bucket_name}` not found — IAM cannot be read until it exists",
+                engine="gcs",
+                method="get_bucket",
+            )
+        if "403" in f"{code} {name}" or "Forbidden" in type(exc).__name__:
+            return PrivilegeProbeResult(
+                can_write=False,
+                can_create_table=False,
+                status="denied",
+                detail=f"GCS AccessDenied on get_bucket for `{bucket_name}` — check IAM",
+                engine="gcs",
+                method="get_bucket",
+            )
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail=f"GCS get_bucket failed: {exc}",
+            engine="gcs",
+            method="get_bucket",
+        )
+
+    try:
+        policy = bucket_obj.get_iam_policy(requested_policy_version=3)
+    except Exception as exc:
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail=(
+                f"GCS get_iam_policy unavailable ({exc}); "
+                "G2 falls back to connectivity (never upload probe)"
+            ),
+            engine="gcs",
+            method="get_iam_policy",
+        )
+
+    bindings = getattr(policy, "bindings", None)
+    if bindings is None and isinstance(policy, dict):
+        bindings = policy.get("bindings")
+    bindings = list(bindings or [])
+    can_write, can_create = evaluate_gcs_iam_bindings(
+        bindings,
+        table_exists=bool(exists),
+    )
+    return _finalize(
+        engine="gcs",
+        can_write=can_write,
+        can_create=can_create,
+        table_exists=bool(exists),
+        table=key_prefix or bucket_name,
+        schema=bucket_name,
+        need_update=False,
+        method="get_iam_policy",
+        write_action="storage.objects.create",
+        create_action="storage.buckets.create",
+    )
+
+
+def _probe_adls(
+    *,
+    host: str,
+    port: int,
+    container: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    service_account: str,
+    key_prefix: str,
+    table_exists: bool,
+) -> PrivilegeProbeResult:
+    from connectors.adls_common import blob_service_client
+
+    container_name = (container or "").strip()
+    if not container_name:
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail="ADLS container name required for privilege probe",
+            engine="adls",
+        )
+
+    cfg = {
+        "host": host,
+        "port": port,
+        "database": container_name,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+        "service_account": service_account,
+        "account_key": password,
+        "account_name": username,
+    }
+    has_account_key = bool(
+        (password or "").strip()
+        or "AccountKey=" in (connection_string or "")
+    )
+    client = blob_service_client(cfg)
+    exists = bool(table_exists)
+    container_client = None
+    try:
+        container_client = client.get_container_client(container_name)
+        container_client.get_container_properties()
+        exists = True
+    except Exception as exc:
+        code = str(getattr(exc, "status_code", "") or getattr(exc, "status", "") or "")
+        name = type(exc).__name__
+        if "404" in f"{code}" or "ResourceNotFound" in name or "ContainerNotFound" in name:
+            exists = False
+        elif "403" in f"{code}" or "ClientAuthenticationError" in name or "HttpResponseError" in name:
+            # Distinguish auth deny from other HTTP errors when status is present.
+            if "403" in f"{code}" or "401" in f"{code}":
+                return PrivilegeProbeResult(
+                    can_write=False,
+                    can_create_table=False,
+                    status="denied",
+                    detail=f"ADLS AccessDenied on get_container_properties for `{container_name}`",
+                    engine="adls",
+                    method="get_container_properties",
+                )
+            return PrivilegeProbeResult(
+                can_write=None,
+                can_create_table=None,
+                status="unavailable",
+                detail=f"ADLS get_container_properties failed: {exc}",
+                engine="adls",
+                method="get_container_properties",
+            )
+        else:
+            return PrivilegeProbeResult(
+                can_write=None,
+                can_create_table=None,
+                status="unavailable",
+                detail=f"ADLS get_container_properties failed: {exc}",
+                engine="adls",
+                method="get_container_properties",
+            )
+
+    roles: list[str] = []
+    acl_permissions = ""
+    try:
+        if container_client is None:
+            raise RuntimeError("container client unavailable")
+        policy = container_client.get_container_access_policy()
+        signed = (policy or {}).get("signed_identifiers") or (policy or {}).get("signedIdentifiers") or []
+        if isinstance(signed, dict):
+            signed = list(signed.values())
+        for ident in signed or []:
+            access = getattr(ident, "permission", None) or getattr(ident, "access_policy", None)
+            perm = getattr(access, "permission", None) if access is not None else None
+            if perm is None and isinstance(ident, dict):
+                perm = (ident.get("access_policy") or ident).get("permission") if isinstance(ident.get("access_policy") or ident, dict) else ident.get("permission")
+            if perm:
+                acl_permissions += str(perm)
+    except Exception:
+        # Access policy is optional — account-key / role evaluation still applies.
+        pass
+
+    can_write, can_create = evaluate_adls_access(
+        has_account_key=has_account_key,
+        roles=roles,
+        acl_permissions=acl_permissions,
+        container_exists=bool(exists),
+    )
+    if not exists and has_account_key:
+        can_write, can_create = True, True
+    return _finalize(
+        engine="adls",
+        can_write=can_write,
+        can_create=can_create,
+        table_exists=bool(exists),
+        table=key_prefix or container_name,
+        schema=container_name,
+        need_update=False,
+        method="get_container_properties",
+        write_action="Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write",
+        create_action="Microsoft.Storage/storageAccounts/blobServices/containers/write",
+    )
 
 
 def resolve_write_flags(

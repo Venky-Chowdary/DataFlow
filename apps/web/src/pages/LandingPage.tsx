@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { ConnectorIcon } from "../app/brand-icons";
 import {
@@ -8,7 +8,6 @@ import {
 import { TrustSection } from "../components/landing/TrustSection";
 import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection";
 import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
-import { fetchCatalogStats } from "../lib/api";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import type { PublicRoute } from "../lib/publicNavigation";
 
@@ -240,19 +239,6 @@ function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNav
 
 /** Home — Airbyte-class composition, Datawrap product truth. */
 export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: LandingHomeProps) {
-  const [liveDrivers, setLiveDrivers] = useState<number | null>(null);
-
-  useEffect(() => {
-    fetchCatalogStats()
-      .then((s) => {
-        setLiveDrivers(s.unique_drivers ?? s.transfer_live ?? s.live);
-      })
-      .catch(() => setLiveDrivers(null));
-  }, []);
-
-  const driverLabel =
-    liveDrivers != null ? `${liveDrivers} transfer-ready drivers` : "Transfer-ready drivers";
-
   return (
     <>
       {/* 1) Hero — brand-first, one headline, one visual */}
@@ -290,7 +276,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               </button>
             </div>
             <p className="lp-hero-meta">
-              {driverLabel}
+              Snowflake · BigQuery · S3 · PostgreSQL
               <span aria-hidden>·</span>
               0 silent drops by design
             </p>
@@ -568,12 +554,11 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         <div className="lp-home-connectors-inner">
           <Reveal className="lp-home-section-head">
             <p className="lp-section-kicker">Connectors</p>
-            <h2>Connect databases, warehouses, files, and apps</h2>
+            <h2>Load Snowflake, BigQuery, and your lake</h2>
             <p>
-              PostgreSQL, MySQL, Snowflake, BigQuery, S3, ADLS, GCS, Salesforce, and the rest of
-              your stack — one catalog, one governed path. Every production load still maps,
-              validates, and reconciles.
-              {liveDrivers != null ? ` ${liveDrivers} transfer-ready drivers on the core path.` : ""}
+              Native connectors for warehouses, object storage, databases, and apps. Map once,
+              validate before write, quarantine bad rows, and keep a checksum — one catalog,
+              one governed path.
             </p>
           </Reveal>
         </div>
@@ -583,8 +568,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         </div>
         <div className="lp-home-connectors-inner">
           <p className="lp-home-connectors-note">
-            Open the catalog to pick a source and destination. We certify warehouse and application
-            routes on your tenant during onboarding.
+            Open the catalog to pick a source and destination — warehouses, lakes, databases, and apps.
           </p>
           <div className="lp-home-arch-cta">
             <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("integrations")}>
