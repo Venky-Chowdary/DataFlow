@@ -68,6 +68,20 @@ describe("computeJobTrustScore", () => {
     assert.ok(t.score <= 28);
     assert.equal(t.cursor_gap, true);
     assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Reset/);
+  });
+
+  it("when_needed cursor gap tells the operator Resume will snapshot", () => {
+    const t = computeJobTrustScore({
+      status: "failed",
+      records_processed: 10,
+      cdc_cursor_gap: true,
+      snapshot_mode: "when_needed",
+      reconciliation: { passed: false },
+    });
+    assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Resume/);
+    assert.match(t.next_action.detail, /migration_proven/);
   });
 
   it("caps completeness when Gate-8 reconcile is missing", () => {

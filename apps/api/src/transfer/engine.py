@@ -1260,6 +1260,7 @@ _CDC_JOB_FIELDS = (
     "watermark",
     "cdc_shared_reader",
     "snapshot_mode",
+    "snapshot_plan",
 )
 
 
@@ -1370,6 +1371,11 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
                     or extras.get("cdc_lease_cursor_key"),
                 }
             )
+            if exc.snapshot_plan:
+                extras["snapshot_plan"] = dict(exc.snapshot_plan)
+                mode = exc.snapshot_plan.get("snapshot_mode")
+                if mode:
+                    extras["snapshot_mode"] = mode
     except Exception as exc:
         logger.debug("cdc cursor gap classification skipped: %s", exc, exc_info=exc)
     try:

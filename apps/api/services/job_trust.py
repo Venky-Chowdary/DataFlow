@@ -213,12 +213,12 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
     recon = j.get("reconciliation") if isinstance(j.get("reconciliation"), dict) else {}
     lag = j.get("cdc_lag_seconds")
     lease_conflict = bool(j.get("cdc_lease_conflict"))
-    cursor_gap = bool(j.get("cdc_cursor_gap")) or str(j.get("error_code") or "") in {
-        "cdc_cursor_gap",
-        "cdc_lsn_gap",
-        "cdc_scn_gap",
-        "cdc_binlog_gap",
-    }
+    from services.cdc_cursor_gap import job_has_cursor_gap
+
+    cursor_gap = job_has_cursor_gap(j)
+    snapshot_mode = str(j.get("snapshot_mode") or "").strip()
+    if not snapshot_mode and isinstance(j.get("snapshot_plan"), dict):
+        snapshot_mode = str(j["snapshot_plan"].get("snapshot_mode") or "")
     source_ha_role = str(j.get("source_ha_role") or "").strip().upper() or None
 
     factors: list[dict[str, Any]] = []
@@ -386,7 +386,9 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
             if f["id"] == "completeness":
                 f["note"] = (
                     "CDC cursor gap (retention / AG·Data Guard failover class) — "
-                    "reset watermark and re-snapshot; continuous CDC across the gap is not claimed."
+                    "purged-window events are gone. when_needed Resume snapshots "
+                    "current source keys then streams from the new tip; initial/never "
+                    "stay fail-closed. Not continuous CDC, not migration_proven."
                 )
 
     # Never grade-A without independent full checksum proof (enterprise honesty).
@@ -425,6 +427,7 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         status=status,
         lease_conflict=lease_conflict,
         cursor_gap=cursor_gap,
+        snapshot_mode=snapshot_mode,
         rejected=rejected,
         recon=recon if recon else None,
         quarantine_verdict=verdict,
@@ -472,15 +475,40 @@ def _next_action(
     status: str,
     lease_conflict: bool,
     cursor_gap: bool,
+    snapshot_mode: str = "",
     rejected: float,
     recon: dict[str, Any] | None = None,
     quarantine_verdict: str = "",
 ) -> dict[str, str]:
     if cursor_gap:
+        from services.cdc_snapshot_mode import snapshot_mode_recovers_gap
+
+        mode = str(snapshot_mode or "").strip().lower().replace("-", "_")
+        if snapshot_mode_recovers_gap(mode):
+            return {
+                "code": "cursor_gap",
+                "label": "Resume — engine will snapshot",
+                "detail": (
+                    "Purged-window events are gone. Resume re-upserts current source keys, "
+                    "then streams from the new tip. Not continuous CDC. Not migration_proven."
+                ),
+            }
+        if mode == "never":
+            return {
+                "code": "cursor_gap",
+                "label": "Set snapshot when_needed",
+                "detail": (
+                    "snapshot_mode=never forbids a recovery snapshot. Change the mode, then Resume. "
+                    "Purged-window events are gone."
+                ),
+            }
         return {
             "code": "cursor_gap",
             "label": "Reset CDC watermark",
-            "detail": "Clear the cursor, then re-run with snapshot when_needed or initial.",
+            "detail": (
+                "snapshot_mode=initial will not snapshot again. Reset the cursor or set when_needed, "
+                "then re-run. Purged-window events are gone."
+            ),
         }
     if lease_conflict:
         return {

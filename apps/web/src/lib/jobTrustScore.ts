@@ -35,6 +35,8 @@ type TrustJobInput = {
   cdc_lease_conflict?: boolean | null;
   cdc_cursor_gap?: boolean | null;
   error_code?: string | null;
+  snapshot_mode?: string | null;
+  snapshot_plan?: { snapshot_mode?: string | null } | null;
   source_ha_role?: string | null;
   trust?: JobTrustScore | null;
   trust_score?: number | null;
@@ -47,6 +49,41 @@ type TrustJobInput = {
 function num(value: unknown, fallback = 0): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+export function snapshotModeRecoversGap(mode?: string | null): boolean {
+  const m = String(mode || "").trim().toLowerCase().replace(/-/g, "_");
+  return m === "when_needed" || m === "always" || m === "initial_only";
+}
+
+export function cursorGapNextAction(snapshotMode?: string | null): {
+  code: string;
+  label: string;
+  detail: string;
+} {
+  const mode = String(snapshotMode || "").trim().toLowerCase().replace(/-/g, "_");
+  if (snapshotModeRecoversGap(mode)) {
+    return {
+      code: "cursor_gap",
+      label: "Resume — engine will snapshot",
+      detail:
+        "Purged-window events are gone. Resume re-upserts current source keys, then streams from the new tip. Not continuous CDC. Not migration_proven.",
+    };
+  }
+  if (mode === "never") {
+    return {
+      code: "cursor_gap",
+      label: "Set snapshot when_needed",
+      detail:
+        "snapshot_mode=never forbids a recovery snapshot. Change the mode, then Resume. Purged-window events are gone.",
+    };
+  }
+  return {
+    code: "cursor_gap",
+    label: "Reset CDC watermark",
+    detail:
+      "snapshot_mode=initial will not snapshot again. Reset the cursor or set when_needed, then re-run. Purged-window events are gone.",
+  };
 }
 
 function gradeOf(score: number): string {
@@ -104,6 +141,8 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     || ["cdc_cursor_gap", "cdc_lsn_gap", "cdc_scn_gap", "cdc_binlog_gap"].includes(
       String(job?.error_code || ""),
     );
+  const snapshotMode =
+    String(job?.snapshot_mode || job?.snapshot_plan?.snapshot_mode || "").trim();
   const sourceHaRole = String(job?.source_ha_role || "").trim().toUpperCase() || null;
 
   const factors: JobTrustFactor[] = [];
@@ -331,11 +370,7 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
 
   let next_action = { code: "ok", label: "Trust posture healthy", detail: "No action required from composite factors." };
   if (cursorGap) {
-    next_action = {
-      code: "cursor_gap",
-      label: "Reset CDC watermark",
-      detail: "Clear the cursor, then re-run with snapshot when_needed or initial.",
-    };
+    next_action = cursorGapNextAction(snapshotMode);
   } else if (leaseConflict) {
     next_action = { code: "lease", label: "Resolve CDC lease", detail: "Force-release or stop the holder, then Resume." };
   } else if (status === "failed" || status === "error") {

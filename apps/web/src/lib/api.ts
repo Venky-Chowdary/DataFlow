@@ -1292,6 +1292,10 @@ export function streamJobProgress(
       watermark: raw.watermark != null ? String(raw.watermark) : null,
       cdc_shared_reader: raw.cdc_shared_reader == null ? null : Boolean(raw.cdc_shared_reader),
       snapshot_mode: raw.snapshot_mode ? String(raw.snapshot_mode) : null,
+      snapshot_plan:
+        raw.snapshot_plan && typeof raw.snapshot_plan === "object"
+          ? (raw.snapshot_plan as import("./types").TransferJob["snapshot_plan"])
+          : null,
       cdc_lease_holder: raw.cdc_lease_holder ? String(raw.cdc_lease_holder) : null,
       cdc_lease_resource: raw.cdc_lease_resource ? String(raw.cdc_lease_resource) : null,
       cdc_lease_stale: raw.cdc_lease_stale == null ? null : Boolean(raw.cdc_lease_stale),

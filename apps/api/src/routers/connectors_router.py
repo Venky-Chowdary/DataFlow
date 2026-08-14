@@ -754,7 +754,12 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         # export — can never supply one. Operators hit exactly that wall: Resume
         # was the only action offered on a failed 1M-row overwrite, and it
         # answered by demanding a key the sync mode never needed.
-        restart_full_refresh = _resume_restarts_from_scratch(xfer_req)
+        # A CDC cursor gap is the same class: the durable cursor is the problem,
+        # so Resume restarts (when_needed snapshots current keys) rather than
+        # polling the purged LSN from the last checkpoint.
+        restart_full_refresh = _resume_restarts_from_scratch(xfer_req) or bool(
+            safety.get("gap_restart")
+        )
         # Resume is the one sanctioned exit from a terminal status, and it must
         # also drop any stale cancel request or the resumed run would abort at
         # its first checkpoint.
@@ -776,7 +781,11 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             "resume": not restart_full_refresh,
             "restarted": restart_full_refresh,
             "message": (
-                "Full refresh restarted from the beginning — it replaces the "
+                "CDC cursor-gap recovery restarted. Purged-window events are gone. "
+                "when_needed snapshots current source keys, then streams from the new tip. "
+                "At-least-once upsert — not continuous CDC, not migration_proven."
+                if safety.get("gap_restart")
+                else "Full refresh restarted from the beginning — it replaces the "
                 "destination, so there is nothing to resume into."
                 if restart_full_refresh
                 else "Resume started from last committed checkpoint (at-least-once upsert)."

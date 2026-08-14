@@ -410,6 +410,15 @@ class MySqlChangeStreamCdc:
                     "table": self.table,
                 }
             )
+            # Adopt the captured consistent point as the live resume. Poll after
+            # a when_needed gap recovery must stream from this tip, not the
+            # purged file:pos the adapter was constructed with.
+            self.resume_token = {
+                **start_pos,
+                "phase": "streaming",
+                "offset": 0,
+                "table": self.table,
+            }
         finally:
             if lock_conn:
                 if locked:

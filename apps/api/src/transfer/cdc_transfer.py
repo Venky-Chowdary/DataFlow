@@ -48,9 +48,9 @@ from services.cdc_engine import (
     max_watermark,
 )
 from services.cdc_snapshot_mode import (
+    resolve_cdc_snapshot_plan,
     resolve_snapshot_mode,
-    should_run_snapshot,
-    should_run_stream,
+    snapshot_plan_stamp,
 )
 from services.error_handling import RetryBudget, with_retry
 from services.replay_safety import classify_replay_safety
@@ -1235,6 +1235,7 @@ def _run_cdc_shared_multi_table(
             ddl_log.append(f"source_ha role={ha.role} topology={ha.topology}")
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    ret = None
     try:
         from services.cdc_retention_probe import attach_cdc_retention
 
@@ -1248,9 +1249,15 @@ def _run_cdc_shared_multi_table(
         stream_contracts,
         cfg_snapshot_mode=str(src_cfg.get("snapshot_mode") or ""),
     )
-    run_snapshot = should_run_snapshot(snapshot_mode, watermark=shared_wm)
-    run_stream = should_run_stream(snapshot_mode)
-    ddl_log.append(f"CDC snapshot_mode={snapshot_mode.value} shared_reader=1")
+    snapshot_plan = resolve_cdc_snapshot_plan(
+        snapshot_mode, watermark=shared_wm, retention=ret
+    )
+    run_snapshot = bool(snapshot_plan["run_snapshot"])
+    run_stream = bool(snapshot_plan["run_stream"])
+    ddl_log.append(
+        f"CDC snapshot_mode={snapshot_mode.value} snapshot_plan={snapshot_plan['kind']}"
+        f"{' lost_window=1' if snapshot_plan.get('lost_window') else ''} shared_reader=1"
+    )
 
     total_rows = 0
     stream_health: dict[str, dict[str, Any]] = {
@@ -1527,6 +1534,9 @@ def _run_cdc_shared_multi_table(
     last_summary["cdc_delivery"] = "at-least-once"
     last_summary["cdc_shared_reader"] = True
     last_summary["snapshot_mode"] = snapshot_mode.value
+    stamp = snapshot_plan_stamp(snapshot_plan)
+    if stamp:
+        last_summary["snapshot_plan"] = stamp
     for k, v in lag_fields.items():
         last_summary[k] = v
     return total_rows, ddl_log, last_summary, headers
@@ -2047,6 +2057,7 @@ def _run_cdc_single_stream(
             ddl_log.append(f"source_ha role={ha.role} topology={ha.topology}")
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    ret = None
     try:
         from services.cdc_retention_probe import attach_cdc_retention
 
@@ -2269,9 +2280,15 @@ def _run_cdc_single_stream(
         stream_contracts,
         cfg_snapshot_mode=str(src_cfg.get("snapshot_mode") or ""),
     )
-    run_snapshot = should_run_snapshot(snapshot_mode, watermark=watermark)
-    run_stream = should_run_stream(snapshot_mode)
-    ddl_log.append(f"CDC snapshot_mode={snapshot_mode.value}")
+    snapshot_plan = resolve_cdc_snapshot_plan(
+        snapshot_mode, watermark=watermark, retention=ret
+    )
+    run_snapshot = bool(snapshot_plan["run_snapshot"])
+    run_stream = bool(snapshot_plan["run_stream"])
+    ddl_log.append(
+        f"CDC snapshot_mode={snapshot_mode.value} snapshot_plan={snapshot_plan['kind']}"
+        f"{' lost_window=1' if snapshot_plan.get('lost_window') else ''}"
+    )
 
     if run_snapshot:
         with _cdc_span("cdc.snapshot", job_id=str(job_id or "")):
@@ -2350,6 +2367,9 @@ def _run_cdc_single_stream(
         if lag_fields.get(ha_key) is not None:
             summary[ha_key] = lag_fields.get(ha_key)
     summary["snapshot_mode"] = snapshot_mode.value
+    stamp = snapshot_plan_stamp(snapshot_plan)
+    if stamp:
+        summary["snapshot_plan"] = stamp
     summary["watermark"] = final_watermark
     summary["checksum"] = state.last_checksum
     if hasattr(cdc, "close"):

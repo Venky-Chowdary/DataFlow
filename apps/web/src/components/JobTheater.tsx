@@ -762,6 +762,7 @@ export function JobTheaterView({
         cursorKey={job.cdc_lease_cursor_key}
         onResume={onResume}
         resuming={resuming}
+        hideGap={Boolean(job.cdc_cursor_gap)}
       />
       {(job.cdc_plugin || job.watermark || job.cdc_delivery || job.sync_mode === "cdc") && job._id && (
         <CdcIncrementalSnapshotPanel jobId={job._id} enabled />
@@ -1338,7 +1339,10 @@ export function JobTheaterView({
             <span className="df2-theater-cdc-chip is-ok">Shared log reader · one slot / server_id</span>
           )}
           {job.snapshot_mode && (
-            <span className="df2-theater-cdc-chip">Snapshot · {job.snapshot_mode}</span>
+            <span className="df2-theater-cdc-chip">
+              Snapshot · {job.snapshot_mode}
+              {job.snapshot_plan?.lost_window ? " · lost window (not continuous CDC)" : ""}
+            </span>
           )}
           {job.cdc_delivery && (
             <span className="df2-theater-cdc-chip">{job.cdc_delivery} delivery</span>

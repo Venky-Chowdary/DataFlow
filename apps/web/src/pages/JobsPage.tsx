@@ -423,7 +423,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   }, [selectedId, onRefresh, onStartTransfer, toast]);
 
   const handleResume = useCallback(async () => {
-    if (!selectedId || !liveJob?.checkpoint) return;
+    if (!selectedId) return;
+    const gapRecovery = Boolean(liveJob?.cdc_cursor_gap);
+    if (!liveJob?.checkpoint && !gapRecovery) return;
     setResuming(true);
     try {
       const res = await resumeJob(selectedId);
@@ -434,8 +436,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
         message:
           res.message
           || (res.restarted
-            ? "Full refresh re-run from the beginning — it replaces the destination."
-            : `Resuming from batch ${liveJob.checkpoint.chunk_index ?? 0} (${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows already committed).`),
+            ? (gapRecovery
+              ? "CDC cursor-gap recovery restarted — not a checkpoint continuation. Purged-window events are gone."
+              : "Full refresh re-run from the beginning — it replaces the destination.")
+            : `Resuming from batch ${liveJob.checkpoint?.chunk_index ?? 0} (${(liveJob.checkpoint?.rows_processed ?? 0).toLocaleString()} rows already committed).`),
         tone: "success",
       });
       onRefresh?.();
@@ -450,7 +454,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     } finally {
       setResuming(false);
     }
-  }, [selectedId, liveJob?.checkpoint, onRefresh, onStartTransfer, toast]);
+  }, [selectedId, liveJob?.checkpoint, liveJob?.cdc_cursor_gap, onRefresh, onStartTransfer, toast]);
 
   const handleCancel = useCallback(async () => {
     if (!selectedId) return;
@@ -1246,11 +1250,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
 
                             <CdcCursorGapPanel
                               job={liveJob}
-                              onResume={
-                                liveJob.checkpoint || liveJob.chunk_current != null
-                                  ? () => void handleResume()
-                                  : undefined
-                              }
+                              onResume={() => void handleResume()}
                             />
                             <CdcRetentionPanel
                               status={liveJob.cdc_retention_status}
@@ -1264,6 +1264,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   ? () => void handleResume()
                                   : undefined
                               }
+                              hideGap={Boolean(liveJob.cdc_cursor_gap)}
                             />
                             {(liveJob.cdc_plugin || liveJob.watermark || liveJob.cdc_delivery || liveJob.sync_mode === "cdc") && (
                               <CdcIncrementalSnapshotPanel jobId={selected._id} enabled />
@@ -1857,7 +1858,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <div><dt>CDC topology</dt><dd>Shared log reader (one slot / server_id)</dd></div>
             )}
             {liveJob.snapshot_mode && (
-              <div><dt>Snapshot mode</dt><dd>{liveJob.snapshot_mode}</dd></div>
+              <div>
+                <dt>Snapshot mode</dt>
+                <dd>
+                  {liveJob.snapshot_mode}
+                  {liveJob.snapshot_plan?.lost_window ? " · lost window (not continuous CDC)" : ""}
+                </dd>
+              </div>
             )}
             {(liveJob.cdc_lease_holder || liveJob.cdc_lease_conflict) && (
               <div>

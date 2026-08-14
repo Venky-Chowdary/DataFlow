@@ -528,7 +528,15 @@ export function TransferResultDashboard({
             {result.cdc_row_filter && (
               <div><dt>Row filter</dt><dd className="df2-mono">{result.cdc_row_filter}</dd></div>
             )}
-            {result.snapshot_mode && <div><dt>Snapshot</dt><dd>{result.snapshot_mode}</dd></div>}
+            {result.snapshot_mode && (
+              <div>
+                <dt>Snapshot</dt>
+                <dd>
+                  {result.snapshot_mode}
+                  {result.snapshot_plan?.lost_window ? " · lost window (not continuous CDC)" : ""}
+                </dd>
+              </div>
+            )}
             {result.cdc_shared_reader && <div><dt>Topology</dt><dd>Shared log reader</dd></div>}
             {result.source_ha_role && (
               <div>
@@ -572,6 +580,8 @@ export function TransferResultDashboard({
             cdc_cursor_gap_resume: result.cdc_cursor_gap_resume,
             cdc_cursor_gap_retained: result.cdc_cursor_gap_retained,
             cdc_lease_cursor_key: result.cdc_lease_cursor_key,
+            snapshot_mode: result.snapshot_mode,
+            snapshot_plan: result.snapshot_plan,
             error_code: result.error_code,
             error: result.error,
             watermark: result.watermark,
@@ -586,6 +596,7 @@ export function TransferResultDashboard({
           message={result.cdc_retention_message}
           dialect={result.cdc_retention_dialect}
           cursorKey={result.cdc_lease_cursor_key}
+          hideGap={Boolean(result.cdc_cursor_gap)}
         />
       )}
 

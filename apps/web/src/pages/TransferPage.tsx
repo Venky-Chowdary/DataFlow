@@ -3996,6 +3996,7 @@ export function TransferPage({
       cdc_row_filter: job.cdc_row_filter,
       cdc_shared_reader: job.cdc_shared_reader,
       snapshot_mode: job.snapshot_mode,
+      snapshot_plan: job.snapshot_plan,
       watermark: job.watermark,
       cdc_lease_holder: job.cdc_lease_holder,
       cdc_lease_backend: job.cdc_lease_backend,

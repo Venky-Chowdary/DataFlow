@@ -50,6 +50,9 @@ def test_mysql_snapshot_batches_carry_binlog_resume_token() -> None:
     assert batches[-1].resume_token["phase"] == "streaming"
     assert batches[0].resume_token["offset"] == 2
     assert batches[1].resume_token["offset"] == 3
+    assert cdc.resume_token["phase"] == "streaming"
+    assert cdc.resume_token["file"] == "mysql-bin.000001"
+    assert cdc.resume_token["pos"] == 4
 
 
 def test_mysql_locked_snapshot_handoff_stamps_gtid() -> None:

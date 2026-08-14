@@ -62,7 +62,7 @@ export function inferTransferFailureHint(
       confidence: "high",
       fix:
         errorFix
-        || "Reset the CDC watermark in Job Theater, set snapshot mode to when_needed or initial, then re-run. Continuous CDC across an AG / Data Guard / archive-purge gap is not possible.",
+        || "If snapshot_mode=when_needed, Resume — the engine snapshots current source keys then streams from the new tip. initial/never stay fail-closed until you change mode or reset the watermark. Purged-window events are gone. Not continuous CDC.",
     };
   }
   if (

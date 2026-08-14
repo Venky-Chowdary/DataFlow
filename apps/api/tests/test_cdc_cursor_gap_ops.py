@@ -74,6 +74,42 @@ def test_job_failure_fields_stamp_cursor_gap():
     assert details.get("code") == "cdc_lsn_gap"
 
 
+def test_job_failure_fields_stamp_snapshot_plan_on_refuse():
+    from services.cdc_cursor_gap import CdcCursorGapError
+    from src.transfer.engine import _job_failure_fields
+
+    details, extras = _job_failure_fields(
+        CdcCursorGapError(
+            "gap refuse",
+            dialect="mysql",
+            resume="a",
+            retained="b",
+            cursor_key="ck2",
+            snapshot_plan={
+                "kind": "refuse",
+                "snapshot_mode": "initial",
+                "next_action": "set_when_needed",
+                "lost_window": True,
+            },
+        )
+    )
+    assert extras.get("cdc_cursor_gap") is True
+    assert extras.get("snapshot_plan", {}).get("kind") == "refuse"
+    assert extras.get("snapshot_mode") == "initial"
+
+
+def test_evaluate_resume_safety_allows_cursor_gap_without_checkpoint():
+    from services.checkpoint_service import evaluate_resume_safety
+
+    out = evaluate_resume_safety(
+        None,
+        job={"cdc_cursor_gap": True, "snapshot_mode": "when_needed", "status": "failed"},
+    )
+    assert out["ok"] is True
+    assert out["gap_restart"] is True
+    assert "not a checkpoint continuation" in " ".join(out["warnings"]).lower() or "gap" in out["honesty"].lower()
+
+
 def test_clear_watermark_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     import services.platform_config as pc

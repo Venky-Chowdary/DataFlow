@@ -3,8 +3,9 @@
 Honesty
 -------
 ``ok`` / ``at_risk`` / ``gap`` classify resume against live retention. A ``gap``
-means continuous CDC across the window is impossible — clear watermark and
-re-snapshot (``when_needed`` / ``initial``). This does not invent dual-node AG
+means continuous CDC across the window is impossible. ``when_needed`` recovers
+by blocking-snapshot of current source keys (see ``cdc_snapshot_mode``);
+``initial`` / ``never`` stay fail-closed. This does not invent dual-node AG
 failover; single-node cleanup produces the same gap class.
 """
 

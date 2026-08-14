@@ -248,6 +248,21 @@ export interface TransferJob {
   cdc_shared_reader?: boolean | null;
   /** Debezium-compatible snapshot mode used for this run. */
   snapshot_mode?: string | null;
+  /**
+   * Named CDC snapshot plan. lost_window means purged WAL/binlog/redo events
+   * are gone — recovery is at-least-once upsert of current keys, not continuous CDC.
+   */
+  snapshot_plan?: {
+    kind?: string | null;
+    snapshot_mode?: string | null;
+    lost_window?: boolean | null;
+    resume_broken?: boolean | null;
+    run_snapshot?: boolean | null;
+    run_stream?: boolean | null;
+    next_action?: string | null;
+    reason?: string | null;
+    migration_proven?: boolean | null;
+  } | null;
   /** Active CDC lease holder (multi-worker fail-fast). */
   cdc_lease_holder?: string | null;
   cdc_lease_resource?: string | null;
@@ -1085,6 +1100,7 @@ export interface TransferResult {
   cdc_row_filter?: string | null;
   cdc_shared_reader?: boolean | null;
   snapshot_mode?: string | null;
+  snapshot_plan?: TransferJob["snapshot_plan"];
   watermark?: string | null;
   cdc_lease_holder?: string | null;
   cdc_lease_backend?: string | null;

@@ -331,6 +331,177 @@ def test_snapshot_modes_debezium_compatible() -> None:
         should_run_snapshot(SnapshotMode.NEVER, watermark=None)
     assert should_run_snapshot(SnapshotMode.WHEN_NEEDED, watermark=None) is True
     assert should_run_snapshot(SnapshotMode.WHEN_NEEDED, watermark="x", resume_broken=True) is True
+    assert should_run_snapshot(SnapshotMode.WHEN_NEEDED, watermark="x") is False
+
+
+def test_classify_snapshot_plan_when_needed_gap_is_blocking() -> None:
+    from services.cdc_snapshot_mode import (
+        KIND_BLOCKING,
+        KIND_REFUSE,
+        KIND_SKIP,
+        classify_snapshot_plan,
+        resolve_cdc_snapshot_plan,
+        snapshot_mode_recovers_gap,
+    )
+    from services.cdc_cursor_gap import CdcCursorGapError
+
+    assert snapshot_mode_recovers_gap("when_needed") is True
+    assert snapshot_mode_recovers_gap("initial") is False
+
+    recovered = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="lsn-old", retention_status="gap"
+    )
+    assert recovered["kind"] == KIND_BLOCKING
+    assert recovered["run_snapshot"] is True
+    assert recovered["run_stream"] is True
+    assert recovered["lost_window"] is True
+    assert recovered["resume_broken"] is True
+    assert recovered["migration_proven"] is False
+
+    healthy = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="lsn-ok", retention_status="ok"
+    )
+    assert healthy["kind"] == KIND_SKIP
+    assert healthy["run_snapshot"] is False
+    assert healthy["lost_window"] is False
+
+    with pytest.raises(CdcCursorGapError) as initial_gap:
+        resolve_cdc_snapshot_plan(
+            SnapshotMode.INITIAL,
+            watermark="lsn-old",
+            retention={"status": "gap", "dialect": "mysql", "resume": "a", "retained": "b"},
+        )
+    assert initial_gap.value.snapshot_plan["kind"] == KIND_REFUSE
+    assert initial_gap.value.snapshot_plan["next_action"] == "set_when_needed"
+
+    with pytest.raises(CdcCursorGapError) as never_gap:
+        resolve_cdc_snapshot_plan(
+            SnapshotMode.NEVER,
+            watermark="lsn-old",
+            retention={"status": "gap", "dialect": "sqlserver"},
+        )
+    assert never_gap.value.snapshot_plan["reason"] == "never_forbids_snapshot"
+
+
+def test_cdc_transfer_when_needed_snapshots_on_retention_gap() -> None:
+    from types import SimpleNamespace
+
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+    from src.transfer.models import EndpointConfig
+
+    source = EndpointConfig(kind="database", format="postgresql", database="t", table="orders")
+    destination = EndpointConfig(kind="database", format="sqlite", database="/tmp/x.db", table="d")
+    state = {"snapped": False}
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            state["snapped"] = True
+            yield ChangeBatch(inserts=[{"id": "1"}], resume_token="new-tip")
+
+        def poll(self):
+            yield ChangeBatch(updates=[{"id": "1", "v": "2"}], resume_token="new-tip")
+
+        def ack(self, token=None):
+            pass
+
+    retention = SimpleNamespace(
+        status="gap",
+        dialect="mysql",
+        resume="mysql-bin.000001:4",
+        retained="mysql-bin.000009:1204",
+        cursor_key="ck",
+    )
+    with (
+        patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", Fake),
+        patch("src.transfer.cdc_transfer._write_batch", return_value=(1, "c", {})),
+        patch("src.transfer.cdc_transfer.delete_by_primary_keys", return_value=0),
+        patch("src.transfer.cdc_transfer.get_watermark", return_value="existing"),
+        patch("src.transfer.cdc_transfer.set_watermark"),
+        patch("services.cdc_retention_probe.attach_cdc_retention", return_value=retention),
+        patch.dict("os.environ", {"DATAFLOW_CDC_MAX_IDLE_POLLS": "1", "DATAFLOW_CDC_MAX_POLL_ROUNDS": "1"}),
+    ):
+        _rows, ddl, summary, _ = run_cdc_database_transfer(
+            source,
+            destination,
+            mappings=[{"source": "id", "target": "id"}],
+            schema={"id": "string"},
+            stream_contracts=[
+                {
+                    "sync_mode": "cdc",
+                    "primary_key": "id",
+                    "cursor_field": "id",
+                    "snapshot_mode": "when_needed",
+                }
+            ],
+            job_id="dz-when-needed-gap",
+        )
+    assert state["snapped"] is True
+    assert summary["snapshot_plan"]["kind"] == "blocking_snapshot"
+    assert summary["snapshot_plan"]["lost_window"] is True
+    assert any("lost_window=1" in line for line in ddl)
+
+
+def test_cdc_transfer_initial_gap_refuses_before_poll() -> None:
+    from types import SimpleNamespace
+
+    from services.cdc_cursor_gap import CdcCursorGapError
+    from src.transfer.cdc_transfer import run_cdc_database_transfer
+    from src.transfer.models import EndpointConfig
+
+    source = EndpointConfig(kind="database", format="postgresql", database="t", table="orders")
+    destination = EndpointConfig(kind="database", format="sqlite", database="/tmp/x.db", table="d")
+    state = {"snapped": False, "polled": False}
+
+    class Fake:
+        def __init__(self, *a, **k):
+            pass
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            state["snapped"] = True
+            yield ChangeBatch(inserts=[{"id": "1"}])
+
+        def poll(self):
+            state["polled"] = True
+            yield ChangeBatch()
+
+        def ack(self, token=None):
+            pass
+
+    retention = SimpleNamespace(
+        status="gap", dialect="mysql", resume="a", retained="b", cursor_key="ck"
+    )
+    with (
+        patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", Fake),
+        patch("src.transfer.cdc_transfer.get_watermark", return_value="existing"),
+        patch("services.cdc_retention_probe.attach_cdc_retention", return_value=retention),
+    ):
+        with pytest.raises(CdcCursorGapError):
+            run_cdc_database_transfer(
+                source,
+                destination,
+                mappings=[{"source": "id", "target": "id"}],
+                schema={"id": "string"},
+                stream_contracts=[
+                    {
+                        "sync_mode": "cdc",
+                        "primary_key": "id",
+                        "cursor_field": "id",
+                        "snapshot_mode": "initial",
+                    }
+                ],
+                job_id="dz-initial-gap",
+            )
+    assert state["snapped"] is False
+    assert state["polled"] is False
 
 
 def test_incremental_snapshot_interleaved(tmp_path, monkeypatch) -> None:

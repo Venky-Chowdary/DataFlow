@@ -3,14 +3,29 @@
 Honesty
 -------
 SQL Server ``min_lsn``, Oracle oldest redo, and MySQL purged binlog/GTID gaps
-mean continuous CDC across the gap is impossible. Operators must clear the
-watermark and re-snapshot (``when_needed`` / ``initial``). This is not
-exactly-once recovery.
+mean continuous CDC across the gap is impossible. ``when_needed`` recovers by
+blocking-snapshot of **current** source keys, then streaming from the new tip.
+``initial`` / ``never`` stay fail-closed until the operator changes mode or
+resets the watermark. This is not exactly-once recovery and not continuous CDC
+across the lost window.
 """
 
 from __future__ import annotations
 
 from typing import Any
+
+GAP_ERROR_CODES = frozenset(
+    {"cdc_cursor_gap", "cdc_lsn_gap", "cdc_scn_gap", "cdc_binlog_gap"}
+)
+
+
+def job_has_cursor_gap(job: dict[str, Any] | None) -> bool:
+    """True when the job failed (or is failing) on a retention / failover gap."""
+    if not isinstance(job, dict):
+        return False
+    if job.get("cdc_cursor_gap"):
+        return True
+    return str(job.get("error_code") or "") in GAP_ERROR_CODES
 
 
 class CdcCursorGapError(RuntimeError):
@@ -25,6 +40,7 @@ class CdcCursorGapError(RuntimeError):
         resume: str = "",
         retained: str = "",
         cursor_key: str = "",
+        snapshot_plan: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code or "cdc_cursor_gap"
@@ -32,9 +48,10 @@ class CdcCursorGapError(RuntimeError):
         self.resume = resume or ""
         self.retained = retained or ""
         self.cursor_key = cursor_key or ""
+        self.snapshot_plan = dict(snapshot_plan or {})
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "code": self.code,
             "dialect": self.dialect,
             "resume": self.resume,
@@ -42,6 +59,9 @@ class CdcCursorGapError(RuntimeError):
             "cursor_key": self.cursor_key,
             "message": str(self),
         }
+        if self.snapshot_plan:
+            out["snapshot_plan"] = dict(self.snapshot_plan)
+        return out
 
 
 class CdcLsnGapError(CdcCursorGapError):
