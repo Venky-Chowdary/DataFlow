@@ -529,6 +529,12 @@ def reconcile(
     which is the only comparable digest for an append into a table that already
     held rows — the whole-table count still goes in the report, but the digest
     must not be described as covering it.
+
+    Strict vs balanced does not make incomparable populations comparable.
+    Whole-table digest mismatch on append/upsert into a larger sink uses the
+    dest-before delta identity (``append_row_count_report``). A keyed-batch
+    digest that still disagrees is a real cell failure and still fails Gate-8.
+    Sample compare never upgrades that to ``full_checksum``.
     """
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
     rows_skipped = max(int(rows_skipped or 0), 0)
@@ -589,8 +595,10 @@ def reconcile(
         )
 
     if source_checksum != target_checksum:
-        # Enterprise GA: checksum mismatch always fails Gate-8.
-        # Sample compare may attach diagnostics only — never green-pass / override.
+        # Comparable checksum mismatch always fails Gate-8. Sample compare may
+        # attach diagnostics only — never green-pass / override. Incomparable
+        # append/upsert into a larger sink is not a checksum: dest-before delta
+        # is the identity. Strict does not invent comparability.
         compared = int((sample_compare or {}).get("compared") or 0)
         sample_ok = (
             bool(sample_compare)
@@ -611,7 +619,7 @@ def reconcile(
                 "soften checksum mismatch."
             )
         mode_label = "strict" if strict_checksum else "balanced"
-        if has_extra and not strict_checksum:
+        if has_extra and checksum_scope != WRITTEN_BATCH_KEYS:
             return append_row_count_report(
                 source_rows=source_rows,
                 target_rows=target_rows,

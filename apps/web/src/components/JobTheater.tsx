@@ -1415,7 +1415,10 @@ export function JobTheaterView({
             {job.reconciliation?.source_checksum && job.reconciliation?.target_checksum
               ? (job.reconciliation.source_checksum === job.reconciliation.target_checksum
                 ? "Gate-8 source ↔ dest match"
-                : "Gate-8 checksum mismatch")
+                : job.reconciliation.phase === "post_write_row_count"
+                  || job.reconciliation.checksum_scope === "whole_table_not_comparable"
+                  ? "Whole-table digests not comparable (append delta)"
+                  : "Gate-8 checksum mismatch")
               : checksum
                 ? "Writer checksum captured"
                 : "Captured on completion"}

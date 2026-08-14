@@ -350,6 +350,12 @@ export interface Gate8ReconciliationPayload {
    * full_checksum | sample | writer_ack | none
    */
   coverage?: string;
+  /**
+   * Population the dest digest covers. ``whole_table_not_comparable`` means
+   * append/upsert into a larger sink — dest-before delta is the identity.
+   */
+  checksum_scope?: string;
+  assurance_level?: string;
   preview?: boolean;
   post_write_pending?: boolean;
   /** File/object export Gate-8: operational pass without read-back proof. */
