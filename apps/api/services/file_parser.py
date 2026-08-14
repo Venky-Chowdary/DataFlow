@@ -179,7 +179,12 @@ def _jsonl_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
         return handle, handle.close
     if isinstance(content, str):
         return io.StringIO(content), None
-    raise TypeError("JSONL COUNT expects bytes, str, or Path")
+    if hasattr(content, "read"):
+        text = io.TextIOWrapper(
+            content, encoding="utf-8", errors="strict", newline=""
+        )
+        return text, text.close
+    raise TypeError("JSONL COUNT expects bytes, str, Path, or a readable stream")
 
 
 def _count_jsonl_records_stream(reader: Any) -> int | None:
@@ -212,6 +217,7 @@ def count_jsonl_records(content: bytes | str | Path) -> int | None:
     Walk is one line at a time (O(line), not ``decode`` + ``splitlines`` of
     the document). Path inputs are counted from disk; bytes (object-store
     GET) stream from a buffer already in RAM. Local gzip JSONL streams.
+    Object-store GET gzip streams through a caller-owned ``GzipFile``.
     """
     closer = None
     try:
@@ -1402,7 +1408,9 @@ def _xml_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
         return io.BytesIO(content), None
     if isinstance(content, str):
         return io.BytesIO(content.encode("utf-8")), None
-    raise TypeError("XML COUNT expects bytes, str, or Path")
+    if hasattr(content, "read"):
+        return content, None
+    raise TypeError("XML COUNT expects bytes, str, Path, or a readable stream")
 
 
 def _xml_count_as_text(content: bytes | str | Path) -> str | None:
@@ -1553,6 +1561,7 @@ def count_xml_records(content: bytes | str | Path) -> int | None:
     defusedxml is absent. Path inputs are counted from disk; bytes
     (object-store GET) stream from a buffer already in RAM. Local gzip
     XML streams; the ImportError DOM fallback does not slurp a gzip path.
+    Object-store GET gzip streams through a caller-owned ``GzipFile``.
     """
     try:
         from defusedxml.ElementTree import iterparse as xml_iterparse

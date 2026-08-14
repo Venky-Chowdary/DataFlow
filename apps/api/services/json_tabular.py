@@ -403,7 +403,9 @@ def _json_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
         return io.BytesIO(content), None
     if isinstance(content, str):
         return io.BytesIO(content.encode("utf-8")), None
-    raise TypeError("JSON COUNT expects bytes, str, or Path")
+    if hasattr(content, "read"):
+        return content, None
+    raise TypeError("JSON COUNT expects bytes, str, Path, or a readable stream")
 
 
 def _json_count_as_text(content: bytes | str | Path) -> str | None:
@@ -435,7 +437,8 @@ def count_json_records(content: bytes | str | Path) -> int | None:
     unmeasured; do not then ``json.loads`` the same poison file. ``json.loads``
     remains the ImportError fallback when ijson is absent. Path inputs are
     counted from disk; bytes (object-store GET) stream from a buffer already
-    in RAM. Local gzip JSON streams; the ImportError ``json.loads`` fallback
+    in RAM. Local gzip JSON streams; object-store GET gzip streams through
+    a caller-owned ``GzipFile``. The ImportError ``json.loads`` fallback
     does not slurp a gzip path (stays unmeasured).
     """
     try:

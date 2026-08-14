@@ -51,7 +51,9 @@ blank lines. Quoted embedded newlines are one record. Local CSV/TSV
 is counted from the path; gzip CSV/TSV streams. Excel / Avro /
 Parquet / ORC gzip still decompresses first (workbook / footer
 parsers need a byte image). Object-store GET gzip of CSV/JSON/JSONL/XML
-still decompresses the GET body (the GET already paid RAM).
+streams through ``GzipFile`` (the GET body stays compressed; COUNT does
+not materialize a second decompressed copy). Excel/Avro/Parquet/ORC GET
+gzip still decompresses (byte-image parsers).
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
@@ -137,6 +139,7 @@ must degrade assurance rather than assume zero.
 from __future__ import annotations
 
 import gzip
+import io
 import logging
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -247,6 +250,7 @@ _IDENTITY_SCAN_MAX = _KEYSET_CENSUS_MAX
 _ARTIFACT_FORMATS = frozenset({
     "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc", "xml",
 })
+_STREAMING_COUNT_KINDS = frozenset({"csv", "tsv", "json", "jsonl", "xml"})
 
 
 def _count(conn: Any, table_ref: str) -> int:
@@ -1741,9 +1745,10 @@ def _read_artifact_bytes(path: Path) -> bytes | None:
 def open_artifact_binary(path: Path) -> tuple[Any, Any]:
     """Byte source for dest COUNT. ``*.gz`` is a gzip stream, never a slurp.
 
-    Caller closes via the returned closer. Encoding sniff that needs a
-    prefix must open, read, close, then open again — gzip seek is not
-    this kernel.
+    Caller closes via the returned closer. Path gzip that needs a prefix
+    (CSV encoding sniff) opens, reads, closes, then opens again — a file
+    handle is cheap. Object-store GET gzip has no second GET: COUNT wraps
+    the compressed body in ``GzipFile`` and rewinds after the prefix.
     """
     if path.name.lower().endswith(".gz"):
         handle = gzip.open(path, "rb")
@@ -1849,6 +1854,31 @@ def _count_avro_bytes(content: bytes) -> int | None:
         return None
 
 
+def _count_streaming_kind(kind: str, source: Any) -> int | None:
+    """CSV/TSV/JSON/JSONL/XML COUNT from Path, bytes, str, or a readable stream."""
+    if kind in {"csv", "tsv"}:
+        from services.csv_profiler import count_csv_rows
+
+        n = count_csv_rows(source)
+        return None if n is None else int(n)
+    if kind == "jsonl":
+        from services.file_parser import count_jsonl_records
+
+        n = count_jsonl_records(source)
+        return None if n is None else int(n)
+    if kind == "json":
+        from services.json_tabular import count_json_records
+
+        n = count_json_records(source)
+        return None if n is None else int(n)
+    if kind == "xml":
+        from services.file_parser import count_xml_records
+
+        n = count_xml_records(source)
+        return None if n is None else int(n)
+    return None
+
+
 def _count_artifact_kind(kind: str, content: bytes) -> int | None:
     """Record COUNT for already-decoded artifact bytes. Unknown kind is None."""
     if kind not in _ARTIFACT_FORMATS:
@@ -1858,29 +1888,12 @@ def _count_artifact_kind(kind: str, content: bytes) -> int | None:
     if kind == "orc":
         return _count_orc_bytes(content)
     try:
-        if kind in {"csv", "tsv"}:
-            from services.csv_profiler import count_csv_rows
-
-            return int(count_csv_rows(content))
-        if kind == "jsonl":
-            from services.file_parser import count_jsonl_records
-
-            n = count_jsonl_records(content)
-            return None if n is None else int(n)
-        if kind == "json":
-            from services.json_tabular import count_json_records
-
-            n = count_json_records(content)
-            return None if n is None else int(n)
+        if kind in _STREAMING_COUNT_KINDS:
+            return _count_streaming_kind(kind, content)
         if kind == "excel":
             return _count_excel_bytes(content)
         if kind == "avro":
             return _count_avro_bytes(content)
-        if kind == "xml":
-            from services.file_parser import count_xml_records
-
-            n = count_xml_records(content)
-            return None if n is None else int(n)
     except Exception as exc:
         logger.info("artifact count failed for kind %s: %s", kind, exc)
         return None
@@ -1895,20 +1908,40 @@ def _count_artifact_payload(
 ) -> int | None:
     """Dest-engine COUNT of an object-store GET body. Same machine as a local file.
 
-    Gzip keys decompress first. Unparseable / unsupported / missing parser
-    stay unmeasured — never JSON-fallback empty (that is dest=0).
+    Gzip keys of CSV/JSON/JSONL/XML stream through ``GzipFile`` — COUNT does
+    not ``gzip.decompress`` a second full copy. Excel/Avro/Parquet/ORC gzip
+    still decompresses. Unparseable / unsupported / missing parser stay
+    unmeasured — never JSON-fallback empty (that is dest=0).
     """
     label = str(name or "")
-    body = content
-    if label.lower().endswith(".gz"):
+    compressed = label.lower().endswith(".gz")
+    if compressed:
+        label = label[: -len(".gz")]
+    kind = _infer_artifact_format(Path(label), fmt)
+    if compressed:
+        if kind in _STREAMING_COUNT_KINDS:
+            try:
+                stream = gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb")
+            except Exception as exc:
+                logger.info("artifact gzip stream failed for %s: %s", name, exc)
+                return None
+            try:
+                return _count_streaming_kind(kind, stream)
+            except Exception as exc:
+                logger.info("artifact gzip count failed for %s: %s", name, exc)
+                return None
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
         try:
             body = gzip.decompress(content)
         except Exception as exc:
-            logger.info("artifact gzip decode failed for %s: %s", label, exc)
+            logger.info("artifact gzip decode failed for %s: %s", name, exc)
             return None
-        label = label[: -len(".gz")]
-    kind = _infer_artifact_format(Path(label), fmt)
-    return _count_artifact_kind(kind, body)
+        return _count_artifact_kind(kind, body)
+    return _count_artifact_kind(kind, content)
 
 
 def count_artifact_rows(
@@ -1931,6 +1964,8 @@ def count_artifact_rows(
     whole export. CSV/TSV counts RFC 4180 records from disk, not
     ``wc -l`` and not a slurp of the whole file. Local CSV/JSON/JSONL/XML
     gzip streams; Excel/Avro/Parquet/ORC gzip still decompresses first.
+    Object-store GET gzip of CSV/JSON/JSONL/XML streams through
+    ``GzipFile``; Excel/Avro/Parquet/ORC GET gzip still decompresses.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -1945,28 +1980,12 @@ def count_artifact_rows(
         return _count_parquet_path(artifact)
     if kind == "orc":
         return _count_orc_path(artifact)
-    if kind == "xml":
-        from services.file_parser import count_xml_records
-
-        n = count_xml_records(artifact)
-        return None if n is None else int(n)
-    if kind == "json":
-        from services.json_tabular import count_json_records
-
-        n = count_json_records(artifact)
-        return None if n is None else int(n)
-    if kind == "jsonl":
-        from services.file_parser import count_jsonl_records
-
-        n = count_jsonl_records(artifact)
-        return None if n is None else int(n)
-    if kind in {"csv", "tsv"}:
-        from services.csv_profiler import count_csv_rows
-
+    if kind in _STREAMING_COUNT_KINDS:
         try:
-            return int(count_csv_rows(artifact))
+            n = _count_streaming_kind(kind, artifact)
+            return None if n is None else int(n)
         except Exception as exc:
-            logger.info("csv artifact count unavailable at %s: %s", artifact, exc)
+            logger.info("artifact count unavailable at %s: %s", artifact, exc)
             return None
     content = _read_artifact_bytes(artifact)
     if content is None:

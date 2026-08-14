@@ -609,7 +609,8 @@ def test_count_artifact_rows_gzip_streams_not_slurp(
     """Local gzip CSV/JSON/JSONL/XML COUNT streams. Never decompress-then-slurp.
 
     Excel/Avro/Parquet/ORC gzip still decompresses first (byte-image parsers).
-    Object-store GET gzip still decompresses the GET body.
+    Object-store GET gzip of the same kinds streams through ``GzipFile``
+    (see ``test_count_artifact_payload_gzip_streams_not_decompress_slurp``).
     """
     import gzip
 
@@ -690,6 +691,64 @@ def test_count_artifact_rows_gzip_streams_not_slurp(
     assert count_artifact_rows(jsonl_gz, fmt="jsonl") == 2
     assert count_artifact_rows(json_gz, fmt="json") == 3
     assert count_artifact_rows(xml_gz, fmt="xml") == 2
+
+
+def test_count_artifact_payload_gzip_streams_not_decompress_slurp(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Object-store GET gzip COUNT streams GzipFile. Never gzip.decompress.
+
+    The GET body is already compressed in RAM. A second decompressed copy
+    is the same hole local *.gz had. Excel/Avro/Parquet/ORC GET gzip still
+    decompresses (byte-image parsers).
+    """
+    import gzip
+
+    from services.dest_precount import _count_artifact_payload
+    from services.format_converter import convert_rows
+
+    csv_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    jsonl_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="jsonl",
+    )
+    json_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="json",
+    )
+    xml_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="xml",
+    )
+    quoted, _ = convert_rows(
+        ["id", "note"],
+        [["1", "hello\nworld"], ["2", "b"]],
+        source_format="csv",
+        target_format="csv",
+    )
+
+    def _no_decompress(*_a, **_k):
+        raise AssertionError("GET gzip COUNT must not gzip.decompress the whole body")
+
+    monkeypatch.setattr("services.dest_precount.gzip.decompress", _no_decompress)
+    assert _count_artifact_payload(gzip.compress(csv_body), name="export.csv.gz") == 3
+    assert _count_artifact_payload(gzip.compress(jsonl_body), name="export.jsonl.gz") == 2
+    assert _count_artifact_payload(gzip.compress(json_body), name="export.json.gz") == 3
+    assert _count_artifact_payload(gzip.compress(xml_body), name="export.xml.gz") == 2
+    assert _count_artifact_payload(gzip.compress(quoted), name="quoted.csv.gz") == 2
+    assert _count_artifact_payload(b"not-gzip", name="bad.csv.gz") is None
+    assert _count_artifact_payload(csv_body, name="export.csv") == 3
 
 
 def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(

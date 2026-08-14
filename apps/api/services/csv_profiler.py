@@ -47,7 +47,14 @@ def _csv_prefix_bytes(content: bytes | str | Path) -> bytes:
         return content[:_ENCODING_PREFIX]
     if isinstance(content, str):
         return content.encode("utf-8")[:_ENCODING_PREFIX]
-    raise TypeError("CSV COUNT expects bytes, str, or Path")
+    if hasattr(content, "read"):
+        prefix = content.read(_ENCODING_PREFIX)
+        seek = getattr(content, "seek", None)
+        if not callable(seek):
+            raise TypeError("CSV COUNT stream must be rewindable after prefix sniff")
+        seek(0)
+        return prefix
+    raise TypeError("CSV COUNT expects bytes, str, Path, or a readable stream")
 
 
 def _csv_count_open(content: bytes | str | Path, encoding: str) -> io.TextIOBase:
@@ -70,7 +77,11 @@ def _csv_count_open(content: bytes | str | Path, encoding: str) -> io.TextIOBase
         )
     if isinstance(content, str):
         return io.StringIO(content)
-    raise TypeError("CSV COUNT expects bytes, str, or Path")
+    if hasattr(content, "read"):
+        return io.TextIOWrapper(
+            content, encoding=encoding, errors="replace", newline=""
+        )
+    raise TypeError("CSV COUNT expects bytes, str, Path, or a readable stream")
 
 
 def detect_delimiter(sample: str) -> str:
@@ -133,6 +144,7 @@ def count_csv_rows(content: bytes | str | Path, encoding: str | None = None) -> 
     export is not decoded twice. Path inputs reopen from disk;
     bytes (object-store GET) stream from a buffer already in RAM.
     Local gzip CSV/TSV streams (prefix sniff, then a second gzip open).
+    Object-store GET gzip streams through a rewindable ``GzipFile``.
     """
     prefix = _csv_prefix_bytes(content)
     enc = encoding or detect_encoding(prefix)
