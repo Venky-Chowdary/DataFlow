@@ -2529,27 +2529,40 @@ def verify_iceberg_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
-    """Reconcile an Iceberg table by scanning the catalog and fingerprinting rows."""
-    try:
-        from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+    """Reconcile Iceberg from current-snapshot data files, not ``scan().to_arrow()``.
 
-        endpoint = {
-            "connection_string": connection_string or "",
+    Dest COUNT is dest-engine file footers (same leftover MERGE listing).
+    Catalog ``SqlCatalog`` / ``scan().count()`` never close filesystem tables
+    and never close leftover identity. Unreadable snapshot is unmeasured.
+    """
+    try:
+        from services.dest_precount import destination_row_count, iceberg_target_sample
+
+        cfg = {
+            "connection_string": connection_string or warehouse or "",
+            "database": warehouse or connection_string or "",
             "warehouse": warehouse or "",
-            "table": table_name,
-            "table_name": table_name,
+            "host": "",
+            "schema": "",
         }
-        cfg = parse_iceberg_catalog_config(endpoint)
-        catalog = load_catalog(endpoint)
-        identifier = cfg["namespace"] + (cfg["table_name"],)
-        tbl = catalog.load_table(identifier)
-        arrow = tbl.scan().to_arrow()
-        count = len(arrow)
-        if limit and len(arrow) > limit:
-            arrow = arrow.slice(0, limit)
-        rows = arrow.to_pylist()
-        columns = target_columns or list(arrow.column_names)
-        checksum = fingerprint_checksum(_iter_fingerprints(rows, columns))
+        count = destination_row_count(
+            "iceberg", cfg, schema="", table_name=table_name
+        )
+        if count is None:
+            return -1, ""
+        cols = [str(c) for c in (target_columns or []) if str(c).strip()]
+        if not cols:
+            return int(count), ""
+        rows = iceberg_target_sample(
+            cfg,
+            schema="",
+            table_name=table_name,
+            columns=cols,
+            limit=int(limit or 0) or None,
+        )
+        if rows is None:
+            return int(count), ""
+        checksum = fingerprint_checksum(_iter_fingerprints(rows, cols))
         return int(count), checksum
     except Exception as exc:
         logger.warning("Iceberg reconciliation read-back failed: %s", exc, exc_info=exc)

@@ -1421,6 +1421,24 @@ def read_target_sample(
                 )
                 return [dict(zip(names, row)) for row in result.fetchall()]
 
+        if db_type in {"iceberg", "apache_iceberg"}:
+            from services.dest_precount import iceberg_target_sample
+
+            sampled = iceberg_target_sample(
+                dest,
+                schema=schema,
+                table_name=table_name,
+                columns=None if cols == ["*"] else list(cols),
+                limit=int(limit or 50),
+                sort_key=sort_key,
+                key_values=keys or None,
+            )
+            if sampled is None:
+                raise TargetSampleUnavailable(
+                    f"Could not read Iceberg snapshot sample from {table_name!r}"
+                )
+            return sampled
+
         if db_type == "pgvector":
             return read_pgvector_target_sample(
                 dest,

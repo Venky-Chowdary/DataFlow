@@ -2263,6 +2263,41 @@ def _iceberg_key_list(
     return out
 
 
+def iceberg_target_sample(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    columns: Sequence[str] | None,
+    limit: int | None = 50,
+    sort_key: str | None = None,
+    key_values: Sequence[Any] | None = None,
+) -> list[dict[str, Any]] | None:
+    """Gate-8 sample from current-snapshot data files — never ``scan().to_arrow()``.
+
+    Same files dest COUNT / leftover MERGE list. Unreadable snapshot is
+    ``None`` (caller raises ``TargetSampleUnavailable``). Missing table is
+    ``[]``. MoR delete files stay unmeasured.
+    """
+    cols = [str(c).strip() for c in (columns or []) if str(c).strip() and c != "*"]
+    key_col = str(sort_key or "").strip()
+    if key_col and key_col not in cols:
+        cols = [key_col] + cols
+    if not cols:
+        return None
+    rows = _iceberg_snapshot_rows(
+        dict(cfg), schema=schema, table_name=table_name, cols=cols
+    )
+    if rows is None:
+        return None
+    if key_values and key_col:
+        wanted = {str(k) for k in key_values if k is not None and str(k) != ""}
+        rows = [r for r in rows if str(r.get(key_col, "")) in wanted]
+    if limit is not None and int(limit) > 0:
+        rows = rows[: int(limit)]
+    return list(rows)
+
+
 def _iceberg_key_hits(
     cfg: dict[str, Any],
     *,

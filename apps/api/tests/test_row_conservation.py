@@ -6044,6 +6044,7 @@ def test_clickhouse_dest_count_uses_final_not_system_tables(
     assert incremental is None
 
 
+@pytest.mark.fake_mongo
 def test_mongodb_leftover_merge_deletes_extra_and_types_pk(monkeypatch: pytest.MonkeyPatch):
     """Mongo leftover MERGE lists exact find projection, then delete_many typed to stored PK."""
     docs = [{"id": 1, "v": "a"}, {"id": 2, "v": "b"}, {"id": 99, "v": "ghost"}]
