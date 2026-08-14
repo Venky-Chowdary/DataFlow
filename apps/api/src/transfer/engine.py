@@ -2964,6 +2964,7 @@ class UniversalTransferEngine:
                         conflict_columns=conflict_columns,
                         job_id=job_id,
                         skip_preflight=request.skip_preflight,
+                        sync_mode=request.sync_mode,
                     )
 
                 if effective_sync_lower == "scd2" and conflict_columns:

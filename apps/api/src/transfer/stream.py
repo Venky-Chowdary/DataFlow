@@ -31,7 +31,13 @@ from connectors.writer_common import (  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
-from services.dest_precount import PRECOUNT_KEY, precount_table
+from services.dest_precount import (
+    PRECOUNT_KEY,
+    begin_overwrite_source_keys,
+    matrix_to_key_tuples,
+    precount_table,
+    stamp_overwrite_source_keys,
+)
 from services.dialect_profiles import schema_from_cfg
 from services.engine_pool import release_engine
 from services.row_conservation import CENSUS_KEY, KeyCensusAccumulator, observe_keyed_batch, record_stream_health
@@ -1383,6 +1389,9 @@ def _stream_database_transfer_impl(
     keyed_census_acc = (
         KeyCensusAccumulator() if write_mode == "upsert" and pk_target_cols else None
     )
+    overwrite_keys_acc = begin_overwrite_source_keys(
+        effective_sync, pk_target_cols, resumed=resumed_pass
+    )
     last_checksum = ""
     # Phase F1 — accumulate fingerprints during the write pass (avoids double source I/O).
     write_pass_fp = FingerprintAccumulator()
@@ -2109,10 +2118,22 @@ def _stream_database_transfer_impl(
             "batch_rows": len(batch.rows),
             "reconcile_sample_rows": sample_rows,
             "fingerprints": inline_fps,
+            "overwrite_keys": (
+                matrix_to_key_tuples(
+                    batch.headers, batch.rows, mappings, pk_target_cols
+                )
+                if overwrite_keys_acc is not None
+                else None
+            ),
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
         nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
+        if overwrite_keys_acc is not None:
+            if "overwrite_keys" in result:
+                overwrite_keys_acc.observe_tuples(result.get("overwrite_keys"))
+            elif result.get("batch_rows"):
+                overwrite_keys_acc.observe_tuples(None)
         written += result["batch_written"]
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
@@ -2576,6 +2597,7 @@ def _stream_database_transfer_impl(
         dest_summary["warnings_suppressed"] = suppressed_warnings
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
+    stamp_overwrite_source_keys(dest_summary, overwrite_keys_acc)
     if keyed_census_acc is not None:
         census = keyed_census_acc.to_census()
         if census is not None:

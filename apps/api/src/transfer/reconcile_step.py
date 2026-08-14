@@ -11,6 +11,7 @@ from connectors.writer_common import (
     transform_error_policy_for_validation_mode,
 )
 from services.dest_precount import (
+    OVERWRITE_SOURCE_KEYS_KEY,
     PRECOUNT_KEY,
     VECTOR_IDENTITY_ENGINES,
     records_to_key_tuples,
@@ -1073,6 +1074,7 @@ def run_reconciliation(
     # invent leftover dest keys and look like inferred deletes).
     from services.sync_cursor import is_overwrite_sync
 
+    key_tuples = None
     if (
         is_overwrite_sync(
             str(
@@ -1084,12 +1086,20 @@ def run_reconciliation(
         and pk_cols
         and db_type
         not in {"pgvector", "pinecone", "qdrant", "weaviate", "milvus", "email"}
-        and records
         and isinstance(source_rows, int)
-        and source_rows == len(records)
         and not resumed_from
     ):
-        key_tuples = records_to_key_tuples(records, [str(c) for c in pk_cols], mapping_dicts)
+        if records and source_rows == len(records):
+            key_tuples = records_to_key_tuples(
+                records, [str(c) for c in pk_cols], mapping_dicts
+            )
+        else:
+            stamped = dest_summary.get(OVERWRITE_SOURCE_KEYS_KEY)
+            if isinstance(stamped, list) and len(stamped) == source_rows:
+                try:
+                    key_tuples = [tuple(t) for t in stamped]
+                except TypeError:
+                    key_tuples = None
         if key_tuples:
             # Complete overwrite snapshot MERGE: hard-DELETE dest keys not
             # in S *before* dest COUNT / checksum. Incremental CDC never

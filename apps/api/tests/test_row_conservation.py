@@ -4627,6 +4627,54 @@ def test_overwrite_merge_deletes_leftover_dest_keys_not_in_complete_s(tmp_path: 
     assert "merge" in ledger.note.lower() or "leftover" in ledger.note.lower()
 
 
+def test_sqlite_overwrite_merge_composite_pk_deletes_leftover_tuple(tmp_path: Path):
+    """SQLite leftover MERGE composite: dest {(1,1),(1,2),(9,9)} vs S → delete (9,9)."""
+    import sqlite3
+
+    path = tmp_path / "p9_leftover_composite.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute(
+            "CREATE TABLE lines (order_id INTEGER NOT NULL, line_id INTEGER NOT NULL, "
+            "note TEXT, PRIMARY KEY (order_id, line_id))"
+        )
+        conn.executemany(
+            "INSERT INTO lines VALUES (?, ?, ?)",
+            [(1, 1, "a"), (1, 2, "b"), (9, 9, "ghost")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    cfg = {"database": str(path)}
+    refused = apply_inferred_leftover_deletes(
+        db_type="sqlite",
+        cfg=cfg,
+        schema="",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[(1, 1), (1, 2)],
+        complete_snapshot=False,
+    )
+    assert refused is None
+    assert destination_row_count("sqlite", cfg, schema="", table_name="lines") == 3
+    deleted = apply_inferred_leftover_deletes(
+        db_type="sqlite",
+        cfg=cfg,
+        schema="",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[(1, 1), (1, 2)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    remaining = destination_key_list(
+        "sqlite", cfg, schema="", table_name="lines", key_columns=["order_id", "line_id"]
+    )
+    assert remaining is not None
+    assert {(int(a), int(b)) for a, b in remaining} == {(1, 1), (1, 2)}
+    assert destination_row_count("sqlite", cfg, schema="", table_name="lines") == 2
+
+
 def test_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: Path):
     """Dest {2,3,99} vs S {1,2,3}: delete 99, dest=2, missing=1 still unclosed."""
     import sqlite3
@@ -5654,6 +5702,9 @@ class _ScriptedWarehouseEngine:
         )
         return "IS_CURRENT" in compact
 
+    def commit(self) -> None:
+        return None
+
     def execute(self, stmt: object, params: object = None):
         from types import SimpleNamespace
 
@@ -5675,6 +5726,26 @@ class _ScriptedWarehouseEngine:
             or "SYSTEM.TABLES" in upper
         ):
             raise AssertionError(f"warehouse COUNT must not use stats views: {sql}")
+        if "DROP TABLE" in upper:
+            self.rows = []
+            self.count = 0
+            return SimpleNamespace(
+                scalar=lambda: None, fetchall=lambda: [], rowcount=0
+            )
+        if "ALTER TABLE" in upper and "DELETE" in upper:
+            drop: set[str] = set()
+            if isinstance(params, dict):
+                drop = {str(v) for v in params.values() if v is not None}
+            if drop:
+                self.rows = [row for row in self.rows if str(row[0]) not in drop]
+                self.count = len(self.rows)
+            return SimpleNamespace(
+                scalar=lambda: len(drop),
+                fetchall=lambda: [],
+                rowcount=len(drop),
+            )
+        if "SYSTEM WAIT MUTATIONS" in upper:
+            return SimpleNamespace(scalar=lambda: None, fetchall=lambda: [])
         if self._mentions_is_current(sql):
             if self.column_error is not None:
                 raise self.column_error
@@ -5922,8 +5993,8 @@ def test_clickhouse_dest_count_uses_final_not_system_tables(
     """ClickHouse dest COUNT is COUNT(*) FROM table FINAL, never total_rows.
 
     ReplacingMergeTree without FINAL overcounts at-least-once INSERT versions.
-    Leftover MERGE stays unapplied — mutations are async and must not stamp
-    leftover_deleted before COUNT(*) FINAL can see the delete.
+    Leftover MERGE ALTER-deletes then SYSTEM WAIT MUTATIONS so COUNT(*) FINAL
+    sees the leftover gone — never leftover_deleted before FINAL.
     """
     from sqlalchemy.exc import ProgrammingError
 
@@ -5956,7 +6027,187 @@ def test_clickhouse_dest_count_uses_final_not_system_tables(
         keys=[(1,), (2,), (3,)],
         complete_snapshot=True,
     )
-    assert leftover is None
+    assert leftover == 1
+    assert destination_row_count("clickhouse", cfg, schema="default", table_name="events") == 2
+    assert any("ALTER TABLE" in sql.upper() and "DELETE" in sql.upper() for sql in engine.sql)
+    assert any("SYSTEM WAIT MUTATIONS" in sql.upper() for sql in engine.sql)
+    assert any(" FINAL" in sql for sql in engine.sql)
+    incremental = apply_inferred_leftover_deletes(
+        db_type="clickhouse",
+        cfg=cfg,
+        schema="default",
+        table_name="events",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=False,
+    )
+    assert incremental is None
+
+
+def test_mongodb_leftover_merge_deletes_extra_and_types_pk(monkeypatch: pytest.MonkeyPatch):
+    """Mongo leftover MERGE lists exact find projection, then delete_many typed to stored PK."""
+    docs = [{"id": 1, "v": "a"}, {"id": 2, "v": "b"}, {"id": 99, "v": "ghost"}]
+
+    class _Coll:
+        def find(self, _q=None, _p=None):
+            return [{"id": d["id"]} for d in docs]
+
+        def find_one(self, _q=None, _p=None):
+            return {"id": docs[0]["id"]} if docs else None
+
+        def count_documents(self, _q=None):
+            return len(docs)
+
+        def delete_many(self, spec):
+            wanted = {str(v) for v in spec["id"]["$in"]}
+            before = len(docs)
+            docs[:] = [d for d in docs if str(d["id"]) not in wanted]
+            return type("R", (), {"deleted_count": before - len(docs)})()
+
+    coll = _Coll()
+
+    class _DB:
+        def __getitem__(self, _name):
+            return coll
+
+    class _Client:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def __getitem__(self, _name):
+            return _DB()
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr("pymongo.MongoClient", _Client)
+    monkeypatch.setattr("connectors.mongodb_common._mongo_client", lambda *_a, **_k: _Client())
+    monkeypatch.setattr(
+        "src.transfer.adapters.mongodb_connection_string",
+        lambda *_a, **_k: "mongodb://localhost",
+    )
+    cfg = {"database": "app", "connection_string": "mongodb://localhost"}
+    listed = destination_key_list(
+        "mongodb", cfg, schema="", table_name="orders", key_columns=["id"]
+    )
+    assert listed is not None
+    assert [int(t[0]) for t in listed] == [1, 2, 99]
+    refused = apply_inferred_leftover_deletes(
+        db_type="mongodb",
+        cfg=cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=False,
+    )
+    assert refused is None
+    deleted = apply_inferred_leftover_deletes(
+        db_type="mongodb",
+        cfg=cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    assert [d["id"] for d in docs] == [1, 2]
+
+
+def test_iceberg_filesystem_overwrite_sync_replaces_leftover_snapshot(tmp_path: Path):
+    """Overwrite sync on filesystem Iceberg replaces dest {1,2,3,99} with S.
+
+    drop_table is unsupported. Insert/append of S onto D would duplicate keys.
+    First overwrite chunk is snapshot replace so leftover MERGE sees dest=S.
+    """
+    from connectors.iceberg_writer import write_mapped_rows
+
+    warehouse = tmp_path / "wh"
+    cfg = _iceberg_cfg(warehouse)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+    ]
+    seed = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="orders",
+        headers=["id", "v"],
+        data_rows=[["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert seed.ok, seed.error
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 4
+    replaced = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="orders",
+        headers=["id", "v"],
+        data_rows=[["1", "a"], ["2", "b"], ["3", "c"]],
+        mappings=mappings,
+        write_mode="insert",
+        sync_mode="full_refresh_overwrite",
+        file_batch_idx=1,
+    )
+    assert replaced.ok, replaced.error
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+    listed = destination_key_list(
+        "iceberg", cfg, schema="", table_name="orders", key_columns=["id"]
+    )
+    assert listed is not None
+    assert {str(t[0]) for t in listed} == {"1", "2", "3"}
+
+
+def test_overwrite_source_key_set_feeds_leftover_merge_without_records(tmp_path: Path):
+    """Streaming leftover MERGE: S from OverwriteSourceKeySet, not records=[]."""
+    import sqlite3
+
+    from services.dest_precount import OverwriteSourceKeySet
+
+    path = tmp_path / "p9_stream_s.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        conn.executemany(
+            "INSERT INTO items (id, label) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c"), (99, "ghost")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    acc = OverwriteSourceKeySet(1)
+    acc.observe_tuples([(1,), (2,)])
+    acc.observe_tuples([(3,)])
+    exported = acc.export()
+    assert exported == [(1,), (2,), (3,)]
+    deleted = apply_inferred_leftover_deletes(
+        db_type="sqlite",
+        cfg={"database": str(path)},
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=exported,
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    assert destination_row_count("sqlite", {"database": str(path)}, schema="", table_name="items") == 3
+
+
+def test_clickhouse_overwrite_drop_clears_dest_before_leftover_merge(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """ClickHouse overwrite DROP — leftover MERGE cannot undo insert-append dups."""
+    from connectors.table_manager import drop_table
+
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(count=4, rows=[(1,), (2,), (3,), (99,)]),
+    )
+    cfg = {"host": "h", "schema": "default"}
+    assert drop_table("clickhouse", cfg, "events", "default") is True
+    assert any("DROP TABLE" in sql.upper() for sql in engine.sql)
+    assert destination_row_count("clickhouse", cfg, schema="default", table_name="events") == 0
 
 
 def test_clickhouse_unknown_database_is_unmeasured_not_empty(monkeypatch: pytest.MonkeyPatch):

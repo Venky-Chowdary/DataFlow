@@ -99,8 +99,10 @@ never ``INFORMATION_SCHEMA`` / ``__TABLES__`` / ``SVV_TABLE_INFO.tbl_rows``
 PG-catalog (no ``to_regclass``). ClickHouse dest COUNT is
 ``COUNT(*) FROM table FINAL`` (same helper the writer uses for
 ReplacingMergeTree) — never ``system.tables.total_rows``. ClickHouse
-leftover MERGE stays unapplied (mutations are async). Composite
-key hits use portable AND/OR equality, not row-value ``IN`` (Oracle 19c
+leftover MERGE lists ``SELECT pk FROM table FINAL``, then
+``ALTER TABLE … DELETE`` + ``SYSTEM WAIT MUTATIONS`` so FINAL can see
+the delete. Composite key hits use portable AND/OR equality, not row-value
+``IN`` (Oracle 19c
 has no tuple IN). Incremental leftover MERGE stays a hard no-op.
 
 Vector destinations are a 1-source-row → N-chunk identity.
@@ -268,6 +270,10 @@ EXTRA_KEYS_KEY = "extra_keys"
 DEST_KEY_HITS_KEY = "dest_key_hits"
 SOURCE_KEY_COUNT_KEY = "source_key_count"
 LEFTOVER_DELETED_KEY = "leftover_deleted"
+# Streaming Gate-8 passes records=[] so leftover MERGE cannot rebuild S
+# from the in-memory snapshot. The stream stamps unique source PK tuples
+# here (bounded) for D \ S. Resume / overflow / duplicate PK leave it unset.
+OVERWRITE_SOURCE_KEYS_KEY = "overwrite_source_keys"
 _KEYSET_CENSUS_MAX = 20_000
 # Same bound as dest key listing: a prefix DISTINCT is a lie.
 _IDENTITY_SCAN_MAX = _KEYSET_CENSUS_MAX
@@ -743,6 +749,85 @@ def records_to_key_tuples(
     return tuples
 
 
+def matrix_to_key_tuples(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[Any]] | None,
+    mappings: Sequence[Mapping[str, Any]] | None,
+    key_columns: Sequence[str],
+) -> list[tuple[Any, ...]] | None:
+    """PK tuples from a writer matrix page. Empty page is ``[]``, not unusable."""
+    if not rows:
+        return []
+    records = [dict(zip(headers, row)) for row in rows]
+    return records_to_key_tuples(records, key_columns, mappings)
+
+
+class OverwriteSourceKeySet:
+    """Complete unique ``S`` across stream pages for leftover MERGE.
+
+    Streaming reconcile has ``records=[]``. Collecting keys during the
+    already-running source scan is the Debezium snapshot-completion analogue:
+    a second source read after write would not be the same snapshot.
+    Duplicate PKs, a missing PK cell, or a census past
+    ``_KEYSET_CENSUS_MAX`` stay unusable — leftover MERGE then stays
+    ``None`` rather than deleting from a prefix of S.
+    """
+
+    def __init__(self, width: int) -> None:
+        self._width = int(width)
+        self._seen: dict[tuple[Any, ...], None] = {}
+        self._failed = False
+
+    def observe_tuples(self, keys: Sequence[tuple[Any, ...]] | None) -> None:
+        if self._failed:
+            return
+        if keys is None:
+            self._failed = True
+            return
+        from services.row_conservation import coerce_pk_part
+
+        for raw in keys:
+            tup = tuple(raw)
+            if len(tup) != self._width or any(v is None for v in tup):
+                self._failed = True
+                return
+            coerced = tuple(coerce_pk_part(p) for p in tup)
+            if coerced in self._seen or len(self._seen) >= _KEYSET_CENSUS_MAX:
+                self._failed = True
+                return
+            self._seen[coerced] = None
+
+    def export(self) -> list[tuple[Any, ...]] | None:
+        if self._failed or not self._seen:
+            return None
+        return list(self._seen.keys())
+
+
+def begin_overwrite_source_keys(
+    sync_mode: str,
+    pk_cols: Sequence[str] | None,
+    *,
+    resumed: bool = False,
+) -> OverwriteSourceKeySet | None:
+    from services.sync_cursor import is_overwrite_sync
+
+    cols = [str(c).strip() for c in (pk_cols or []) if str(c).strip()]
+    if resumed or not cols or not is_overwrite_sync(sync_mode):
+        return None
+    return OverwriteSourceKeySet(len(cols))
+
+
+def stamp_overwrite_source_keys(
+    dest_summary: dict[str, Any] | None,
+    acc: OverwriteSourceKeySet | None,
+) -> None:
+    if acc is None or not isinstance(dest_summary, dict):
+        return
+    keys = acc.export()
+    if keys is not None:
+        dest_summary[OVERWRITE_SOURCE_KEYS_KEY] = keys
+
+
 def destination_keyset_census(
     db_type: str,
     cfg: dict[str, Any],
@@ -880,6 +965,14 @@ def destination_key_list(
     try:
         if db_type in {"iceberg", "apache_iceberg"}:
             rows = _iceberg_key_list(
+                cfg, schema=schema, table_name=table, cols=cols
+            )
+        elif db_type == "clickhouse":
+            rows = _clickhouse_key_list(
+                cfg, schema=schema, table_name=table, cols=cols
+            )
+        elif db_type == "mongodb":
+            rows = _mongodb_key_list(
                 cfg, schema=schema, table_name=table, cols=cols
             )
         else:
@@ -1056,7 +1149,8 @@ def _clickhouse_row_count(
 
     ``system.tables.total_rows`` is parts metadata. ReplacingMergeTree
     without FINAL overcounts at-least-once INSERT versions. This is dest
-    COUNT only — leftover MERGE stays unapplied (mutations are async).
+    This is dest COUNT. Leftover MERGE lists the same FINAL population
+    then ALTER DELETE + ``SYSTEM WAIT MUTATIONS``.
     """
     import sqlalchemy as sa
     from connectors.generic_sql import clickhouse_final_table_sql
@@ -1076,6 +1170,88 @@ def _clickhouse_row_count(
             return 0
         logger.warning("ClickHouse dest COUNT(*) FINAL failed: %s", exc)
         return None
+
+
+def _clickhouse_key_list(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+) -> list[tuple[Any, ...]] | None:
+    """PK tuples of ``COUNT(*) FROM table FINAL`` — leftover MERGE listing.
+
+    SELECT without FINAL overcounts ReplacingMergeTree versions and would
+    disagree with dest COUNT, so leftover MERGE would refuse (unique ≠ n).
+    Mutations stay unapplied until ``SYSTEM WAIT MUTATIONS`` in the deleter.
+    """
+    import sqlalchemy as sa
+    from connectors.generic_sql import clickhouse_final_table_sql
+    from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+
+    sch = str(schema or cfg.get("schema") or "").strip() or None
+    table_ref = clickhouse_final_table_sql(
+        quote_table_ref(table_name, sch, dialect="clickhouse")
+    )
+    col_sql = ", ".join(quote_sql_identifier(c, "`") for c in cols)
+    sql = f"SELECT {col_sql} FROM {table_ref}"  # nosec B608
+    try:
+        with _warehouse_sql_engine("clickhouse", cfg) as engine:
+            with engine.connect() as conn:
+                rows = conn.execute(sa.text(sql)).fetchall() or []
+    except Exception as exc:
+        if _is_missing_warehouse_relation(exc, "clickhouse"):
+            return []
+        logger.warning("ClickHouse dest key list FINAL failed: %s", exc)
+        return None
+    out: list[tuple[Any, ...]] = []
+    width = len(cols)
+    for row in rows:
+        tup = tuple(row[:width])
+        if len(tup) != width or any(v is None for v in tup):
+            continue
+        out.append(tup)
+    return out
+
+
+def _mongodb_key_list(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+) -> list[tuple[Any, ...]] | None:
+    """Collection PK tuples. Exact find projection — never estimatedCount."""
+    from pymongo import MongoClient
+
+    from src.transfer.adapters import mongodb_connection_string
+
+    database = str(cfg.get("database") or "")
+    if not database or not table_name:
+        return None
+    client: MongoClient = MongoClient(
+        mongodb_connection_string(dict(cfg)), serverSelectionTimeoutMS=5000
+    )
+    try:
+        coll = client[database][table_name]
+        projection = {c: 1 for c in cols}
+        if "_id" not in projection:
+            projection["_id"] = 0
+        out: list[tuple[Any, ...]] = []
+        width = len(cols)
+        for doc in coll.find({}, projection):
+            if not isinstance(doc, Mapping):
+                continue
+            tup = tuple(doc.get(c) for c in cols)
+            if len(tup) != width or any(v is None for v in tup):
+                continue
+            out.append(tup)
+        return out
+    except Exception as exc:
+        logger.warning("Mongo dest key list failed: %s", exc)
+        return None
+    finally:
+        client.close()
 
 
 def _warehouse_sql_key_list(

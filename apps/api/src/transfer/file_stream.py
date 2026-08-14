@@ -52,7 +52,13 @@ from connectors.writer_common import (
     row_fingerprints,
     transform_error_policy_for_validation_mode,
 )
-from services.dest_precount import PRECOUNT_KEY, precount_table
+from services.dest_precount import (
+    PRECOUNT_KEY,
+    begin_overwrite_source_keys,
+    records_to_key_tuples,
+    precount_table,
+    stamp_overwrite_source_keys,
+)
 from services.excel_parser import sheet_headers
 from services.reconciliation import FingerprintAccumulator
 from services.tabular_rows import is_blank_row
@@ -875,6 +881,9 @@ def stream_file_to_database(
     chunk_idx = checkpoint.chunk_index or 0
     resumed = chunk_idx > 0 or written > 0
     dest_summary: dict[str, Any] = {}
+    overwrite_keys_acc = begin_overwrite_source_keys(
+        effective_sync, pk_target_cols, resumed=resumed
+    )
     # Gate-8 append proof needs the cardinality from before the first batch. On a
     # resume the destination already holds rows this job wrote, so the count is
     # no longer a "before" and the delta stays unproven rather than wrong.
@@ -993,6 +1002,7 @@ def stream_file_to_database(
                 "warnings": [],
                 "rejected_details": [],
                 "batch_rows": 0,
+                "overwrite_keys": [],
             }
         headers, data_rows = records_to_matrix(batch, columns)
         local_warnings: list[str] = []
@@ -1128,6 +1138,11 @@ def stream_file_to_database(
             # Full rejected_details for DLQ — never truncate before persist.
             "rejected_details": list(dest_summary.get("rejected_details") or []),
             "batch_rows": len(data_rows),
+            "overwrite_keys": (
+                records_to_key_tuples(batch, pk_target_cols, mappings)
+                if overwrite_keys_acc is not None
+                else None
+            ),
         }
 
     first_index = chunk_idx + 1
@@ -1135,6 +1150,11 @@ def stream_file_to_database(
 
     def _apply_file_result(idx: int, result: dict[str, Any]) -> None:
         nonlocal written, rejected_total, coerced_null_total, last_checksum, dest_summary, source_rows_seen
+        if overwrite_keys_acc is not None:
+            if "overwrite_keys" in result:
+                overwrite_keys_acc.observe_tuples(result.get("overwrite_keys"))
+            elif result.get("batch_rows"):
+                overwrite_keys_acc.observe_tuples(None)
         if result["fingerprints"]:
             fp_accumulator.add_many(result["fingerprints"])
         source_rows_seen += int(result.get("batch_rows") or 0)
@@ -1287,6 +1307,7 @@ def stream_file_to_database(
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
+    stamp_overwrite_source_keys(dest_summary, overwrite_keys_acc)
     if pk_target_cols:
         dest_summary["conflict_columns"] = list(pk_target_cols)
         dest_summary["primary_key_columns"] = list(pk_target_cols)

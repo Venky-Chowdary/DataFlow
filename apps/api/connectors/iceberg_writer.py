@@ -51,6 +51,33 @@ def _pyiceberg_available() -> bool:
         return False
 
 
+def _iceberg_effective_write_mode(
+    write_mode: str,
+    *,
+    sync_mode: str = "",
+    file_batch_idx: int = 0,
+) -> str:
+    """Overwrite sync replaces the snapshot once; later chunks append.
+
+    Iceberg ``drop_table`` is unsupported, so full-refresh overwrite cannot
+    clear dest via table_manager. Insert/append of S onto D would duplicate
+    keys and leftover MERGE would refuse (unique PK ≠ COUNT). First chunk
+    of overwrite sync is snapshot replace — leftover MERGE then sees dest=S.
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    mode = (write_mode or "append").lower()
+    upsert_modes = {"upsert", "merge", "cdc", "incremental_deduped"}
+    idx = int(file_batch_idx or 0)
+    if is_overwrite_sync(sync_mode) and mode not in upsert_modes:
+        if idx in (0, 1):
+            return "overwrite" if mode in {"insert", "append", ""} else mode
+        return "append"
+    if mode in {"overwrite", "replace"} and idx > 1:
+        return "append"
+    return mode
+
+
 def _warehouse_root(host: str, database: str, connection_string: str) -> Path:
     raw = (connection_string or database or host or "").strip()
     if raw.startswith("file://"):
@@ -1103,7 +1130,6 @@ def _write_mapped_rows_pyiceberg(
     destination_column_nullability: dict[str, bool] | None = None,
 ) -> WriteResult:
     """Write a batch through a real pyiceberg catalog with MERGE/upsert support."""
-    from services.sync_cursor import is_overwrite_sync
     if pa is None:
         return WriteResult(
             ok=False,
@@ -1244,19 +1270,10 @@ def _write_mapped_rows_pyiceberg(
             driver="iceberg",
         )
 
-    mode = (write_mode or "append").lower()
+    mode = _iceberg_effective_write_mode(
+        write_mode, sync_mode=sync_mode, file_batch_idx=file_batch_idx
+    )
     upsert_modes = {"upsert", "merge", "cdc", "incremental_deduped"}
-    # Multi-chunk full-refresh overwrite: only the first chunk may replace the
-    # destination; later chunks append to the same snapshot. This mirrors the
-    # Redis prefix-clear-once contract and avoids losing all but the final chunk.
-    if is_overwrite_sync(sync_mode) and mode not in upsert_modes:
-        if file_batch_idx in (0, 1):
-            if mode == "insert":
-                mode = "overwrite"
-        else:
-            mode = "append"
-    elif mode in {"overwrite", "replace"} and file_batch_idx > 1:
-        mode = "append"
 
     try:
         existing_arrow = tbl.schema().as_arrow()
@@ -1890,6 +1907,11 @@ def _write_mapped_rows_filesystem(
     mappings = mappings or []
     column_types = column_types or {}
     table = (table_name or "events").strip()
+    write_mode = _iceberg_effective_write_mode(
+        write_mode,
+        sync_mode=str(_kwargs.get("sync_mode") or ""),
+        file_batch_idx=int(_kwargs.get("file_batch_idx") or 0),
+    )
 
     try:
         root = _warehouse_root(host, database, connection_string)

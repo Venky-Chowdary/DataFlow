@@ -936,3 +936,143 @@ def test_pg_to_mariadb_upsert_tombstone_drops_dest_count():
         finally:
             dest.close()
 
+
+def test_sqlite_overwrite_e2e_clears_preexisting_leftover_dest_keys(tmp_path: Path):
+    """execute_tracked overwrite: dest {1,2,3,99} vs S {1,2,3} → dest COUNT=3."""
+    src_path = tmp_path / "p9_leftover_src.db"
+    dst_path = tmp_path / "p9_leftover_dst.db"
+    src = sqlite3.connect(str(src_path))
+    try:
+        src.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        src.executemany(
+            "INSERT INTO items (id, label) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+        src.commit()
+    finally:
+        src.close()
+    dest = sqlite3.connect(str(dst_path))
+    try:
+        dest.execute("CREATE TABLE items_out (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        dest.executemany(
+            "INSERT INTO items_out (id, label) VALUES (?, ?)",
+            [(1, "old"), (2, "old"), (3, "old"), (99, "ghost")],
+        )
+        dest.commit()
+    finally:
+        dest.close()
+
+    req = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="sqlite", database=str(src_path), table="items"
+        ),
+        destination=EndpointConfig(
+            kind="database", format="sqlite", database=str(dst_path), table="items_out"
+        ),
+        mappings=_maps(),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="warn",
+        skip_preflight=True,
+        stream_contracts=[
+            {
+                "name": "items",
+                "selected": True,
+                "sync_mode": "full_refresh_overwrite",
+                "primary_key": "id",
+                "mappings": _maps(),
+            }
+        ],
+    )
+    result = _run(req)
+    assert result.success, result.error
+    dest = sqlite3.connect(str(dst_path))
+    try:
+        ids = [int(r[0]) for r in dest.execute("SELECT id FROM items_out ORDER BY id").fetchall()]
+        dest_count = dest.execute("SELECT COUNT(*) FROM items_out").fetchone()[0]
+    finally:
+        dest.close()
+    assert dest_count == 3, dest_count
+    assert ids == [1, 2, 3]
+    stamped = result.row_accounting or {}
+    assert stamped.get("dest_count") == 3, stamped
+
+
+def test_iceberg_overwrite_e2e_merges_leftover_snapshot_keys(tmp_path: Path):
+    """execute_tracked sqlite→iceberg overwrite replaces dest {1,2,3,99} with S.
+
+    Iceberg drop_table is unsupported. First overwrite chunk is snapshot replace
+    so dest-only key 99 cannot survive. Payload is label (not qty) so Map does
+    not invent decimal and quarantine the load.
+    """
+    from connectors.iceberg_writer import write_mapped_rows
+    from services.dest_precount import destination_key_list, destination_row_count
+
+    warehouse = tmp_path / "wh"
+    dest_uri = str(warehouse)
+    iceberg_maps = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "label", "target": "label", "transform": "direct"},
+    ]
+    seed = write_mapped_rows(
+        connection_string=dest_uri,
+        table_name="leftover_e2e",
+        headers=["id", "label"],
+        data_rows=[["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]],
+        mappings=iceberg_maps,
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert seed.ok, seed.error
+    src_path = tmp_path / "leftover_src.db"
+    src = sqlite3.connect(str(src_path))
+    try:
+        src.execute("CREATE TABLE leftover_src (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        src.executemany(
+            "INSERT INTO leftover_src (id, label) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+        src.commit()
+    finally:
+        src.close()
+
+    req = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="sqlite", database=str(src_path), table="leftover_src"
+        ),
+        destination=EndpointConfig(
+            kind="database",
+            format="iceberg",
+            database=dest_uri,
+            connection_string=dest_uri,
+            table="leftover_e2e",
+        ),
+        mappings=_maps(),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="warn",
+        skip_preflight=True,
+        stream_contracts=[
+            {
+                "name": "leftover_src",
+                "selected": True,
+                "sync_mode": "full_refresh_overwrite",
+                "primary_key": "id",
+                "mappings": _maps(),
+            }
+        ],
+    )
+    result = _run(req)
+    assert result.success, result.error
+    cfg = {
+        "connection_string": dest_uri,
+        "database": dest_uri,
+        "host": "",
+        "schema": "",
+    }
+    dest_count = destination_row_count("iceberg", cfg, schema="", table_name="leftover_e2e")
+    dest_keys = destination_key_list(
+        "iceberg", cfg, schema="", table_name="leftover_e2e", key_columns=["id"]
+    )
+    assert dest_count == 3, dest_count
+    assert dest_keys is not None
+    assert {str(t[0]) for t in dest_keys} == {"1", "2", "3"}
+

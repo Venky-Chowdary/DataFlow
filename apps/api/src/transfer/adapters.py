@@ -1439,6 +1439,7 @@ def _write_destination_database(
     job_id: str | None = None,
     skip_preflight: bool = False,
     error_policy: str | None = None,
+    sync_mode: str = "",
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
 
@@ -1532,6 +1533,7 @@ def _write_destination_database(
         ),
         "file_batch_idx": 0,
         "skip_preflight": skip_preflight,
+        "sync_mode": sync_mode,
         # Live dest nullability for write-time NOT NULL escalate (G3 parity).
         "destination_column_nullability": dict(
             (cfg.get("extra") or {}).get("schema_nullability")
