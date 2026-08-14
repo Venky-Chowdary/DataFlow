@@ -909,8 +909,23 @@ rowcount is not that proof.
     `parse_xml` ingest `max_rows` still refuse (`test_xml_over_max_rows_fail_closed`).
     `elem.clear()` drops text; empty Element shells stay O(n) under a
     wide parent — lxml O(depth) unlink is a future enhancement of this
-    kernel, not a second COUNT. Cardinality ≠ Gate-8. Frontend not
+    kernel, not a second COUNT.     Cardinality ≠ Gate-8. Frontend not
     run this slice (no UI change).
+
+  L1 keyed cardinality (this host, after 2026-08-14 slice):
+    Property 5 + Property 9 command: 270 passed, 9 skipped in 38.30s.
+    The three sqlite upsert tests that failed with success=False and
+    "Row fidelity verified" now pass:
+    `test_sqlite_two_table_upsert_job_uses_dest_before_not_summed_count`,
+    `test_sqlite_upsert_updates_do_not_change_dest_count`,
+    `test_sqlite_upsert_tombstone_drops_dest_count`.
+    L1 identity: overwrite `reader == dest`; append dest-Δ; keyed
+    `dest_delta == inserts - deletes`. 3 updates + 1 insert into dest
+    that held 3 → COUNT(*) 4, L1 expected_delta 1 not reader 4.
+    Tombstone insert+delete → dest_delta 0. Keyed L1 without census is
+    unmeasured (does not veto L3). Ladder veto no longer keeps a
+    verified-success sentence as the job error. `engine.py` unchanged.
+    Frontend not run this slice (no UI change).
 
   Snowflake / BigQuery / DuckDB / Databricks dest COUNT (this host, after 2026-08-14 slice):
     232 passed, 8 skipped in 35.47s (Property 9 command).
