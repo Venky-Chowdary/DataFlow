@@ -465,8 +465,9 @@ def snapshot_data_files(
 def snapshot_has_delete_files(current_meta: dict[str, Any] | None) -> bool:
     """True when the snapshot lists delete files (MoR).
 
-    Dest COUNT / leftover listing apply Iceberg v2 position and equality
-    deletes through ``iceberg_mor``. Footer sum without MoR would lie.
+    Dest COUNT / leftover listing apply Iceberg v2 position/equality and
+    v3 deletion vectors through ``iceberg_mor``. Footer sum without MoR
+    would lie.
     """
     if not current_meta:
         return False

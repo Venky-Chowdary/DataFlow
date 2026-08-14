@@ -983,7 +983,8 @@ rowcount is not that proof.
     typed per field — never `In("order_id,line_id", ...)`. Digit string
     on a string PK stays a string; long binds int. Incomplete PK
     projection (missing a composite part) is unmeasured. Quoted-string
-    `IN` fallback is string PK only. MoR / deletion vectors Planned.
+    `IN` fallback is string PK only. MoR writes Planned; dest-engine
+    v2/v3 MoR COUNT measured.
     Skips: 2 moto, 3 Qdrant `:6333`, SQL Server `:1433`, Oracle `:1521`.
 
   Leftover MERGE completeness + execute_tracked E2E (this host, after 2026-08-14 slice):
@@ -1012,10 +1013,10 @@ rowcount is not that proof.
     * `execute_tracked` sqlite overwrite E2E: dest `{1,2,3,99}` → dest
       COUNT=3, ids `[1,2,3]`.
     Incremental leftover MERGE stays a hard no-op. Vectors skip leftover
-    MERGE. Filesystem Iceberg v2 MoR measured below. Iceberg V3 deletion
-    vectors and `hdfs://` COUNT Planned. Live ClickHouse / Mongo clusters
-    not on this host. Skips: 2 moto, 3 Qdrant `:6333`, SQL Server `:1433`,
-    Oracle `:1521`.
+    MERGE. Filesystem Iceberg v2 MoR and v3 deletion-vector-v1 measured
+    below. Iceberg `hdfs://` COUNT Planned. Live ClickHouse / Mongo
+    clusters not on this host. Skips: 2 moto, 3 Qdrant `:6333`, SQL
+    Server `:1433`, Oracle `:1521`.
 
   Iceberg v2 MoR dest COUNT + leftover listing (this host, after 2026-08-14 slice):
     399 passed, 9 skipped in 47.81s (same Property 5+9 command plus mapping
@@ -1031,7 +1032,9 @@ rowcount is not that proof.
       Missing sequence-number on equality deletes → unmeasured.
     * Position + equality overlapping the same row → subtract once.
     * Missing delete file path stays unmeasured (fail-closed).
-    * V3 deletion vector / puffin stays unmeasured.
+    * V3 deletion-vector-v1 measured below (same unique in-range pos
+      kernel). Placeholder puffin without `content_offset` stays
+      unmeasured.
     * Leftover MERGE vs S `{1,2,3}` after MoR already removed 99 →
       leftover_deleted=0, dest COUNT=3 (row 99 is not a leftover to DELETE).
     Catalog inspect with delete rows but no readable parquet stays
@@ -1053,8 +1056,8 @@ rowcount is not that proof.
     local catalog inspect MoR). `s3://` data-file COUNT Range-GETs the
     footer; position-delete parquet is GET-spooled; overlapping
     `(file, pos)` with delete `record-count=2` → remaining `n-1`.
-    `hdfs://` and V3 deletion vectors stay Planned. Skips: 2 moto,
-    3 Qdrant `:6333`, SQL Server `:1433`, Oracle `:1521`.
+    `hdfs://` COUNT Planned. V3 deletion vectors measured below.
+    Skips: 2 moto, 3 Qdrant `:6333`, SQL Server `:1433`, Oracle `:1521`.
 
   Dest-engine mirror census (this host, after 2026-08-14 slice):
     407 passed, 9 skipped in 51.11s (Property 5+9 + mapping goldens +
@@ -1068,6 +1071,35 @@ rowcount is not that proof.
     active=3; stream sqlite dest_count=50 after 5 inferred deletes
     (active=45). Skips: 2 moto, 3 Qdrant `:6333`, SQL Server `:1433`,
     Oracle `:1521`.
+
+  Iceberg v3 deletion-vector dest-engine (this host, after 2026-08-14 slice):
+    Focused honesty suite 88 passed in 2.07s:
+    `test_iceberg_deletion_vector.py` + F4 CDC transport + Iceberg CDC
+    delete + Debezium parity + snapshot→LSN handoff +
+    `test_row_conservation.py -k iceberg|deletion_vector|cdc`.
+    Broader Property 9 file on this slim venv: 280 passed, 20 skipped,
+    4 failed (BigQuery driver missing; gzip-xml object-store — env, not
+    the DV kernel). Identity is still data − applied deletes, never
+    `data_footer − record_count` (Iceberg #14864 / Puffin spec):
+    * Spec-accurate `deletion-vector-v1`: BE length, magic `D1D33964`,
+      portable roaring (array / bitmap / run), CRC-32 of magic+vector.
+    * DV of pos 1 on `{1,2,3}` → COUNT=2, keys `{1,3}`. Position-only
+      COUNT does not project data pages. Out-of-range pos is a no-op.
+    * Missing `content_offset`, CRC mismatch, cardinality mismatch, or
+      two DVs for the same data file → unmeasured.
+    * DV + equality overlapping id=99 → subtract once (COUNT=3).
+    * Leftover MERGE vs S `{1,2,3}` after DV already removed 99 →
+      leftover_deleted=0, dest COUNT=3.
+    * Catalog inspect with `content_offset` applies the same kernel.
+      Remote `s3://` puffin Range-GETs `[offset, offset+size)` — never
+      unsized GET of the puffin.
+    Writes stay copy-on-write (`supports_merge_on_read=False`).
+    Incremental leftover MERGE stays a hard no-op. CDC delivery stays
+    at-least-once (`EXACTLY_ONCE_CLAIMED=False`). F4 streaming transport
+    unit tests now run (7 passed); capability remains
+    `cdc_streaming_status=planned_opt_in`. `hdfs://` COUNT, Delta/Hudi
+    writers, live snapshot→stream ITs, and Properties 10–12 stay
+    Planned / UNPROVEN.
 
   XML artifact dest COUNT (this host, after 2026-08-14 slice):
     221 passed, 8 skipped in 35.35s (Property 9 command).
@@ -1333,10 +1365,10 @@ TypeScript does not recompute dest.
   `execute_tracked` sqlite overwrite and sqlite→iceberg overwrite E2E:
   dest `{1,2,3,99}` → dest COUNT=3, dest-only key 99 gone. Catalog dest COUNT is
   dest-engine file footers, never `scan().count()`. Filesystem Iceberg v2
-  MoR (position/equality) is dest − applied deletes; catalog inspect
-  applies the same kernel when delete parquet is local or GET-spooled
-  from `s3://` / `gs://` / `abfss://`. V3 deletion vectors and `hdfs://`
-  stay Planned.
+  MoR (position/equality) and v3 `deletion-vector-v1` are dest − applied
+  deletes; catalog inspect applies the same kernel when delete parquet /
+  puffin is local, GET-spooled, or Range-GET of the DV blob from
+  `s3://` / `gs://` / `abfss://`. `hdfs://` COUNT stays Planned.
 * Stream-path this-run `soft_deleted` / `reactivated` census — dest-engine
   COUNT of transitions before the anti-join UPDATE (currently deleted ∩
   staging = reactivated; currently active \\ staging = inferred delete).
@@ -1451,7 +1483,8 @@ TypeScript does not recompute dest.
   filesystem CoW and pyiceberg SqlCatalog (`D \ S` then existing delete;
   dest COUNT = dest-engine file footers, never `scan().count()` /
   manifest `record-count`). Missing
-  catalog table = 0. MoR / deletion vectors Planned.
+  catalog table = 0. Dest-engine v2/v3 MoR COUNT measured; MoR writes
+  Planned.
 * Multi-table job rollup — **PARTIAL** on named SQLite fixture: two overwrite
   tables (2+3) close as job dest 5, not last-table 3. Mixed/keyed kinds are not
   summed.

@@ -2487,7 +2487,7 @@ def _iceberg_snapshot_rows(
 ) -> list[dict[str, Any]] | None:
     """Current snapshot PK (or requested) columns. Key list and leftover MERGE.
 
-    Same data-file population as dest COUNT, including Iceberg v2 MoR.
+    Same data-file population as dest COUNT, including Iceberg v2/v3 MoR.
     Catalog path projects columns from live files — never
     ``scan().to_arrow()``. A missing snapshot file is unmeasured
     (``None``), not dest=0. Missing table is ``[]``. Metadata
