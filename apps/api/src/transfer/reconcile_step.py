@@ -51,6 +51,9 @@ def _finalize_reconcile(
     snap = None
     if isinstance(dest_summary, dict):
         snap = dest_summary.get("source_snapshot")
+        raw_before = dest_summary.get(PRECOUNT_KEY)
+        if out.get(PRECOUNT_KEY) is None and isinstance(raw_before, int):
+            out[PRECOUNT_KEY] = raw_before
     if isinstance(snap, dict) and snap:
         out["source_snapshot"] = dict(snap)
     return out

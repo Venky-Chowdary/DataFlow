@@ -372,6 +372,8 @@ export interface Gate8ReconciliationPayload {
   };
   source_rows?: number;
   target_rows?: number;
+  /** Pre-write dest COUNT(*) — append identity is dest_after − dest_before. */
+  target_rows_before?: number | null;
   rejected_rows?: number;
   coerced_null_rows?: number;
   /** Intentional LSN-guard / redelivery skips — not a shortfall. */

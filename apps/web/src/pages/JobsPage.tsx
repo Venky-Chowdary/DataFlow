@@ -1046,7 +1046,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 {
                                   id: "gate8",
                                   title: "Gate-8 reconcile",
-                                  description: "Source vs destination row counts and checksums",
+                                  description: "Dest-before delta, row counts, and checksums",
                                   icon: "shield",
                                   meta: recon
                                     ? gate8.label

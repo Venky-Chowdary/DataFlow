@@ -405,6 +405,7 @@ def test_reconcile_extra_rows_checksum_mismatch_always_fails():
     assert stamped["assurance_level"] == "row_count"
     assert stamped["migration_proven"] is False
     assert stamped["checksum_match"] is False
+    assert stamped.get("target_rows_before") == 5
 
     overwrite = reconcile(
         source_rows=10,

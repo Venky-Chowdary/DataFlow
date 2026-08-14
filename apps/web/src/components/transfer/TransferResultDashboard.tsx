@@ -666,7 +666,13 @@ export function TransferResultDashboard({
                         ? "Writer acknowledged rows — independent source/destination checksum compare not available"
                         : gate8.label === "Failed"
                           ? result.reconciliation?.message || "Reconciliation failed"
-                          : result.reconciliation?.message || `Gate-8 ${gate8.label.toLowerCase()} for this job`}
+                          : gate8.label === "Append delta"
+                            ? result.reconciliation?.message
+                              || "Append delta verified — whole-table checksums are not comparable"
+                            : gate8.label === "Batch verified"
+                              ? result.reconciliation?.message
+                                || "This run’s keys verified — extra destination rows are outside this proof"
+                              : result.reconciliation?.message || `Gate-8 ${gate8.label.toLowerCase()} for this job`}
                 </dd>
               </div>
               {droppedRows > 0 && (
@@ -690,9 +696,9 @@ export function TransferResultDashboard({
             <summary>Checksums, warnings &amp; DDL</summary>
             <div className="df2-result-more-body">
               <p className="df2-result-explain-body">
-                Checksums are computed over source and destination rows and compared.
-                If reconciliation passed, the transfer is complete and unchanged.
-              </p>
+                If reconciliation is <strong>Verified</strong>, source and destination fingerprints match.
+                Append delta and batch-verified runs landed rows but whole-table checksums are not comparable.
+
               {(result.reconciliation?.source_checksum || result.reconciliation?.target_checksum) && (
                 <dl className="df2-result-checksum-pair">
                   <div>

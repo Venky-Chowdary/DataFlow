@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyGate8Status, isGate8AppendDelta, isGate8IdentityUnproven, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
+import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8IdentityUnproven, isGate8KeyedBatch, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
@@ -256,6 +256,41 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
     const view = classifyGate8Status(report);
     assert.equal(view.label, "Append delta");
     assert.equal(view.tone, "warn");
+    assert.equal(view.fullPass, false);
+  });
+
+  it("dest-before identity is dest after − dest before, not dest − source", () => {
+    const id = gate8AppendIdentity({
+      passed: true,
+      source_rows: 200,
+      target_rows: 300,
+      target_rows_before: 100,
+      checksum_scope: "whole_table_not_comparable",
+    });
+    assert.equal(id.destBefore, 100);
+    assert.equal(id.destAfter, 300);
+    assert.equal(id.written, 200);
+    assert.equal(id.expected, 200);
+    assert.equal(id.deltaOk, true);
+  });
+
+  it("keyed-batch extra dest is batch verified, not fullPass", () => {
+    const report = {
+      passed: true,
+      phase: "post_write_verified",
+      coverage: "full_checksum",
+      checksum_scope: "written_batch_keys",
+      source_checksum: "abc",
+      target_checksum: "abc",
+      checksum_match: true,
+      population_proof: false,
+      source_rows: 200,
+      target_rows: 300,
+      target_rows_before: 100,
+    };
+    assert.equal(isGate8KeyedBatch(report), true);
+    const view = classifyGate8Status(report);
+    assert.equal(view.label, "Batch verified");
     assert.equal(view.fullPass, false);
   });
 });

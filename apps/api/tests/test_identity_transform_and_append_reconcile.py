@@ -116,6 +116,7 @@ def test_strict_full_append_passes_on_dest_before_delta() -> None:
     assert stamped["migration_proven"] is False
     assert "checksum mismatch" not in stamped["message"].lower()
     assert "200" in stamped["message"]
+    assert stamped.get("target_rows_before") == 100
 
 
 def test_append_without_pre_write_count_is_not_verified() -> None:

@@ -1520,6 +1520,68 @@
   gap: 8px;
 }
 
+.df2-gate8-proof.is-pending .df2-gate8-proof-kicker {
+  color: #b45309;
+}
+
+.df2-gate8-proof.is-compact .df2-gate8-proof-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 720px) {
+  .df2-gate8-proof {
+    padding: 12px;
+  }
+
+  .df2-gate8-proof-head {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .df2-gate8-proof-head h3 {
+    font-size: 14px;
+    line-height: 1.35;
+  }
+
+  .df2-gate8-proof-badge {
+    align-self: flex-start;
+  }
+
+  .df2-gate8-proof-grid,
+  .df2-gate8-proof.is-compact .df2-gate8-proof-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .df2-gate8-proof-next {
+    flex-direction: column;
+  }
+
+  .df2-gate8-proof-next-copy p {
+    max-width: none;
+  }
+
+  .df2-gate8-proof-honesty {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .df2-gate8-proof-grid,
+  .df2-gate8-proof.is-compact .df2-gate8-proof-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .df2-gate8-proof-next-actions {
+    width: 100%;
+  }
+
+  .df2-gate8-proof-next-actions .df2-btn {
+    flex: 1 1 100%;
+    justify-content: center;
+  }
+}
+
 .df2-theater-v3-cdc-meta {
   display: flex;
   flex-wrap: wrap;

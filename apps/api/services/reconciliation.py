@@ -105,6 +105,8 @@ class ReconciliationReport:
     assurance_level: str = ""
     # Set when the digests cover different populations (see reconcile_coverage).
     checksum_scope: str = ""
+    # Pre-write dest COUNT(*) — append identity is dest_after − dest_before.
+    target_rows_before: int | None = None
 
     def to_dict(self) -> dict:
         return stamp_post_write_phase(asdict(self))
@@ -691,6 +693,7 @@ def reconcile(
         population_proof=False,
         assurance_level="coerced" if coerced_null_rows else "full_checksum",
         checksum_scope=checksum_scope,
+        target_rows_before=target_rows_before,
     )
 
 

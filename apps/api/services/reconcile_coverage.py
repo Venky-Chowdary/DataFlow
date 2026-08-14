@@ -153,6 +153,7 @@ def append_row_count_report(
         "checksum_match": False,
         "population_proof": False,
         "checksum_scope": WHOLE_TABLE_NOT_COMPARABLE,
+        "target_rows_before": target_rows_before,
     }
 
     if target_rows_before is None:

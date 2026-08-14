@@ -18,7 +18,7 @@ import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
-import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
+import { Gate8ProofCard, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch } from "./transfer/Gate8ProofCard";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
@@ -1405,23 +1405,39 @@ export function JobTheaterView({
         <article className="df2-theater-v3-sla-card">
           <span>Checksum evidence</span>
           <strong>
-            {job.reconciliation?.target_checksum
-              ? String(job.reconciliation.target_checksum).slice(0, 12)
-              : checksum
-                ? checksum.slice(0, 12)
-                : "Pending"}
+            {(() => {
+              const recon = job.reconciliation;
+              if (recon && (isGate8AppendDelta(recon) || isGate8KeyedBatch(recon))) {
+                const id = gate8AppendIdentity(recon);
+                if (id.destBefore != null && id.written != null) {
+                  return `${id.destBefore.toLocaleString()} → ${id.destAfter.toLocaleString()}`;
+                }
+              }
+              if (job.reconciliation?.target_checksum) {
+                return String(job.reconciliation.target_checksum).slice(0, 12);
+              }
+              return checksum ? checksum.slice(0, 12) : "Pending";
+            })()}
           </strong>
           <small>
-            {job.reconciliation?.source_checksum && job.reconciliation?.target_checksum
-              ? (job.reconciliation.source_checksum === job.reconciliation.target_checksum
-                ? "Gate-8 source ↔ dest match"
-                : job.reconciliation.phase === "post_write_row_count"
-                  || job.reconciliation.checksum_scope === "whole_table_not_comparable"
-                  ? "Whole-table digests not comparable (append delta)"
-                  : "Gate-8 checksum mismatch")
-              : checksum
-                ? "Writer checksum captured"
-                : "Captured on completion"}
+            {(() => {
+              const recon = job.reconciliation;
+              if (recon && isGate8KeyedBatch(recon) && recon.passed) {
+                return "This run’s keys verified — extra dest rows outside proof";
+              }
+              if (recon && isGate8AppendDelta(recon)) {
+                const id = gate8AppendIdentity(recon);
+                return id.deltaOk
+                  ? "Append delta verified — whole-table digests not comparable"
+                  : "Whole-table digests not comparable (append delta)";
+              }
+              if (recon?.source_checksum && recon?.target_checksum) {
+                return recon.source_checksum === recon.target_checksum
+                  ? "Gate-8 source ↔ dest match"
+                  : "Gate-8 checksum mismatch";
+              }
+              return checksum ? "Writer checksum captured" : "Captured on completion";
+            })()}
           </small>
         </article>
       </div>

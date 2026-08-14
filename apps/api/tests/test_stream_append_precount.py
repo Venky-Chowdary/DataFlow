@@ -106,6 +106,7 @@ def test_file_stream_strict_append_gate8_closes_on_precount_delta(tmp_path: Path
     assert report["passed"] is True, report.get("message")
     assert "checksum mismatch" not in str(report.get("message") or "").lower()
     assert report.get("migration_proven") is not True
+    assert report.get("target_rows_before") == 2
     msg = str(report.get("message") or "").lower()
     scoped = str(report.get("checksum_scope") or "")
     # Either dest-before delta (incomparable whole-table hashes) or keyed-batch
