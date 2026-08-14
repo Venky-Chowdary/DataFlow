@@ -4998,9 +4998,9 @@ def test_iceberg_dest_count_is_file_footer_not_manifest_record_count(
 
     Spark COUNT(*) on Iceberg uses manifest record-count and bails to a
     full scan when delete files exist. Manifest record-count is
-    writer-stamped (sys.partitions class). MoR delete files stay
-    unmeasured — data − deletes is a lie for overlapping position
-    deletes and equality deletes.
+    writer-stamped (sys.partitions class). Missing delete files stay
+    unmeasured. Applied MoR is unique ``(file_path, pos)`` / equality AND,
+    never ``data_footer − delete_record_count``.
     """
     from connectors.iceberg_writer import write_mapped_rows
     from services.dest_precount import destination_row_count
@@ -5047,6 +5047,297 @@ def test_iceberg_dest_count_is_file_footer_not_manifest_record_count(
     meta["delete-files"] = [{"path": "data/deletes.parquet"}]
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
     assert destination_row_count("iceberg", cfg, schema="", table_name="orders") is None
+
+
+def _iceberg_latest_meta_path(warehouse: Path, table: str = "orders") -> Path:
+    meta_dir = warehouse / table / "metadata"
+    if not meta_dir.is_dir():
+        meta_dir = next(warehouse.rglob("v*.metadata.json")).parent
+    versions = sorted(meta_dir.glob("v*.metadata.json"))
+    assert versions
+    return versions[-1]
+
+
+def _iceberg_data_rel(meta: dict) -> str:
+    refs = meta.get("data-files") or []
+    assert refs
+    rel = str(refs[0].get("path") or "").strip()
+    assert rel
+    return rel
+
+
+def _stamp_iceberg_delete_files(
+    meta_path: Path,
+    delete_refs: list[dict],
+    *,
+    data_seq: int | None = 1,
+) -> dict:
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    if data_seq is not None:
+        for ref in meta.get("data-files") or []:
+            ref["sequence-number"] = data_seq
+    meta["delete-files"] = delete_refs
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    return meta
+
+
+def _write_iceberg_delete_parquet(path: Path, columns: dict) -> None:
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(pa.table(columns), path)
+
+
+def _write_iceberg_orders(tmp_path: Path, rows: list[list[str]]):
+    from connectors.iceberg_writer import write_mapped_rows
+
+    warehouse = tmp_path / "wh"
+    cfg = _iceberg_cfg(warehouse)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="orders",
+        headers=["id", "v"],
+        data_rows=rows,
+        mappings=mappings,
+        write_mode="append",
+        create_table=True,
+    )
+    assert written.ok, written.error
+    return warehouse, cfg
+
+
+def test_iceberg_mor_position_delete_count_is_unique_pos_not_record_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Overlapping position deletes count once. Delete record-count is not dest."""
+    from services.dest_precount import destination_key_list, destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    rel = _iceberg_data_rel(meta)
+    deletes = warehouse / "orders" / "data" / "pos-deletes.parquet"
+    _write_iceberg_delete_parquet(
+        deletes,
+        {
+            "file_path": [rel, rel],
+            "pos": [1, 1],
+        },
+    )
+    _stamp_iceberg_delete_files(
+        meta_path,
+        [
+            {
+                "path": "data/pos-deletes.parquet",
+                "content": 1,
+                "sequence-number": 2,
+                "record-count": 2,
+            }
+        ],
+    )
+
+    def _no_project(*_a, **_k):
+        raise AssertionError("position-only MoR COUNT must not project data pages")
+
+    monkeypatch.setattr(
+        "services.dest_precount._project_iceberg_local", _no_project
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 2
+
+    monkeypatch.undo()
+    listed = destination_key_list(
+        "iceberg", cfg, schema="", table_name="orders", key_columns=["id"]
+    )
+    assert listed is not None
+    assert {str(t[0]) for t in listed} == {"1", "3"}
+
+
+def test_iceberg_mor_position_delete_out_of_range_pos_is_noop(tmp_path: Path):
+    from services.dest_precount import destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    rel = _iceberg_data_rel(meta)
+    deletes = warehouse / "orders" / "data" / "pos-deletes.parquet"
+    _write_iceberg_delete_parquet(
+        deletes, {"file_path": [rel], "pos": [99]}
+    )
+    _stamp_iceberg_delete_files(
+        meta_path,
+        [{"path": "data/pos-deletes.parquet", "content": 1, "sequence-number": 2}],
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+
+
+def test_iceberg_mor_equality_delete_id_99_and_same_seq_survives(tmp_path: Path):
+    """Equality applies only when data_seq < delete_seq. Null-safe AND match."""
+    from services.dest_precount import destination_key_list, destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    deletes = warehouse / "orders" / "data" / "eq-deletes.parquet"
+    _write_iceberg_delete_parquet(deletes, {"id": ["99"]})
+
+    _stamp_iceberg_delete_files(
+        meta_path,
+        [
+            {
+                "path": "data/eq-deletes.parquet",
+                "content": 2,
+                "sequence-number": 1,
+                "equality-ids": [1],
+            }
+        ],
+        data_seq=1,
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 4
+
+    _stamp_iceberg_delete_files(
+        meta_path,
+        [
+            {
+                "path": "data/eq-deletes.parquet",
+                "content": 2,
+                "sequence-number": 2,
+                "equality-ids": [1],
+            }
+        ],
+        data_seq=1,
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+    listed = destination_key_list(
+        "iceberg", cfg, schema="", table_name="orders", key_columns=["id"]
+    )
+    assert listed is not None
+    assert {str(t[0]) for t in listed} == {"1", "2", "3"}
+
+
+def test_iceberg_mor_equality_missing_sequence_is_unmeasured(tmp_path: Path):
+    from services.dest_precount import destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["99", "ghost"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    deletes = warehouse / "orders" / "data" / "eq-deletes.parquet"
+    _write_iceberg_delete_parquet(deletes, {"id": ["99"]})
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["delete-files"] = [
+        {"path": "data/eq-deletes.parquet", "content": 2, "equality-ids": [1]}
+    ]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") is None
+
+
+def test_iceberg_mor_position_and_equality_overlapping_row_subtracts_once(
+    tmp_path: Path,
+):
+    from services.dest_precount import destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    rel = _iceberg_data_rel(meta)
+    pos_path = warehouse / "orders" / "data" / "pos-deletes.parquet"
+    eq_path = warehouse / "orders" / "data" / "eq-deletes.parquet"
+    _write_iceberg_delete_parquet(pos_path, {"file_path": [rel], "pos": [3]})
+    _write_iceberg_delete_parquet(eq_path, {"id": ["99"]})
+    _stamp_iceberg_delete_files(
+        meta_path,
+        [
+            {
+                "path": "data/pos-deletes.parquet",
+                "content": 1,
+                "sequence-number": 2,
+            },
+            {
+                "path": "data/eq-deletes.parquet",
+                "content": 2,
+                "sequence-number": 2,
+                "equality-ids": [1],
+            },
+        ],
+        data_seq=1,
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+
+
+def test_iceberg_mor_deletion_vector_is_unmeasured(tmp_path: Path):
+    from services.dest_precount import destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(tmp_path, [["1", "a"], ["2", "b"]])
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    puffin = warehouse / "orders" / "data" / "deletes.puffin"
+    puffin.write_bytes(b"puffin-placeholder")
+    _stamp_iceberg_delete_files(
+        meta_path,
+        [{"path": "data/deletes.puffin", "content": 3, "sequence-number": 2}],
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") is None
+
+
+def test_iceberg_mor_leftover_merge_sees_surviving_keys_not_deleted_row(
+    tmp_path: Path,
+):
+    """MoR-deleted dest key 99 is not a leftover. leftover = D \\ S after MoR."""
+    from services.dest_precount import destination_keyset_census, destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    deletes = warehouse / "orders" / "data" / "eq-deletes.parquet"
+    _write_iceberg_delete_parquet(deletes, {"id": ["99"]})
+    _stamp_iceberg_delete_files(
+        meta_path,
+        [
+            {
+                "path": "data/eq-deletes.parquet",
+                "content": 2,
+                "sequence-number": 2,
+                "equality-ids": [1],
+            }
+        ],
+        data_seq=1,
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+    census = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+    )
+    assert census is not None
+    assert census["dest_count"] == 3
+    assert census[EXTRA_KEYS_KEY] == 0
+    assert census[MISSING_KEYS_KEY] == 0
+    leftover = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+        complete_snapshot=True,
+    )
+    assert leftover == 0
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
 
 
 def test_iceberg_dest_count_missing_data_file_is_unmeasured_not_prefix(

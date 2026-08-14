@@ -719,11 +719,12 @@ rowcount is not that proof.
     not drop. Mirror already applies inferred soft-deletes on full
     re-sync. Incremental CDC is a hard no-op (`complete_snapshot=False`).
     Iceberg leftover MERGE lists current-snapshot PK tuples (filesystem
-    data files or catalog `scan().to_arrow()`), never metadata
-    `record-count` / `scan().count()`, then CoW-deletes `D \ S` through
-    the existing dest-engine delete. Catalog dest COUNT is `len` of that
-    same listing. MoR / deletion vectors stay Planned — apply them in
-    the snapshot population once; the identity is still leftover = D \ S.
+    data files or catalog file projection), never metadata
+    ``record-count`` / ``scan().count()``, then CoW-deletes ``D \\ S`` through
+    the existing dest-engine delete. Catalog dest COUNT is dest-engine
+    file footers of that listing. Filesystem MoR applies Iceberg v2
+    position and equality deletes so leftover identity is ``data − applied
+    deletes``. V3 deletion vectors stay Planned.
 13. SCD Type 2 current-row identity: `COUNT(*) WHERE is_current` is dest
     population. Physical history `COUNT(*)` is diagnostic
     (`history_rows`). Writer version-upsert ack and Gate-8 stuffed
@@ -1274,7 +1275,10 @@ TypeScript does not recompute dest.
   MERGE is **PARTIAL** on filesystem CoW and pyiceberg SqlCatalog (same
   identity as SQL: dest `{1,2,3,99}` vs S `{1,2,3}` CoW-deletes 99,
   extra=0; composite dest `{(1,1),(1,2),(9,9)}` vs S `{(1,1),(1,2)}`
-  deletes `(9,9)`; missing source keys stay missing). Catalog dest COUNT is
+  deletes `(9,9)`; missing source keys stay missing). Overwrite sync on
+  filesystem Iceberg replaces the first snapshot (`drop_table` unsupported).
+  `execute_tracked` sqlite overwrite and sqlite→iceberg overwrite E2E:
+  dest `{1,2,3,99}` → dest COUNT=3, dest-only key 99 gone. Catalog dest COUNT is
   dest-engine file footers, never `scan().count()`. MoR / deletion
   vectors Planned.
 * Stream-path this-run `soft_deleted` / `reactivated` census — dest-engine

@@ -1616,12 +1616,15 @@ def _iceberg_row_count(
     COUNT opens each live data file and uses the dest-engine population
     already proven for artifacts (Parquet footer ``num_rows``, JSONL
     object-per-line). Catalog object-store URIs use the same Range-GET
-    footer kernel as S3/GCS/ADLS dest. A listed data-file that is gone
-    is unmeasured, not dest=0. MoR / deletion vectors stay unmeasured — equality
-    deletes and overlapping position deletes make ``data − deletes`` a
-    lie (Iceberg #14864). Missing table is 0. Unreadable snapshot is
-    ``None``. Key list / leftover MERGE project PK columns from the same
-    snapshot files as COUNT. Never ``scan().to_arrow()``.
+    footer kernel as S3/GCS/ADLS dest.     A listed data-file that is gone
+    is unmeasured, not dest=0. Filesystem MoR applies Iceberg v2 position
+    and equality deletes (unique ``(file_path, pos)``; equality AND plus
+    ``data_seq < delete_seq``). ``data_footer − delete_record_count`` is
+    never dest (Iceberg #14864). V3 deletion vectors / puffin stay
+    unmeasured. Missing delete file is unmeasured. Missing table is 0.
+    Unreadable snapshot is ``None``. Key list / leftover MERGE project PK
+    columns from the same snapshot population as COUNT. Never
+    ``scan().to_arrow()``.
     """
     from connectors.iceberg_writer import resolve_iceberg_write_path
 
@@ -1841,14 +1844,21 @@ def _iceberg_filesystem_file_count(
     current_meta = _load_metadata(versions[-1])
     if not current_meta:
         return 0
-    if snapshot_has_delete_files(current_meta):
-        logger.info("iceberg MoR delete files present; dest COUNT unmeasured")
-        return None
     try:
         files = snapshot_data_files(table_dir, current_meta)
     except ValueError as exc:
         logger.info("iceberg snapshot data files unreadable: %s", exc)
         return None
+    if snapshot_has_delete_files(current_meta):
+        from connectors.iceberg_mor import filesystem_mor_count
+
+        return filesystem_mor_count(
+            table_dir,
+            current_meta,
+            files,
+            count_data_file=_count_iceberg_data_file,
+            project_file=_project_iceberg_local,
+        )
     total = 0
     for _rel, path in files:
         n = _count_iceberg_data_file(path)
@@ -1861,8 +1871,10 @@ def _iceberg_filesystem_file_count(
 def _iceberg_catalog_data_paths(endpoint: dict[str, Any]) -> list[str] | None:
     """Current snapshot data-file URIs. ``None`` is unmeasured; ``[]`` is empty.
 
-    Same listing dest COUNT uses. MoR delete files → None. Missing table → [].
-    Never ``scan().to_arrow()`` / ``scan().count()``.
+    Same listing dest COUNT uses. Catalog inspect delete files without
+    readable parquet stay unmeasured (filesystem MoR is the measured
+    kernel). Missing table → []. Never ``scan().to_arrow()`` /
+    ``scan().count()``.
     """
     from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
 
@@ -2042,6 +2054,21 @@ def _project_iceberg_handle(
                 pass
 
 
+def _project_iceberg_local(
+    file_path: Path, cols: Sequence[str]
+) -> list[dict[str, Any]] | None:
+    """Project columns from one local snapshot data file."""
+    handle, closer = open_artifact_binary(file_path)
+    try:
+        return _project_iceberg_handle(handle, name=file_path.name, cols=cols)
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
 def _iceberg_project_data_uri(
     uri: str, *, endpoint: dict[str, Any], warehouse: str, cols: Sequence[str]
 ) -> list[dict[str, Any]] | None:
@@ -2131,10 +2158,11 @@ def _iceberg_snapshot_rows(
 ) -> list[dict[str, Any]] | None:
     """Current snapshot PK (or requested) columns. Key list and leftover MERGE.
 
-    Same data-file population as dest COUNT. Catalog path projects columns
-    from live files — never ``scan().to_arrow()``. MoR delete files and a
-    missing snapshot file are unmeasured (``None``), not dest=0. Missing
-    table is ``[]``. Metadata ``record-count`` is never dest population.
+    Same data-file population as dest COUNT, including Iceberg v2 MoR.
+    Catalog path projects columns from live files — never
+    ``scan().to_arrow()``. A missing snapshot file is unmeasured
+    (``None``), not dest=0. Missing table is ``[]``. Metadata
+    ``record-count`` is never dest population.
     """
     from connectors.iceberg_writer import resolve_iceberg_write_path
 
@@ -2180,25 +2208,24 @@ def _iceberg_snapshot_rows(
     current_meta = _load_metadata(versions[-1])
     if not current_meta:
         return []
-    if snapshot_has_delete_files(current_meta):
-        logger.info("iceberg MoR delete files present; dest key list unmeasured")
-        return None
     try:
         files = snapshot_data_files(table_dir, current_meta)
     except ValueError as exc:
         logger.info("iceberg snapshot data files unreadable: %s", exc)
         return None
+    if snapshot_has_delete_files(current_meta):
+        from connectors.iceberg_mor import filesystem_mor_snapshot_rows
+
+        return filesystem_mor_snapshot_rows(
+            table_dir,
+            current_meta,
+            files,
+            cols=wanted,
+            project_file=_project_iceberg_local,
+        )
     rows = []
     for _rel, file_path in files:
-        handle, closer = open_artifact_binary(file_path)
-        try:
-            part = _project_iceberg_handle(handle, name=file_path.name, cols=wanted)
-        finally:
-            if closer is not None:
-                try:
-                    closer()
-                except Exception:
-                    pass
+        part = _project_iceberg_local(file_path, wanted)
         if part is None:
             return None
         rows.extend(part)
@@ -2241,12 +2268,12 @@ def _iceberg_key_list(
     table_name: str,
     cols: list[str],
 ) -> list[tuple[Any, ...]] | None:
-    """Current-snapshot PK tuples. Never metadata ``record-count``. Never deletes.
+    """Current-snapshot PK tuples. Never metadata ``record-count``.
 
-    Same population as dest COUNT(*) (``len`` of this listing). Catalog
-    ``scan().count()`` / ``scan().to_arrow()`` / metadata ``record-count``
-    never close. Missing table is ``[]``. Incomplete / unreadable snapshot
-    is ``None``.
+    Same population as dest COUNT(*) (``len`` of this listing), including
+    Iceberg v2 MoR. Catalog ``scan().count()`` / ``scan().to_arrow()`` /
+    metadata ``record-count`` never close. Missing table is ``[]``.
+    Incomplete / unreadable snapshot is ``None``.
     """
     rows = _iceberg_snapshot_rows(cfg, schema=schema, table_name=table_name, cols=cols)
     if rows is None:
@@ -2277,7 +2304,7 @@ def iceberg_target_sample(
 
     Same files dest COUNT / leftover MERGE list. Unreadable snapshot is
     ``None`` (caller raises ``TargetSampleUnavailable``). Missing table is
-    ``[]``. MoR delete files stay unmeasured.
+    ``[]``. Filesystem MoR uses the same surviving-row population as COUNT.
     """
     cols = [str(c).strip() for c in (columns or []) if str(c).strip() and c != "*"]
     key_col = str(sort_key or "").strip()
