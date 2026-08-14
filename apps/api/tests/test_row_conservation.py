@@ -10,8 +10,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from services.dest_precount import (
+    ARTIFACT_COUNT_KEY,
+    DEST_COUNT_ARTIFACT,
+    count_artifact_rows,
+    stamp_artifact_census,
+)
 from services.row_conservation import (
     DEST_ACTIVE_READBACK,
+    DEST_ARTIFACT_READBACK,
     DEST_PER_STREAM,
     DEST_READBACK,
     DEST_UNMEASURED,
@@ -81,6 +88,112 @@ def test_skipped_readback_stuffs_writer_ack_and_is_refused():
     )
     assert count is None
     assert source == DEST_UNMEASURED
+
+
+def test_artifact_readback_closes_on_file_count_not_writer_ack():
+    """DMS hole for files: writer rows never close dest; re-opened records do."""
+    count, source = dest_count_from_recon(
+        {
+            "target_rows": 10_000,
+            "skipped_readback": True,
+            "unproven": True,
+            "migration_proven": False,
+            "dest_count_source": DEST_ARTIFACT_READBACK,
+            ARTIFACT_COUNT_KEY: 3,
+            "message": "File/object export wrote successfully — Gate-8 cell fidelity unproven",
+        }
+    )
+    assert count == 3
+    assert source == DEST_ARTIFACT_READBACK
+
+
+def test_artifact_source_without_artifact_count_is_unmeasured():
+    """Forged dest_count_source + stuffed target_rows is still writer ack."""
+    count, source = dest_count_from_recon(
+        {
+            "target_rows": 10_000,
+            "skipped_readback": True,
+            "dest_count_source": DEST_ARTIFACT_READBACK,
+            "message": "File/object export wrote successfully",
+        }
+    )
+    assert count is None
+    assert source == DEST_UNMEASURED
+
+
+def test_artifact_overwrite_balances_on_file_count_not_writer_ack():
+    ledger = account_population(
+        rows_read=3,
+        dest_count=3,
+        dest_count_source=DEST_ARTIFACT_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=10_000,
+        sync_mode="incremental_append",
+    )
+    assert ledger.conservation_kind == KIND_OVERWRITE
+    assert ledger.rows_written == 3
+    assert ledger.rows_written_source == DEST_ARTIFACT_READBACK
+    assert ledger.writer_ack == 10_000
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.writer_ack_delta == -9997
+    assert "artifact" in ledger.note.lower()
+    assert "destination table" not in ledger.note.lower()
+
+
+def test_count_artifact_rows_csv_jsonl_json_independent_of_writer(tmp_path: Path):
+    csv_path = tmp_path / "export.csv"
+    csv_path.write_text("id,name\n1,a\n2,b\n3,c\n", encoding="utf-8")
+    assert count_artifact_rows(csv_path, fmt="csv") == 3
+
+    empty = tmp_path / "empty.csv"
+    empty.write_text("id,name\n", encoding="utf-8")
+    assert count_artifact_rows(empty, fmt="csv") == 0
+
+    jsonl_path = tmp_path / "export.jsonl"
+    jsonl_path.write_text('{"id":1}\n{"id":2}\n', encoding="utf-8")
+    assert count_artifact_rows(jsonl_path, fmt="jsonl") == 2
+
+    json_path = tmp_path / "export.json"
+    json_path.write_text('[{"id":1},{"id":2},{"id":3}]', encoding="utf-8")
+    assert count_artifact_rows(json_path, fmt="json") == 3
+
+    import gzip
+
+    gz_path = tmp_path / "export.csv.gz"
+    gz_path.write_bytes(gzip.compress(b"id\n1\n2\n"))
+    assert count_artifact_rows(gz_path, fmt="csv") == 2
+
+    bad = tmp_path / "bad.jsonl"
+    bad.write_text("{not json\n", encoding="utf-8")
+    assert count_artifact_rows(bad, fmt="jsonl") is None
+
+    missing = tmp_path / "nope.csv"
+    assert count_artifact_rows(missing, fmt="csv") is None
+    assert count_artifact_rows("s3://bucket/key.csv", fmt="csv") is None
+
+
+def test_stamp_artifact_census_never_keeps_writer_target_rows(tmp_path: Path):
+    csv_path = tmp_path / "out.csv"
+    csv_path.write_text("id\n1\n2\n", encoding="utf-8")
+    stamped = stamp_artifact_census(
+        {"target_rows": 10_000, "skipped_readback": True},
+        {"path": str(csv_path), "format": "csv"},
+    )
+    assert stamped[ARTIFACT_COUNT_KEY] == 2
+    assert stamped["dest_count_source"] == DEST_COUNT_ARTIFACT
+    assert stamped["target_rows"] == 2
+    assert stamped["target_rows_before"] == 0
+
+    unmeasured = stamp_artifact_census(
+        {"target_rows": 10_000, "skipped_readback": True},
+        {"path": "s3://bucket/export.csv", "format": "csv"},
+    )
+    assert ARTIFACT_COUNT_KEY not in unmeasured
+    assert unmeasured["target_rows"] is None
 
 
 def test_failed_gate8_still_exposes_independent_dest_count():

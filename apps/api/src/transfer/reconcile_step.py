@@ -10,7 +10,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
-from services.dest_precount import PRECOUNT_KEY
+from services.dest_precount import PRECOUNT_KEY, stamp_artifact_census
 from services.reconcile_coverage import (
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
@@ -878,28 +878,41 @@ def run_reconciliation(
         # Object/file exports have no destination cell read-back. Writer checksum
         # proves bytes landed, not per-cell fidelity. Operational write may pass;
         # never stamp migration_proven / cell-fidelity Gate-8 green.
+        # Independent artifact COUNT (re-open the file) is dest cardinality —
+        # writer ``rows_written`` never closes conservation.
         checksum = str(writer_checksum or dest_summary.get("checksum") or "").strip()
-        return _finalize({
-            "passed": True,
-            "unproven": True,
-            "skipped_readback": True,
-            "migration_proven": False,
-            "message": (
+        payload = stamp_artifact_census(
+            {
+                "passed": True,
+                "unproven": True,
+                "skipped_readback": True,
+                "migration_proven": False,
+                "message": (
+                    "File/object export wrote successfully — Gate-8 cell fidelity "
+                    "unproven (no destination read-back). "
+                    + (
+                        f"Writer checksum present ({checksum[:16]}…) — count/bytes only."
+                        if checksum
+                        else "No writer checksum; treat as operational pass only."
+                    )
+                ),
+                "source_rows": source_rows,
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+                "checksum": checksum,
+            },
+            dest_summary,
+            fmt=endpoint.format,
+        )
+        counted = payload.get("artifact_row_count")
+        if isinstance(counted, int) and counted >= 0:
+            payload["message"] = (
                 "File/object export wrote successfully — Gate-8 cell fidelity "
-                "unproven (no destination read-back). "
-                + (
-                    f"Writer checksum present ({checksum[:16]}…) — count/bytes only."
-                    if checksum
-                    else "No writer checksum; treat as operational pass only."
-                )
-            ),
-            "source_rows": source_rows,
-            "target_rows": rows_written,
-            "rejected_rows": rejected_rows,
-            "coerced_null_rows": coerced_null_rows,
-            "rows_skipped": rows_skipped,
-            "checksum": checksum,
-        })
+                "unproven (no destination cell read-back). Independent artifact "
+                f"record count is {counted:,}. Writer acknowledgement is diagnostic."
+            )
+        return _finalize(payload)
 
     from .connector_capabilities import resolve_driver_type
 

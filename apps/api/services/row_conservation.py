@@ -24,6 +24,10 @@ How dest_population is chosen:
 
 * **overwrite / replace / empty dest** — dest COUNT(*) is the written
   population. Pre-existing rows were dropped or there were none.
+* **file / object export** — dest population is an independent record
+  COUNT of the artifact on disk (``artifact_readback``), not writer
+  ``rows`` / bytes-landed. File replace is overwrite (dest-before 0).
+  Cardinality ≠ cell checksum: Gate-8 stays unproven.
 * **append** — only the delta proves anything:
   ``COUNT(*)_after - COUNT(*)_before``. A table that already held 30 rows
   satisfies ``dest >= expected`` even if the writer appended nothing.
@@ -75,14 +79,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from services.dest_precount import PRECOUNT_KEY
+from services.dest_precount import ARTIFACT_COUNT_KEY, PRECOUNT_KEY
 from services.reconcile_coverage import is_unproven_export
 from services.sync_cursor import is_append_sync, is_overwrite_sync
 
 DEST_READBACK = "gate8_dest_readback"
 DEST_UNMEASURED = "unmeasured"
 DEST_EMPTY_PASS = "empty_pass"
+DEST_ARTIFACT_READBACK = "artifact_readback"
 CENSUS_KEY = "keyed_census"
+# Dest population that may close overwrite cardinality. Artifact COUNT is
+# dest-engine analogue for a replaced file — not SQL COUNT(*), not writer ack.
+_INDEPENDENT_DEST = frozenset({DEST_READBACK, DEST_ARTIFACT_READBACK})
 
 KIND_OVERWRITE = "overwrite"
 KIND_APPEND_DELTA = "append_delta"
@@ -564,8 +572,19 @@ def dest_count_from_recon(recon: Mapping[str, Any] | None) -> tuple[int | None, 
     explicit dest row-count phase. File/object exports and "verified by
     writer" with no dest digest stuff the writer's acknowledgement into the
     same field — using that would circularly balance a short write.
+
+    Independent artifact COUNT is a third axis: ``skipped_readback`` still
+    means no cell digest, but ``artifact_row_count`` re-opened the file.
+    Only that keyed field closes dest population — ``target_rows`` on an
+    export report is historically writer ack and never sufficient.
     """
     report = dict(recon or {})
+    source = str(report.get("dest_count_source") or "").strip()
+    if source == DEST_ARTIFACT_READBACK:
+        counted = _as_optional_int(report.get(ARTIFACT_COUNT_KEY))
+        if counted is not None and counted >= 0:
+            return counted, DEST_ARTIFACT_READBACK
+        return None, DEST_UNMEASURED
     msg = str(report.get("message") or "").lower()
     if report.get("skipped_readback") is True:
         return None, DEST_UNMEASURED
@@ -1002,6 +1021,11 @@ def account_population(
     coerced = int(coerced_null_rows or 0)
     kind = conservation_kind(sync_mode, dest_count_before=dest_count_before)
     ack = writer_ack if writer_ack is not None else None
+    # File replace is overwrite regardless of the operator's SQL sync-mode
+    # label: the engine opens the artifact ``wb``. Append-delta / keyed
+    # identities do not apply to a replaced file.
+    if dest_count_source == DEST_ARTIFACT_READBACK:
+        kind = KIND_OVERWRITE
 
     if rows_read is None:
         return ConservationLedger(
@@ -1073,7 +1097,7 @@ def account_population(
 
     written: int | None
     written_source = dest_count_source
-    if dest_count is None or dest_count_source != DEST_READBACK:
+    if dest_count is None or dest_count_source not in _INDEPENDENT_DEST:
         written = None
         written_source = DEST_UNMEASURED
         return ConservationLedger(
@@ -1100,6 +1124,27 @@ def account_population(
         )
 
     if kind == KIND_APPEND_DELTA:
+        if dest_count_source != DEST_READBACK:
+            return ConservationLedger(
+                rows_read=read,
+                rows_written=None,
+                rows_quarantined=quarantined,
+                rows_skipped=skipped,
+                rows_coerced_null=coerced,
+                writer_ack=ack,
+                dest_count=dest_count,
+                dest_count_before=dest_count_before,
+                unaccounted=None,
+                balanced=False,
+                rows_read_source="gate8_source_count",
+                rows_written_source=DEST_UNMEASURED,
+                conservation_kind=kind,
+                note=(
+                    "Append delta requires dest-engine COUNT(*) before and after "
+                    "the write. Artifact record count cannot prove a SQL append."
+                ),
+                writer_ack_delta=None,
+            )
         if dest_count_before is None:
             return ConservationLedger(
                 rows_read=read,
@@ -1126,33 +1171,39 @@ def account_population(
         written_source = DEST_READBACK
     else:
         written = dest_count
-        written_source = DEST_READBACK
+        written_source = dest_count_source
+
+    artifact = dest_count_source == DEST_ARTIFACT_READBACK
+    dest_phrase = (
+        "export artifact (independent record count)"
+        if artifact
+        else "destination (independent COUNT(*))"
+    )
+    dest_short = "artifact record count" if artifact else "dest COUNT(*)"
 
     unaccounted = read - (written + quarantined + skipped)
     ack_delta = (written - ack) if ack is not None else None
 
     if unaccounted > 0:
         note = (
-            f"{unaccounted} source row(s) are neither on the destination "
-            "(independent COUNT(*)), quarantined, nor skipped. Treat as "
-            "potential silent loss — the writer acknowledgement is not "
-            "evidence they landed."
+            f"{unaccounted} source row(s) are neither in the {dest_phrase}, "
+            "quarantined, nor skipped. Treat as potential silent loss — the "
+            "writer acknowledgement is not evidence they landed."
         )
     elif unaccounted < 0:
         note = (
-            f"{abs(unaccounted)} more row(s) are on the destination, "
+            f"{abs(unaccounted)} more row(s) are in the {dest_phrase}, "
             "quarantined, or skipped than were read. Duplicate writes, "
             "pre-existing rows on overwrite, or double-counted rejects."
         )
     else:
         note = (
-            "Every source row is on the destination (independent COUNT(*)), "
-            "quarantined, or skipped."
+            f"Every source row is in the {dest_phrase}, quarantined, or skipped."
         )
     if ack_delta:
         sign = "more" if ack_delta > 0 else "fewer"
         note += (
-            f" Writer acknowledged {ack:,}; dest COUNT(*) accounts for "
+            f" Writer acknowledged {ack:,}; {dest_short} accounts for "
             f"{written:,} ({abs(ack_delta):,} {sign} than the writer claimed)."
         )
     return ConservationLedger(

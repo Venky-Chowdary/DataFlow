@@ -74,6 +74,39 @@ describe("destHeadline never falls back to writer ack", () => {
     assert.equal(h.label, "At destination");
   });
 
+  it("shows artifact record count, never 'at destination table', when dest is a file", () => {
+    const artifactLedger = {
+      ...overwriteLedger,
+      dest_count: 3,
+      rows_written: 3,
+      rows_read: 3,
+      writer_ack: 10_000,
+      writer_ack_delta: -9997,
+      rows_written_source: "artifact_readback",
+      note: "Every source row is in the export artifact (independent record count).",
+    };
+    const h = destHeadline({
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: artifactLedger,
+    });
+    assert.equal(h.value, "3");
+    assert.equal(h.measured, true);
+    assert.equal(h.label, "In export artifact");
+    assert.equal(destMetricCompact(h), "3 in artifact");
+    const copy = conservationCompleteCopy({
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: artifactLedger,
+    });
+    assert.match(copy, /3 in export artifact/);
+    assert.doesNotMatch(copy, /at destination/);
+    const cells = ledgerIdentityCells(artifactLedger);
+    assert.equal(cells.find((c) => c.label === "Artifact records")?.value, "3");
+    assert.equal(cells.find((c) => c.label === "Dest COUNT(*)"), undefined);
+    assert.match(ledgerEquation(artifactLedger), /artifact 3/);
+  });
+
   it("shows em dash when dest is unmeasured — never invents dest = writer ack", () => {
     const h = destHeadline({
       status: "completed",

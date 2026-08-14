@@ -74,6 +74,19 @@ def test_sqlite_to_csv_to_sqlite_roundtrip():
         exported_rows = list(reader)
         assert len(exported_rows) == len(EXPECTED)
 
+        recon = export_result.reconciliation or {}
+        assert recon.get("skipped_readback") is True
+        assert recon.get("migration_proven") is False
+        assert recon.get("unproven") is True
+        assert recon.get("artifact_row_count") == len(EXPECTED)
+        assert recon.get("dest_count_source") == "artifact_readback"
+        ledger = export_result.row_accounting or {}
+        assert ledger.get("dest_count") == len(EXPECTED)
+        assert ledger.get("rows_written_source") == "artifact_readback"
+        assert ledger.get("conservation_kind") == "overwrite"
+        assert ledger.get("balanced") is True
+        assert ledger.get("writer_ack") == len(EXPECTED)
+
         # 2. CSV file -> new SQLite database
         import_request = TransferRequest(
             source=EndpointConfig(kind="file", format="csv"),

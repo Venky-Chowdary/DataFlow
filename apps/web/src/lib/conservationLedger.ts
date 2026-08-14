@@ -57,6 +57,7 @@ export type LedgerCarrier = {
 
 const UNMEASURED_SOURCES = new Set(["unmeasured", ""]);
 const UNMEASURED_KINDS = new Set(["unmeasured", ""]);
+const ARTIFACT_READBACK = "artifact_readback";
 
 function num(value: unknown): number | null {
   if (value == null || value === "") return null;
@@ -128,6 +129,10 @@ function parsePerStream(value: unknown): StreamLedgerSlice[] | null {
     }));
 }
 
+function isArtifactLedger(ledger: ConservationLedger | null | undefined): boolean {
+  return Boolean(ledger && ledger.rows_written_source === ARTIFACT_READBACK);
+}
+
 export function isDestMeasured(ledger: ConservationLedger | null | undefined): boolean {
   if (!ledger) return false;
   if (UNMEASURED_KINDS.has(ledger.conservation_kind)) return false;
@@ -195,6 +200,9 @@ export function ledgerEquation(ledger: ConservationLedger): string {
   }
   if (kind === "unmeasured") {
     return "dest COUNT unmeasured — writer ack is not destination proof";
+  }
+  if (ledger.rows_written_source === ARTIFACT_READBACK) {
+    return `read ${fmt(ledger.rows_read)} = artifact ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
   }
   return `read ${fmt(ledger.rows_read)} = dest ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
 }
@@ -277,6 +285,15 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
       };
     }
     const unbalanced = ledger.balanced === false;
+    if (isArtifactLedger(ledger)) {
+      return {
+        value: Number(ledger.dest_count).toLocaleString(),
+        label: running ? "Artifact so far" : "In export artifact",
+        title: ledger.note || "Independent record count of the written file. Writer acknowledgement is diagnostic. Cell fidelity unproven.",
+        measured: true,
+        tone: unbalanced ? "danger" : "ok",
+      };
+    }
     return {
       value: Number(ledger.dest_count).toLocaleString(),
       label: running ? "Dest so far" : "At destination",
@@ -330,6 +347,7 @@ export function destMetricCompact(metric: RowMetric): string {
   if (!metric.measured) return `${metric.value} ${metric.label.toLowerCase()}`;
   if (metric.label.toLowerCase().includes("per-stream")) return "per-stream dest";
   if (metric.label.toLowerCase().includes("active")) return `${metric.value} active`;
+  if (metric.label.toLowerCase().includes("artifact")) return `${metric.value} in artifact`;
   return `${metric.value} at dest`;
 }
 
@@ -369,19 +387,23 @@ export function conservationCompleteCopy(
   const ledger = readConservationLedger(source);
   const mirror = ledger?.conservation_kind === "mirror";
   const job = ledger?.conservation_kind === "job_rollup";
+  const artifact = isArtifactLedger(ledger);
   if (opts?.quarantine) {
     if (dest.measured) {
       return mirror
         ? `${dest.value} active at destination; some rows held out or coerced to NULL`
         : job && dest.value === "—"
           ? "Per-stream dest; some rows held out or coerced to NULL"
-          : `${dest.value} at destination; some rows held out or coerced to NULL`;
+          : artifact
+            ? `${dest.value} in export artifact; some rows held out or coerced to NULL`
+            : `${dest.value} at destination; some rows held out or coerced to NULL`;
     }
     return `${writer.value} writer-acked (dest COUNT unmeasured); some rows held out or coerced to NULL`;
   }
   if (dest.measured) {
     if (mirror) return `${dest.value} active at destination`;
     if (job && dest.value === "—") return "Every stream ledger is closed — dest COUNT not summed";
+    if (artifact) return `${dest.value} in export artifact`;
     return `${dest.value} at destination`;
   }
   return `${writer.value} writer-acked — dest COUNT unmeasured`;
@@ -448,7 +470,10 @@ export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityC
   }
   return [
     { label: "Read", value: fmt(ledger.rows_read) },
-    { label: "Dest COUNT(*)", value: fmt(ledger.dest_count) },
+    {
+      label: isArtifactLedger(ledger) ? "Artifact records" : "Dest COUNT(*)",
+      value: fmt(ledger.dest_count),
+    },
     { label: "Held out", value: fmt(ledger.rows_quarantined) },
     { label: "Skipped", value: fmt(ledger.rows_skipped) },
   ];

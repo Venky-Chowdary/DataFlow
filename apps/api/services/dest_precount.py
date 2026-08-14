@@ -19,15 +19,24 @@ the same way and ``reconcile()`` / the conservation ledger can tell
 "delta proven" apart from "delta unknown" instead of silently reporting
 the second as the first.
 
-``None`` means the count is unavailable (unsupported engine, missing table, or
-an unreachable destination); callers must degrade assurance rather than assume
-zero.
+File/object exports have no SQL engine. ``count_artifact_rows`` is the
+same identity against the bytes on disk: re-open the written artifact and
+COUNT records. Writer ``rows`` / bytes-landed is Airbyte/Fivetran S3
+success — it does not close conservation. Independent artifact COUNT is
+cardinality, not Gate-8 cell fidelity.
+
+``None`` means the count is unavailable (unsupported engine, missing table,
+unreachable destination, or an unreadable/unsupported artifact); callers
+must degrade assurance rather than assume zero.
 """
 
 from __future__ import annotations
 
+import gzip
+import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -37,11 +46,16 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "PRECOUNT_KEY",
+    "ARTIFACT_COUNT_KEY",
+    "DEST_COUNT_SOURCE_KEY",
+    "DEST_COUNT_ARTIFACT",
     "destination_row_count",
     "destination_key_hits",
     "precount_destination",
     "precount_table",
     "count_endpoint_rows",
+    "count_artifact_rows",
+    "stamp_artifact_census",
     "DestBeforeCensus",
 ]
 
@@ -51,6 +65,15 @@ _KEY_HIT_CHUNK = 400
 
 # Key used to carry the pre-write count on the writer's destination summary.
 PRECOUNT_KEY = "target_rows_before"
+
+# Independent record COUNT of a written file/object artifact. Analogous to
+# SQL COUNT(*) — never the writer's ``rows`` / ``rows_written``. Cardinality
+# of the bytes on disk, not Gate-8 cell fidelity.
+ARTIFACT_COUNT_KEY = "artifact_row_count"
+DEST_COUNT_SOURCE_KEY = "dest_count_source"
+DEST_COUNT_ARTIFACT = "artifact_readback"
+
+_ARTIFACT_FORMATS = frozenset({"csv", "tsv", "json", "jsonl", "parquet"})
 
 
 def _count(conn: Any, table_ref: str) -> int:
@@ -431,3 +454,155 @@ class DestBeforeCensus:
         recon[PRECOUNT_KEY] = int(value)
         summary["reconciliation"] = recon
         return summary
+
+
+def _infer_artifact_format(path: Path, fmt: str | None) -> str:
+    explicit = str(fmt or "").strip().lower()
+    aliases = {"ndjson": "jsonl", "xlsx": "excel", "xls": "excel"}
+    if explicit in aliases:
+        explicit = aliases[explicit]
+    if explicit in _ARTIFACT_FORMATS:
+        return explicit
+    name = path.name.lower()
+    if name.endswith(".gz"):
+        name = name[: -len(".gz")]
+    if name.endswith(".csv"):
+        return "csv"
+    if name.endswith(".tsv"):
+        return "tsv"
+    if name.endswith(".jsonl") or name.endswith(".ndjson"):
+        return "jsonl"
+    if name.endswith(".json"):
+        return "json"
+    if name.endswith(".parquet"):
+        return "parquet"
+    return ""
+
+
+def _read_artifact_bytes(path: Path) -> bytes | None:
+    try:
+        if path.name.lower().endswith(".gz"):
+            with gzip.open(path, "rb") as handle:
+                return handle.read()
+        return path.read_bytes()
+    except OSError as exc:
+        logger.info("artifact bytes unreadable at %s: %s", path, exc)
+        return None
+
+
+def _count_jsonl_bytes(content: bytes) -> int | None:
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    count = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(obj, dict):
+            return None
+        count += 1
+    return count
+
+
+def _count_json_bytes(content: bytes) -> int | None:
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if isinstance(payload, list):
+        return len(payload)
+    return None
+
+
+def _count_parquet_path(path: Path) -> int | None:
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        return None
+    try:
+        metadata = pq.ParquetFile(str(path)).metadata
+        if metadata is None:
+            return None
+        return int(metadata.num_rows)
+    except Exception as exc:
+        logger.info("parquet artifact count unavailable at %s: %s", path, exc)
+        return None
+
+
+def count_artifact_rows(
+    path: str | Path | None,
+    *,
+    fmt: str | None = None,
+) -> int | None:
+    """Independent record COUNT of a written file, or ``None`` if unknowable.
+
+    Dest-engine analogue of ``destination_row_count`` for file/object exports.
+    Re-opens the bytes on disk. Never returns the writer's ``rows_written``.
+    Missing path, remote URI without a local file, unsupported format, or
+    unparseable content stay ``None`` — conservation remains unmeasured.
+    Empty but well-formed artifacts are measured zero.
+    """
+    raw = str(path or "").strip()
+    if not raw:
+        return None
+    artifact = Path(raw)
+    if not artifact.is_file():
+        return None
+    kind = _infer_artifact_format(artifact, fmt)
+    if kind not in _ARTIFACT_FORMATS:
+        return None
+    if kind == "parquet":
+        return _count_parquet_path(artifact)
+    content = _read_artifact_bytes(artifact)
+    if content is None:
+        return None
+    try:
+        if kind in {"csv", "tsv"}:
+            from services.csv_profiler import count_csv_rows
+
+            return int(count_csv_rows(content))
+        if kind == "jsonl":
+            return _count_jsonl_bytes(content)
+        if kind == "json":
+            return _count_json_bytes(content)
+    except Exception as exc:
+        logger.info("artifact count failed for %s (%s): %s", artifact, kind, exc)
+        return None
+    return None
+
+
+def stamp_artifact_census(
+    recon: Mapping[str, Any],
+    dest_summary: Mapping[str, Any] | None,
+    *,
+    fmt: str | None = None,
+) -> dict[str, Any]:
+    """Stamp independent artifact COUNT onto Gate-8. Never writer ack.
+
+    File replace is dest-before 0: the engine opens the artifact ``wb``.
+    Cell-fidelity flags (``skipped_readback`` / ``unproven``) stay with the
+    caller — this only owns dest cardinality.
+    """
+    out = dict(recon)
+    data = dict(dest_summary or {})
+    path = data.get("path") or data.get("export_path")
+    resolved_fmt = fmt or data.get("format")
+    counted = count_artifact_rows(
+        path if isinstance(path, str) else None,
+        fmt=str(resolved_fmt or "") or None,
+    )
+    if counted is None:
+        # Writer ``target_rows`` must not survive as dest COUNT.
+        out["target_rows"] = None
+        return out
+    out[ARTIFACT_COUNT_KEY] = counted
+    out[DEST_COUNT_SOURCE_KEY] = DEST_COUNT_ARTIFACT
+    out["target_rows"] = counted
+    out[PRECOUNT_KEY] = 0
+    return out
