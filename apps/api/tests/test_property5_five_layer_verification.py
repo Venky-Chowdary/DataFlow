@@ -11,7 +11,6 @@ Inject a single-cell drift and assert:
 from __future__ import annotations
 
 import os
-import socket
 import sqlite3
 import uuid
 from pathlib import Path
@@ -30,22 +29,34 @@ from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
 
 
-def _pg_up() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 5432), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
 def _pg_creds() -> dict:
     return {
         "host": os.environ.get("P5_PG_HOST", os.environ.get("P2_PG_HOST", "127.0.0.1")),
         "port": int(os.environ.get("P5_PG_PORT", os.environ.get("P2_PG_PORT", "5432"))),
-        "database": os.environ.get("P5_PG_DB", os.environ.get("P2_PG_DB", "postgres")),
-        "username": os.environ.get("P5_PG_USER", os.environ.get("P2_PG_USER", "postgres")),
-        "password": os.environ.get("P5_PG_PASSWORD", os.environ.get("P2_PG_PASSWORD", "admin")),
+        "database": os.environ.get("P5_PG_DB", os.environ.get("P2_PG_DB", "dataflow")),
+        "username": os.environ.get("P5_PG_USER", os.environ.get("P2_PG_USER", "dataflow")),
+        "password": os.environ.get("P5_PG_PASSWORD", os.environ.get("P2_PG_PASSWORD", "dataflow")),
     }
+
+
+def _pg_up() -> bool:
+    """True only when this host can authenticate — TCP-open is not enough."""
+    creds = _pg_creds()
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(
+            host=creds["host"],
+            port=creds["port"],
+            dbname=creds["database"],
+            user=creds["username"],
+            password=creds["password"],
+            connect_timeout=2,
+        )
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 
 def _build_population(n: int = 500) -> list[dict]:
