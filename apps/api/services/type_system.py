@@ -869,6 +869,7 @@ _DECIMAL_DEFAULT_SCALE: Final[dict[str, int]] = {
 }
 
 
+@lru_cache(maxsize=8192)
 def parse_numeric_precision_scale(inferred: str | None) -> tuple[int | None, int | None]:
     """Extract (precision, scale) from NUMBER(p,s) / DECIMAL(p,s) / NUMERIC(p).
 
@@ -7370,23 +7371,41 @@ def integer_within_wire_budget(*, digit_count: int, exponent: int) -> bool:
     return magnitude_digits <= INTEGER_MAX_DIGITS
 
 
+_LAZY_INVENT_EXPORTS = frozenset({
+    "normalize_logical_type",
+    "ddl_type",
+    "create_new_mapping_target_type",
+    "materialize_dest_ddl",
+    "integer_width_carrier",
+    "float_width_carrier",
+    "ddl_invent_never_narrower_than_table",
+    "promote_create_new_temporal_stamp",
+    "_is_explicit_physical_stamp",
+    "_PHYSICAL_STAMP_PASS_THROUGH",
+    "_PASS_THROUGH_REJECT_ON_DEST",
+})
+
+
 def __getattr__(name: str):
-    """Lazy re-export of invent bodies / pass-through tables (Phase C2)."""
-    if name in {
-        "normalize_logical_type",
-        "ddl_type",
-        "create_new_mapping_target_type",
-        "materialize_dest_ddl",
-        "integer_width_carrier",
-        "float_width_carrier",
-        "ddl_invent_never_narrower_than_table",
-        "promote_create_new_temporal_stamp",
-        "_is_explicit_physical_stamp",
-        "_PHYSICAL_STAMP_PASS_THROUGH",
-        "_PASS_THROUGH_REJECT_ON_DEST",
-    }:
+    """Lazy re-export of invent bodies / pass-through tables (Phase C2).
+
+    The resolved object is bound into this module's globals, so a name costs one
+    ``__getattr__`` for the process and every later reference is an ordinary
+    module attribute lookup. Without that binding the hook ran on *every*
+    access, and ``normalize_logical_type`` is the most-called function in the
+    codebase — a single 20k-row reconcile pass went through here 380,000 times,
+    paying a set membership test, a ``sys.modules`` lookup and a ``getattr`` for
+    each cell it canonicalized.
+    """
+    if name in _LAZY_INVENT_EXPORTS:
         from services.decision_kernel import type_invent as _ti
-        return getattr(_ti, name)
+
+        resolved = getattr(_ti, name)
+        globals()[name] = resolved
+        return resolved
+    # ``from services.type_system import x`` inside a function asks for
+    # ``__path__`` every time it runs, and the hot paths here are full of such
+    # imports, so the miss is worth answering before the set lookup.
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 

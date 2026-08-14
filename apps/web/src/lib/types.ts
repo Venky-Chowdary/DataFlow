@@ -377,6 +377,12 @@ export interface Gate8ReconciliationPayload {
     /** Set when the destination read-back itself failed. */
     error?: string;
     alignment?: string;
+    /**
+     * Why a sample was not compared. ``alignment: "declined"`` means the engine
+     * had no key that identifies a row, so pairing them by position would have
+     * compared unrelated rows — it says so instead of reporting corruption.
+     */
+    reason?: string;
     identity_warning?: string;
     /** Deterministic sample set for auditor replay. */
     sample_seed?: {
@@ -570,6 +576,8 @@ export interface PreflightProofBundle {
       skipped?: boolean;
       error?: string;
       alignment?: string;
+      /** Why a sample was not compared (see the payload shape above). */
+      reason?: string;
       identity_warning?: string;
     };
   };

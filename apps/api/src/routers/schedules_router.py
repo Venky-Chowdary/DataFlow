@@ -138,6 +138,13 @@ class ScheduleResponse(BaseModel):
     created_at: str
     # Pipeline Detail needs schema map without a second Transfer Studio hop.
     mappings: list[dict[str, Any]] = Field(default_factory=list)
+    # The source shape this schedule last read. A run is refused when a column
+    # it carries changes type, is dropped or is renamed, so the operator has to
+    # be able to see the baseline that judged it — otherwise the refusal is a
+    # dead end rather than a finding.
+    source_schema: dict[str, str] = Field(default_factory=dict)
+    source_schema_fingerprint: str = ""
+    source_schema_observed_at: str = ""
     mapping_count: int = 0
 
     @classmethod
@@ -388,6 +395,72 @@ async def get_pipeline_history(schedule_id: str, limit: int = 25):
         raise HTTPException(status_code=404, detail="Schedule not found")
     history = list(reversed(sched.run_history))[: max(1, min(limit, 100))]
     return {"schedule_id": schedule_id, "runs": history}
+
+
+@router.post("/{schedule_id}/accept-source-schema")
+async def accept_source_schema(schedule_id: str):
+    """Record the source's current shape as this schedule's baseline.
+
+    A run refused for source drift is a finding, not a verdict: the operator has
+    to be able to look at what changed and say whether the mapping still holds.
+    Without this the refusal had no exit — the message asked for a review that no
+    control performed, which is the dead end this product exists to remove.
+
+    Deliberately explicit. Re-baselining is the operator asserting the change is
+    understood, so it is never done for them by a retry.
+    """
+    from datetime import datetime, timezone
+
+    from services.schedule_runner import _endpoint_from_connector, _resolve_connector
+    from services.source_schema_memory import fingerprint_source
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+
+    src = _resolve_connector(sched.source_connector_id)
+    if not src:
+        raise HTTPException(
+            status_code=400,
+            detail="Source connector is unavailable — cannot read the current schema.",
+        )
+    try:
+        endpoint = _endpoint_from_connector(src, sched.source_table)
+        info = introspect_endpoint(endpoint) or {}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Could not read the source schema: {exc}"
+        ) from exc
+
+    schema = {str(k): str(v) for k, v in (info.get("schema") or {}).items()}
+    if not schema:
+        raise HTTPException(
+            status_code=502,
+            detail="Source returned no schema — nothing to record as a baseline.",
+        )
+    columns = [str(c) for c in (info.get("columns") or schema.keys())]
+    fingerprint = fingerprint_source(columns, schema)
+    updated = update_schedule(
+        schedule_id,
+        {
+            "source_schema": schema,
+            "source_schema_fingerprint": fingerprint,
+            "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return {
+        "success": True,
+        "schedule_id": schedule_id,
+        "source_schema_fingerprint": fingerprint,
+        "columns": len(schema),
+        "message": (
+            f"Baseline updated to the source's current shape ({len(schema)} columns). "
+            "The next run compares against this."
+        ),
+    }
 
 
 @router.post("/{schedule_id}/run")

@@ -130,6 +130,14 @@ class PipelineSchedule:
     # Data contract — when set, scheduled runs enforce the signed contract.
     contract_id: str = ""
     require_signed_contract: bool = False
+    #: The source shape observed on the last successful run, so a later run can
+    #: tell a renamed or retyped column from one that was always that way. A
+    #: schedule that remembers only its cursor cannot notice that the column it
+    #: reads changed meaning, which is the largest single cause of pipeline
+    #: incidents and the one that keeps succeeding while writing wrong values.
+    source_schema: dict[str, str] = field(default_factory=dict)
+    source_schema_fingerprint: str = ""
+    source_schema_observed_at: str = ""
     # Retry policy applied on run failure.
     max_retries: int = 0
     retry_backoff_seconds: int = 60

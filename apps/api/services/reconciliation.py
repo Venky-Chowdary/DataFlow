@@ -160,7 +160,9 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["assurance_level"] = "none"
         return out
 
-    writer_only = is_writer_ack_only(msg, tgt)
+    writer_only = is_writer_ack_only(
+        msg, tgt, source_provenance=str(out.get("source_checksum_provenance") or "")
+    )
     sample = out.get("sample_compare") if isinstance(out.get("sample_compare"), dict) else {}
     sample_ok = bool(sample.get("passed")) and int(sample.get("compared") or 0) > 0
     # GA: diverging independent digests never become sample-verified success.
@@ -246,6 +248,28 @@ def _canonical_fingerprint_ddl(engine: str, ddl: str) -> str:
         return ddl.upper()
 
 
+def _column_fingerprint_ddl(
+    column: str, eng: str, types: dict[str, str] | None
+) -> str:
+    """Resolve the canonical DDL that steers one column's fingerprint.
+
+    Everything here depends on the column and the destination catalog, never on
+    the cell, so a row loop must resolve it once per column rather than once per
+    value. Done per cell it cost more than the canonicalization it was steering.
+    """
+    ddl = ""
+    lookup = types or {}
+    if column and lookup:
+        ddl = str(lookup.get(column) or lookup.get(column.lower()) or "")
+        if not ddl:
+            needle = column.lower()
+            for k, v in lookup.items():
+                if str(k).lower() == needle:
+                    ddl = str(v or "")
+                    break
+    return _canonical_fingerprint_ddl(eng, ddl)
+
+
 def _fingerprint_cell(
     value: Any,
     *,
@@ -255,16 +279,12 @@ def _fingerprint_cell(
 ) -> str:
     """Cell fingerprint — bind-aware when destination types are known."""
     eng = (dest_db_type or "").strip().lower()
-    types = dest_types or {}
-    ddl = ""
-    if column and types:
-        ddl = str(types.get(column) or types.get(column.lower()) or "")
-        if not ddl:
-            for k, v in types.items():
-                if str(k).lower() == column.lower():
-                    ddl = str(v or "")
-                    break
-    ddl = _canonical_fingerprint_ddl(eng, ddl)
+    ddl = _column_fingerprint_ddl(column, eng, dest_types)
+    return _fingerprint_with_ddl(value, ddl, eng)
+
+
+def _fingerprint_with_ddl(value: Any, ddl: str, eng: str) -> str:
+    """Fingerprint one cell against an already-resolved column DDL."""
     if eng:
         try:
             # Defined later in this module; resolved at call time.
@@ -290,16 +310,28 @@ def _iter_fingerprints(
     """
     eng = (dest_db_type or "").strip().lower()
     types = dest_types or {}
+    # Column facts resolved once for the whole scan. These depend on the
+    # destination catalog, not on any cell, and resolving them per value cost
+    # more than the canonicalization they steer.
+    _ddl_cache: dict[str, str] = {}
+
+    def _ddl_for(col: str) -> str:
+        ddl = _ddl_cache.get(col)
+        if ddl is None:
+            ddl = _column_fingerprint_ddl(col, eng, types)
+            _ddl_cache[col] = ddl
+        return ddl
 
     def _fp(val: Any, col: str = "") -> str:
-        return _fingerprint_cell(
-            val, column=col, dest_db_type=eng, dest_types=types
-        )
+        return _fingerprint_with_ddl(val, _ddl_for(col), eng)
 
     if columns is not None:
         cols = columns
         sorted_cols = sorted(cols, key=lambda x: x.lower())
         col_index = {c: i for i, c in enumerate(cols)}
+        # Pair each emitted column with its lowered label and resolved DDL so the
+        # row loop does no per-cell lookup at all.
+        emit_plan = [(c, c.lower(), _ddl_for(c)) for c in sorted_cols]
         sort_idx = -1
         if sort_key:
             sort_key_lower = sort_key.lower()
@@ -310,7 +342,8 @@ def _iter_fingerprints(
         for row in rows:
             if isinstance(row, dict):
                 parts = [
-                    f"{c.lower()}={_fp(row.get(c), c)}" for c in sorted_cols
+                    f"{label}={_fingerprint_with_ddl(row.get(c), ddl, eng)}"
+                    for c, label, ddl in emit_plan
                 ]
                 if sort_key:
                     row_key = _fp(row.get(sort_key), sort_key)
@@ -322,9 +355,11 @@ def _iter_fingerprints(
                 else:
                     row_key = ""
             else:
+                n = len(row)
                 parts = [
-                    f"{c.lower()}={_fp(row[col_index[c]] if col_index[c] < len(row) else None, c)}"
-                    for c in sorted_cols
+                    f"{label}="
+                    f"{_fingerprint_with_ddl(row[col_index[c]] if col_index[c] < n else None, ddl, eng)}"
+                    for c, label, ddl in emit_plan
                 ]
                 row_key = (
                     _fp(
@@ -353,111 +388,14 @@ def _iter_fingerprints(
             yield (row_key, fingerprint)
 
 
-class FingerprintAccumulator:
-    """Streaming, order-independent checksum accumulator for arbitrary row counts.
-
-    Keeps fingerprints in memory until ``DATAFLOW_FINGERPRINT_SPILL_THRESHOLD``
-    is reached, then spills sorted chunks to disk and merges them at the end.
-    This lets the engine compute a strict source checksum for billion-row files
-    without holding every row's fingerprint in RAM.
-    """
-
-    def __init__(self, threshold: int | None = None) -> None:
-        self.threshold = threshold or SPILL_THRESHOLD
-        self.buffer: list[tuple[str, str]] = []
-        self.chunk_files: list[str] = []
-        self.total = 0
-        self._tempdir: tempfile.TemporaryDirectory | None = None
-
-    def add(self, key: str, fingerprint: str) -> None:
-        self.buffer.append((key, fingerprint))
-        self.total += 1
-        if len(self.buffer) >= self.threshold:
-            self._spill()
-
-    def add_many(self, fingerprints: Iterable[tuple[str, str]]) -> None:
-        for key, fingerprint in fingerprints:
-            self.add(key, fingerprint)
-
-    def _spill(self) -> None:
-        if not self.buffer:
-            return
-        self.buffer.sort(key=lambda x: (x[0], x[1]))
-        if self._tempdir is None:
-            self._tempdir = tempfile.TemporaryDirectory(prefix="dataflow_fp_")
-        fd, path = tempfile.mkstemp(dir=self._tempdir.name, suffix=".chk")
-        with os.fdopen(fd, "wb") as f:
-            for key, fp in self.buffer:
-                key_b = key.encode("utf-8")
-                fp_b = fp.encode("utf-8")
-                f.write(struct.pack(">I", len(key_b)))
-                f.write(key_b)
-                f.write(struct.pack(">I", len(fp_b)))
-                f.write(fp_b)
-        self.chunk_files.append(path)
-        self.buffer = []
-
-    def _read_chunk(self, path: str) -> Iterable[tuple[str, str]]:
-        with open(path, "rb") as f:
-            while True:
-                key_len_b = f.read(4)
-                if not key_len_b:
-                    break
-                key_len = struct.unpack(">I", key_len_b)[0]
-                key = f.read(key_len).decode("utf-8")
-                fp_len_b = f.read(4)
-                if not fp_len_b:
-                    break
-                fp_len = struct.unpack(">I", fp_len_b)[0]
-                fp = f.read(fp_len).decode("utf-8")
-                yield (key, fp)
-
-    def _sorted_stream(self) -> Iterable[tuple[str, str]]:
-        if not self.chunk_files:
-            self.buffer.sort(key=lambda x: (x[0], x[1]))
-            yield from self.buffer
-            return
-        if self.buffer:
-            self._spill()
-        streams = [self._read_chunk(p) for p in self.chunk_files]
-        yield from heapq.merge(*streams, key=lambda x: (x[0], x[1]))
-
-    def digest(self) -> str:
-        """Full SHA-256 hex digest (audit §2.8 — never truncate to 64 bits)."""
-        h = hashlib.sha256()
-        for _, fp in self._sorted_stream():
-            h.update(fp.encode("utf-8"))
-        self.close()
-        return h.hexdigest()
-
-    def close(self) -> None:
-        if self._tempdir is not None:
-            self._tempdir.cleanup()
-            self._tempdir = None
-        self.chunk_files = []
-        self.buffer = []
-
-
-def fingerprint_checksum(fingerprints: Iterable[tuple[str, str]]) -> str:
-    """Hash a list/iterable of (row_key, fingerprint) tuples.
-
-    For small inputs the in-memory sort+hash path is used; for large or
-    streaming inputs an ``FingerprintAccumulator`` spills to disk so the
-    checksum stays memory-bounded.
-    """
-    if isinstance(fingerprints, list) and len(fingerprints) <= SPILL_THRESHOLD:
-        return _hash_fingerprints(fingerprints)
-    acc = FingerprintAccumulator()
-    acc.add_many(fingerprints)
-    return acc.digest()
-
-
-def _hash_fingerprints(fingerprints: list[tuple[str, str]]) -> str:
-    fingerprints.sort(key=lambda x: (x[0], x[1]))
-    h = hashlib.sha256()
-    for _, fp in fingerprints:
-        h.update(fp.encode("utf-8"))
-    return h.hexdigest()
+# Accumulating fingerprints into a digest lives in its own module (size budget);
+# re-exported here because this module is the reconciliation surface callers
+# import from.
+from services.fingerprint_accumulator import (  # noqa: E402,F401 — re-export
+    FingerprintAccumulator,
+    fingerprint_checksum,
+    _hash_fingerprints,
+)
 
 
 def canonical_checksum(
@@ -4142,178 +4080,15 @@ def build_reconciliation_proof(
 
 
 
-def _bucket_member_order(
-    idxs: list[int], *, seed: str, bucket_name: str
-) -> list[int]:
-    """Deterministic intra-bucket order (stable across process restarts)."""
-    import hashlib
-
-    return sorted(
-        idxs,
-        key=lambda i: hashlib.sha256(
-            f"{seed}:{bucket_name}:{i}".encode()
-        ).hexdigest(),
-    )
 
 
-def _stratified_sample_indices(
-    records: list[dict[str, Any]],
-    *,
-    stratify_col: str,
-    sample_size: int,
-    seed: str = "",
-) -> list[int]:
-    """Deterministic per-bucket quota sampling for skewed categoricals.
-
-    Rare classes get a guaranteed slot when buckets fit in ``sample_size``.
-    When bucket count exceeds ``sample_size``, prefer the *smallest* buckets
-    (rare classes) — never hash-trim across buckets (that reintroduces the
-    first-N trap stratification exists to prevent).
-
-    Still a **sample** plan — never population proof.
-    """
-    import hashlib
-
-    if sample_size <= 0 or not records or not stratify_col:
-        return list(range(min(max(sample_size, 0), len(records))))
-    buckets: dict[str, list[int]] = {}
-    for i, rec in enumerate(records):
-        if not isinstance(rec, dict):
-            continue
-        raw = rec.get(stratify_col)
-        key = normalize_cell(raw) if raw is not None else ""
-        buckets.setdefault(key or "<null>", []).append(i)
-    names = sorted(buckets.keys())
-    if not names:
-        return list(range(min(sample_size, len(records))))
-
-    n_buckets = len(names)
-
-    # More strata than slots: keep rare (smallest) buckets — 1 row each.
-    if n_buckets > sample_size:
-        ranked = sorted(
-            names,
-            key=lambda name: (
-                len(buckets[name]),
-                hashlib.sha256(f"{seed}:bucket:{name}".encode()).hexdigest(),
-                name,
-            ),
-        )
-        picked: list[int] = []
-        for name in ranked[:sample_size]:
-            scored = _bucket_member_order(
-                buckets[name], seed=seed, bucket_name=name
-            )
-            if scored:
-                picked.append(scored[0])
-        return picked[:sample_size]
-
-    # Proportional quota with floor 1 (always possible when n_buckets <= sample_size).
-    base = sample_size // n_buckets
-    rem = sample_size % n_buckets
-    picked = []
-    for bi, name in enumerate(names):
-        scored = _bucket_member_order(buckets[name], seed=seed, bucket_name=name)
-        take = base + (1 if bi < rem else 0)
-        take = min(max(take, 1), len(scored))
-        picked.extend(scored[:take])
-
-    # Shrink from largest buckets only — never drop a bucket entirely.
-    while len(picked) > sample_size:
-        # Count current picks per bucket
-        membership: dict[str, list[int]] = {n: [] for n in names}
-        for i in picked:
-            rec = records[i] if i < len(records) else {}
-            raw = rec.get(stratify_col) if isinstance(rec, dict) else None
-            key = normalize_cell(raw) if raw is not None else ""
-            membership.setdefault(key or "<null>", []).append(i)
-        # Drop one row from the largest bucket that still has >1
-        candidates = [
-            (len(idxs), name)
-            for name, idxs in membership.items()
-            if len(idxs) > 1
-        ]
-        if not candidates:
-            # Should not happen when n_buckets <= sample_size; fail closed trim.
-            picked = picked[:sample_size]
-            break
-        _, drop_name = max(
-            candidates,
-            key=lambda t: (
-                t[0],
-                hashlib.sha256(f"{seed}:drop:{t[1]}".encode()).hexdigest(),
-            ),
-        )
-        drop_idxs = membership[drop_name]
-        # Drop the last in deterministic bucket order
-        ordered = _bucket_member_order(drop_idxs, seed=seed, bucket_name=drop_name)
-        drop_i = ordered[-1]
-        picked = [i for i in picked if i != drop_i]
-
-    if len(picked) < sample_size:
-        used = set(picked)
-        for i in range(len(records)):
-            if i not in used and isinstance(records[i], dict):
-                picked.append(i)
-                used.add(i)
-            if len(picked) >= sample_size:
-                break
-    return picked[:sample_size]
-
-
-def _auto_stratify_source_column(
-    source_records: list[dict[str, Any]],
-    mappings: list[dict[str, Any]],
-    *,
-    sort_key: str | None,
-    source_sort_key: str | None,
-) -> str | None:
-    """Heuristic stratum: skewed low-cardinality mapped column (not the PK).
-
-    Returns ``None`` when no safe candidate exists — caller falls back to
-    keyed/positional sample. Never claims population coverage.
-    """
-    from collections import Counter
-
-    exclude = {
-        str(sort_key or "").strip().lower(),
-        str(source_sort_key or "").strip().lower(),
-        "id",
-        "_id",
-        "pk",
-        "uuid",
-        "guid",
-    }
-    exclude.discard("")
-    best_col: str | None = None
-    best_key: tuple[float, int, str] | None = None
-    for m in mappings:
-        src_col = str(m.get("source") or "").strip()
-        tgt_col = str(m.get("target") or "").strip()
-        if not src_col:
-            continue
-        if src_col.lower() in exclude or tgt_col.lower() in exclude:
-            continue
-        vals: list[str] = []
-        for r in source_records:
-            raw = r.get(src_col)
-            cell = normalize_cell(raw) if raw is not None else ""
-            vals.append(cell or "<null>")
-        if not vals:
-            continue
-        n_classes = len(set(vals))
-        if not (2 <= n_classes <= 20):
-            continue
-        counts = Counter(vals)
-        skew = max(counts.values()) / len(vals)
-        # Require imbalance so uniform enums don't pretend to stratify.
-        if skew < 0.55:
-            continue
-        key = (skew, n_classes, src_col.lower())
-        if best_key is None or key > best_key:
-            best_key = key
-            best_col = src_col
-    return best_col
+# Sample selection lives in its own module (size budget); re-exported because
+# this module is the reconciliation surface callers import from.
+from services.sample_strategy import (  # noqa: E402,F401 — re-export
+    _auto_stratify_source_column,
+    _bucket_member_order,
+    _stratified_sample_indices,
+)
 
 
 def sample_compare_rows(
@@ -4327,11 +4102,19 @@ def sample_compare_rows(
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
     stratify_by: str | None = None,
+    rows_are_paired: bool = False,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
-    Rows are aligned by a stable key (e.g. primary key) when available, so upserts
-    and out-of-order writes compare correctly. Falls back to sorted index alignment.
+    Rows are aligned by a unique key, so upserts and out-of-order writes compare
+    correctly. Without one the comparison is declined rather than guessed.
+
+    ``rows_are_paired`` is for the caller that can vouch the two collections are
+    the same rows in the same order — the row at index *i* on each side really is
+    the same row. Gate-8 cannot: its source rows are the batch the pass held and
+    its destination rows are the first N of the table by ``ORDER BY 1``, two
+    independent draws. Pairing those by index reports unrelated rows as
+    corruption, which is why it is opt-in and off by default.
 
     When ``dest_db_type`` / ``dest_types`` are provided, both sides are fingerprinted
     through the same write-path bind helpers as MySQL/Postgres/Snowflake writers
@@ -4366,11 +4149,54 @@ def sample_compare_rows(
                 break
 
     target_by_key: dict[str, dict[str, Any]] = {}
+    duplicate_alignment_key = ""
     if sort_key:
         for d in target_dicts:
             key = normalize_cell(d.get(sort_key))
-            if key and key not in target_by_key:
-                target_by_key[key] = d
+            if not key:
+                continue
+            if key in target_by_key:
+                # Two destination rows answer to the same key, so the key does
+                # not identify a row and cannot align one. Keeping the first and
+                # comparing every later row against it reports the difference
+                # between two *different rows* as corruption.
+                duplicate_alignment_key = sort_key
+                break
+            target_by_key[key] = d
+        if not duplicate_alignment_key:
+            seen_source_keys: set[str] = set()
+            for rec in source_records:
+                if not isinstance(rec, dict):
+                    continue
+                key = normalize_cell(
+                    rec.get(source_sort_key) if source_sort_key else None
+                )
+                if not key:
+                    continue
+                if key in seen_source_keys:
+                    duplicate_alignment_key = sort_key
+                    break
+                seen_source_keys.add(key)
+
+    if duplicate_alignment_key:
+        # Nothing here is evidence of a bad write, so nothing here may fail the
+        # transfer. ``_sort_key_for_columns`` falls back to the first mapped
+        # column when no identity column exists, which for an ordinary export —
+        # a region, a status, a date — repeats on almost every row. Declining is
+        # the honest answer: the sample proved nothing, and says so.
+        return {
+            "passed": True,
+            "compared": 0,
+            "mismatches": [],
+            "skipped": True,
+            "alignment": "declined",
+            "reason": (
+                f"No unique identity key for read-back alignment: "
+                f"`{duplicate_alignment_key}` repeats, so it cannot say which "
+                "destination row corresponds to which source row. Map a primary "
+                "key to enable per-row sample compare."
+            ),
+        }
 
     def _fingerprint(raw: Any, *, transform: str | None, tgt_col: str) -> str:
         ddl = (
@@ -4518,9 +4344,32 @@ def sample_compare_rows(
         "content_sha256": hashlib.sha256(seed_canon.encode("utf-8")).hexdigest(),
     }
 
+    if not (sort_key and target_by_key) and not rows_are_paired:
+        # Without a key there is nothing to join on, and the two sides are not
+        # the same draw: the source rows are the batch this pass held, while the
+        # destination read is the first N of the whole table by ``ORDER BY 1``.
+        # Lining those up by index compares unrelated rows and calls the
+        # difference corruption. A sample that cannot be aligned proves nothing,
+        # which is a different statement from the data being wrong.
+        return {
+            "passed": True,
+            "compared": 0,
+            "mismatches": [],
+            "skipped": True,
+            "alignment": "declined",
+            "sample_seed": sample_seed,
+            "reason": (
+                "No identity key to align the read-back sample: source rows and "
+                "the destination read are drawn independently, so position does "
+                "not pair them. Map a primary key to enable per-row compare."
+            ),
+        }
+
     mismatches: list[dict[str, str]] = []
     compared = 0
-    target_fallback = sorted(target_dicts, key=lambda d: _sortable(_row_key(d)))
+    keyed = bool(sort_key and target_by_key)
+    # Only reachable when the caller vouched for pairing; see ``rows_are_paired``.
+    target_paired = list(target_dicts) if not keyed else []
 
     def _result(*, passed: bool) -> dict[str, Any]:
         return {
@@ -4528,17 +4377,22 @@ def sample_compare_rows(
             "compared": compared,
             "mismatches": mismatches,
             "sample_seed": sample_seed,
-            "alignment": "keyed" if (sort_key and target_by_key) else "positional",
+            "alignment": "keyed" if keyed else "paired_by_caller",
         }
 
     for idx, src in enumerate(source_sorted):
-        if sort_key and target_by_key:
+        if keyed:
             key = normalize_cell(src.get(source_sort_key) if source_sort_key else None)
             if not key and sort_key:
                 key = normalize_cell(src.get(sort_key))
             tgt = target_by_key.get(key) if key else None
+            if tgt is None:
+                # This key is not in the destination read-back window. That is a
+                # scope miss, not a missing row, and falling back to the row at
+                # the same index would compare two unrelated rows.
+                continue
         else:
-            tgt = target_fallback[idx] if idx < len(target_fallback) else None
+            tgt = target_paired[idx] if idx < len(target_paired) else None
         if tgt is None:
             continue
 

@@ -209,7 +209,19 @@ export function isGate8IdentityUnproven(report: Gate8Reconciliation): boolean {
   if (report.identity && report.identity.proven === false) return true;
   const alignment = String(report.sample_compare?.alignment || "").toLowerCase();
   if (alignment === "unproven_identity" || alignment === "positional_only") return true;
+  // Declined: the engine refused to pair rows it could not identify. The rows
+  // may be perfect and the sample still proved nothing, so this must read as
+  // unproven rather than as a clean pass.
+  if (alignment === "declined") return true;
   return Boolean(report.sample_compare?.identity_warning);
+}
+
+/** Why a read-back sample was not compared, in the operator's terms. */
+export function gate8SampleDeclinedReason(report: Gate8Reconciliation): string {
+  const alignment = String(report.sample_compare?.alignment || "").toLowerCase();
+  if (alignment !== "declined") return "";
+  return String(report.sample_compare?.reason || "").trim()
+    || "No identity key to align the read-back sample against the source.";
 }
 
 export function classifyGate8Status(
@@ -342,6 +354,7 @@ export function Gate8ProofCard({
   const delta = targetRows - expectedRows;
   const mismatches = report.sample_compare?.mismatches ?? [];
   const sampleSkipped = Boolean(report.sample_compare?.skipped);
+  const declinedReason = gate8SampleDeclinedReason(report);
   const sampleError = String(report.sample_compare?.error || "").trim();
   const alignment = String(report.sample_compare?.alignment || "").toLowerCase();
   const identityWarning = String(
@@ -453,7 +466,15 @@ export function Gate8ProofCard({
         </p>
       )}
 
-      {sampleSkipped && !sampleError && (
+      {declinedReason && !sampleError && (
+        <p className="df2-gate8-proof-message is-warn" role="status">
+          <strong>Per-row sample not compared.</strong> {declinedReason} Row
+          counts and checksums still apply; per-cell fidelity is unproven for
+          this run.
+        </p>
+      )}
+
+      {sampleSkipped && !sampleError && !declinedReason && (
         <p className="df2-gate8-proof-message is-warn" role="status">
           Value read-back was not performed — row counts/checksums alone do not prove
           per-cell fidelity.

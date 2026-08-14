@@ -25,6 +25,21 @@ def _risk_cleared(m: Any) -> bool:
 
 # Offline fallback when apps.api type_system cannot be imported (package-only).
 # Hosted Validate must use is_lossy_coercion / is_precision_collapse_coercion.
+
+def _effective_source_type(source_type: str, transform: str | None) -> str:
+    """The source type an operator-declared zone makes true.
+
+    Falls back to the declared type when the hosted type system is unavailable —
+    this package runs standalone, and guessing here would be worse than leaving
+    the stricter verdict in place.
+    """
+    try:
+        from services.timezone_policy import effective_source_type
+    except ImportError:  # pragma: no cover — standalone package
+        return source_type
+    return effective_source_type(source_type, transform)
+
+
 LOSSY_COERCIONS = {
     ("VARCHAR", "INTEGER"),
     ("VARCHAR", "TIMESTAMP"),
@@ -471,12 +486,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 continue
             target = ColumnSchema(name=m.target, inferred_type=stamped)
         examined += 1
-        pair = (source_col.inferred_type.upper(), target.inferred_type.upper())
+        # A declared source zone is the operator supplying the fact the source
+        # never recorded, so from here the column really does carry an instant.
+        # Judging the type path on the undeclared type would leave the transfer
+        # blocked for a problem the declaration already answered.
+        source_type_declared = _effective_source_type(
+            source_col.inferred_type, getattr(m, "transform", "")
+        )
+        pair = (source_type_declared.upper(), target.inferred_type.upper())
         # Prefer type_system SSOT when available; LOSSY_COERCIONS is offline fallback only.
         if is_lossy_coercion:
             lossy = bool(
                 is_lossy_coercion(
-                    source_col.inferred_type,
+                    source_type_declared,
                     target.inferred_type,
                     dest_db=dest_kind,
                     dest_table_exists=getattr(
@@ -540,7 +562,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             not lossy
             and is_precision_collapse_coercion
             and is_precision_collapse_coercion(
-                source_col.inferred_type,
+                source_type_declared,
                 target.inferred_type,
                 dest_db=str(
                     getattr(getattr(ctx.plan, "destination", None), "db_type", "")
@@ -610,7 +632,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             (
                 is_precision_collapse_coercion
                 and is_precision_collapse_coercion(
-                    source_col.inferred_type,
+                    source_type_declared,
                     target.inferred_type,
                     dest_db=_dest_db,
                     dest_table_exists=_dest_exists,

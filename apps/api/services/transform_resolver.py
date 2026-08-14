@@ -84,6 +84,17 @@ _STRING_TRANSFORMS: frozenset[str] = {
 }
 
 
+def _declares_zone(raw: str) -> bool:
+    """A zone the operator declared for a zoneless source column.
+
+    Carried as a parameterised transform because the zone is data, not a mode:
+    the source never recorded it, so it can only come from the operator.
+    """
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+
+    return str(raw or "").lower().startswith(ASSUME_TIMEZONE_PREFIX)
+
+
 def _type_compatible_transform(target_type: str, raw: str) -> bool:
     """Return True if raw transform is compatible with the target logical type."""
     t = normalize_logical_type(target_type)
@@ -98,9 +109,9 @@ def _type_compatible_transform(target_type: str, raw: str) -> bool:
     if t == "boolean":
         return raw in {"boolean"}
     if t == "datetime":
-        return raw in {"datetime", "date", "timestamp"}
+        return raw in {"datetime", "date", "timestamp"} or _declares_zone(raw)
     if t == "date":
-        return raw in {"date", "datetime", "timestamp"}
+        return raw in {"date", "datetime", "timestamp"} or _declares_zone(raw)
     if t in {"json", "array"}:
         return raw in {"json", "binary", "decimal", "integer", "boolean", "date", "datetime", "uuid"}
     if t == "binary":

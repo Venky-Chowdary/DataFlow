@@ -9791,6 +9791,32 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   white-space: nowrap;
 }
 
+/* A drift finding carries its own remediation, so the row wraps to give the
+   controls space instead of squeezing them past the ellipsis. */
+.df2-sched-history-errors li:has(.df2-sched-history-error-actions) {
+  flex-wrap: wrap;
+  align-items: flex-start;
+}
+
+.df2-sched-history-error-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.df2-sched-history-accepted {
+  color: var(--df2-success-fg, #15803d);
+}
+
+@media (max-width: 720px) {
+  .df2-sched-history-error-actions {
+    margin-left: 0;
+    width: 100%;
+  }
+}
+
 @media (max-width: 720px) {
   .df2-sched-history-row {
     grid-template-columns: 1fr 1fr;

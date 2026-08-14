@@ -799,6 +799,9 @@ def stream_database_transfer(
             logger.warning("source snapshot release failed: %s", exc, exc_info=exc)
 
 
+from .copy_route import _try_copy_fast_path  # noqa: E402 — see module docstring
+
+
 def _stream_database_transfer_impl(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -868,6 +871,24 @@ def _stream_database_transfer_impl(
             f"Sync mode `{effective_sync}` requires primary_key for upsert; "
             "refuse silent insert fallback (set primary_key on the stream contract)"
         )
+
+    fast = _try_copy_fast_path(
+        source=source,
+        destination=destination,
+        mappings=mappings,
+        schema=schema,
+        src_type=src_type,
+        dest_type=dest_type,
+        src_cfg=src_cfg,
+        dest_cfg=dest_cfg,
+        effective_sync=effective_sync,
+        incremental=incremental,
+        source_filter=source_filter,
+        limit=limit,
+        checkpoint=checkpoint,
+    )
+    if fast is not None:
+        return fast
     # Parallel/chunked resume is only safe with idempotent writes.
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
     resume_key_resolved = False
@@ -888,8 +909,9 @@ def _stream_database_transfer_impl(
             write_mode = "upsert"
         else:
             raise ValueError(
-                "Cannot resume a streaming insert without a primary key; "
-                "set primary_key on the stream contract or use an upsert sync mode"
+                "Cannot resume a streaming insert without a primary key. "
+                "Re-run this transfer with Full refresh · Overwrite to reload it "
+                "safely, or set a primary key to make the replay idempotent."
             )
     # Decide up front whether an interrupted batch may be re-sent. Append-only
     # destinations get retries only for failures that prove nothing landed;
@@ -3286,44 +3308,6 @@ def _read_staging_batches(
         release_engine(engine)
 
 
-def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str], int, list[dict]]:
-    """Return columns, schema, row count, and sample rows for preflight."""
-    from .connector_capabilities import resolve_driver_type
-    src_type = resolve_driver_type(source.format or "")
-    src_cfg = resolve_connector_config(source)
-    table = _source_name(source)
-    if not table:
-        raise ValueError("Source table/collection name required for streaming transfer")
-
-    src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
-
-    probe, _ = _unwrap_read(_read_batch(src_type, src_cfg, table, None, 0, CHUNK_SIZE, database=src_db))
-    columns = probe.headers
-    if not columns and probe.total_rows == 0:
-        raise ValueError(f"Source `{table}` has no columns or is empty")
-
-    if src_type in ("s3", "gcs", "adls"):
-        try:
-            from services.object_store_introspect import profile_object_batch
-            profiled = profile_object_batch(columns, probe.rows)
-            schema = profiled.get("schema") or {c: "string" for c in columns}
-        except Exception:
-            schema = {c: "string" for c in columns}
-    elif src_type == "redis":
-        schema = {c: "string" for c in columns}
-    else:
-        probe_meta = getattr(probe, "meta", None) or {}
-        native = probe_meta.get("native_types") or probe_meta.get("schema") or {}
-        if isinstance(native, dict) and native:
-            schema = {c: str(native.get(c) or "string") for c in columns}
-        else:
-            schema = _introspect_table_schema(src_type, src_cfg, table, columns)
-            if not schema:
-                schema = {c: "string" for c in columns}
-    sample_rows = [dict(zip(probe.headers, row)) for row in probe.rows[:100]]
-    return columns, schema, probe.total_rows, sample_rows
-
-
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:
     if source.kind != "database" or destination.kind != "database":
         return False
@@ -3332,3 +3316,8 @@ def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> b
         resolve_driver_type(source.format) in _STREAMING_TYPES
         and resolve_driver_type(destination.format) in _STREAMING_TYPES
     )
+
+
+# Preflight's look-ahead lives in its own module (size budget); re-exported here
+# because callers import it from this module.
+from .source_peek import peek_stream_source  # noqa: E402,F401 — re-export

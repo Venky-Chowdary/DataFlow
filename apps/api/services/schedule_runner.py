@@ -9,6 +9,7 @@ from services.brand_env import getenv_brand
 import socket
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from services.schedule_store import due_schedules
 
@@ -266,6 +267,72 @@ def build_schedule_request(sched, src: dict, dst: dict):
     )
 
 
+def _guard_source_schema_drift(sched: Any, request: Any) -> None:
+    """Refuse a scheduled run whose source changed shape since the last one.
+
+    Raises ``ValueError`` so the caller records it the same way it records a
+    contract refusal — before a row moves. The damaging drift is the kind that
+    would otherwise succeed: a column that keeps its name and changes type loads
+    cleanly and writes wrong values, and nothing downstream reports an error.
+
+    A source that cannot be introspected is left alone. Refusing a nightly load
+    because a probe timed out is the false alarm that gets the check switched
+    off, and an unread schema is not evidence of a change.
+    """
+    from services.source_schema_memory import evaluate_source_drift
+
+    previous = dict(getattr(sched, "source_schema", None) or {})
+    try:
+        from src.transfer.endpoint_intelligence import introspect_endpoint
+
+        info = introspect_endpoint(request.source) or {}
+    except Exception as exc:
+        logger.info(
+            "Schedule %s source schema probe unavailable: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+        return
+    current = dict(info.get("schema") or {})
+    if not current:
+        return
+
+    verdict = evaluate_source_drift(
+        previous_schema=previous,
+        current_schema=current,
+        current_columns=list(info.get("columns") or current.keys()),
+        mappings=list(getattr(request, "mappings", None) or []),
+        schema_policy=str(getattr(sched, "schema_policy", "") or "manual_review"),
+        dest_db=str(getattr(request.destination, "format", "") or ""),
+    )
+    if verdict.blocks:
+        raise ValueError(
+            f"{verdict.summary} Review the mapping and re-approve, or set "
+            "schema_policy to propagate the change deliberately."
+        )
+    _remember_source_schema(sched, current, verdict.fingerprint)
+
+
+def _remember_source_schema(sched: Any, schema: dict[str, str], fingerprint: str) -> None:
+    """Record the shape this run read, so the next one has something to compare."""
+    if not fingerprint or fingerprint == getattr(sched, "source_schema_fingerprint", ""):
+        return
+    try:
+        from services.schedule_store import update_schedule
+
+        update_schedule(
+            str(getattr(sched, "id", "")),
+            {
+                "source_schema": dict(schema),
+                "source_schema_fingerprint": fingerprint,
+                "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception as exc:
+        # Losing the baseline costs a later comparison, never this run.
+        logger.info("Schedule source schema not recorded: %s", exc)
+
+
 def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job_doc: dict | None) -> dict:
     doc = job_doc or {}
     finished = datetime.now(timezone.utc)
@@ -484,6 +551,7 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
 
     try:
         request = build_schedule_request(sched, src, dst)
+        _guard_source_schema_drift(sched, request)
     except ValueError as exc:
         logger.error("Schedule %s blocked by contract policy: %s", schedule_id, exc)
         mark_schedule_run(

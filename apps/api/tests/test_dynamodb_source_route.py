@@ -296,6 +296,28 @@ def test_no_scan_at_all_does_not_prove_emptiness():
     assert "amount" in (result.error or "")
 
 
+def test_probe_early_returns_report_every_field():
+    """The early exits are the paths a mocked probe never exercises.
+
+    Both leave without scanning, so neither may report emptiness as proven, and
+    both have to construct the full result — a short one raises TypeError where
+    a fail-closed WriteResult was intended.
+    """
+    from unittest.mock import MagicMock
+
+    from connectors.dynamodb_writer import _fetch_dynamo_physical_types
+
+    no_columns = _fetch_dynamo_physical_types(MagicMock(), "orders", [])
+    assert no_columns.scanned is False
+    assert no_columns.items_seen == 0
+
+    refused = MagicMock()
+    refused.describe_table.side_effect = RuntimeError("AccessDenied")
+    failed = _fetch_dynamo_physical_types(refused, "orders", ["amount"])
+    assert failed.scanned is False
+    assert failed.sample_ok is False
+
+
 def test_a_failed_scan_leaves_emptiness_unproven():
     """Scan failure is unknown, not empty, so the guard must still refuse."""
     from unittest.mock import MagicMock, patch

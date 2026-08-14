@@ -209,6 +209,7 @@ def test_sample_compare_rows_detects_mismatch():
         [{"id": "1", "name": "Alice"}],
         [{"id": "2", "name": "Alice"}],
         [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}],
+        rows_are_paired=True,
     )
     assert not result["passed"]
     assert result["mismatches"]

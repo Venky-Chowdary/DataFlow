@@ -1092,7 +1092,18 @@ export async function retryJob(
   throw lastError instanceof Error ? lastError : new Error("Retry failed");
 }
 
-export async function resumeJob(jobId: string): Promise<{ job_id: string; status: string }> {
+/**
+ * Resume a job. A full refresh has nothing to resume *into* — it replaces the
+ * destination — so the server re-runs it from the beginning and says so with
+ * `restarted`. Dropping that made the UI promise a checkpoint continuation it
+ * had not performed.
+ */
+export async function resumeJob(jobId: string): Promise<{
+  job_id: string;
+  status: string;
+  restarted?: boolean;
+  message?: string;
+}> {
   const urls = [
     `${API_BASE}/connectors/jobs/${jobId}/resume`,
     `${API_BASE}/jobs/${jobId}/resume`,
@@ -1105,7 +1116,12 @@ export async function resumeJob(jobId: string): Promise<{ job_id: string; status
       if (!res.ok) {
         throw new Error(typeof data.detail === "string" ? data.detail : "Resume failed");
       }
-      return data as { job_id: string; status: string };
+      return data as {
+        job_id: string;
+        status: string;
+        restarted?: boolean;
+        message?: string;
+      };
     } catch (error) {
       lastError = error;
     }
@@ -1457,6 +1473,28 @@ export async function fetchScheduleHistory(
   const res = await apiFetch(`${API_BASE}/schedules/${id}/history?limit=${limit}`);
   if (!res.ok) throw new Error("Failed to fetch schedule history");
   return res.json();
+}
+
+/**
+ * Record the source's current shape as this schedule's baseline.
+ *
+ * The operator asserting that a drift finding has been reviewed and the mapping
+ * still holds. Deliberately a separate action rather than something a retry
+ * does implicitly.
+ */
+export async function acceptScheduleSourceSchema(
+  id: string,
+): Promise<{ success: boolean; message?: string; columns?: number }> {
+  const res = await apiFetch(`${API_BASE}/schedules/${id}/accept-source-schema`, {
+    method: "POST",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof data?.detail === "string" ? data.detail : "Could not update the baseline",
+    );
+  }
+  return data as { success: boolean; message?: string; columns?: number };
 }
 
 export async function createSchedule(

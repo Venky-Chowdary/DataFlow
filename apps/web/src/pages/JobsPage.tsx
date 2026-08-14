@@ -1,3 +1,4 @@
+import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "../components/DtIcon";
@@ -423,8 +424,18 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     if (!selectedId || !liveJob?.checkpoint) return;
     setResuming(true);
     try {
-      await resumeJob(selectedId);
-      toast({ title: "Resume started", message: `Resuming from batch ${liveJob.checkpoint.chunk_index ?? 0} (${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows already committed).`, tone: "success" });
+      const res = await resumeJob(selectedId);
+      // Full refresh restarts rather than continuing; promising a batch offset
+      // it will not use is the kind of detail that erodes trust in the report.
+      toast({
+        title: res.restarted ? "Transfer restarted" : "Resume started",
+        message:
+          res.message
+          || (res.restarted
+            ? "Full refresh re-run from the beginning — it replaces the destination."
+            : `Resuming from batch ${liveJob.checkpoint.chunk_index ?? 0} (${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows already committed).`),
+        tone: "success",
+      });
       onRefresh?.();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Resume failed";
@@ -1667,7 +1678,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               </div>
             )}
             {typeof destSummary.load_method === "string" && destSummary.load_method && (
-              <div><dt>Load method</dt><dd>{String(destSummary.load_method)}</dd></div>
+              <div>
+                <dt>Load method</dt>
+                <dd title={loadMethodDescription(String(destSummary.load_method))}>
+                  {loadMethodLabel(String(destSummary.load_method))}
+                </dd>
+              </div>
             )}
             {typeof destSummary.chunk_policy === "object" && destSummary.chunk_policy !== null ? (
               <div>
