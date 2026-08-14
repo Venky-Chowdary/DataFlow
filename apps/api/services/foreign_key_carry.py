@@ -131,6 +131,41 @@ def _describe(fk: ForeignKey) -> str:
     return f"{detail} {suffix}".strip()
 
 
+def _map_lookup(maps: dict[str, dict[str, str]] | None, table: str) -> dict[str, str]:
+    """Case-insensitive table → column map. Missing table means identity."""
+    if not maps or not table:
+        return {}
+    if table in maps:
+        return maps[table]
+    lower = table.lower()
+    for key, value in maps.items():
+        if key.lower() == lower:
+            return value
+    return {}
+
+
+def _alias(name: str, cmap: dict[str, str], dest_cols_lower: dict[str, str]) -> str | None:
+    """Source column → destination column.
+
+    An empty mapping document is identity (the load wrote source names). An
+    explicit map that omits the column is a refusal, unless the destination
+    column list still contains that name — the operator kept it un-renamed.
+    """
+    if not name:
+        return None
+    if name in cmap:
+        return cmap[name]
+    lower = name.lower()
+    for key, value in cmap.items():
+        if key.lower() == lower:
+            return value
+    if dest_cols_lower:
+        return dest_cols_lower.get(lower)
+    if not cmap:
+        return name
+    return None
+
+
 def _constraint_name(dest_table: str, fk: ForeignKey, index: int) -> str:
     """Derive the destination constraint name from the destination table.
 
@@ -192,10 +227,13 @@ def plan_foreign_keys(
     column_map: dict[str, str] | None = None,
     table_map: dict[str, str] | None = None,
     dest_existing_tables: set[str] | None = None,
+    referenced_column_maps: dict[str, dict[str, str]] | None = None,
 ) -> ForeignKeyPlan:
     """Plan the destination constraints for one child table.
 
     ``column_map`` maps source column → destination column for this table;
+    ``referenced_column_maps`` maps each source table → its column map, so a
+    renamed parent key is referenced under the name the load actually wrote.
     ``table_map`` maps source table → destination table for the tables this job
     moves. ``dest_existing_tables`` are the tables already present on the
     destination (lower-cased), used when the parent is not part of the job.
@@ -266,7 +304,7 @@ def plan_foreign_keys(
         child_cols: list[str] = []
         missing: list[str] = []
         for col in fk.columns:
-            mapped = cmap.get(col) or dest_cols_lower.get(col.lower())
+            mapped = _alias(col, cmap, dest_cols_lower)
             if mapped:
                 child_cols.append(mapped)
             else:
@@ -327,7 +365,34 @@ def plan_foreign_keys(
                 )
                 continue
 
-        if not fk.referenced_columns or len(fk.referenced_columns) != len(child_cols):
+        parent_cmap = _map_lookup(referenced_column_maps, fk.referenced_table)
+        ref_cols: list[str] = []
+        missing_ref: list[str] = []
+        for col in fk.referenced_columns:
+            mapped = _alias(col, parent_cmap, {})
+            if mapped:
+                ref_cols.append(mapped)
+            else:
+                missing_ref.append(col)
+        if missing_ref:
+            plan.decisions.append(
+                ForeignKeyDecision(
+                    name=fk.name,
+                    status="unsupported",
+                    reason=(
+                        "Referenced column(s) "
+                        + ", ".join(missing_ref)
+                        + " were remapped off the parent, so the reference cannot "
+                        "be reproduced."
+                    ),
+                    source_detail=detail,
+                    dest_table=dest_table,
+                    referenced_table=ref_dest,
+                )
+            )
+            continue
+
+        if not ref_cols or len(ref_cols) != len(child_cols):
             plan.decisions.append(
                 ForeignKeyDecision(
                     name=fk.name,
@@ -363,7 +428,7 @@ def plan_foreign_keys(
             f"ADD CONSTRAINT {_quote(dial, name)} FOREIGN KEY "
             f"({', '.join(_quote(dial, c) for c in child_cols)}) "
             f"REFERENCES {_qualified(dial, dest_schema, ref_dest)} "
-            f"({', '.join(_quote(dial, c) for c in fk.referenced_columns)}){clause}"
+            f"({', '.join(_quote(dial, c) for c in ref_cols)}){clause}"
         )
         plan.statements.append(statement)
         plan.decisions.append(
@@ -379,7 +444,7 @@ def plan_foreign_keys(
                 dest_table=dest_table,
                 referenced_table=ref_dest,
                 columns=tuple(child_cols),
-                referenced_columns=tuple(fk.referenced_columns),
+                referenced_columns=tuple(ref_cols),
             )
         )
     return plan
@@ -390,16 +455,39 @@ def _is_violation(error: str) -> bool:
 
     Distinguishing this from "the engine cannot" is the whole value of adding
     constraints after the load: one is a data defect the operator must see, the
-    other is a capability statement about the destination.
+    other is a capability statement about the destination. Missing indexes
+    (MySQL 1215) and missing parents (42P01) are capability/order defects, not
+    orphans.
     """
     text = error.lower()
     markers = (
         "violat",  # PG 23503 / Oracle ORA-02298 wording
         "foreign key constraint fails",  # MySQL 1452
+        "cannot add or update a child row",  # MariaDB 1452 wording
         "conflicted with the foreign key",  # SQL Server 547
         "ora-02298",  # parent keys not found
         "ora-02291",
         "1452",
+        "23503",
+    )
+    return any(m in text for m in markers)
+
+
+def _is_already_present(error: str) -> bool:
+    """Has this constraint already been applied (resume, nested single-table carry)?
+
+    The ALTER is idempotent: a duplicate-object rejection is not a failure, it
+    is an invitation to re-read the destination catalog and certify.
+    """
+    text = error.lower()
+    markers = (
+        "already exists",
+        "duplicate foreign key",
+        "duplicate object",
+        "duplicate constraint",
+        "there is already an object named",
+        "42710",  # PostgreSQL duplicate_object
+        "1826",  # MySQL duplicate foreign key constraint name
     )
     return any(m in text for m in markers)
 
@@ -423,6 +511,9 @@ def apply_foreign_keys(
             execute(decision.dest_ddl)
         except Exception as exc:  # noqa: BLE001 — the failure is the finding
             message = f"{type(exc).__name__}: {exc}"
+            if _is_already_present(message):
+                out.append(decision)
+                continue
             violation = _is_violation(message)
             out.append(
                 ForeignKeyDecision(

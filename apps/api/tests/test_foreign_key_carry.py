@@ -290,6 +290,47 @@ def test_constraint_name_is_derived_from_the_destination_not_the_source():
     assert MEASURED["items"][0]["name"] in decision.source_detail
 
 
+def test_empty_mapping_document_is_identity_not_unmapped():
+    """Create-new with no Map stamps still wrote source column names."""
+    plan = _plan(dest_columns=[], column_map={})
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert '("customer_id")' in decision.dest_ddl
+    assert '("id")' in decision.dest_ddl
+
+
+def test_renamed_parent_key_is_referenced_under_the_destination_name():
+    plan = _plan(
+        referenced_column_maps={"customers": {"id": "customer_pk"}},
+    )
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert '("customer_pk")' in decision.dest_ddl
+    assert decision.referenced_columns == ("customer_pk",)
+
+
+def test_parent_key_dropped_from_the_parent_map_is_refused():
+    plan = _plan(
+        referenced_column_maps={"customers": {"name": "name"}},
+    )
+    decision = _only(plan)
+    assert decision.status == "unsupported"
+    assert "id" in decision.reason
+    assert plan.statements == []
+
+
+def test_duplicate_alter_stays_planned_so_the_catalog_can_certify():
+    """Resume and nested single-table carry re-issue the same ALTER."""
+    plan = _plan()
+
+    def execute(_sql: str) -> None:
+        raise RuntimeError('constraint "fk_orders_customer_id" already exists')
+
+    settled = apply_foreign_keys(plan, execute)
+    assert settled[0].status == "planned"
+    assert settled[0].integrity_violation is False
+
+
 def test_a_name_too_long_for_oracle_is_shortened_without_colliding():
     long_col = "customer_reference_identifier_column"
     plan = plan_foreign_keys(

@@ -43,7 +43,9 @@ def measure_source_foreign_keys(
     notices.
     """
     key = (dialect or "").strip().lower()
-    schema = str(cfg.get("schema") or cfg.get("database") or "")
+    from services.dialect_profiles import catalog_namespace
+
+    schema = catalog_namespace(key, cfg)
     if key not in SUPPORTED_DIALECTS:
         return {
             table: ForeignKeys(
@@ -98,13 +100,16 @@ def _destination_tables(engine: Any, dialect: str, schema: str) -> set[str] | No
     """List destination tables, or ``None`` when the catalog cannot be read.
 
     ``None`` matters: "I could not list the destination" must not be planned as
-    "the referenced parent is missing".
+    "the referenced parent is missing". SQLite has no schema layer — a file
+    path must not be handed to the inspector as a namespace.
     """
     try:
         import sqlalchemy as sa
 
+        key = (dialect or "").strip().lower()
+        ns = None if key in {"sqlite", "duckdb"} else (schema or None)
         inspector = sa.inspect(engine)
-        return {t.lower() for t in inspector.get_table_names(schema=schema or None)}
+        return {t.lower() for t in inspector.get_table_names(schema=ns)}
     except Exception as exc:  # noqa: BLE001 — unreadable catalog is a state
         logger.debug("destination table list failed on %s: %s", dialect, exc)
         return None
@@ -126,6 +131,10 @@ def carry_foreign_keys(
     certificate, the proof bundle and the operator view all read.
     """
     from connectors.generic_sql import _engine
+    from services.dialect_profiles import catalog_namespace, schema_from_cfg
+
+    qual_schema = schema_from_cfg(dest_dialect, dest_cfg, schema=dest_schema or None)
+    catalog_ns = catalog_namespace(dest_dialect, dest_cfg, schema=dest_schema or None)
 
     decisions: list[ForeignKeyDecision] = []
     try:
@@ -147,18 +156,19 @@ def carry_foreign_keys(
             for table in source_keys
         ]
 
-    known = _destination_tables(engine, dest_dialect, dest_schema)
+    known = _destination_tables(engine, dest_dialect, catalog_ns)
     for source_table, keys in source_keys.items():
         dest_table = table_map.get(source_table, source_table)
         plan = plan_foreign_keys(
             source_foreign_keys=keys.to_dict(),
             dest_dialect=dest_dialect,
-            dest_schema=dest_schema,
+            dest_schema=qual_schema,
             dest_table=dest_table,
             dest_columns=dest_columns.get(source_table, []),
             column_map=column_maps.get(source_table, {}),
             table_map=table_map,
             dest_existing_tables=known,
+            referenced_column_maps=column_maps,
         )
         if plan.statements:
             def execute(sql: str) -> None:
@@ -173,7 +183,7 @@ def carry_foreign_keys(
         if any(d.status == "planned" for d in settled):
             with engine.connect() as conn:
                 dest_keys = probe_foreign_keys(
-                    dest_dialect, conn, dest_schema, dest_table
+                    dest_dialect, conn, catalog_ns, dest_table
                 )
             settled = verify_foreign_keys(settled, dest_keys)
         decisions.extend(settled)
