@@ -5307,7 +5307,8 @@ def test_iceberg_mor_position_and_equality_overlapping_row_subtracts_once(
     assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
 
 
-def test_iceberg_mor_deletion_vector_is_unmeasured(tmp_path: Path):
+def test_iceberg_mor_deletion_vector_missing_offset_is_unmeasured(tmp_path: Path):
+    """Placeholder puffin without content_offset stays fail-closed."""
     from services.dest_precount import destination_row_count
 
     warehouse, cfg = _write_iceberg_orders(tmp_path, [["1", "a"], ["2", "b"]])
@@ -5319,6 +5320,213 @@ def test_iceberg_mor_deletion_vector_is_unmeasured(tmp_path: Path):
         [{"path": "data/deletes.puffin", "content": 3, "sequence-number": 2}],
     )
     assert destination_row_count("iceberg", cfg, schema="", table_name="orders") is None
+
+
+def _stamp_iceberg_deletion_vector(
+    warehouse: Path,
+    meta_path: Path,
+    positions: set[int],
+    *,
+    extra: dict | None = None,
+    corrupt: bool = False,
+) -> dict:
+    from connectors.iceberg_deletion_vector import write_puffin_deletion_vector
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    rel = _iceberg_data_rel(meta)
+    puffin = warehouse / "orders" / "data" / "deletes.puffin"
+    offset, size = write_puffin_deletion_vector(
+        puffin, positions, referenced_data_file=rel
+    )
+    if corrupt:
+        raw = bytearray(puffin.read_bytes())
+        raw[offset + 10] ^= 0xFF
+        puffin.write_bytes(raw)
+    ref = {
+        "path": "data/deletes.puffin",
+        "content": 3,
+        "file-format": "puffin",
+        "sequence-number": 2,
+        "content_offset": offset,
+        "content_size_in_bytes": size,
+        "referenced_data_file": rel,
+        "record_count": len(positions),
+    }
+    if extra:
+        ref.update(extra)
+    return _stamp_iceberg_delete_files(meta_path, [ref])
+
+
+def test_iceberg_mor_deletion_vector_count_is_unique_pos_not_record_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """V3 DV of pos 1 on 3 rows is dest=2. Bitmap cardinality is not dest."""
+    from services.dest_precount import destination_key_list, destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    _stamp_iceberg_deletion_vector(warehouse, meta_path, {1})
+
+    def _no_project(*_a, **_k):
+        raise AssertionError("position-only DV COUNT must not project data pages")
+
+    monkeypatch.setattr(
+        "services.dest_precount._project_iceberg_local", _no_project
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 2
+    monkeypatch.undo()
+    listed = destination_key_list(
+        "iceberg", cfg, schema="", table_name="orders", key_columns=["id"]
+    )
+    assert listed is not None
+    assert {str(t[0]) for t in listed} == {"1", "3"}
+
+
+def test_iceberg_mor_deletion_vector_out_of_range_pos_is_noop(tmp_path: Path):
+    from services.dest_precount import destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    _stamp_iceberg_deletion_vector(warehouse, meta_path, {99})
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+
+
+def test_iceberg_mor_deletion_vector_crc_mismatch_is_unmeasured(tmp_path: Path):
+    from services.dest_precount import destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(tmp_path, [["1", "a"], ["2", "b"]])
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    _stamp_iceberg_deletion_vector(warehouse, meta_path, {1}, corrupt=True)
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") is None
+
+
+def test_iceberg_mor_deletion_vector_cardinality_mismatch_is_unmeasured(
+    tmp_path: Path,
+):
+    from services.dest_precount import destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(tmp_path, [["1", "a"], ["2", "b"]])
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    _stamp_iceberg_deletion_vector(
+        warehouse, meta_path, {1}, extra={"record_count": 99}
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") is None
+
+
+def test_iceberg_mor_two_deletion_vectors_same_file_is_unmeasured(tmp_path: Path):
+    from connectors.iceberg_deletion_vector import write_puffin_deletion_vector
+    from services.dest_precount import destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    rel = _iceberg_data_rel(meta)
+    refs = []
+    for name, positions in (("a.puffin", {1}), ("b.puffin", {2})):
+        path = warehouse / "orders" / "data" / name
+        offset, size = write_puffin_deletion_vector(
+            path, positions, referenced_data_file=rel
+        )
+        refs.append(
+            {
+                "path": f"data/{name}",
+                "content": 3,
+                "file-format": "puffin",
+                "sequence-number": 2,
+                "content_offset": offset,
+                "content_size_in_bytes": size,
+                "referenced_data_file": rel,
+                "record_count": len(positions),
+            }
+        )
+    _stamp_iceberg_delete_files(meta_path, refs)
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") is None
+
+
+def test_iceberg_mor_deletion_vector_and_equality_overlapping_subtracts_once(
+    tmp_path: Path,
+):
+    from services.dest_precount import destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    rel = _iceberg_data_rel(meta)
+    from connectors.iceberg_deletion_vector import write_puffin_deletion_vector
+
+    puffin = warehouse / "orders" / "data" / "deletes.puffin"
+    offset, size = write_puffin_deletion_vector(
+        puffin, {3}, referenced_data_file=rel
+    )
+    eq_path = warehouse / "orders" / "data" / "eq-deletes.parquet"
+    _write_iceberg_delete_parquet(eq_path, {"id": ["99"]})
+    _stamp_iceberg_delete_files(
+        meta_path,
+        [
+            {
+                "path": "data/deletes.puffin",
+                "content": 3,
+                "file-format": "puffin",
+                "sequence-number": 2,
+                "content_offset": offset,
+                "content_size_in_bytes": size,
+                "referenced_data_file": rel,
+                "record_count": 1,
+            },
+            {
+                "path": "data/eq-deletes.parquet",
+                "content": 2,
+                "sequence-number": 2,
+                "equality-ids": [1],
+            },
+        ],
+        data_seq=1,
+    )
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+
+
+def test_iceberg_mor_leftover_merge_sees_surviving_keys_after_deletion_vector(
+    tmp_path: Path,
+):
+    """MoR-deleted dest key 99 via v3 DV is not a leftover."""
+    from services.dest_precount import destination_keyset_census, destination_row_count
+
+    warehouse, cfg = _write_iceberg_orders(
+        tmp_path, [["1", "a"], ["2", "b"], ["3", "c"], ["99", "ghost"]]
+    )
+    meta_path = _iceberg_latest_meta_path(warehouse)
+    _stamp_iceberg_deletion_vector(warehouse, meta_path, {3})
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+    census = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+    )
+    assert census is not None
+    assert census["dest_count"] == 3
+    assert census[EXTRA_KEYS_KEY] == 0
+    leftover = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[("1",), ("2",), ("3",)],
+        complete_snapshot=True,
+    )
+    assert leftover == 0
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
 
 
 def test_iceberg_mor_leftover_merge_sees_surviving_keys_not_deleted_row(
@@ -5608,6 +5816,14 @@ def _fake_iceberg_inspect_mor(
                 return _Col([r.get("file_format", "PARQUET") for r in delete_rows])
             if name == "equality_ids":
                 return _Col([r.get("equality_ids") for r in delete_rows])
+            if name in {
+                "content_offset",
+                "content_size_in_bytes",
+                "referenced_data_file",
+                "record_count",
+            }:
+                if any(name in r for r in delete_rows):
+                    return _Col([r.get(name) for r in delete_rows])
             raise KeyError(name)
 
     class _DataFiles:
@@ -5834,6 +6050,136 @@ def test_iceberg_catalog_mor_position_delete_object_store_range_get(
     assert destination_row_count(
         "iceberg", cfg, schema="default", table_name="orders"
     ) == 2
+
+
+def test_iceberg_catalog_mor_deletion_vector_when_inspect_has_offset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from connectors.iceberg_deletion_vector import write_puffin_deletion_vector
+    from services.dest_precount import destination_row_count
+
+    data_path = tmp_path / "part-0.parquet"
+    puffin_path = tmp_path / "deletes.puffin"
+    _write_iceberg_delete_parquet(
+        data_path, {"id": ["1", "2", "3"], "v": ["a", "b", "c"]}
+    )
+    offset, size = write_puffin_deletion_vector(
+        puffin_path, {1}, referenced_data_file=str(data_path)
+    )
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_mor(
+            [str(data_path)],
+            [
+                {
+                    "file_path": str(puffin_path),
+                    "content": 3,
+                    "file_format": "PUFFIN",
+                    "content_offset": offset,
+                    "content_size_in_bytes": size,
+                    "referenced_data_file": str(data_path),
+                    "record_count": 1,
+                }
+            ],
+        ),
+    )
+    cfg = _iceberg_sql_cfg(str(tmp_path), f"sqlite:///{tmp_path / 'catalog.db'}")
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="orders"
+    ) == 2
+
+
+def test_iceberg_catalog_mor_deletion_vector_object_store_range_get(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Remote DV COUNT Range-GETs the puffin blob, never unsized GET of the file."""
+    from connectors.iceberg_deletion_vector import write_puffin_deletion_vector
+    from services.dest_precount import destination_row_count
+    from services.object_streaming import RangeGetSource
+
+    data_path = tmp_path / "part-0.parquet"
+    puffin_path = tmp_path / "deletes.puffin"
+    data_uri = "s3://lake/wh/ns/orders/data/part-0.parquet"
+    del_uri = "s3://lake/wh/ns/orders/data/deletes.puffin"
+    _write_iceberg_delete_parquet(
+        data_path, {"id": ["1", "2", "3"], "v": ["a", "b", "c"]}
+    )
+    offset, size = write_puffin_deletion_vector(
+        puffin_path, {1}, referenced_data_file=data_uri
+    )
+    data_bytes = data_path.read_bytes()
+    puffin_bytes = puffin_path.read_bytes()
+    bodies = {
+        "wh/ns/orders/data/part-0.parquet": data_bytes,
+        "wh/ns/orders/data/deletes.puffin": puffin_bytes,
+    }
+    range_gets: list[tuple[str, int, int]] = []
+
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_mor(
+            [data_uri],
+            [
+                {
+                    "file_path": del_uri,
+                    "content": 3,
+                    "file_format": "PUFFIN",
+                    "content_offset": offset,
+                    "content_size_in_bytes": size,
+                    "referenced_data_file": data_uri,
+                    "record_count": 1,
+                }
+            ],
+        ),
+    )
+
+    def _open_seekable(kind: str, store_cfg: dict, bucket: str, key: str):
+        assert kind == "s3" and bucket == "lake"
+        content = bodies.get(key)
+        if content is None:
+            return False
+        src = RangeGetSource(len(content), lambda start, n: content[start : start + n])
+        return src, src.close
+
+    def _open_binary(kind: str, store_cfg: dict, bucket: str, key: str):
+        raise AssertionError(f"deletion-vector must Range-GET, not GET {key}")
+
+    def _range_get(kind: str, store_cfg: dict, bucket: str, key: str, start: int, length: int):
+        assert kind == "s3" and bucket == "lake"
+        content = bodies[key]
+        range_gets.append((key, start, length))
+        return content[start : start + length]
+
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_seekable", _open_seekable
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_binary", _open_binary
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.range_get_object_bytes", _range_get
+    )
+    cfg = {
+        "type": "iceberg",
+        "connection_string": f"sqlite:///{tmp_path / 'catalog.db'}",
+        "warehouse": "s3://lake/wh",
+        "table": "orders",
+        "schema": "default",
+        "username": "AKIA",
+        "password": "secret",
+        "host": "us-east-1",
+        "extra": {
+            "s3.endpoint": "http://127.0.0.1:9000",
+            "s3.path-style-access": True,
+            "s3.access-key-id": "AKIA",
+            "s3.secret-access-key": "secret",
+            "s3.region": "us-east-1",
+        },
+    }
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="orders"
+    ) == 2
+    assert range_gets == [("wh/ns/orders/data/deletes.puffin", offset, size)]
 
 
 def test_iceberg_catalog_object_store_count_is_range_footer_not_scan(

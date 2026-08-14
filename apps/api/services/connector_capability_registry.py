@@ -803,8 +803,9 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
-        # Filesystem + catalog path today is Copy-on-Write rewrite (not MoR /
-        # deletion-vector). MoR is Planned — do not claim Iceberg V3 DV yet.
+        # Writes stay Copy-on-Write. Dest-engine COUNT/leftover listing
+        # apply v2 position/equality and v3 deletion-vector-v1 when the
+        # puffin blob is readable. Do not claim MoR writes.
         "write_strategy": "copy-on-write",
         "supports_merge_on_read": False,
         "supports_lsn_guard": True,
@@ -812,7 +813,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "common_issues": [
             "Schema evolution is supported but should be declared explicitly.",
-            "Upserts/deletes rewrite data files (copy-on-write); merge-on-read / deletion vectors are Planned.",
+            "Upserts/deletes rewrite data files (copy-on-write). Dest COUNT applies v2 MoR and v3 deletion vectors; MoR writes stay Planned.",
         ],
         "recommended_batch_size": 10000,
     },

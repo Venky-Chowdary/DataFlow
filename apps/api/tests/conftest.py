@@ -246,7 +246,6 @@ def pytest_collection_modifyitems(config, items):
                 token in nid
                 for token in (
                     "cdc_postgres",
-                    "postgresql_cdc",
                     "cross_schema_edge_types",
                     "csv_to_postgres_upsert",
                     "[pgvector]",

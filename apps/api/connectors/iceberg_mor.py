@@ -12,7 +12,12 @@ is a lie for overlapping position deletes and for equality deletes
   (AND). Null matches null. Applies when ``data_seq < delete_seq``
   (strictly less — a row inserted in the same snapshot is not a phantom
   delete). Missing sequence numbers on equality deletes → unmeasured.
-* **Deletion vectors (content=3 / puffin):** Planned / unmeasured.
+* **Deletion vectors (content=3 / puffin):** Iceberg v3
+  ``deletion-vector-v1`` roaring bitmap at ``content_offset`` +
+  ``content_size_in_bytes``. Same population as position deletes
+  (unique in-range pos; ``data_seq <= delete_seq``). At most one DV
+  per data file. Missing offset/size, CRC mismatch, cardinality
+  disagreement, or a second DV for the same file → unmeasured.
 
 Path matching: exact, URI suffix on the snapshot relative path, or unique
 basename. Ambiguous basename is unmeasured. A missing delete file is
@@ -26,6 +31,14 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
+
+from connectors.iceberg_deletion_vector import (
+    IcebergDeletionVectorError,
+    deletion_vector_byte_range,
+    read_deletion_vector,
+    record_count_from_ref,
+    referenced_data_file_from_ref,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +148,7 @@ def _load_mor_plan(
     rels = [rel for rel, _path in data_files]
     plan = _MorPlan(data_seq=data_seq)
     field_names = _schema_field_names(meta)
+    dv_files: set[str] = set()
     for ref in refs:
         if not isinstance(ref, dict):
             raise IcebergMorUnmeasured("delete-files entry is not an object")
@@ -143,17 +157,32 @@ def _load_mor_plan(
         ).strip()
         if not raw_path:
             raise IcebergMorUnmeasured("delete-files entry missing path")
-        if _is_deletion_vector(ref, raw_path):
-            raise IcebergMorUnmeasured("deletion vector / puffin unmeasured")
+        content = _content_code(ref)
+        is_dv = content == CONTENT_DELETION_VECTOR or _is_deletion_vector(ref, raw_path)
+        if is_dv and content in {CONTENT_POSITION, CONTENT_EQUALITY}:
+            raise IcebergMorUnmeasured("delete content/format conflict")
         resolved = _resolve_snapshot_file(table_dir, raw_path)
         if resolved is None:
             raise IcebergMorUnmeasured(f"delete file missing: {raw_path}")
-        content = _content_code(ref)
         seq = _optional_int(
             ref.get("sequence-number")
             or ref.get("sequence_number")
             or ref.get("data-sequence-number")
         )
+        if is_dv:
+            loaded = _load_deletion_vector(ref, resolved, rels)
+            if loaded is None:
+                continue
+            rel, positions = loaded
+            if rel in dv_files:
+                raise IcebergMorUnmeasured(
+                    f"two deletion vectors for data file {rel!r}"
+                )
+            dv_files.add(rel)
+            plan.position.append(
+                _PositionDeleteFile(seq, tuple((rel, pos) for pos in positions))
+            )
+            continue
         names = _parquet_column_names(resolved)
         if names is None:
             raise IcebergMorUnmeasured(f"delete file unreadable: {raw_path}")
@@ -161,7 +190,7 @@ def _load_mor_plan(
         if content is None:
             content = inferred
         if content == CONTENT_DELETION_VECTOR:
-            raise IcebergMorUnmeasured("deletion vector content=3")
+            raise IcebergMorUnmeasured("deletion vector content=3 without puffin bytes")
         if content == CONTENT_POSITION:
             if inferred != CONTENT_POSITION:
                 raise IcebergMorUnmeasured("position delete schema missing file_path/pos")
@@ -411,6 +440,61 @@ def _content_code(ref: dict[str, Any]) -> int | None:
     raise IcebergMorUnmeasured(f"unknown delete content {code}")
 
 
+def _load_deletion_vector(
+    ref: dict[str, Any], resolved: Path, rels: Sequence[str]
+) -> tuple[str, tuple[int, ...]] | None:
+    """Apply one v3 deletion vector as unique positions on one data file.
+
+    Unmatched ``referenced_data_file`` is a no-op (the data file was
+    already replaced). Missing offset/size, CRC, or cardinality is
+    unmeasured — never ``record-count`` arithmetic.
+    """
+    try:
+        byte_range = deletion_vector_byte_range(ref)
+    except IcebergDeletionVectorError as exc:
+        raise IcebergMorUnmeasured(str(exc)) from exc
+    if byte_range is None:
+        raise IcebergMorUnmeasured(
+            "deletion vector missing content_offset/content_size_in_bytes"
+        )
+    offset, size = byte_range
+    try:
+        referenced = referenced_data_file_from_ref(ref)
+    except IcebergDeletionVectorError:
+        referenced = None
+    try:
+        record_count = record_count_from_ref(ref)
+        blob = read_deletion_vector(
+            resolved,
+            offset=offset,
+            size=size,
+            referenced_data_file=referenced,
+            record_count=record_count,
+        )
+    except IcebergDeletionVectorError as exc:
+        raise IcebergMorUnmeasured(str(exc)) from exc
+    referenced = blob.referenced_data_file or referenced
+    if not referenced:
+        raise IcebergMorUnmeasured("deletion vector missing referenced_data_file")
+    bound = _match_data_rel(referenced, rels)
+    if bound is None:
+        return None
+    return bound, tuple(sorted(blob.positions))
+
+
+def is_deletion_vector_ref(ref: dict[str, Any], path: str = "") -> bool:
+    """True when the delete ref is an Iceberg v3 puffin deletion vector."""
+    raw = path or str(
+        ref.get("path") or ref.get("file_path") or ref.get("file-path") or ""
+    )
+    try:
+        if _content_code(ref) == CONTENT_DELETION_VECTOR:
+            return True
+    except IcebergMorUnmeasured:
+        pass
+    return _is_deletion_vector(ref, raw)
+
+
 def _is_deletion_vector(ref: dict[str, Any], path: str) -> bool:
     fmt = str(
         ref.get("file-format") or ref.get("file_format") or ref.get("format") or ""
@@ -608,6 +692,18 @@ def inspect_delete_refs(delete_table: Any) -> list[dict[str, Any]] | None:
     contents = _inspect_pylist(delete_table, "content")
     formats = _inspect_pylist(delete_table, "file_format")
     eq_ids = _inspect_pylist(delete_table, "equality_ids")
+    offsets = _inspect_pylist(delete_table, "content_offset")
+    if offsets is None:
+        offsets = _inspect_pylist(delete_table, "content-offset")
+    sizes = _inspect_pylist(delete_table, "content_size_in_bytes")
+    if sizes is None:
+        sizes = _inspect_pylist(delete_table, "content-size-in-bytes")
+    referenced = _inspect_pylist(delete_table, "referenced_data_file")
+    if referenced is None:
+        referenced = _inspect_pylist(delete_table, "referenced-data-file")
+    record_counts = _inspect_pylist(delete_table, "record_count")
+    if record_counts is None:
+        record_counts = _inspect_pylist(delete_table, "record-count")
     refs: list[dict[str, Any]] = []
     for i, path in enumerate(paths):
         raw = str(path or "").strip()
@@ -620,6 +716,18 @@ def inspect_delete_refs(delete_table: Any) -> list[dict[str, Any]] | None:
             ref["file-format"] = formats[i]
         if eq_ids is not None and i < len(eq_ids) and eq_ids[i] is not None:
             ref["equality-ids"] = list(eq_ids[i])
+        if offsets is not None and i < len(offsets) and offsets[i] is not None:
+            ref["content_offset"] = offsets[i]
+        if sizes is not None and i < len(sizes) and sizes[i] is not None:
+            ref["content_size_in_bytes"] = sizes[i]
+        if referenced is not None and i < len(referenced) and referenced[i] is not None:
+            ref["referenced_data_file"] = referenced[i]
+        if (
+            record_counts is not None
+            and i < len(record_counts)
+            and record_counts[i] is not None
+        ):
+            ref["record_count"] = record_counts[i]
         refs.append(ref)
     return refs
 

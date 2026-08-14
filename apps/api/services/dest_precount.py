@@ -136,8 +136,10 @@ MERGE project PK columns from those same snapshot files — never
 applies the anti-join only when the source census is complete overwrite
 (SQL and Iceberg CoW). Incremental CDC must not call that apply. Mirror
 already applies inferred soft-deletes on full re-sync. Iceberg v2 MoR
-(position/equality) is dest − applied deletes; V3 deletion vectors stay
-Planned. The identity is still ``leftover = D \\ S``.
+(position/equality) and v3 deletion vectors (Puffin
+``deletion-vector-v1``) are dest − applied deletes. Missing
+``content_offset`` / CRC / cardinality stays unmeasured. The identity
+is still ``leftover = D \\ S``.
 
 SCD Type 2 is the same 1-source-identity → N-history-row shape as
 vector chunks. Physical ``COUNT(*)`` of versions grows on every
@@ -1619,9 +1621,11 @@ def _iceberg_row_count(
     footer kernel as S3/GCS/ADLS dest.     A listed data-file that is gone
     is unmeasured, not dest=0. Filesystem MoR applies Iceberg v2 position
     and equality deletes (unique ``(file_path, pos)``; equality AND plus
-    ``data_seq < delete_seq``). ``data_footer − delete_record_count`` is
-    never dest (Iceberg #14864). V3 deletion vectors / puffin stay
-    unmeasured. Missing delete file is unmeasured. Missing table is 0.
+    ``data_seq < delete_seq``). V3 deletion vectors apply the same
+    unique in-range pos kernel from the Puffin roaring blob. ``data_footer
+    − delete_record_count`` is never dest (Iceberg #14864). Missing
+    ``content_offset`` / unreadable puffin stays unmeasured. Missing
+    delete file is unmeasured. Missing table is 0.
     Unreadable snapshot is ``None``. Key list / leftover MERGE project PK
     columns from the same snapshot population as COUNT. Never
     ``scan().to_arrow()``.
@@ -2002,10 +2006,72 @@ def _iceberg_catalog_data_files(
     return files
 
 
+def _iceberg_delete_spool_suffix(uri: str) -> str:
+    lowered = str(uri or "").lower()
+    if lowered.endswith(".puffin.gz"):
+        return ".puffin.gz"
+    if lowered.endswith(".puffin"):
+        return ".puffin"
+    return ".parquet"
+
+
+def _spool_iceberg_delete_range(
+    uri: str,
+    *,
+    endpoint: dict[str, Any],
+    warehouse: str,
+    offset: int,
+    size: int,
+) -> Path | None:
+    """Range-GET one deletion-vector blob. Never unsized Body.read() of the puffin."""
+    from services.object_streaming import (
+        parse_object_store_uri,
+        range_get_object_bytes,
+    )
+
+    raw = str(uri or "").strip()
+    resolved = _resolve_iceberg_data_uri(raw, warehouse)
+    loc = parse_object_store_uri(resolved)
+    if loc is None:
+        logger.info("iceberg catalog deletion-vector not an object URI: %s", uri)
+        return None
+    store_cfg = _iceberg_object_store_cfg(endpoint, loc)
+    try:
+        blob = range_get_object_bytes(
+            loc.kind, store_cfg, loc.bucket, loc.key, int(offset), int(size)
+        )
+    except Exception as exc:
+        logger.info("iceberg catalog deletion-vector Range GET failed: %s", exc)
+        return None
+    if not blob or len(blob) != int(size):
+        logger.info("iceberg catalog deletion-vector Range GET short read: %s", uri)
+        return None
+    tmp_path: Path | None = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="df-iceberg-del-",
+            suffix=_iceberg_delete_spool_suffix(raw),
+            delete=False,
+        )
+        tmp_path = Path(tmp.name)
+        tmp.write(blob)
+        tmp.flush()
+        tmp.close()
+        return tmp_path
+    except Exception as exc:
+        logger.info("iceberg catalog deletion-vector spool failed: %s", exc)
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return None
+
+
 def _spool_iceberg_delete_uri(
     uri: str, *, endpoint: dict[str, Any], warehouse: str
 ) -> Path | None:
-    """Local path of a delete parquet. Object-store URIs GET into a temp file."""
+    """Local path of a delete parquet/puffin. Object-store URIs GET into a temp file."""
     from services.object_streaming import (
         open_object_store_binary,
         parse_object_store_uri,
@@ -2033,7 +2099,9 @@ def _spool_iceberg_delete_uri(
     tmp_path: Path | None = None
     try:
         tmp = tempfile.NamedTemporaryFile(
-            prefix="df-iceberg-del-", suffix=".parquet", delete=False
+            prefix="df-iceberg-del-",
+            suffix=_iceberg_delete_spool_suffix(raw),
+            delete=False,
         )
         tmp_path = Path(tmp.name)
         while True:
@@ -2072,10 +2140,56 @@ def _prepare_catalog_mor(
     rewritten = dict(mor_meta)
     temps: list[Path] = []
     refs: list[dict[str, Any]] = []
+    from connectors.iceberg_deletion_vector import (
+        IcebergDeletionVectorError,
+        deletion_vector_byte_range,
+    )
+    from connectors.iceberg_mor import is_deletion_vector_ref
+
     for ref in list(mor_meta.get("delete-files") or []):
         if not isinstance(ref, dict):
             return None
         raw = str(ref.get("path") or ref.get("file_path") or "").strip()
+        is_dv = is_deletion_vector_ref(ref, raw)
+        byte_range = None
+        if is_dv:
+            try:
+                byte_range = deletion_vector_byte_range(ref)
+            except IcebergDeletionVectorError:
+                return None
+        local = _iceberg_local_path(raw, warehouse=warehouse)
+        if local is None:
+            resolved = _resolve_iceberg_data_uri(raw, warehouse)
+            if resolved != raw:
+                local = _iceberg_local_path(resolved, warehouse=warehouse)
+        if local is not None:
+            cloned = dict(ref)
+            cloned["path"] = str(local)
+            refs.append(cloned)
+            continue
+        if is_dv and byte_range is not None:
+            path = _spool_iceberg_delete_range(
+                raw,
+                endpoint=endpoint,
+                warehouse=warehouse,
+                offset=byte_range[0],
+                size=byte_range[1],
+            )
+            if path is None:
+                for tmp in temps:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                return None
+            cloned = dict(ref)
+            cloned["path"] = str(path)
+            cloned["content_offset"] = 0
+            cloned["content-offset"] = 0
+            cloned["content_size_in_bytes"] = byte_range[1]
+            refs.append(cloned)
+            temps.append(path)
+            continue
         path = _spool_iceberg_delete_uri(raw, endpoint=endpoint, warehouse=warehouse)
         if path is None:
             for tmp in temps:
