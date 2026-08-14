@@ -19,6 +19,7 @@ from services.unique_key_introspect import (
 )
 from services.check_constraints import probe_check_constraints
 from services.foreign_key_metadata import probe_foreign_keys
+from services.identity_carry import apply_identity_probe
 from services.physical_storage_metadata import probe_physical_storage
 from services.secondary_indexes import probe_secondary_indexes
 from services.value_serializer import json_default
@@ -1053,6 +1054,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 indexes_meta = probe_secondary_indexes(
                     "mysql", cur, db_name, target
                 ).to_dict()
+                apply_identity_probe("mysql", cur, db_name, target, columns)
         conn.close()
         return {
             "ok": True,
@@ -1529,6 +1531,7 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
         if default_expr and "nextval(" not in str(default_expr).lower():
             col_pg["default"] = str(default_expr)
         columns.append(col_pg)
+    apply_identity_probe("postgresql", cur, schema, table, columns)
     _measure_unconstrained_decimals(cur, schema, table, columns)
     return columns
 
@@ -2365,6 +2368,8 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                         "data_type": dtype,
                     }
                 )
+            if columns:
+                apply_identity_probe("oracle", conn, owner, resolved_table, columns)
             unique_meta = (
                 _oracle_fetch_unique_keys(conn, owner, resolved_table)
                 if columns
@@ -2587,44 +2592,10 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
             # IDENTITY columns: INFORMATION_SCHEMA does not expose them, so a
             # SQL Server source looked like a plain BIGINT key and the
             # destination was created without a generator — the client's first
-            # insert after cutover then had no key to use.
+            # insert after cutover then had no key to use. Seed/increment are
+            # measured from sys.identity_columns (sql_variant decoded).
             if columns:
-                try:
-                    identity_rows = conn.execute(
-                        sa.text(
-                            """
-                            SELECT c.name,
-                                   CAST(c.seed_value AS BIGINT),
-                                   CAST(c.increment_value AS BIGINT)
-                            FROM sys.identity_columns c
-                            JOIN sys.tables t ON t.object_id = c.object_id
-                            JOIN sys.schemas s ON s.schema_id = t.schema_id
-                            WHERE s.name = :schema AND t.name = :table
-                            """
-                        ),
-                        {"schema": schema, "table": table},
-                    ).fetchall()
-                    identity_names = {
-                        str(r[0]): (r[1], r[2]) for r in (identity_rows or []) if r and r[0]
-                    }
-                    for col in columns:
-                        if col["name"] not in identity_names:
-                            continue
-                        seed, step = identity_names[col["name"]]
-                        typ = str(col.get("inferred_type") or "")
-                        col["is_identity"] = True
-                        # SQL Server IDENTITY always accepts client values under
-                        # SET IDENTITY_INSERT, so it is by-default polarity.
-                        col["generation"] = "by_default"
-                        if "IDENTITY" not in typ.upper():
-                            col["inferred_type"] = (
-                                f"{typ} IDENTITY({_as_int(seed, 1)},"
-                                f"{_as_int(step, 1)})"
-                            )
-                except Exception as exc:
-                    # Losing the sequence silently recreates IDENTITY(1,1) on a
-                    # table whose keys run on another progression.
-                    logger.warning("sqlserver identity probe failed: %s", exc)
+                apply_identity_probe("sqlserver", conn, schema, table, columns)
 
             # Computed columns are not insertable — annotate GENERATED ALWAYS
             # so writers omit them (same path as PG/MySQL identity).
@@ -3697,6 +3668,7 @@ def _introspect_sqlite(
                     col_out["semantic_role"] = semantic_role
                 columns.append(col_out)
 
+            apply_identity_probe("sqlite", cur, "", table, columns)
             unique_meta = _sqlite_fetch_unique_keys(cur, table_q, info_rows)
             foreign_keys, foreign_keys_meta = _fetch_foreign_keys("sqlite", cur, "", table)
             check_meta = probe_check_constraints("sqlite", cur, "", table).to_dict()

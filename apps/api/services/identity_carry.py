@@ -31,12 +31,15 @@ Fail-closed rules:
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 import sqlalchemy as sa
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:  # circular at runtime: schema_fidelity owns the planner
     from services.schema_fidelity import SourceSchemaCatalog
@@ -64,10 +67,15 @@ class SqlAlchemyConnection(Protocol):
 
 __all__ = [
     "IdentityDecision",
+    "IdentityGenerator",
+    "IdentityGenerators",
+    "apply_identity_probe",
     "identity_generation",
     "identity_load_mode",
     "identity_seed_step",
     "plan_identity_carry",
+    "probe_identity_generators",
+    "stamp_identity_on_columns",
 ]
 
 # Engines whose generator this module can emit on create-new. Anything absent
@@ -123,6 +131,57 @@ class IdentityCarryPlan:
     @property
     def carried(self) -> list[IdentityDecision]:
         return [d for d in self.decisions if d.status == "carried"]
+
+
+IdentityStatus = Literal["measured", "unavailable"]
+
+
+@dataclass(frozen=True)
+class IdentityGenerator:
+    """One source key generator as the catalog holds it.
+
+    ``start`` / ``increment`` are the progression the application already runs
+    on. Recreating the column as IDENTITY(1,1) is a silent cutover failure:
+    checksums stay green and the first INSERT without an explicit key collides
+    or walks off the client's numbering.
+    """
+
+    column: str
+    generation: str = "by_default"  # always | by_default
+    start: int = 1
+    increment: int = 1
+    mechanism: str = ""  # identity | serial | autoincrement | auto_increment
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "column": self.column,
+            "generation": self.generation,
+            "start": self.start,
+            "increment": self.increment,
+            "mechanism": self.mechanism,
+        }
+
+
+@dataclass(frozen=True)
+class IdentityGenerators:
+    """Measured key generators of one table, or an honest failure to measure."""
+
+    dialect: str
+    status: IdentityStatus
+    detail: str = ""
+    items: tuple[IdentityGenerator, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dialect": self.dialect,
+            "status": self.status,
+            "detail": self.detail,
+            "items": [i.to_dict() for i in self.items],
+        }
+
+    @property
+    def measured(self) -> bool:
+        return self.status == "measured"
 
 
 def identity_generation(declared_type: str | None, *, catalog_generation: str = "") -> str:
@@ -189,12 +248,11 @@ def _already_generates(dest_type: str) -> bool:
     )
 
 
-# ``INT IDENTITY(5,10)`` / ``... AS IDENTITY (START WITH 5 INCREMENT BY 10)``.
-_SEED_STEP_RE = re.compile(
-    r"IDENTITY\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)"
-    r"|START\s+WITH\s+(-?\d+)\s+INCREMENT\s+BY\s+(-?\d+)",
-    re.I,
+_IDENTITY_PAIR_RE = re.compile(
+    r"IDENTITY\s*\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)", re.I
 )
+_START_WITH_RE = re.compile(r"START\s+WITH\s+(-?\d+)", re.I)
+_INCREMENT_BY_RE = re.compile(r"INCREMENT\s+BY\s+(-?\d+)", re.I)
 
 
 def identity_seed_step(declared_type: str | None) -> tuple[int, int]:
@@ -202,15 +260,20 @@ def identity_seed_step(declared_type: str | None) -> tuple[int, int]:
 
     A key sequence declared ``IDENTITY(1000, 10)`` is part of the client's data
     model — recreating it as ``IDENTITY(1,1)`` hands back a table that numbers
-    new rows differently from every row already in it.
+    new rows differently from every row already in it. SQL Server spells the
+    pair as ``IDENTITY(seed, increment)``; PostgreSQL and Oracle spell the same
+    pair as ``START WITH`` / ``INCREMENT BY``, in either order.
     """
-    match = _SEED_STEP_RE.search(declared_type or "")
-    if not match:
-        return 1, 1
-    seed, step = (match.group(1), match.group(2))
-    if seed is None:
-        seed, step = (match.group(3), match.group(4))
-    return int(seed or 1), int(step or 1)
+    text = declared_type or ""
+    pair = _IDENTITY_PAIR_RE.search(text)
+    if pair:
+        return int(pair.group(1)), int(pair.group(2))
+    start = _START_WITH_RE.search(text)
+    step = _INCREMENT_BY_RE.search(text)
+    return (
+        int(start.group(1)) if start else 1,
+        int(step.group(1)) if step else 1,
+    )
 
 
 def _suffix_for(
@@ -461,3 +524,345 @@ def sqlalchemy_fetchall(conn: SqlAlchemyConnection) -> FetchAll:
         return conn.execute(sa.text(bound), named).fetchall()
 
     return _run
+
+
+# --------------------------------------------------------------------------
+# Source catalog probe
+# --------------------------------------------------------------------------
+# The planner reads seed/increment from the column's inferred_type spelling
+# (``IDENTITY(s,i)`` / ``START WITH s INCREMENT BY i``). Measuring those
+# numbers from the engine catalog — not from attidentity / EXTRA alone — is
+# what stops a stepped IDENTITY landing as IDENTITY(1,1). Same contract as
+# CHECK and FK probes: unavailable is not proof of absence.
+
+
+def _unavailable_generators(dialect: str, detail: str) -> IdentityGenerators:
+    return IdentityGenerators(dialect=dialect, status="unavailable", detail=detail)
+
+
+def _rows(cursor: Any, sql: str, params: tuple | dict) -> list[tuple]:
+    cursor.execute(sql, params)
+    return list(cursor.fetchall() or [])
+
+
+def _rows_any_paramstyle(cursor: Any, sql: str, params: tuple) -> list[tuple]:
+    """SQL Server arrives through pymssql (``%s``) and pyodbc (``?``) alike."""
+    last: Exception | None = None
+    for style in ("%s", "?"):
+        try:
+            return _rows(cursor, sql.replace("{p}", style), params)
+        except Exception as exc:  # noqa: BLE001 — driver paramstyle fallback
+            last = exc
+    raise last if last else RuntimeError("no paramstyle attempted")
+
+
+def _catalog_int(value: Any, fallback: int = 1) -> int:
+    """Catalog number as an int, whatever container the driver used.
+
+    SQL Server returns ``sys.identity_columns.seed_value`` as ``sql_variant``,
+    which pyodbc hands back as little-endian bytes — ``int()`` raises on it, and
+    swallowing that loses the source's key progression.
+    """
+    if isinstance(value, bool) or value is None:
+        return fallback
+    if isinstance(value, bytes):
+        return int.from_bytes(value, "little", signed=True)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _generation_from_attidentity(attidentity: str) -> str:
+    ident = (attidentity or "").strip().lower()
+    if ident == "a":
+        return "always"
+    return "by_default"
+
+
+_PG_GENERATOR_SQL = """
+SELECT a.attname,
+       COALESCE(a.attidentity, ''),
+       s.seqstart,
+       s.seqincrement
+  FROM pg_catalog.pg_attribute a
+  JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
+  JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+  JOIN pg_catalog.pg_depend d
+    ON d.refobjid = c.oid
+   AND d.refobjsubid = a.attnum
+   AND d.classid = 'pg_class'::regclass
+   AND d.deptype IN ('a', 'i')
+  JOIN pg_catalog.pg_class seq ON seq.oid = d.objid AND seq.relkind = 'S'
+  JOIN pg_catalog.pg_sequence s ON s.seqrelid = seq.oid
+ WHERE n.nspname = %s
+   AND c.relname = %s
+   AND a.attnum > 0
+   AND NOT a.attisdropped
+"""
+
+
+def _probe_postgres(cursor: Any, schema: str, table: str) -> IdentityGenerators:
+    rows = _rows(cursor, _PG_GENERATOR_SQL, (schema or "public", table))
+    items: list[IdentityGenerator] = []
+    seen: set[str] = set()
+    for row in rows:
+        name = str(row[0] or "")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        attidentity = str(row[1] or "")
+        mechanism = "identity" if attidentity.strip() else "serial"
+        items.append(
+            IdentityGenerator(
+                column=name,
+                generation=_generation_from_attidentity(attidentity),
+                start=_catalog_int(row[2], 1),
+                increment=_catalog_int(row[3], 1),
+                mechanism=mechanism,
+            )
+        )
+    return IdentityGenerators("postgresql", "measured", items=tuple(items))
+
+
+_MYSQL_GENERATOR_SQL = """
+SELECT column_name
+  FROM information_schema.columns
+ WHERE table_schema = COALESCE(NULLIF(%s, ''), DATABASE())
+   AND table_name = %s
+   AND LOCATE('auto_increment', LOWER(extra)) > 0
+ ORDER BY ordinal_position
+"""
+
+
+def _probe_mysql(cursor: Any, schema: str, table: str) -> IdentityGenerators:
+    rows = _rows(cursor, _MYSQL_GENERATOR_SQL, (schema or "", table))
+    items = tuple(
+        IdentityGenerator(
+            column=str(r[0]),
+            generation="by_default",
+            mechanism="auto_increment",
+        )
+        for r in rows
+        if r and r[0]
+    )
+    return IdentityGenerators("mysql", "measured", items=items)
+
+
+_SQLSERVER_GENERATOR_SQL = """
+SELECT c.name,
+       c.seed_value,
+       c.increment_value
+  FROM sys.identity_columns c
+  JOIN sys.tables t ON t.object_id = c.object_id
+  JOIN sys.schemas s ON s.schema_id = t.schema_id
+ WHERE s.name = {p} AND t.name = {p}
+"""
+
+
+def _probe_sqlserver(cursor: Any, schema: str, table: str) -> IdentityGenerators:
+    rows = _rows_any_paramstyle(
+        cursor, _SQLSERVER_GENERATOR_SQL, (schema or "dbo", table)
+    )
+    items = tuple(
+        IdentityGenerator(
+            column=str(r[0]),
+            generation="by_default",
+            start=_catalog_int(r[1], 1),
+            increment=_catalog_int(r[2], 1),
+            mechanism="identity",
+        )
+        for r in rows
+        if r and r[0]
+    )
+    return IdentityGenerators("sqlserver", "measured", items=items)
+
+
+_ORACLE_GENERATOR_SQL = """
+SELECT column_name, generation_type, identity_options
+  FROM all_tab_identity_cols
+ WHERE owner = :owner AND table_name = :tab
+"""
+_ORACLE_START_RE = re.compile(r"START WITH:\s*(-?\d+)", re.I)
+_ORACLE_INCR_RE = re.compile(r"INCREMENT BY:\s*(-?\d+)", re.I)
+
+
+def _probe_oracle(cursor: Any, schema: str, table: str) -> IdentityGenerators:
+    owner = (schema or "").upper()
+    tab = (table or "").upper()
+    rows = _rows(cursor, _ORACLE_GENERATOR_SQL, {"owner": owner, "tab": tab})
+    items: list[IdentityGenerator] = []
+    for name, generation, options in rows:
+        gen_u = str(generation or "").upper()
+        polarity = (
+            "always" if ("ALWAYS" in gen_u and "DEFAULT" not in gen_u) else "by_default"
+        )
+        opt = str(options or "")
+        start_m = _ORACLE_START_RE.search(opt)
+        step_m = _ORACLE_INCR_RE.search(opt)
+        items.append(
+            IdentityGenerator(
+                column=str(name),
+                generation=polarity,
+                start=int(start_m.group(1)) if start_m else 1,
+                increment=int(step_m.group(1)) if step_m else 1,
+                mechanism="identity",
+            )
+        )
+    return IdentityGenerators("oracle", "measured", items=tuple(items))
+
+
+def _probe_sqlite(cursor: Any, schema: str, table: str) -> IdentityGenerators:
+    """Flag ``INTEGER PRIMARY KEY AUTOINCREMENT`` — never-reuse rowid.
+
+    SQLite's implicit INTEGER PRIMARY KEY still auto-assigns, but it reuses
+    deleted rowids. AUTOINCREMENT is the generator the application opted into;
+    missing it here is how a sqlite source looked like a plain BIGINT and the
+    destination never created a generator.
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    ddl_rows = _rows(
+        cursor,
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    )
+    ddl = str(ddl_rows[0][0] or "") if ddl_rows else ""
+    if "AUTOINCREMENT" not in ddl.upper():
+        return IdentityGenerators("sqlite", "measured", items=())
+    quoted = quote_sql_identifier(table)
+    pragma = _rows(cursor, f"PRAGMA table_info({quoted})", ())  # nosec B608
+    int_pk: list[str] = []
+    for row in pragma:
+        name = str(row[1] if len(row) > 1 else "")
+        declared = str(row[2] if len(row) > 2 else "").upper()
+        pk = _catalog_int(row[5] if len(row) > 5 else 0, 0)
+        if pk != 1 or not name:
+            continue
+        base = declared.split("(", 1)[0].strip()
+        if base in {"INTEGER", "INT", ""}:
+            int_pk.append(name)
+    if len(int_pk) != 1:
+        return _unavailable_generators(
+            "sqlite",
+            "sqlite_master names AUTOINCREMENT but the INTEGER PRIMARY KEY "
+            "column could not be identified; this is not proof the table has "
+            "no generator.",
+        )
+    return IdentityGenerators(
+        "sqlite",
+        "measured",
+        items=(
+            IdentityGenerator(
+                column=int_pk[0],
+                generation="by_default",
+                mechanism="autoincrement",
+            ),
+        ),
+    )
+
+
+_PROBES = {
+    "postgresql": _probe_postgres,
+    "postgres": _probe_postgres,
+    "redshift": _probe_postgres,
+    "timescale": _probe_postgres,
+    "cockroach": _probe_postgres,
+    "mysql": _probe_mysql,
+    "mariadb": _probe_mysql,
+    "sqlserver": _probe_sqlserver,
+    "mssql": _probe_sqlserver,
+    "azure_sql": _probe_sqlserver,
+    "azure_sql_database": _probe_sqlserver,
+    "oracle": _probe_oracle,
+    "sqlite": _probe_sqlite,
+}
+
+
+def probe_identity_generators(
+    dialect: str,
+    cursor_or_connection: Any,
+    schema: str,
+    table: str,
+) -> IdentityGenerators:
+    """Measure key generators of ``schema.table``, or report why it could not."""
+    key = (dialect or "").strip().lower()
+    probe = _PROBES.get(key)
+    if probe is None:
+        return _unavailable_generators(
+            key or "unknown",
+            f"Identity catalog probe not implemented for '{key or 'unknown'}'.",
+        )
+    if not table:
+        return _unavailable_generators(key, "No table name supplied.")
+    try:
+        from services.physical_storage_metadata import as_driver_cursor
+
+        return probe(as_driver_cursor(cursor_or_connection), schema or "", table)
+    except Exception as exc:  # noqa: BLE001 — an unreadable catalog is a state
+        logger.debug("identity generator probe failed on %s: %s", key, exc, exc_info=exc)
+        return _unavailable_generators(
+            key, f"{type(exc).__name__}: {exc}"
+        )
+
+
+def stamp_identity_on_columns(
+    columns: list[dict[str, Any]],
+    generators: IdentityGenerators,
+) -> None:
+    """Merge measured generators onto introspected columns in place.
+
+    Enrichment only: a failed probe never clears ``is_identity`` already set
+    from attidentity / EXTRA / IDENTITY_COLUMN. Seed and increment travel on
+    ``inferred_type`` so ``identity_seed_step`` — the planner's one parser —
+    sees the source progression without a second catalog field.
+    """
+    if generators.status != "measured" or not generators.items:
+        return
+    by_fold = {g.column.casefold(): g for g in generators.items}
+    dest = _norm(generators.dialect)
+    for col in columns:
+        name = str(col.get("name") or "")
+        spec = by_fold.get(name.casefold())
+        if spec is None:
+            continue
+        col["is_identity"] = True
+        if spec.generation:
+            col["generation"] = spec.generation
+        col["identity_start"] = spec.start
+        col["identity_increment"] = spec.increment
+        typ = str(col.get("inferred_type") or "")
+        upper = typ.upper()
+        if dest == "sqlserver":
+            if "IDENTITY" not in upper:
+                col["inferred_type"] = f"{typ} IDENTITY({spec.start},{spec.increment})"
+            continue
+        if dest in {"mysql", "mariadb"}:
+            if "AUTO_INCREMENT" not in upper:
+                col["inferred_type"] = f"{typ} AUTO_INCREMENT"
+            continue
+        if dest == "sqlite":
+            # AUTOINCREMENT is not a portable type qualifier. Flagging
+            # is_identity is enough for the planner to emit a dest generator.
+            continue
+        if (spec.start, spec.increment) != (1, 1) and "START WITH" not in upper:
+            if not _IDENTITY_PAIR_RE.search(typ):
+                col["inferred_type"] = (
+                    f"{typ} (START WITH {spec.start} INCREMENT BY {spec.increment})"
+                )
+
+
+def apply_identity_probe(
+    dialect: str,
+    cursor_or_connection: Any,
+    schema: str,
+    table: str,
+    columns: list[dict[str, Any]],
+) -> None:
+    """One call for every introspect path: measure, then stamp."""
+    if not columns or not table:
+        return
+    stamp_identity_on_columns(
+        columns,
+        probe_identity_generators(dialect, cursor_or_connection, schema, table),
+    )
