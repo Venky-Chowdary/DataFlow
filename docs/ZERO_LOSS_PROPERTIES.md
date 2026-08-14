@@ -1141,6 +1141,9 @@ rowcount is not that proof.
     live snapshot→stream ITs, and exactly-once stay Planned / UNPROVEN.
 
   Iceberg MoR upsert writes (this host, after 2026-08-14 slice):
+    Iceberg leftover/upsert/COUNT: 73 passed, 188 deselected in 2.48s.
+    CDC matrix: 173 passed, 17 skipped, 0 failed in 14.30s (live
+    PG/MySQL/Oracle ITs skipped — ports/env unset; skip ≠ pass).
     Filesystem upserts on an existing snapshot write an equality-delete
     of the updated PK plus a new data file at the **same** snapshot
     sequence (Iceberg spec / Flink upsert pattern: equality deletes
