@@ -956,6 +956,18 @@ rowcount is not that proof.
     MoR / deletion vectors Planned. Frontend 29 passed; `npm run build`
     tsc+vite clean.
 
+  Iceberg leftover key census without `scan().to_arrow()` (this host, after 2026-08-14 slice):
+    379 passed, 9 skipped in 46.14s (Property 5+9 command plus mapping
+    goldens + Iceberg CDC delete). Mapping re-verified: 93/93 + 200/200
+    golden floor 1.0. Iceberg SqlCatalog key list and leftover MERGE
+    (`dest {1,2,3,99}` vs `S {1,2,3}` → delete 99) pass with
+    `DataScan.to_arrow` / `count` patched to raise. PK columns are
+    projected from the same snapshot data files dest COUNT footers.
+    Catalog leftover apply uses pyiceberg `In()` typed to the PK field
+    (string vs long), not a full Arrow rewrite. Filesystem leftover
+    tests still pass. MoR / deletion vectors Planned. Skips: 2 moto,
+    3 Qdrant `:6333`, SQL Server `:1433`, Oracle `:1521`.
+
   XML artifact dest COUNT (this host, after 2026-08-14 slice):
     221 passed, 8 skipped in 35.35s (Property 9 command).
     Identity: unique repeating record-path, never parse_xml max_rows,
