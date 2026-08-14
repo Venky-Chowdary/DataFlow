@@ -135,11 +135,22 @@ export function ledgerEquation(ledger: ConservationLedger): string {
   return `read ${fmt(ledger.rows_read)} = dest ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
 }
 
-export function writerAckDisagrees(ledger: ConservationLedger | null | undefined): boolean {
+export function writerAckDisagrees(source: unknown): boolean {
+  const ledger = resolveLedger(source);
   if (!ledger) return false;
   if (ledger.writer_ack_delta != null) return ledger.writer_ack_delta !== 0;
   if (ledger.writer_ack == null || ledger.dest_count == null) return false;
   return ledger.writer_ack !== ledger.dest_count;
+}
+
+function resolveLedger(source: unknown): ConservationLedger | null {
+  if (!source || typeof source !== "object") return null;
+  const obj = source as Record<string, unknown>;
+  if ("row_accounting" in obj) return readConservationLedger(obj as LedgerCarrier);
+  if ("conservation_kind" in obj || "rows_written_source" in obj) {
+    return readConservationLedger({ row_accounting: obj });
+  }
+  return readConservationLedger(obj as LedgerCarrier);
 }
 
 export type RowMetric = {

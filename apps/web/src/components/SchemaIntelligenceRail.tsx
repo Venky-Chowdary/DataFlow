@@ -67,6 +67,14 @@ export function SchemaIntelligenceRail({
   const formatLabel = inferSourceFormatLabel(analysis, sourceFormat);
   const destMetric = result ? destHeadline(result) : null;
   const writerMetric = result ? writerHeadline(result) : null;
+  const advantages = buildCompetitiveAdvantages({
+    sourceKind,
+    destType,
+    columnCount: colSummary.total,
+    hasPreflight: Boolean(preflight),
+    hasCrossDb: Boolean(destType && destType !== "mongodb"),
+    nestedFieldCount: nestedFields.length,
+  });
 
   return (
     <aside className="df2-intelligence-rail" aria-label="Schema intelligence">
