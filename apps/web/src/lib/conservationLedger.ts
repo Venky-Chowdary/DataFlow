@@ -31,6 +31,7 @@ export type ConservationLedger = {
   active_count: number | null;
   inferred_deletes: number | null;
   reactivated: number | null;
+  events_read: number | null;
 };
 
 export type LedgerCarrier = {
@@ -90,6 +91,7 @@ export function readConservationLedger(
     active_count: num(raw.active_count),
     inferred_deletes: num(raw.inferred_deletes),
     reactivated: num(raw.reactivated),
+    events_read: num(raw.events_read),
   };
 }
 
@@ -111,7 +113,7 @@ export function conservationKindLabel(kind: string | null | undefined): string {
     case "append_delta":
       return "Append · dest delta";
     case "keyed":
-      return "Keyed · inserts − deletes";
+      return "Keyed · inserts − deletes (keys, not events)";
     case "mirror":
       return "Mirror · active population";
     case "empty_pass":
@@ -303,12 +305,19 @@ export type LedgerIdentityCell = { label: string; value: string };
 /** Display-only identity cells from engine fields — not a second algorithm. */
 export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[] {
   if (ledger.conservation_kind === "keyed") {
-    return [
+    const cells: LedgerIdentityCell[] = [
       { label: "Inserts", value: fmt(ledger.inserts) },
       { label: "Updates", value: fmt(ledger.updates) },
       { label: "Deletes", value: fmt(ledger.deletes) },
       { label: "Dest Δ", value: fmt(ledger.dest_delta) },
     ];
+    if (ledger.events_read != null || ledger.unique_batch_keys != null) {
+      cells.push(
+        { label: "Events", value: fmt(ledger.events_read) },
+        { label: "Keys", value: fmt(ledger.unique_batch_keys) },
+      );
+    }
+    return cells;
   }
   if (ledger.conservation_kind === "mirror") {
     return [

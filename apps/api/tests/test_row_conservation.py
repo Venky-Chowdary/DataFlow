@@ -772,3 +772,119 @@ def test_mirror_without_active_census_is_unmeasured():
     assert ledger["rows_written"] is None
     assert ledger["rows_written_source"] == DEST_UNMEASURED
     assert ledger["active_count"] is None
+
+
+def test_accumulator_redelivery_of_same_key_is_not_a_second_insert():
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    acc.add_events(5)
+    acc.add_batch([(1,)], dest_hits=0)
+    acc.add_events(5)
+    acc.add_batch([(1,)], dest_hits=0)
+    census = acc.to_census()
+    assert census is not None
+    assert census.unique_batch_keys == 1
+    assert census.inserts == 1
+    assert census.dest_preexisting == 0
+    assert census.events_read == 10
+    assert census.expected_delta == 1
+
+
+def test_keyed_ledger_closes_on_keys_not_duplicate_events():
+    from services.row_conservation import KeyCensus
+
+    census = KeyCensus(
+        unique_batch_keys=3,
+        dest_preexisting=3,
+        events_read=10,
+    )
+    ledger = account_population(
+        rows_read=10,
+        dest_count=30,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=30,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=10_000,
+        sync_mode="cdc",
+        census=census,
+    )
+    assert ledger.balanced is True
+    assert ledger.dest_delta == 0
+    assert ledger.inserts == 0
+    assert ledger.updates == 3
+    assert ledger.events_read == 10
+    assert ledger.unique_batch_keys == 3
+    assert ledger.writer_ack == 10_000
+    assert "10 event" in ledger.note
+    assert "3 live key" in ledger.note
+
+
+def test_sqlite_duplicate_events_census_is_keys_not_rowcount(tmp_path: Path):
+    import sqlite3
+
+    from services.row_conservation import prepare_keyed_upsert
+
+    path = tmp_path / "p9_events.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        conn.executemany(
+            "INSERT INTO items (id, label) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    live, payload = prepare_keyed_upsert(
+        [
+            {"id": 1, "label": "A"},
+            {"id": 1, "label": "A2"},
+            {"id": 2, "label": "B"},
+            {"id": 2, "label": "B2"},
+            {"id": 3, "label": "C"},
+            {"id": 3, "label": "C2"},
+        ],
+        key_columns=["id"],
+        mappings=None,
+        db_type="sqlite",
+        cfg={"database": str(path)},
+        schema="",
+        table_name="items",
+        dest_nonempty=True,
+    )
+    assert payload is not None
+    assert payload["events_read"] == 6
+    assert payload["unique_batch_keys"] == 3
+    assert payload["dest_preexisting"] == 3
+    assert payload["inserts"] == 0
+    assert payload["expected_delta"] == 0
+    assert len(live) == 3
+
+    from services.dest_precount import PRECOUNT_KEY
+
+    ledger = account_job(
+        {
+            "sync_mode": "cdc",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 6,
+                "target_rows": 3,
+                "target_checksum": "dest-digest",
+                PRECOUNT_KEY: 3,
+            },
+            "destination_summary": {
+                PRECOUNT_KEY: 3,
+                "keyed_census": payload,
+            },
+        }
+    )
+    assert ledger.conservation_kind == KIND_KEYED
+    assert ledger.balanced is True
+    assert ledger.events_read == 6
+    assert ledger.unique_batch_keys == 3
+    assert ledger.dest_delta == 0
+    assert ledger.writer_ack == 10_000

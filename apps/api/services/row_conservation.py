@@ -93,12 +93,17 @@ class KeyCensus:
     ``tombstones`` is COUNT(DISTINCT tombstone key) dest already holds —
     those are the DELETEs that drop ``COUNT(*)``. A tombstone for a key
     dest does not hold is a no-op, not a delete and not an insert.
+
+    ``events_read`` is the at-least-once log/writer event count (Debezium
+    messages, ON CONFLICT rowcount). It never enters ``expected_delta``.
+    Dest COUNT(*) moves by keys, not by redelivered events.
     """
 
     unique_batch_keys: int
     dest_preexisting: int
     tombstones: int = 0
     unique_tombstone_keys: int = 0
+    events_read: int | None = None
 
     @property
     def inserts(self) -> int:
@@ -123,6 +128,7 @@ class KeyCensus:
             "dest_preexisting": self.dest_preexisting,
             "tombstones": self.tombstones,
             "unique_tombstone_keys": self.unique_tombstone_keys,
+            "events_read": self.events_read,
             "inserts": self.inserts,
             "updates": self.updates,
             "deletes": self.deletes,
@@ -139,9 +145,13 @@ class KeyCensus:
             preexisting = int(data["dest_preexisting"])
             tombs = int(data.get("tombstones") or 0)
             tomb_keys = int(data.get("unique_tombstone_keys") or 0)
+            events_raw = data.get("events_read")
+            events = int(events_raw) if events_raw is not None and events_raw != "" else None
         except (TypeError, ValueError):
             return None
         if unique < 0 or preexisting < 0 or tombs < 0 or tomb_keys < 0:
+            return None
+        if events is not None and events < 0:
             return None
         if preexisting > unique:
             return None
@@ -152,6 +162,7 @@ class KeyCensus:
             dest_preexisting=preexisting,
             tombstones=tombs,
             unique_tombstone_keys=max(tomb_keys, tombs),
+            events_read=events,
         )
 
 
@@ -372,6 +383,7 @@ def census_from_partition(
     schema: str,
     table_name: str,
     key_columns: Sequence[str],
+    events_read: int | None = None,
 ) -> KeyCensus | None:
     """Dest-engine live hits + dest-held tombstones. ``None`` if either probe fails."""
     from services.dest_precount import destination_key_hits
@@ -400,6 +412,7 @@ def census_from_partition(
         dest_preexisting=int(live_hits),
         tombstones=int(tomb_hits),
         unique_tombstone_keys=len(partition.tombstone_keys),
+        events_read=events_read,
     )
 
 
@@ -432,6 +445,7 @@ def prepare_keyed_upsert(
             schema=schema,
             table_name=table_name,
             key_columns=cols,
+            events_read=len(records),
         )
     if partition.tombstone_keys:
         apply_hard_deletes(
@@ -442,9 +456,8 @@ def prepare_keyed_upsert(
             key_columns=cols,
             keys=partition.tombstone_keys,
         )
-        live_out = partition.live_records
-    else:
-        live_out = records
+    # Last-op-wins per key: at-least-once duplicate events are not a second write.
+    live_out = partition.live_records
     payload = census.to_dict() if census is not None else None
     return live_out, payload
 
@@ -466,6 +479,9 @@ def census_change_batch(
     live_records = [dict(r) for r in list(inserts or []) + list(updates or [])]
     live_keys = extract_batch_keys(live_records, cols, mappings)
     tomb_keys = parse_delete_keys(deletes, len(cols))
+    tomb_set = set(tomb_keys)
+    # Apply order is upserts then deletes, so a PK in both lists nets delete.
+    live_keys = [k for k in live_keys if k not in tomb_set]
     partition = KeyPartition(
         live_records=live_records,
         live_keys=live_keys,
@@ -478,6 +494,7 @@ def census_change_batch(
         schema=schema,
         table_name=table_name,
         key_columns=cols,
+        events_read=len(inserts or []) + len(updates or []) + len(deletes or []),
     )
 
 
@@ -633,6 +650,7 @@ class ConservationLedger:
     active_count: int | None = None
     inferred_deletes: int | None = None
     reactivated: int | None = None
+    events_read: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -660,6 +678,7 @@ class ConservationLedger:
             "active_count": self.active_count,
             "inferred_deletes": self.inferred_deletes,
             "reactivated": self.reactivated,
+            "events_read": self.events_read,
         }
 
 
@@ -750,6 +769,7 @@ def _account_keyed(
                 "was not independently measured after the write."
             ),
             writer_ack_delta=None,
+            events_read=census.events_read,
         )
     if quarantined or skipped:
         return ConservationLedger(
@@ -770,6 +790,7 @@ def _account_keyed(
                 "so dest COUNT(*) delta cannot be compared to the census."
             ),
             writer_ack_delta=None,
+            events_read=census.events_read,
         )
 
     dest_delta = dest_count - dest_count_before
@@ -784,6 +805,13 @@ def _account_keyed(
             "update(s) did not change COUNT(*). Writer acknowledgements "
             "count updates; they are not dest population."
         )
+        events = census.events_read
+        if events is not None and events > census.unique_batch_keys:
+            note += (
+                f" At-least-once delivered {events} event(s) for "
+                f"{census.unique_batch_keys} live key(s); cardinality is keys, "
+                "not log events (Debezium/DMS message counts do not move COUNT(*))."
+            )
     elif unaccounted > 0:
         note = (
             f"{unaccounted} expected new dest row(s) did not appear in "
@@ -815,6 +843,7 @@ def _account_keyed(
         dest_delta=dest_delta,
         unique_batch_keys=census.unique_batch_keys,
         dest_preexisting=census.dest_preexisting,
+        events_read=census.events_read,
     )
 
 
@@ -1204,21 +1233,51 @@ class KeyCensusAccumulator:
     """Per-batch dest hits, reconstructed as a run-level census.
 
     Each batch is probed *before* it writes. Inserts this run become dest
-    hits for a later batch, so summing ``len(live) - hits`` equals new keys
-    for the whole stream. ``dest_preexisting`` is unique live keys minus
-    those inserts — dest-engine, not writer ON CONFLICT.
+    hits for a later batch, so summing ``len(unseen live) - hits`` equals
+    new keys for the whole stream. ``dest_preexisting`` is unique live keys
+    minus those inserts — dest-engine, not writer ON CONFLICT.
 
-    Tombstone dest-hits sum independently. A key that this run inserted and
-    later deleted stays in the live unique set so ``inserts - deletes``
-    still equals dest COUNT(*) delta (insert then delete nets zero).
+    At-least-once redelivery of a key already observed this run is not a
+    new insert. ``dest_hits`` must be dest-engine hits among the *unseen*
+    live keys of that call (callers probe ``unseen_live``). Counting log
+    events as inserts is the Debezium/DMS message-count hole.
+
+    Tombstone dest-hits sum independently, keyed uniquely across batches.
+    A key that this run inserted and later deleted stays in the live unique
+    set so ``inserts - deletes`` still equals dest COUNT(*) delta.
     """
 
     def __init__(self) -> None:
         self._seen: set[tuple[Any, ...]] = set()
+        self._tomb_seen: set[tuple[Any, ...]] = set()
         self._inserts = 0
         self._tombstones = 0
-        self._unique_tombstone_keys = 0
+        self._events = 0
+        self._unique_tombstone_fallback = 0
         self._failed = False
+
+    def unseen_live(self, keys: Sequence[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+        return self._unseen(keys, self._seen)
+
+    def unseen_tombstones(self, keys: Sequence[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+        return self._unseen(keys, self._tomb_seen)
+
+    @staticmethod
+    def _unseen(
+        keys: Sequence[tuple[Any, ...]],
+        already: set[tuple[Any, ...]],
+    ) -> list[tuple[Any, ...]]:
+        out: list[tuple[Any, ...]] = []
+        seen_here: set[tuple[Any, ...]] = set()
+        for key in keys:
+            if key in seen_here or key in already:
+                continue
+            seen_here.add(key)
+            out.append(key)
+        return out
+
+    def add_events(self, events: int) -> None:
+        self._events += max(int(events or 0), 0)
 
     def add_batch(self, keys: Sequence[tuple[Any, ...]], dest_hits: int | None) -> None:
         if dest_hits is None:
@@ -1231,7 +1290,13 @@ class KeyCensusAccumulator:
                 continue
             seen_batch.add(key)
             batch.append(key)
-        self._inserts += max(len(batch) - int(dest_hits), 0)
+        unseen = [k for k in batch if k not in self._seen]
+        hits = int(dest_hits)
+        if hits > len(unseen):
+            # Caller probed a wider set than unseen live keys — refuse to invent inserts.
+            self._failed = True
+            return
+        self._inserts += max(len(unseen) - hits, 0)
         self._seen.update(batch)
 
     def add_tombstones(
@@ -1239,17 +1304,29 @@ class KeyCensusAccumulator:
         dest_hits: int | None,
         *,
         unique_keys: int = 0,
+        keys: Sequence[tuple[Any, ...]] | None = None,
     ) -> None:
         if dest_hits is None:
             self._failed = True
             return
-        self._tombstones += max(int(dest_hits), 0)
-        self._unique_tombstone_keys += max(int(unique_keys), 0)
+        hits = max(int(dest_hits), 0)
+        if keys is not None:
+            unseen = self.unseen_tombstones(keys)
+            if hits > len(unseen):
+                self._failed = True
+                return
+            self._tombstones += hits
+            for key in keys:
+                self._tomb_seen.add(key)
+            return
+        self._tombstones += hits
+        self._unique_tombstone_fallback += max(int(unique_keys), 0)
 
     def to_census(self) -> KeyCensus | None:
         if self._failed:
             return None
-        if not self._seen and self._tombstones == 0 and self._unique_tombstone_keys == 0:
+        unique_tombs = len(self._tomb_seen) or self._unique_tombstone_fallback
+        if not self._seen and self._tombstones == 0 and unique_tombs == 0:
             return None
         unique = len(self._seen)
         preexisting = unique - self._inserts
@@ -1259,7 +1336,8 @@ class KeyCensusAccumulator:
             unique_batch_keys=unique,
             dest_preexisting=preexisting,
             tombstones=self._tombstones,
-            unique_tombstone_keys=self._unique_tombstone_keys,
+            unique_tombstone_keys=unique_tombs,
+            events_read=self._events or None,
         )
 
 
@@ -1285,6 +1363,7 @@ def observe_keyed_batch(
 
     cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
     records = [dict(zip(headers, row)) for row in rows]
+    acc.add_events(len(records))
     if not cols:
         acc.add_batch([], 0)
         return
@@ -1299,13 +1378,15 @@ def observe_keyed_batch(
         rows[:] = [
             [rec.get(h) for h in header_list] for rec in partition.live_records
         ]
+    live_probe = acc.unseen_live(partition.live_keys)
+    tomb_probe = acc.unseen_tombstones(partition.tombstone_keys)
     live_hits = destination_key_hits(
         db_type,
         dict(cfg),
         schema=schema,
         table_name=table_name,
         key_columns=cols,
-        keys=partition.live_keys,
+        keys=live_probe,
     )
     tomb_hits = destination_key_hits(
         db_type,
@@ -1313,11 +1394,13 @@ def observe_keyed_batch(
         schema=schema,
         table_name=table_name,
         key_columns=cols,
-        keys=partition.tombstone_keys,
+        keys=tomb_probe,
     )
     acc.add_batch(partition.live_keys, live_hits)
     acc.add_tombstones(
-        tomb_hits, unique_keys=len(partition.tombstone_keys)
+        tomb_hits,
+        unique_keys=len(partition.tombstone_keys),
+        keys=partition.tombstone_keys,
     )
     if partition.tombstone_keys:
         apply_hard_deletes(
@@ -1328,3 +1411,59 @@ def observe_keyed_batch(
             key_columns=cols,
             keys=partition.tombstone_keys,
         )
+
+
+def observe_change_batch(
+    acc: KeyCensusAccumulator,
+    *,
+    inserts: Sequence[Mapping[str, Any]] | None,
+    updates: Sequence[Mapping[str, Any]] | None,
+    deletes: Sequence[str] | None,
+    key_columns: Sequence[str],
+    db_type: str,
+    cfg: Mapping[str, Any],
+    schema: str,
+    table_name: str,
+    mappings: Sequence[Mapping[str, Any]] | None = None,
+) -> None:
+    """Fold one CDC ChangeBatch into the run-level key census.
+
+    Same identity as ``observe_keyed_batch``: dest-engine hits on unseen
+    keys, last-op delete wins inside the batch (apply upserts then deletes),
+    redelivered keys are events not inserts.
+    """
+    from services.dest_precount import destination_key_hits
+
+    cols = [str(c).strip() for c in key_columns if str(c).strip()]
+    insert_list = list(inserts or [])
+    update_list = list(updates or [])
+    delete_list = list(deletes or [])
+    acc.add_events(len(insert_list) + len(update_list) + len(delete_list))
+    if not cols:
+        acc.add_batch([], 0)
+        return
+    live_records = [dict(r) for r in insert_list + update_list]
+    live_keys = extract_batch_keys(live_records, cols, mappings)
+    tomb_keys = parse_delete_keys(delete_list, len(cols))
+    tomb_set = set(tomb_keys)
+    live_keys = [k for k in live_keys if k not in tomb_set]
+    live_probe = acc.unseen_live(live_keys)
+    tomb_probe = acc.unseen_tombstones(tomb_keys)
+    live_hits = destination_key_hits(
+        db_type,
+        dict(cfg),
+        schema=schema,
+        table_name=table_name,
+        key_columns=cols,
+        keys=live_probe,
+    )
+    tomb_hits = destination_key_hits(
+        db_type,
+        dict(cfg),
+        schema=schema,
+        table_name=table_name,
+        key_columns=cols,
+        keys=tomb_probe,
+    )
+    acc.add_batch(live_keys, live_hits)
+    acc.add_tombstones(tomb_hits, unique_keys=len(tomb_keys), keys=tomb_keys)

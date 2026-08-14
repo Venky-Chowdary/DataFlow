@@ -418,6 +418,18 @@ class CdcState:
     accumulated_rejected_details: list[dict[str, Any]] = field(default_factory=list)
     accumulated_rejected_rows: int = 0
     accumulated_coerced_null_rows: int = 0
+    #: Per destination table — keys from orders and users must not mix.
+    census_accs: dict[str, Any] = field(default_factory=dict)
+
+    def acc_for(self, table: str) -> Any:
+        from services.row_conservation import KeyCensusAccumulator
+
+        key = str(table or "")
+        acc = self.census_accs.get(key)
+        if acc is None:
+            acc = KeyCensusAccumulator()
+            self.census_accs[key] = acc
+        return acc
 
 
 def _merge_cdc_dest_summary(
@@ -723,6 +735,7 @@ def _apply_change_batch(
     *,
     backfill_new_fields: bool = False,
     job_id: str = "",
+    census_acc: Any | None = None,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
     from services.cdc_snapshot_window import _pk_columns
@@ -741,19 +754,34 @@ def _apply_change_batch(
     dest_summary: dict[str, Any] = {}
     census_payload: dict[str, Any] | None = None
     if pk_target_cols:
-        from services.row_conservation import census_change_batch
+        from services.row_conservation import census_change_batch, observe_change_batch
 
-        census = census_change_batch(
-            inserts=change.inserts,
-            updates=change.updates,
-            deletes=change.deletes,
-            key_columns=pk_target_cols,
-            db_type=dest_type,
-            cfg=dest_cfg,
-            schema=str(dest_cfg.get("schema") or ""),
-            table_name=dest_table,
-            mappings=mappings,
-        )
+        if census_acc is not None:
+            observe_change_batch(
+                census_acc,
+                inserts=change.inserts,
+                updates=change.updates,
+                deletes=change.deletes,
+                key_columns=pk_target_cols,
+                db_type=dest_type,
+                cfg=dest_cfg,
+                schema=str(dest_cfg.get("schema") or ""),
+                table_name=dest_table,
+                mappings=mappings,
+            )
+            census = census_acc.to_census()
+        else:
+            census = census_change_batch(
+                inserts=change.inserts,
+                updates=change.updates,
+                deletes=change.deletes,
+                key_columns=pk_target_cols,
+                db_type=dest_type,
+                cfg=dest_cfg,
+                schema=str(dest_cfg.get("schema") or ""),
+                table_name=dest_table,
+                mappings=mappings,
+            )
         if census is not None:
             census_payload = census.to_dict()
 
@@ -1339,6 +1367,7 @@ def _run_cdc_shared_multi_table(
                 max(1, chunk_idx + 1),
                 backfill_new_fields=backfill_new_fields,
                 job_id=str(job_id or ""),
+                census_acc=shared_accum.acc_for(str(dest_table or stream or "")),
             )
         chunk_idx += 1
         total_rows += rows_written + deleted
@@ -2054,6 +2083,7 @@ def _run_cdc_single_stream(
                 total_chunks,
                 backfill_new_fields=backfill_new_fields,
                 job_id=str(job_id or ""),
+                census_acc=state.acc_for(str(dest_table or "")),
             )
         state.rows_written += rows_written
         state.inserts += len(change.inserts)

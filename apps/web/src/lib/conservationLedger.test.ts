@@ -42,6 +42,7 @@ const overwriteLedger = {
   active_count: null,
   inferred_deletes: null,
   reactivated: null,
+  events_read: null,
 };
 
 describe("readConservationLedger", () => {
@@ -247,5 +248,25 @@ describe("mirror active population is dest headline, not physical COUNT(*)", () 
     });
     assert.equal(h.value, "3");
     assert.equal(h.measured, true);
+  });
+});
+
+describe("keyed ledger shows events vs keys, never closes on event count", () => {
+  it("surfaces 10 events and 3 keys from the engine census", () => {
+    const cells = ledgerIdentityCells({
+      ...overwriteLedger,
+      conservation_kind: "keyed",
+      dest_delta: 0,
+      inserts: 0,
+      updates: 3,
+      deletes: 0,
+      unique_batch_keys: 3,
+      dest_preexisting: 3,
+      events_read: 10,
+      writer_ack: 10_000,
+    });
+    assert.equal(cells.find((c) => c.label === "Events")?.value, "10");
+    assert.equal(cells.find((c) => c.label === "Keys")?.value, "3");
+    assert.equal(cells.find((c) => c.label === "Dest Δ")?.value, "0");
   });
 });
