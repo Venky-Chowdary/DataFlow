@@ -207,6 +207,134 @@ def test_count_artifact_rows_csv_jsonl_json_independent_of_writer(tmp_path: Path
     assert count_artifact_rows("s3://bucket/key.csv", fmt="csv") is None
 
 
+def test_count_artifact_rows_excel_excludes_phantom_used_range(tmp_path: Path):
+    """Finance dumps: formatting inflates openpyxl max_row. Dest is value rows."""
+    openpyxl = pytest.importorskip("openpyxl")
+    import io
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["id", "name"])
+    ws.append(["1", "a"])
+    ws.append(["2", "b"])
+    for r in range(5, 22):
+        ws.cell(row=r, column=1).number_format = "0.00"
+    buf = io.BytesIO()
+    wb.save(buf)
+    path = tmp_path / "export.xlsx"
+    path.write_bytes(buf.getvalue())
+    assert ws.max_row > 3
+    assert count_artifact_rows(path, fmt="excel") == 2
+    assert count_artifact_rows(path) == 2
+    empty = tmp_path / "header_only.xlsx"
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(["id", "name"], [], source_format="csv", target_format="excel")
+    empty.write_bytes(content)
+    assert count_artifact_rows(empty, fmt="excel") == 0
+    stamped = stamp_artifact_census(
+        {"target_rows": 10_000, "skipped_readback": True},
+        {"path": str(path), "format": "excel"},
+    )
+    assert stamped[ARTIFACT_COUNT_KEY] == 2
+    assert stamped["dest_count_source"] == DEST_COUNT_ARTIFACT
+    assert stamped["target_rows"] == 2
+    assert stamped["target_rows_before"] == 0
+
+
+def test_count_artifact_rows_avro_streams_records_not_writer_ack(tmp_path: Path):
+    pytest.importorskip("fastavro")
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "name"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="avro",
+    )
+    path = tmp_path / "export.avro"
+    path.write_bytes(content)
+    assert count_artifact_rows(path, fmt="avro") == 3
+    assert count_artifact_rows(path) == 3
+    empty_bytes, _ = convert_rows(["id"], [], source_format="csv", target_format="avro")
+    empty = tmp_path / "empty.avro"
+    empty.write_bytes(empty_bytes)
+    assert count_artifact_rows(empty, fmt="avro") == 0
+    bad = tmp_path / "bad.avro"
+    bad.write_bytes(b"not-avro")
+    assert count_artifact_rows(bad, fmt="avro") is None
+    stamped = stamp_artifact_census(
+        {"target_rows": 10_000, "skipped_readback": True},
+        {"path": str(path), "format": "avro"},
+    )
+    assert stamped[ARTIFACT_COUNT_KEY] == 3
+    assert stamped["target_rows"] == 3
+
+
+def test_count_artifact_rows_orc_footer_not_writer_ack(tmp_path: Path):
+    pytest.importorskip("pyarrow.orc")
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="orc",
+    )
+    path = tmp_path / "export.orc"
+    path.write_bytes(content)
+    assert count_artifact_rows(path, fmt="orc") == 2
+    assert count_artifact_rows(path) == 2
+    empty_bytes, _ = convert_rows(["id"], [], source_format="csv", target_format="orc")
+    empty = tmp_path / "empty.orc"
+    empty.write_bytes(empty_bytes)
+    assert count_artifact_rows(empty, fmt="orc") == 0
+    stamped = stamp_artifact_census(
+        {"target_rows": 10_000, "skipped_readback": True},
+        {"path": str(path), "format": "orc"},
+    )
+    assert stamped[ARTIFACT_COUNT_KEY] == 2
+    assert stamped["target_rows"] == 2
+
+
+def test_count_artifact_rows_xml_stays_unmeasured(tmp_path: Path):
+    """XML has no dest-engine record COUNT yet — never invent dest = writer ack."""
+    path = tmp_path / "export.xml"
+    path.write_text("<records><record><id>1</id></record></records>", encoding="utf-8")
+    assert count_artifact_rows(path, fmt="xml") is None
+    skipped = stamp_artifact_census(
+        {"target_rows": 10_000},
+        {"path": str(path), "format": "xml"},
+    )
+    assert ARTIFACT_COUNT_KEY not in skipped
+    assert skipped["target_rows"] is None
+
+
+def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """Absent openpyxl/fastavro/pyarrow must not close overwrite as dest=0."""
+    xlsx = tmp_path / "export.xlsx"
+    xlsx.write_bytes(b"not-a-workbook")
+    monkeypatch.setattr(
+        "services.excel_parser.count_excel_rows",
+        lambda *_a, **_k: (_ for _ in ()).throw(ValueError("Excel import is not ready")),
+    )
+    assert count_artifact_rows(xlsx, fmt="excel") is None
+
+    import sys
+
+    avro = tmp_path / "export.avro"
+    avro.write_bytes(b"not-avro")
+    monkeypatch.setitem(sys.modules, "fastavro", None)
+    assert count_artifact_rows(avro, fmt="avro") is None
+
+    orc = tmp_path / "export.orc"
+    orc.write_bytes(b"not-orc")
+    monkeypatch.setitem(sys.modules, "pyarrow", None)
+    assert count_artifact_rows(orc, fmt="orc") is None
+
+
 def test_stamp_artifact_census_never_keeps_writer_target_rows(tmp_path: Path):
     csv_path = tmp_path / "out.csv"
     csv_path.write_text("id\n1\n2\n", encoding="utf-8")

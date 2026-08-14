@@ -23,7 +23,12 @@ File/object exports have no SQL engine. ``count_artifact_rows`` is the
 same identity against the bytes on disk: re-open the written artifact and
 COUNT records. Writer ``rows`` / bytes-landed is Airbyte/Fivetran S3
 success — it does not close conservation. Independent artifact COUNT is
-cardinality, not Gate-8 cell fidelity.
+cardinality, not Gate-8 cell fidelity. Excel dest population is
+value-bearing rows (``excel_parser.count_excel_rows``), never
+openpyxl ``max_row`` / used-range. Avro is a streamed record COUNT, not
+``parse_avro``'s ingest cap. ORC/Parquet footer ``nrows`` is dest-engine
+cardinality of the file we wrote, not a warehouse catalog estimate.
+XML stays unmeasured until a dest-engine record COUNT exists.
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
@@ -200,7 +205,9 @@ _KEYSET_CENSUS_MAX = 20_000
 # Same bound as dest key listing: a prefix DISTINCT is a lie.
 _IDENTITY_SCAN_MAX = _KEYSET_CENSUS_MAX
 
-_ARTIFACT_FORMATS = frozenset({"csv", "tsv", "json", "jsonl", "parquet"})
+_ARTIFACT_FORMATS = frozenset({
+    "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc",
+})
 _OBJECT_STORE_DRIVERS = frozenset({
     "s3",
     "gcs",
@@ -1617,6 +1624,12 @@ def _infer_artifact_format(path: Path, fmt: str | None) -> str:
         return "json"
     if name.endswith(".parquet"):
         return "parquet"
+    if name.endswith(".xlsx") or name.endswith(".xls"):
+        return "excel"
+    if name.endswith(".avro"):
+        return "avro"
+    if name.endswith(".orc"):
+        return "orc"
     return ""
 
 
@@ -1676,6 +1689,53 @@ def _count_parquet_path(path: Path) -> int | None:
         return None
 
 
+def _count_orc_path(path: Path) -> int | None:
+    """ORC footer stripe cardinality — dest-engine COUNT of this file.
+
+    Same honesty as Parquet ``metadata.num_rows``. Never a warehouse
+    catalog estimate. Missing pyarrow stays unmeasured, not zero.
+    """
+    try:
+        from pyarrow import orc
+    except ImportError:
+        return None
+    try:
+        reader = orc.ORCFile(str(path))
+        n = getattr(reader, "nrows", None)
+        if n is None:
+            n = reader.read().num_rows
+        return int(n)
+    except Exception as exc:
+        logger.info("orc artifact count unavailable at %s: %s", path, exc)
+        return None
+
+
+def _count_excel_bytes(content: bytes) -> int | None:
+    """Value-bearing rows. Used-range / ``max_row`` is not dest population."""
+    try:
+        from services.excel_parser import count_excel_rows
+
+        return int(count_excel_rows(content))
+    except Exception as exc:
+        logger.info("excel artifact count unavailable: %s", exc)
+        return None
+
+
+def _count_avro_bytes(content: bytes) -> int | None:
+    """Streamed record COUNT. Never materialize; never the ingest 100k cap."""
+    import io
+
+    try:
+        import fastavro
+    except ImportError:
+        return None
+    try:
+        return sum(1 for _ in fastavro.reader(io.BytesIO(content)))
+    except Exception as exc:
+        logger.info("avro artifact count unavailable: %s", exc)
+        return None
+
+
 def count_artifact_rows(
     path: str | Path | None,
     *,
@@ -1687,7 +1747,8 @@ def count_artifact_rows(
     Re-opens the bytes on disk. Never returns the writer's ``rows_written``.
     Missing path, remote URI without a local file, unsupported format, or
     unparseable content stay ``None`` — conservation remains unmeasured.
-    Empty but well-formed artifacts are measured zero.
+    Empty but well-formed artifacts are measured zero. Excel counts rows
+    that carry values, not the worksheet used range.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -1700,6 +1761,8 @@ def count_artifact_rows(
         return None
     if kind == "parquet":
         return _count_parquet_path(artifact)
+    if kind == "orc":
+        return _count_orc_path(artifact)
     content = _read_artifact_bytes(artifact)
     if content is None:
         return None
@@ -1712,6 +1775,10 @@ def count_artifact_rows(
             return _count_jsonl_bytes(content)
         if kind == "json":
             return _count_json_bytes(content)
+        if kind == "excel":
+            return _count_excel_bytes(content)
+        if kind == "avro":
+            return _count_avro_bytes(content)
     except Exception as exc:
         logger.info("artifact count failed for %s (%s): %s", artifact, kind, exc)
         return None
