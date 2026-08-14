@@ -30,6 +30,15 @@ Lakehouse and object-store destinations already have dest-*after* read-back
 append delta and first-write overwrite (missing table/object = 0) can close.
 Writer ``Table.upsert`` / PUT rowcount is not that proof.
 
+Oracle and SQL Server (Azure SQL, RDS, Autonomous SKUs) answer dest COUNT
+and leftover MERGE listing with dest-engine ``COUNT(*)`` / ``SELECT pk``.
+``sys.partitions`` / ``sys.dm_db_partition_stats.row_count`` and Oracle
+``ALL_TABLES.num_rows`` are estimates or stale optimizer stats — they never
+close conservation. Missing table is 0. Catalog aliases quote as
+``sqlserver`` / ``oracle`` (brackets vs folded double-quotes). Composite
+key hits use portable AND/OR equality, not row-value ``IN`` (Oracle 19c
+has no tuple IN). Incremental leftover MERGE stays a hard no-op.
+
 Vector destinations are a 1-source-row → N-chunk identity.
 Physical ``COUNT(*)`` of embedding rows is **not** dest population — that
 is the Fivetran ``_deleted`` analogue for RAG: 2 documents → 5 chunks
@@ -75,7 +84,8 @@ from __future__ import annotations
 import gzip
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -429,6 +439,14 @@ def destination_row_count(
 
         if db_type in _OBJECT_STORE_DRIVERS:
             return _object_store_row_count(db_type, cfg, table_name=table)
+
+        from services.dialect_profiles import warehouse_sql_quote_dialect
+
+        dialect = warehouse_sql_quote_dialect(db_type)
+        if dialect:
+            return _warehouse_sql_row_count(
+                db_type, cfg, schema=schema, table_name=table, dialect=dialect
+            )
     except Exception as exc:  # pragma: no cover - destination-specific failure
         logger.warning("Pre-write destination count failed: %s", exc)
         return None
@@ -482,6 +500,19 @@ def destination_key_hits(
             logger.warning("Iceberg dest key census failed: %s", exc)
             return None
     try:
+        from services.dialect_profiles import warehouse_sql_quote_dialect
+
+        dialect = warehouse_sql_quote_dialect(db_type)
+        if dialect:
+            return _warehouse_sql_key_hits(
+                db_type,
+                cfg,
+                schema=schema,
+                table_name=table,
+                cols=cols,
+                keys=unique,
+                dialect=dialect,
+            )
         return _key_hits_sql(db_type, cfg, schema=schema, table_name=table, cols=cols, keys=unique)
     except Exception as exc:  # pragma: no cover - destination-specific failure
         logger.warning("Pre-write destination key census failed: %s", exc)
@@ -692,9 +723,22 @@ def destination_key_list(
                 cfg, schema=schema, table_name=table, cols=cols
             )
         else:
-            rows = _key_list_sql(
-                db_type, cfg, schema=schema, table_name=table, cols=cols
-            )
+            from services.dialect_profiles import warehouse_sql_quote_dialect
+
+            dialect = warehouse_sql_quote_dialect(db_type)
+            if dialect:
+                rows = _warehouse_sql_key_list(
+                    db_type,
+                    cfg,
+                    schema=schema,
+                    table_name=table,
+                    cols=cols,
+                    dialect=dialect,
+                )
+            else:
+                rows = _key_list_sql(
+                    db_type, cfg, schema=schema, table_name=table, cols=cols
+                )
     except Exception as exc:  # pragma: no cover - destination-specific failure
         logger.warning("Dest key list failed: %s", exc)
         return None
@@ -704,6 +748,183 @@ def destination_key_list(
     if len(unique) != dest_n or len(unique) != len(rows):
         return None
     return unique
+
+
+def _warehouse_sql_table_ref(
+    dialect: str,
+    cfg: Mapping[str, Any],
+    schema: str,
+    table_name: str,
+) -> str:
+    from connectors.sql_identifiers import quote_table_ref
+    from services.dialect_profiles import normalize_schema
+
+    sch = normalize_schema(
+        dialect,
+        schema or cfg.get("schema"),
+        username=cfg.get("username"),
+    )
+    return quote_table_ref(table_name, sch, dialect=dialect)
+
+
+def _is_missing_warehouse_relation(exc: BaseException, dialect: str) -> bool:
+    """True only for 'no such table'. Login/network/privilege-other stay unmeasured.
+
+    SQL Server 208 / 42S02 / Invalid object name. Oracle ORA-00942. Never
+    ``sys.partitions`` absence, never a truncated catalog.
+    """
+    text = str(exc).lower()
+    orig = getattr(exc, "orig", None)
+    orig_text = str(orig).lower() if orig is not None else ""
+    combined = f"{text} {orig_text}"
+    if dialect == "oracle":
+        return "ora-00942" in combined
+    args = getattr(orig, "args", ()) if orig is not None else ()
+    if args and str(args[0]) in {"208", "42S02"}:
+        return True
+    code = getattr(orig, "sqlstate", None) or getattr(exc, "sqlstate", None)
+    if str(code or "").upper() == "42S02":
+        return True
+    return "invalid object name" in combined
+
+
+@contextmanager
+def _warehouse_sql_engine(db_type: str, cfg: Mapping[str, Any]) -> Iterator[Any]:
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from services.engine_pool import release_engine
+
+    engine_cfg = dict(cfg)
+    if not str(engine_cfg.get("type") or "").strip():
+        engine_cfg["type"] = db_type
+    engine = get_sqlalchemy_engine(engine_cfg)
+    try:
+        yield engine
+    finally:
+        release_engine(engine)
+
+
+def _warehouse_sql_row_count(
+    db_type: str,
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    dialect: str,
+) -> int | None:
+    """Dest-engine COUNT(*). Missing table is 0. Stats views never consulted."""
+    import sqlalchemy as sa
+
+    try:
+        table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+        with _warehouse_sql_engine(db_type, cfg) as engine:
+            with engine.connect() as conn:
+                n = conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
+        return int(n or 0)
+    except Exception as exc:
+        if _is_missing_warehouse_relation(exc, dialect):
+            return 0
+        logger.warning("Warehouse dest COUNT(*) failed: %s", exc)
+        return None
+
+
+def _warehouse_sql_key_list(
+    db_type: str,
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+    dialect: str,
+) -> list[tuple[Any, ...]] | None:
+    import sqlalchemy as sa
+    from connectors.sql_identifiers import quote_sql_identifier
+    from services.dialect_profiles import quote_char_for
+
+    qchar = quote_char_for(dialect) or '"'
+    table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    col_sql = ", ".join(quote_sql_identifier(c, qchar) for c in cols)
+    sql = f"SELECT {col_sql} FROM {table_ref}"  # nosec B608
+    try:
+        with _warehouse_sql_engine(db_type, cfg) as engine:
+            with engine.connect() as conn:
+                rows = conn.execute(sa.text(sql)).fetchall() or []
+    except Exception as exc:
+        if _is_missing_warehouse_relation(exc, dialect):
+            return []
+        logger.warning("Warehouse dest key list failed: %s", exc)
+        return None
+    out: list[tuple[Any, ...]] = []
+    width = len(cols)
+    for row in rows:
+        tup = tuple(row[:width])
+        if len(tup) != width or any(v is None for v in tup):
+            continue
+        out.append(tup)
+    return out
+
+
+def _warehouse_sql_key_hits(
+    db_type: str,
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+    dialect: str,
+) -> int | None:
+    """How many of these keys dest holds. Named binds; composite is AND/OR.
+
+    Oracle 19c (JPMorgan-class) has no row-value ``IN ((a,b),…)``. SQL Server
+    does, but one portable predicate keeps leftover MERGE listing exact on
+    both engines. Chunk size stays under SQL Server's 2100-parameter cap.
+    """
+    import sqlalchemy as sa
+    from connectors.sql_identifiers import quote_sql_identifier
+    from services.dialect_profiles import quote_char_for
+
+    qchar = quote_char_for(dialect) or '"'
+    table_ref = _warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    qcols = [quote_sql_identifier(c, qchar) for c in cols]
+    col_sql = ", ".join(qcols)
+    width = len(cols)
+    total = 0
+    try:
+        with _warehouse_sql_engine(db_type, cfg) as engine:
+            with engine.connect() as conn:
+                for i in range(0, len(keys), _KEY_HIT_CHUNK):
+                    chunk = keys[i : i + _KEY_HIT_CHUNK]
+                    if width == 1:
+                        placeholders = ", ".join(f":k{j}" for j in range(len(chunk)))
+                        sql = (
+                            f"SELECT COUNT(DISTINCT {col_sql}) FROM {table_ref} "  # nosec B608
+                            f"WHERE {col_sql} IN ({placeholders})"
+                        )
+                        params = {f"k{j}": row[0] for j, row in enumerate(chunk)}
+                    else:
+                        clauses: list[str] = []
+                        params = {}
+                        for j, row in enumerate(chunk):
+                            parts = []
+                            for c_i, quoted in enumerate(qcols):
+                                name = f"k{j}_{c_i}"
+                                parts.append(f"{quoted} = :{name}")
+                                params[name] = row[c_i]
+                            clauses.append("(" + " AND ".join(parts) + ")")
+                        sql = (
+                            f"SELECT COUNT(*) FROM ("  # nosec B608
+                            f"SELECT DISTINCT {col_sql} FROM {table_ref} "
+                            f"WHERE {' OR '.join(clauses)}"
+                            f") _df_key_hits"
+                        )
+                    n = conn.execute(sa.text(sql), params).scalar()
+                    total += int(n or 0)
+    except Exception as exc:
+        if _is_missing_warehouse_relation(exc, dialect):
+            return 0
+        logger.warning("Warehouse dest key hits failed: %s", exc)
+        return None
+    return total
 
 
 def _key_list_sql(

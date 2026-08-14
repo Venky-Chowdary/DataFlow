@@ -117,6 +117,12 @@ def quote_table_ref(
     ``dialect``: ansi | postgresql | snowflake | sqlite | duckdb | mysql | bigquery
     """
     dialect = (dialect or "ansi").lower()
+    try:
+        from services.dialect_profiles import normalize_driver
+
+        dialect = normalize_driver(dialect) or dialect
+    except Exception:
+        pass
     if dialect in ("mysql", "mariadb", "clickhouse"):
         q = "`"
         tbl = require_safe_identifier(table, preserve_case=True) if sanitize else require_safe_identifier(

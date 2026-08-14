@@ -71,9 +71,31 @@ DIALECT_PROFILES: dict[str, DialectProfile] = {
 
 _ALIASES: dict[str, str] = {
     "mssql+pyodbc": "sqlserver",
+    "mssql+pymssql": "sqlserver",
+    "sql_server": "sqlserver",
+    "microsoft_sql_server": "sqlserver",
+    "azure_sql": "sqlserver",
+    "azure_sql_database": "sqlserver",
+    "azure_sql_managed_instance": "sqlserver",
+    "google_cloud_sql_sql_server": "sqlserver",
+    "amazon_rds_sql_server": "sqlserver",
+    "synapse": "sqlserver",
+    "azure_synapse": "sqlserver",
+    "synapse_analytics": "sqlserver",
+    "azure_synapse_dedicated": "sqlserver",
+    "azure_synapse_serverless": "sqlserver",
     "postgresql+psycopg2": "postgresql",
     "mysql+pymysql": "mysql",
     "oracle+oracledb": "oracle",
+    "oracle+cx_oracle": "oracle",
+    "oracledb": "oracle",
+    "oracle_db": "oracle",
+    "oracle_autonomous": "oracle",
+    "oracle_adw": "oracle",
+    "oracle_atp": "oracle",
+    "oracle_autonomous_warehouse": "oracle",
+    "amazon_rds_oracle": "oracle",
+    "autonomous_database": "oracle",
     "bq": "bigquery",
     "amazon_s3": "s3",
     "azure_blob_storage": "adls",
@@ -243,7 +265,19 @@ _FETCH_FIRST_DIALECTS: frozenset[str] = frozenset(
 )
 
 _ORACLE_LIKE: frozenset[str] = frozenset(
-    {"oracle", "oracle+oracledb", "oracle+cx_oracle", "autonomous_database", "amazon_rds_oracle"}
+    {
+        "oracle",
+        "oracle+oracledb",
+        "oracle+cx_oracle",
+        "oracledb",
+        "oracle_db",
+        "oracle_autonomous",
+        "oracle_adw",
+        "oracle_atp",
+        "oracle_autonomous_warehouse",
+        "autonomous_database",
+        "amazon_rds_oracle",
+    }
 )
 
 
@@ -252,7 +286,29 @@ def uses_fetch_first_pagination(driver: str | None) -> bool:
     return normalize_driver(driver) in _FETCH_FIRST_DIALECTS or (driver or "").strip().lower() in _FETCH_FIRST_DIALECTS
 
 
+def warehouse_sql_quote_dialect(driver: str | None) -> str | None:
+    """Exact dest-engine COUNT(*) family: ``sqlserver`` or ``oracle``.
+
+    Catalog SKUs (Azure SQL, RDS Oracle, Autonomous) alias onto these two.
+    Snowflake / BigQuery clustering stats and ``INFORMATION_SCHEMA``
+    approximations are not this path — those COUNT identities stay
+    unmeasured until proven exact.
+    """
+    key = dialect_profile(driver).driver
+    if key in {"sqlserver", "mssql"}:
+        return "sqlserver"
+    if key == "oracle":
+        return "oracle"
+    return None
+
+
+def is_sqlserver_like(driver: str | None) -> bool:
+    return warehouse_sql_quote_dialect(driver) == "sqlserver"
+
+
 def is_oracle_like(driver: str | None) -> bool:
+    if dialect_profile(driver).driver == "oracle":
+        return True
     raw = (driver or "").strip().lower()
     return normalize_driver(driver) in _ORACLE_LIKE or raw in _ORACLE_LIKE
 
@@ -316,18 +372,7 @@ def page_clause(driver: str | None, offset: int, limit: int) -> str:
 def zero_row_probe_sql(driver: str | None, qualified: str) -> str:
     """A ``SELECT`` that returns column metadata but no rows, on any dialect."""
     raw = (driver or "").strip().lower()
-    if normalize_driver(driver) in {"mssql", "sqlserver"} or raw in {
-        "mssql",
-        "sqlserver",
-        "microsoft_sql_server",
-        "azure_sql_database",
-        "azure_sql_managed_instance",
-        "synapse_analytics",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-        "google_cloud_sql_sql_server",
-        "amazon_rds_sql_server",
-    }:
+    if is_sqlserver_like(driver) or raw in {"mssql", "sqlserver"}:
         return f"SELECT TOP 0 * FROM {qualified}"  # nosec B608
     if uses_fetch_first_pagination(driver):
         # ``LIMIT 0`` is a syntax error on Oracle/DB2; ``WHERE 1=0`` is universal.

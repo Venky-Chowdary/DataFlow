@@ -5,8 +5,12 @@ from __future__ import annotations
 from services.dialect_profiles import (
     default_schema_for,
     fold_identifier,
+    is_oracle_like,
+    is_sqlserver_like,
     normalize_schema,
+    quote_char_for,
     schema_from_cfg,
+    warehouse_sql_quote_dialect,
 )
 from connectors.sql_identifiers import quote_table_ref
 
@@ -61,8 +65,42 @@ def test_quote_table_ref_per_dialect():
     assert quote_table_ref("jobs", "public", dialect="postgresql") == '"public"."jobs"'
     assert quote_table_ref("jobs", "public", dialect="snowflake") == '"PUBLIC"."JOBS"'
     assert quote_table_ref("jobs", "dbo", dialect="sqlserver") == "[dbo].[jobs]"
+    assert quote_table_ref("jobs", "dbo", dialect="azure_sql_database") == "[dbo].[jobs]"
+    assert quote_table_ref("jobs", "hr", dialect="oracle") == '"HR"."JOBS"'
+    assert quote_table_ref("jobs", "hr", dialect="amazon_rds_oracle") == '"HR"."JOBS"'
     assert quote_table_ref("jobs", None, dialect="mysql") == "`jobs`"
     assert quote_table_ref("jobs", "analytics", dialect="bigquery", project="p1") == "`p1.analytics.jobs`"
+
+
+def test_warehouse_sql_quote_dialect_aliases_onto_exact_engines():
+    """Catalog SKUs must quote as sqlserver/oracle so leftover MERGE can list keys."""
+    for sku in (
+        "sqlserver",
+        "mssql",
+        "azure_sql_database",
+        "amazon_rds_sql_server",
+        "synapse_analytics",
+        "azure_sql",
+    ):
+        assert warehouse_sql_quote_dialect(sku) == "sqlserver", sku
+        assert is_sqlserver_like(sku)
+        assert quote_char_for(sku) == "["
+        assert default_schema_for(sku) == "dbo"
+    for sku in (
+        "oracle",
+        "oracle_db",
+        "amazon_rds_oracle",
+        "oracle_autonomous_warehouse",
+        "autonomous_database",
+    ):
+        assert warehouse_sql_quote_dialect(sku) == "oracle", sku
+        assert is_oracle_like(sku)
+        assert quote_char_for(sku) == '"'
+    assert warehouse_sql_quote_dialect("snowflake") is None
+    assert warehouse_sql_quote_dialect("postgresql") is None
+    assert warehouse_sql_quote_dialect("bigquery") is None
+    assert normalize_schema("azure_sql_database", "public") == "dbo"
+    assert normalize_schema("amazon_rds_oracle", None, username="app") == "APP"
 
 
 def test_empty_schema_matrix_all_major_dialects():

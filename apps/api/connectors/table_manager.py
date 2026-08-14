@@ -13,6 +13,35 @@ from connectors.mongodb_common import (
 
 logger = logging.getLogger(__name__)
 
+# Destinations whose DELETE / LSN fetch go through SQLAlchemy generic_sql.
+# Membership is dialect family (Azure SQL ≡ SQL Server, RDS Oracle ≡ Oracle),
+# not a catalog-id allow-list that leftover MERGE can miss.
+_GENERIC_SQL_MUTATE_ENGINES = frozenset(
+    {
+        "generic_sql",
+        "snowflake",
+        "bigquery",
+        "duckdb",
+        "databricks",
+    }
+)
+
+
+def _generic_sql_cfg(cfg: dict[str, Any], dt: str) -> dict[str, Any]:
+    """Engine builder reads ``type``; catalog ``mssql`` quotes as sqlserver."""
+    out = {**cfg, "db_type": "sqlserver" if dt == "mssql" else dt}
+    if not str(out.get("type") or "").strip():
+        out["type"] = out["db_type"]
+    return out
+
+
+def _routes_generic_sql_mutate(dt: str) -> bool:
+    from services.dialect_profiles import warehouse_sql_quote_dialect
+
+    if dt in _GENERIC_SQL_MUTATE_ENGINES:
+        return True
+    return warehouse_sql_quote_dialect(dt) is not None
+
 
 def _sqlite_path_from_cfg(cfg: dict[str, Any]) -> str:
     """Resolve a SQLite filesystem path from endpoint config.
@@ -322,28 +351,12 @@ def delete_by_primary_keys(
         return _delete_generic_sql(cfg, table_name, pk_cols[0], work_keys, schema)
     if dt == "mongodb":
         return _delete_mongodb(cfg, table_name, pk_cols[0], work_keys)
-    if dt in {
-        "sqlserver",
-        "mssql",
-        "oracle",
-        "oracle_db",
-        "oracle_autonomous_warehouse",
-        "snowflake",
-        "bigquery",
-        "duckdb",
-        "databricks",
-        "synapse_analytics",
-        "azure_sql_database",
-        "amazon_rds_sql_server",
-        "google_cloud_sql_sql_server",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-    }:
+    if _routes_generic_sql_mutate(dt):
         # Route warehouse/SQL dialects through the generic SQLAlchemy deleter.
         from connectors.generic_sql import delete_by_primary_keys as _generic_delete
 
         return _generic_delete(
-            {**cfg, "db_type": dt if dt != "mssql" else "sqlserver"},
+            _generic_sql_cfg(cfg, dt),
             table_name,
             pk_cols[0],
             work_keys,
@@ -434,30 +447,10 @@ def _fetch_pk_lsn_map(
         finally:
             conn.close()
         return existing
-    if dt in {
-        "generic_sql",
-        "sqlserver",
-        "mssql",
-        "oracle",
-        "snowflake",
-        "bigquery",
-        "sqlite",
-        "duckdb",
-        "databricks",
-        "synapse_analytics",
-        "azure_sql_database",
-        "amazon_rds_sql_server",
-        "google_cloud_sql_sql_server",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-        "oracle_db",
-        "oracle_autonomous_warehouse",
-    }:
+    if dt == "sqlite" or _routes_generic_sql_mutate(dt):
         from connectors.generic_sql import fetch_pk_lsn_map
 
-        sa_cfg = {**cfg, "db_type": dt if dt != "mssql" else "sqlserver"}
-        if "type" not in sa_cfg:
-            sa_cfg["type"] = sa_cfg.get("db_type") or dt
+        sa_cfg = _generic_sql_cfg(cfg, dt)
         return fetch_pk_lsn_map(
             sa_cfg,
             table_name,
@@ -718,24 +711,9 @@ def _delete_composite(
         return _delete_mysql_composite(cfg, table_name, pk_cols, tuples, schema)
     if dt == "sqlite":
         return _delete_sqlite_composite(cfg, table_name, pk_cols, tuples, schema)
-    if dt in {
-        "generic_sql",
-        "sqlserver",
-        "mssql",
-        "oracle",
-        "snowflake",
-        "bigquery",
-        "duckdb",
-        "databricks",
-        "synapse_analytics",
-        "azure_sql_database",
-        "amazon_rds_sql_server",
-        "google_cloud_sql_sql_server",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-    }:
+    if _routes_generic_sql_mutate(dt):
         return _delete_generic_sql_composite(
-            {**cfg, "db_type": dt if dt != "mssql" else "sqlserver"},
+            _generic_sql_cfg(cfg, dt),
             table_name,
             pk_cols,
             tuples,

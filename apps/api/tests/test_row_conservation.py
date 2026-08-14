@@ -2673,3 +2673,380 @@ def test_iceberg_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: P
     assert census["dest_count"] == 2
     assert census[EXTRA_KEYS_KEY] == 0
     assert census[MISSING_KEYS_KEY] == 1
+
+
+class _ScriptedWarehouseEngine:
+    """In-process dest engine: COUNT(*) / SELECT pk / named-bind hits. No stats views."""
+
+    def __init__(self, *, count: int = 0, rows: list[tuple] | None = None, error: BaseException | None = None):
+        self.count = count
+        self.rows = list(rows or [])
+        self.error = error
+        self.sql: list[str] = []
+        self.params: list[object] = []
+
+    def connect(self):
+        return self
+
+    def dispose(self) -> None:
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def execute(self, stmt: object, params: object = None):
+        from types import SimpleNamespace
+
+        sql = str(stmt)
+        self.sql.append(sql)
+        self.params.append(params)
+        if self.error is not None:
+            raise self.error
+        upper = sql.upper()
+        if "SYS.PARTITIONS" in upper or "DM_DB_PARTITION_STATS" in upper or "NUM_ROWS" in upper:
+            raise AssertionError(f"warehouse COUNT must not use stats views: {sql}")
+        if "COUNT(DISTINCT" in upper or "_DF_KEY_HITS" in upper:
+            dest = {row[0] for row in self.rows}
+            values = []
+            if isinstance(params, dict):
+                values = [v for k, v in params.items() if str(k).startswith("k")]
+            hits = len(dest.intersection(values))
+            return SimpleNamespace(scalar=lambda: hits, fetchall=lambda: [])
+        if "COUNT(*)" in upper:
+            return SimpleNamespace(scalar=lambda: self.count, fetchall=lambda: [])
+        return SimpleNamespace(scalar=lambda: None, fetchall=lambda: list(self.rows))
+
+
+def _patch_warehouse(monkeypatch: pytest.MonkeyPatch, engine: _ScriptedWarehouseEngine) -> _ScriptedWarehouseEngine:
+    monkeypatch.setattr(
+        "connectors.generic_sql.get_sqlalchemy_engine",
+        lambda cfg: engine,
+    )
+    monkeypatch.setattr("services.engine_pool.release_engine", lambda eng: None)
+    return engine
+
+
+def test_sqlserver_dest_count_quotes_dbo_and_never_uses_partition_stats(monkeypatch: pytest.MonkeyPatch):
+    """Azure SQL / SQL Server leftover MERGE listing needs [dbo].[table] COUNT(*)."""
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(count=4, rows=[(1,), (2,), (3,), (99,)]),
+    )
+    cfg = {"host": "db.example", "username": "sa", "database": "app"}
+    assert destination_row_count("azure_sql_database", cfg, schema="", table_name="items") == 4
+    assert any("COUNT(*)" in sql.upper() for sql in engine.sql)
+    assert any("[dbo].[items]" in sql for sql in engine.sql)
+    assert all("sys.partitions" not in sql.lower() for sql in engine.sql)
+    listed = destination_key_list(
+        "sqlserver", cfg, schema="", table_name="items", key_columns=["id"]
+    )
+    assert listed is not None
+    assert sorted(listed) == [(1,), (2,), (3,), (99,)]
+    hits = destination_keyset_census(
+        "amazon_rds_sql_server",
+        cfg,
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+    )
+    assert hits is not None
+    assert hits["dest_count"] == 4
+    assert hits[EXTRA_KEYS_KEY] == 1
+    assert hits[MISSING_KEYS_KEY] == 0
+
+
+def test_oracle_dest_count_folds_schema_and_missing_table_is_zero(monkeypatch: pytest.MonkeyPatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    cfg = {"host": "db.example", "username": "app", "database": "ORCL"}
+    missing = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            error=ProgrammingError("SELECT", {}, Exception("ORA-00942: table or view does not exist")),
+        ),
+    )
+    assert destination_row_count("amazon_rds_oracle", cfg, schema="", table_name="orders") == 0
+    assert any('"APP"."ORDERS"' in sql for sql in missing.sql)
+
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(count=2, rows=[(10,), (20,)]),
+    )
+    assert destination_row_count("oracle_autonomous_warehouse", cfg, schema="hr", table_name="orders") == 2
+    assert any('"HR"."ORDERS"' in sql for sql in engine.sql)
+    listed = destination_key_list(
+        "oracle", cfg, schema="hr", table_name="orders", key_columns=["id"]
+    )
+    assert listed == [(10,), (20,)]
+
+
+def test_sqlserver_missing_table_is_zero_not_unmeasured(monkeypatch: pytest.MonkeyPatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            error=ProgrammingError("SELECT", {}, Exception("Invalid object name 'dbo.fresh'")),
+        ),
+    )
+    n = destination_row_count("sqlserver", {"host": "h"}, schema="dbo", table_name="fresh")
+    assert n == 0
+    assert engine.sql  # COUNT(*) was attempted, not skipped as unsupported
+
+
+def test_sqlserver_login_failure_is_unmeasured_not_empty(monkeypatch: pytest.MonkeyPatch):
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(error=RuntimeError("Login failed for user 'sa'")),
+    )
+    assert destination_row_count("sqlserver", {"host": "h"}, schema="dbo", table_name="items") is None
+    assert engine.sql
+
+
+def test_snowflake_and_bigquery_dest_count_stay_unmeasured():
+    """Clustering / INFORMATION_SCHEMA approximations are not COUNT(*). Leave unproven."""
+    assert destination_row_count("snowflake", {"host": "h"}, schema="PUBLIC", table_name="T") is None
+    assert destination_row_count("bigquery", {"project": "p"}, schema="ds", table_name="T") is None
+    assert destination_key_list(
+        "snowflake", {"host": "h"}, schema="PUBLIC", table_name="T", key_columns=["id"]
+    ) is None
+
+
+def test_oracle_composite_key_hits_use_and_or_not_tuple_in(monkeypatch: pytest.MonkeyPatch):
+    """Oracle 19c has no row-value IN; leftover MERGE composite hits must be AND/OR."""
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(count=2, rows=[(1, "a"), (2, "b")]),
+    )
+    cfg = {"username": "app"}
+    census = destination_keyset_census(
+        "oracle",
+        cfg,
+        schema="app",
+        table_name="pair",
+        key_columns=["id", "kind"],
+        keys=[(1, "a"), (2, "b")],
+    )
+    assert census is not None
+    assert census["dest_count"] == 2
+    hit_sql = [sql for sql in engine.sql if "_df_key_hits" in sql or "_DF_KEY_HITS" in sql.upper()]
+    assert hit_sql
+    compact = hit_sql[0].replace(" ", "")
+    assert "IN((" not in compact
+    assert " = :k0_0" in hit_sql[0]
+    assert " AND " in hit_sql[0]
+
+
+def test_azure_sql_leftover_merge_deletes_keys_not_in_complete_s(monkeypatch: pytest.MonkeyPatch):
+    """Catalog SKU azure_sql_database must apply leftover = D \\ S, not return unapplied."""
+    monkeypatch.setattr(
+        "services.dest_precount.destination_key_list",
+        lambda *a, **k: [(1,), (2,), (3,), (99,)],
+    )
+    deleted: list[str] = []
+
+    def _delete(**kwargs: object) -> int:
+        deleted.extend(list(kwargs["keys"]))  # type: ignore[arg-type]
+        return len(kwargs["keys"])  # type: ignore[arg-type]
+
+    monkeypatch.setattr("connectors.table_manager.delete_by_primary_keys", _delete)
+    n = apply_inferred_leftover_deletes(
+        db_type="azure_sql_database",
+        cfg={"host": "db.example"},
+        schema="dbo",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=True,
+    )
+    assert n == 1
+    assert deleted == ["99"]
+    refused = apply_inferred_leftover_deletes(
+        db_type="azure_sql_database",
+        cfg={"host": "db.example"},
+        schema="dbo",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=False,
+    )
+    assert refused is None
+
+
+def test_amazon_rds_oracle_leftover_merge_routes_delete(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(
+        "services.dest_precount.destination_key_list",
+        lambda *a, **k: [(1,), (99,)],
+    )
+    seen: dict[str, object] = {}
+
+    def _delete(**kwargs: object) -> int:
+        seen.update(kwargs)
+        return 1
+
+    monkeypatch.setattr("connectors.table_manager.delete_by_primary_keys", _delete)
+    n = apply_inferred_leftover_deletes(
+        db_type="amazon_rds_oracle",
+        cfg={"username": "app"},
+        schema="APP",
+        table_name="ORDERS",
+        key_columns=["id"],
+        keys=[(1,)],
+        complete_snapshot=True,
+    )
+    assert n == 1
+    assert seen["db_type"] == "amazon_rds_oracle"
+    assert seen["keys"] == ["99"]
+
+
+def test_sqlserver_live_leftover_merge_when_reachable():
+    """Live SQL Server: dest {1,2,3,99} vs S {1,2,3} → DELETE 99, extra=0.
+
+    Skip when :1433 does not answer or the driver cannot authenticate. Never
+    invent green. COUNT(*) from dest-engine, never sys.partitions.
+    """
+    import socket
+
+    try:
+        socket.create_connection(("127.0.0.1", 1433), timeout=1).close()
+    except OSError:
+        pytest.skip("SQL Server not listening on 1433")
+
+    cfg = {
+        "type": "sqlserver",
+        "host": "127.0.0.1",
+        "port": 1433,
+        "database": "dataflow",
+        "username": "sa",
+        "password": "Datawrap_CDC_2022!",
+        "schema": "dbo",
+    }
+    table = "df_p9_leftover_merge"
+    try:
+        from connectors.generic_sql import get_sqlalchemy_engine
+        import sqlalchemy as sa
+
+        engine = get_sqlalchemy_engine(cfg)
+    except Exception as exc:
+        pytest.skip(f"SQL Server engine unavailable: {exc}")
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa.text(f"IF OBJECT_ID(N'dbo.{table}', N'U') IS NOT NULL DROP TABLE dbo.{table}"))
+            conn.execute(
+                sa.text(f"CREATE TABLE dbo.{table} (id BIGINT NOT NULL PRIMARY KEY, label NVARCHAR(32) NULL)")
+            )
+            conn.execute(
+                sa.text(f"INSERT INTO dbo.{table} (id, label) VALUES (1, N'a'), (2, N'b'), (3, N'c'), (99, N'ghost')")
+            )
+            conn.commit()
+    except Exception as exc:
+        pytest.skip(f"SQL Server setup failed: {exc}")
+
+    assert destination_row_count("sqlserver", cfg, schema="dbo", table_name=table) == 4
+    listed = destination_key_list(
+        "sqlserver", cfg, schema="dbo", table_name=table, key_columns=["id"]
+    )
+    assert listed is not None
+    assert sorted(listed) == [(1,), (2,), (3,), (99,)]
+    deleted = apply_inferred_leftover_deletes(
+        db_type="sqlserver",
+        cfg=cfg,
+        schema="dbo",
+        table_name=table,
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    after = destination_keyset_census(
+        "sqlserver",
+        cfg,
+        schema="dbo",
+        table_name=table,
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+    )
+    assert after is not None
+    assert after["dest_count"] == 3
+    assert after[EXTRA_KEYS_KEY] == 0
+    assert after[MISSING_KEYS_KEY] == 0
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa.text(f"IF OBJECT_ID(N'dbo.{table}', N'U') IS NOT NULL DROP TABLE dbo.{table}"))
+            conn.commit()
+    except Exception:
+        pass
+
+
+def test_oracle_live_leftover_merge_when_reachable():
+    """Live Oracle: same leftover identity. Skip when :1521 does not answer."""
+    import os
+    import socket
+
+    host = os.environ.get("DATAFLOW_ORACLE_HOST", "127.0.0.1")
+    port = int(os.environ.get("DATAFLOW_ORACLE_PORT", "1521"))
+    try:
+        socket.create_connection((host, port), timeout=1).close()
+    except OSError:
+        pytest.skip(f"Oracle not listening on {host}:{port}")
+
+    cfg = {
+        "type": "oracle",
+        "host": host,
+        "port": port,
+        "database": os.environ.get("DATAFLOW_ORACLE_SERVICE", "ORCL"),
+        "username": os.environ.get("DATAFLOW_ORACLE_USER", "system"),
+        "password": os.environ.get("DATAFLOW_ORACLE_PASSWORD", ""),
+        "schema": "",
+    }
+    if not cfg["password"]:
+        pytest.skip("Oracle password not configured")
+    table = "DF_P9_LEFTOVER"
+    try:
+        from connectors.generic_sql import get_sqlalchemy_engine
+        import sqlalchemy as sa
+
+        engine = get_sqlalchemy_engine(cfg)
+        with engine.connect() as conn:
+            conn.execute(sa.text(f"BEGIN EXECUTE IMMEDIATE 'DROP TABLE {table}'; EXCEPTION WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF; END;"))
+            conn.execute(sa.text(f'CREATE TABLE "{table}" (id NUMBER PRIMARY KEY, label VARCHAR2(32))'))
+            conn.execute(sa.text(f"INSERT INTO \"{table}\" (id, label) VALUES (1, 'a')"))
+            conn.execute(sa.text(f"INSERT INTO \"{table}\" (id, label) VALUES (2, 'b')"))
+            conn.execute(sa.text(f"INSERT INTO \"{table}\" (id, label) VALUES (3, 'c')"))
+            conn.execute(sa.text(f"INSERT INTO \"{table}\" (id, label) VALUES (99, 'ghost')"))
+            conn.commit()
+    except Exception as exc:
+        pytest.skip(f"Oracle setup failed: {exc}")
+
+    assert destination_row_count("oracle", cfg, schema="", table_name=table) == 4
+    deleted = apply_inferred_leftover_deletes(
+        db_type="oracle",
+        cfg=cfg,
+        schema="",
+        table_name=table,
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    after = destination_keyset_census(
+        "oracle",
+        cfg,
+        schema="",
+        table_name=table,
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+    )
+    assert after is not None
+    assert after["dest_count"] == 3
+    assert after[EXTRA_KEYS_KEY] == 0
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa.text(f"BEGIN EXECUTE IMMEDIATE 'DROP TABLE {table}'; EXCEPTION WHEN OTHERS THEN NULL; END;"))
+            conn.commit()
+    except Exception:
+        pass
