@@ -439,7 +439,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             ? (gapRecovery
               ? "CDC cursor-gap recovery restarted — not a checkpoint continuation. Purged-window events are gone."
               : "Full refresh re-run from the beginning — it replaces the destination.")
-            : `Resuming from batch ${liveJob.checkpoint?.chunk_index ?? 0} (${(liveJob.checkpoint?.rows_processed ?? 0).toLocaleString()} rows already committed).`),
+            : `Resuming from batch ${liveJob?.checkpoint?.chunk_index ?? 0} (${(liveJob?.checkpoint?.rows_processed ?? 0).toLocaleString()} rows already committed).`),
         tone: "success",
       });
       onRefresh?.();
