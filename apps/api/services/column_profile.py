@@ -191,8 +191,12 @@ def read_column_profile(
     table_ref: str,
     columns: list[str],
     types: dict[str, str] | None,
-) -> dict[str, Any]:
-    """Run the profile SQL and return ``{column: ColumnAggregate}``.
+) -> tuple[int, dict[str, Any]]:
+    """Run the profile SQL and return ``(row_count, {column: ColumnAggregate})``.
+
+    The ``row_count`` is the table's own ``count(*)`` from the same query, so a
+    standalone parity check (which has no transfer to quote a count from) gets an
+    authoritative cardinality without a second round trip.
 
     Numeric min/max/sum are canonicalized so a scale-only difference is not a
     divergence. Statistics this route does not trust for a column are left
@@ -240,7 +244,7 @@ def read_column_profile(
             max_value=max_v,
             sum_value=sum_v,
         )
-    return out
+    return row_count, out
 
 
 def _connect(family: str, cfg: dict[str, Any]) -> Any:
@@ -321,13 +325,17 @@ def engine_profile_ladder(
     dest_table: str,
     pairs: list[tuple[str, str]],
     types: dict[str, str] | None,
-    source_rows: int,
-    target_rows: int,
+    source_rows: int | None = None,
+    target_rows: int | None = None,
     rejected_rows: int = 0,
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
 ) -> dict[str, Any] | None:
     """L1 + engine-side L2 for a SQL route, at any scale, same- or cross-engine.
+
+    ``source_rows``/``target_rows`` are the accounted cardinalities from a
+    transfer (which knows about rejected/skipped rows); a standalone parity check
+    leaves them ``None`` and the profile's own ``count(*)`` is used instead.
 
     ``pairs`` are ordered ``(source_column, target_column)``; a rename is free
     because each side profiles its own names and the source profile is re-keyed
@@ -370,11 +378,11 @@ def engine_profile_ladder(
         src_conn = _connect(src_family, source_cfg)
         dst_conn = _connect(dst_family, dest_cfg)
         with src_conn.cursor() as sc, dst_conn.cursor() as dc:
-            src_raw = read_column_profile(
+            src_rows_obs, src_raw = read_column_profile(
                 source_engine, sc, _table_ref(src_family, source_schema, source_table),
                 source_cols, source_types,
             )
-            dst_profile = read_column_profile(
+            dst_rows_obs, dst_profile = read_column_profile(
                 dest_engine, dc, _table_ref(dst_family, dest_schema, dest_table),
                 target_cols, dest_types,
             )
@@ -404,9 +412,13 @@ def engine_profile_ladder(
     src_profile = _prepare_for_comparison(src_profile, kinds, cross_engine=cross_engine)
     dst_profile = _prepare_for_comparison(dst_profile, kinds, cross_engine=cross_engine)
 
+    # A transfer supplies accounted counts; a standalone check trusts the
+    # profile's own count(*).
+    eff_source_rows = src_rows_obs if source_rows is None else int(source_rows)
+    eff_target_rows = dst_rows_obs if target_rows is None else int(target_rows)
     l1 = layer_l1_row_balance(
-        source_rows=int(source_rows),
-        target_rows=int(target_rows),
+        source_rows=eff_source_rows,
+        target_rows=eff_target_rows,
         rejected_rows=int(rejected_rows or 0),
         coerced_null_rows=int(coerced_null_rows or 0),
         rows_skipped=int(rows_skipped or 0),
