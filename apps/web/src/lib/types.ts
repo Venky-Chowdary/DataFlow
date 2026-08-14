@@ -356,6 +356,7 @@ export interface Gate8ReconciliationPayload {
    */
   checksum_scope?: string;
   assurance_level?: string;
+  checksum_match?: boolean | null;
   preview?: boolean;
   post_write_pending?: boolean;
   /** File/object export Gate-8: operational pass without read-back proof. */

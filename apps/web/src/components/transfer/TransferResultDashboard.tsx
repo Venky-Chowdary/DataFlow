@@ -698,7 +698,7 @@ export function TransferResultDashboard({
               <p className="df2-result-explain-body">
                 If reconciliation is <strong>Verified</strong>, source and destination fingerprints match.
                 Append delta and batch-verified runs landed rows but whole-table checksums are not comparable.
-
+              </p>
               {(result.reconciliation?.source_checksum || result.reconciliation?.target_checksum) && (
                 <dl className="df2-result-checksum-pair">
                   <div>
