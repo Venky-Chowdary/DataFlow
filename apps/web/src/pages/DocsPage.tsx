@@ -89,13 +89,9 @@ const WORKSPACE_SHOTS = [
 ] as const;
 
 function DocsHero({
-  transferLive,
-  total,
   activeSection,
   onJump,
 }: {
-  transferLive: number;
-  total: number;
   activeSection: string;
   onJump: (id: string) => void;
 }) {
@@ -126,24 +122,6 @@ function DocsHero({
           >
             Preflight gates
           </Button>
-        </div>
-        <div className="df2-docs-hero-stats">
-          <div className="df2-docs-hero-stat">
-            <strong>{transferLive.toLocaleString()}</strong>
-            <span>Transfer-ready drivers</span>
-          </div>
-          <div className="df2-docs-hero-stat">
-            <strong>{total.toLocaleString()}</strong>
-            <span>Catalog tiles</span>
-          </div>
-          <div className="df2-docs-hero-stat">
-            <strong>8</strong>
-            <span>Preflight gates</span>
-          </div>
-          <div className="df2-docs-hero-stat">
-            <strong>0</strong>
-            <span>Silent drops by design</span>
-          </div>
         </div>
       </div>
       <nav className="df2-docs-hero-progress" aria-label="On this page">
@@ -481,7 +459,7 @@ export function DocsPage() {
       className="df2-page-docs"
     >
       <PageFrame className="df2-docs-workspace">
-      <DocsHero transferLive={transferLive} total={total} activeSection={activeSection} onJump={jumpTo} />
+      <DocsHero activeSection={activeSection} onJump={jumpTo} />
 
       <div className="df2-docs-shell">
         <aside className="df2-docs-toc" aria-label="Documentation sections">

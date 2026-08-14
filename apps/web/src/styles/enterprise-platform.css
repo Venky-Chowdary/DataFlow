@@ -87,7 +87,7 @@ body {
 }
 
 .df2-content {
-  background: #fff;
+  background: var(--df-bg-canvas, #f3f5f7);
 }
 
 /* Pages use full available width — no centered column */

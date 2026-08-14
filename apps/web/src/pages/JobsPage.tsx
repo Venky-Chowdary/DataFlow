@@ -26,7 +26,7 @@ import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
-import { destHeadline, formatJobRowMetric, writerAckDisagrees, writerHeadline, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
+import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
 import {
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
@@ -556,8 +556,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const recon = liveJob?.reconciliation;
   const gate8 = classifyGate8Status(recon);
   const destMetric = destHeadline(liveJob);
-  const writerMetric = writerHeadline(liveJob);
-  const ackDisagrees = writerAckDisagrees(liveJob);
   const jobDuration = formatJobDuration(liveJob?.started_at, liveJob?.completed_at);
   const triggeredBy = liveJob?.triggered_by || liveJob?.created_by || "";
   const syncModeLabel = formatSyncModeLabel(
@@ -876,119 +874,15 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                       </div>
                       <div className="df2-jobs-v3-summary-ids">
                         <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
+                        <span
+                          className={`df2-jobs-v3-summary-dest ${destMetricToneClass(destMetric)}`}
+                          title={destMetric.title}
+                        >
+                          {destMetricCompact(destMetric)}
+                        </span>
                         <CopyIdChip id={selected._id} label="Job" />
                       </div>
                     </header>
-
-                    <div className="df2-jobs-v3-summary-metrics" role="group" aria-label="Job metrics">
-                      <article
-                        className={`is-metric-dest${destMetric.measured ? "" : " is-unmeasured"}${destMetric.tone === "danger" ? " is-danger" : destMetric.tone === "warn" ? " is-warn" : ""}`}
-                        title={destMetric.title}
-                      >
-                        <strong>{destMetric.value}</strong>
-                        <span>{destMetric.label}</span>
-                      </article>
-                      {ackDisagrees && (
-                        <article className="is-metric-writer is-warn" title={writerMetric.title}>
-                          <strong>{writerMetric.value}</strong>
-                          <span>{writerMetric.label}</span>
-                        </article>
-                      )}
-                      <article className="is-metric-progress">
-                        <strong>{liveJob.progress_pct ?? 100}%</strong>
-                        <span>Progress</span>
-                      </article>
-                      <article className="is-metric-columns">
-                        <strong>{mappingCount || "—"}</strong>
-                        <span>Columns</span>
-                      </article>
-                      <article
-                        className="is-metric-mode"
-                        title={liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}
-                      >
-                        <strong>
-                          {(() => {
-                            const mode = String(liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer");
-                            const short: Record<string, string> = {
-                              full_refresh_overwrite: "overwrite",
-                              full_refresh_append: "append",
-                              incremental_append: "incr append",
-                              incremental_upsert: "upsert",
-                              cdc: "CDC",
-                              migration: "migration",
-                            };
-                            return short[mode.toLowerCase()] || (mode.length > 12 ? `${mode.slice(0, 10)}…` : mode);
-                          })()}
-                        </strong>
-                        <span>Mode</span>
-                      </article>
-                      <article className={`is-metric-quarantine${rejectedCount > 0 ? " is-warn" : ""}`}>
-                        <strong>{rejectedCount.toLocaleString()}</strong>
-                        <span>Quarantined</span>
-                      </article>
-                      <article className={`is-metric-coerced${Number(liveJob.coerced_null_rows ?? 0) > 0 ? " is-warn" : ""}`}>
-                        <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
-                        <span>Coerced</span>
-                      </article>
-                      <article
-                        className={`is-metric-reconcile${
-                          gate8.tone === "ok"
-                            ? " is-ok"
-                            : gate8.tone === "danger" || selected.status === "failed"
-                              ? " is-bad"
-                              : gate8.tone === "warn"
-                                ? " is-warn"
-                                : ""
-                        }`}
-                      >
-                        <strong>
-                          {gate8.label !== "Pending"
-                            ? gate8.label
-                            : isJobSuccess(liveJob.status)
-                              ? "Pending"
-                              : selected.status === "failed"
-                                ? "Failed"
-                                : "—"}
-                        </strong>
-                        <span>Reconcile</span>
-                      </article>
-                      {jobDuration && (
-                        <article className="is-metric-duration">
-                          <strong>{jobDuration}</strong>
-                          <span>Duration</span>
-                        </article>
-                      )}
-                      {triggeredBy && (
-                        <article className="is-metric-actor">
-                          <strong title={triggeredBy}>
-                            {triggeredBy.includes("@") ? triggeredBy.split("@")[0] : triggeredBy}
-                          </strong>
-                          <span>Run by</span>
-                        </article>
-                      )}
-                      {syncModeLabel !== "—" && (
-                        <article className="is-metric-mode">
-                          <strong title={syncModeLabel}>{syncModeLabel}</strong>
-                          <span>Sync mode</span>
-                        </article>
-                      )}
-                      {liveJob.cdc_lag_seconds != null && Number.isFinite(Number(liveJob.cdc_lag_seconds)) && (
-                        <article className="is-metric-cdc">
-                          <strong>{`${Number(liveJob.cdc_lag_seconds).toFixed(1)}s`}</strong>
-                          <span>CDC lag</span>
-                        </article>
-                      )}
-                      {liveJob.replication_lag_bytes != null && Number.isFinite(Number(liveJob.replication_lag_bytes)) && (
-                        <article className="is-metric-wal">
-                          <strong>
-                            {Number(liveJob.replication_lag_bytes) >= 1_048_576
-                              ? `${(Number(liveJob.replication_lag_bytes) / 1_048_576).toFixed(1)} MB`
-                              : `${Number(liveJob.replication_lag_bytes).toLocaleString()} B`}
-                          </strong>
-                          <span>WAL</span>
-                        </article>
-                      )}
-                    </div>
 
                     <div className="df2-jobs-detail-card">
                       <div className="df2-jobs-detail-tabs" role="tablist" aria-label="Job detail sections">

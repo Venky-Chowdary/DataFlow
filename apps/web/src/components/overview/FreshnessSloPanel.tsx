@@ -69,7 +69,7 @@ export function FreshnessSloPanel({
     setDismissed(isBannerDismissed("overview.freshness", signature));
   }, [signature]);
 
-  if (!sloStatus || sloStatus === "n_a") return null;
+  if (!sloStatus || sloStatus === "n_a" || sloStatus === "ok") return null;
   if (dismissed) return null;
 
   const onDismiss = () => {
@@ -104,31 +104,6 @@ export function FreshnessSloPanel({
       </div>
     );
   }
-  if (sloStatus === "ok" && alerts.length === 0) {
-    return (
-      <div className="df2-freshness-slo is-ok" role="status" aria-label="CDC freshness SLO">
-        <DtIcon name="check" size={16} />
-        <div className="df2-freshness-slo-body">
-          <strong>CDC freshness OK</strong>
-          <p>
-            {worstLagSeconds != null
-              ? `Worst proven CDC lag ${worstLagSeconds.toFixed(1)}s (warn at ${warnSeconds}s).`
-              : `Pipelines within warn (${warnSeconds}s) / WAL catch-up band.`}
-          </p>
-        </div>
-        <button
-          type="button"
-          className="df2-banner-dismiss"
-          onClick={onDismiss}
-          aria-label="Dismiss freshness OK notice"
-          title="Dismiss until this status changes"
-        >
-          <DtIcon name="x" size={14} />
-        </button>
-      </div>
-    );
-  }
-
   const top = alerts.slice(0, 4);
   return (
     <div
