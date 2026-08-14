@@ -11,7 +11,9 @@ from services.mirror_engine import (
     _update_deleted_batch,
     apply_inferred_deletes_via_staging,
     apply_inferred_soft_deletes,
+    lattice_column_names,
     quote_sql_identifier,
+    strip_lattice_from_upsert,
 )
 
 __all__ = [
@@ -24,5 +26,7 @@ __all__ = [
     "_compute_active_checksum",
     "apply_inferred_deletes_via_staging",
     "apply_inferred_soft_deletes",
+    "lattice_column_names",
     "quote_sql_identifier",
+    "strip_lattice_from_upsert",
 ]

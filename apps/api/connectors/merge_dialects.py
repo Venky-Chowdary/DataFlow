@@ -5,7 +5,9 @@ Each engine spells the same idempotent apply differently — staging tables,
 strategy inventory lives in :mod:`connectors.merge_registry`; the SQL lives
 here so ``generic_sql`` stays about the shared write path.
 
-All of these are at-least-once idempotent applies, never exactly-once.
+``update_insert_upsert`` is the portable MERGE when native upsert cannot run
+and dest-owned columns must survive (never DELETE+INSERT). All of these are
+at-least-once idempotent applies, never exactly-once.
 """
 
 from __future__ import annotations
@@ -779,3 +781,90 @@ def _sybase_merge_upsert(
     finally:
         with contextlib.suppress(Exception):
             conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
+_KEY_HIT_CHUNK = 400
+
+
+def update_insert_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+) -> int:
+    """Portable MERGE: UPDATE matched keys, INSERT missing. Never DELETE.
+
+    Native ``ON CONFLICT`` / ``MERGE`` already have this identity. Delete+insert
+    is not the same algorithm: DELETE drops dest-owned columns (mirror
+    ``_deleted``, identity, generated defaults) and INSERT materializes
+    DEFAULT — a silent un-delete. This fallback is used when the dest table
+    has dest-owned columns and native upsert cannot run (no unique index).
+    Does not require a unique constraint. At-least-once, not exactly-once.
+    """
+    if not rows or not conflict_cols:
+        return 0
+    existing = _existing_conflict_keys(conn, table_obj, rows, conflict_cols)
+    update_cols = [c for c in target_cols if c not in conflict_cols]
+    to_update: list[dict[str, Any]] = []
+    to_insert: list[dict[str, Any]] = []
+    for row in rows:
+        payload = {c: row.get(c) for c in target_cols}
+        key = tuple(row[c] for c in conflict_cols)
+        if key in existing:
+            if update_cols:
+                to_update.append(payload)
+        else:
+            to_insert.append(payload)
+    written = 0
+    if to_update and update_cols:
+        stmt = (
+            table_obj.update()
+            .where(
+                sa.and_(
+                    *(table_obj.c[c] == sa.bindparam(f"_k_{c}") for c in conflict_cols)
+                )
+            )
+            .values({c: sa.bindparam(f"_u_{c}") for c in update_cols})
+        )
+        conn.execute(
+            stmt,
+            [
+                {
+                    **{f"_k_{c}": row[c] for c in conflict_cols},
+                    **{f"_u_{c}": row.get(c) for c in update_cols},
+                }
+                for row in to_update
+            ],
+        )
+        written += len(to_update)
+    elif to_update:
+        written += len(to_update)
+    if to_insert:
+        conn.execute(table_obj.insert(), to_insert)
+        written += len(to_insert)
+    return written
+
+
+def _existing_conflict_keys(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+) -> set[tuple[Any, ...]]:
+    keys: set[tuple[Any, ...]] = set()
+    for i in range(0, len(rows), _KEY_HIT_CHUNK):
+        chunk = rows[i : i + _KEY_HIT_CHUNK]
+        clauses = [
+            sa.and_(*[table_obj.c[c] == row[c] for c in conflict_cols])
+            for row in chunk
+            if all(row.get(c) not in (None, "") for c in conflict_cols)
+        ]
+        if not clauses:
+            continue
+        stmt = sa.select(*[table_obj.c[c] for c in conflict_cols]).where(
+            sa.or_(*clauses)
+        )
+        for found in conn.execute(stmt):
+            keys.add(tuple(found[j] for j in range(len(conflict_cols))))
+    return keys

@@ -2291,6 +2291,43 @@ def test_s3_missing_object_is_measured_zero():
         )
 
 
+def test_object_store_dest_count_live_get(local_object_store: str):
+    """Dest COUNT GETs bodies from a live S3 API, not a monkeypatched payload list."""
+    if not local_object_store:
+        pytest.skip(
+            "no local object store endpoint (install moto or set DATAFLOW_TEST_S3_ENDPOINT)"
+        )
+    import boto3
+
+    from tests.conftest import LOCAL_OBJECT_STORE_BUCKET
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=local_object_store,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name="us-east-1",
+    )
+    key = "proof/live_get.json"
+    client.put_object(
+        Bucket=LOCAL_OBJECT_STORE_BUCKET,
+        Key=key,
+        Body=b'[{"id":1},{"id":2},{"id":3}]',
+    )
+    cfg = {
+        "database": LOCAL_OBJECT_STORE_BUCKET,
+        "connection_string": local_object_store,
+        "username": "test",
+        "password": "test",
+        "path_style": True,
+    }
+    assert destination_row_count("s3", cfg, schema="", table_name=key) == 3
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="proof/missing.json")
+        == 0
+    )
+
+
 def _patch_object_store_payloads(
     monkeypatch: pytest.MonkeyPatch, payloads: list[tuple[str, bytes]] | None
 ) -> None:

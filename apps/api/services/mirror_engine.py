@@ -1,13 +1,22 @@
 """Inferred-delete (mirror) support for full-refresh SQL transfers.
 
 A mirror sync keeps the destination table in sync with the source:
-- source rows are upserted and marked active
+- source rows are upserted (business columns only)
 - destination rows no longer in the source are soft-deleted
 - rows that reappear after being deleted are reactivated.
 
-This is the Fivetran-style "inferred deletes via full re-sync" behavior:
-when the source cannot emit delete events, we infer them by comparing the
-complete source snapshot to the destination.
+``_deleted`` is dest-owned lattice, not a business column. Fivetran SET
+``_fivetran_deleted=false`` on every synced row, so this-run reactivate is
+invisible and physical ``COUNT(*)`` never drops (the Fivetran hole). Our
+writer never SET / INSERT the lattice: new keys take dest DEFAULT (active);
+existing tombstones stay tombstones until this module's inferred-delete
+pass transitions them. Dest-after ``currently deleted ∩ snapshot`` then
+equals dest-before tombstone ∩ snapshot — the writer cannot un-delete
+first. Delete+insert fallback is forbidden while the lattice column exists
+(INSERT DEFAULT would materialize active). Native ON CONFLICT / MERGE SET
+exclude the lattice; the portable UPDATE+INSERT fallback in
+``connectors.merge_dialects`` is the same identity when no unique index
+exists.
 """
 
 from __future__ import annotations
@@ -19,6 +28,44 @@ from services.engine_pool import release_engine
 
 SOFT_DELETE_COLUMN = "_deleted"
 _KEY_SEP = "\x1f"
+
+
+def lattice_column_names(columns: Any) -> tuple[str, ...]:
+    """Dest-owned mirror lattice columns present on this table."""
+    folded = SOFT_DELETE_COLUMN.casefold()
+    found: list[str] = []
+    for raw in columns:
+        name = str(getattr(raw, "name", raw) or "")
+        if name and name.casefold() == folded:
+            found.append(name)
+    return tuple(found)
+
+
+def strip_lattice_from_upsert(
+    rows: list[dict[str, Any]],
+    update_cols: list[str],
+    target_cols: list[str],
+    lattice: tuple[str, ...],
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """Remove dest-owned lattice columns from upsert SET / INSERT lists.
+
+    Native ON CONFLICT / MERGE SET of ``_deleted`` from the payload (or a
+    mapped default 0) is an un-delete the inferred-delete pass never saw.
+    INSERT of the lattice column is the same lie: new keys use dest DEFAULT
+    (active); existing keys must not be rewritten.
+    """
+    if not lattice:
+        return rows, update_cols, target_cols
+    owned = {n.casefold() for n in lattice}
+
+    def keep(name: str) -> bool:
+        return str(name).casefold() not in owned
+
+    return (
+        [{k: v for k, v in row.items() if keep(k)} for row in rows],
+        [c for c in update_cols if keep(c)],
+        [c for c in target_cols if keep(c)],
+    )
 
 
 def _qualified_name(table: str, schema: str | None) -> str:
@@ -222,10 +269,12 @@ def apply_inferred_deletes_via_staging(
     * reactivated = currently deleted AND in staging
     * soft_deleted = currently active AND not in staging
 
-    Driver ``rowcount`` is not this proof (SQLAlchemy may return -1; a
-    reactivate UPDATE that touches already-active rows is not a reactivate).
-    ``RETURNING`` / ``OUTPUT`` is a future enhancement of this kernel, not a
-    second path. Does not close Gate-8. Unmeasured COUNT stays ``None``.
+    Because upsert does not own ``_deleted``, currently-deleted ∩ staging
+    equals dest-before tombstone ∩ snapshot. Driver ``rowcount`` is not this
+    proof (SQLAlchemy may return -1; a reactivate UPDATE that touches
+    already-active rows is not a reactivate). ``RETURNING`` / ``OUTPUT`` is
+    a future enhancement of this kernel, not a second path. Does not close
+    Gate-8. Unmeasured COUNT stays ``None``.
     """
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier

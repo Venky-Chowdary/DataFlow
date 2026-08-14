@@ -3,6 +3,11 @@
 ``generic_sql`` still owns the dialect SQL bodies. This module is the
 machine-readable inventory of which dialect uses which strategy so Decision
 Kernel / preflight / docs do not scrape the 5.5k-line file.
+
+When dest-owned lattice columns (mirror ``_deleted``) are present,
+``generic_sql`` replaces ``delete_insert`` with portable UPDATE+INSERT
+(``merge_dialects.update_insert_upsert``). Native strategies already exclude
+the lattice from SET. Registry ``fallback`` is the no-lattice path.
 """
 
 from __future__ import annotations

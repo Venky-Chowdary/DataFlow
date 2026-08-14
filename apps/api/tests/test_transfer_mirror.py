@@ -104,11 +104,10 @@ def test_file_to_sqlite_mirror_soft_deletes_and_reactivates(tmp_path: Path) -> N
     assert ledger.get("reactivated") == 0, ledger
     assert ledger.get("rows_written_source") == "gate8_dest_active_readback", ledger
 
-    # Bringing id 1 back must land as active. File→SQLite dest has no unique
-    # key on first create, so upsert may delete+insert and materialize
-    # ``_deleted = 0`` before the inferred-delete pass. This-run reactivate
-    # census is dest-engine transitions *remaining for that pass* (0 here).
-    # Dest-before tombstone ∩ snapshot is a future enhancement of this kernel.
+    # Bringing id 1 back must land as active AND census a this-run reactivate.
+    # Upsert does not own ``_deleted`` (native SET excluded; no-unique fallback
+    # is UPDATE+INSERT, never delete+insert DEFAULT). Dest-after currently
+    # deleted ∩ snapshot equals dest-before tombstone ∩ snapshot.
     request3 = TransferRequest(
         source=EndpointConfig(kind="file", format="csv"),
         source_content=_csv_bytes([("1", "Alice"), ("2", "Bob2"), ("3", "Charlie2"), ("4", "Dave")]),
@@ -130,6 +129,7 @@ def test_file_to_sqlite_mirror_soft_deletes_and_reactivates(tmp_path: Path) -> N
     assert all(r[2] in (0, False, None) for r in rows3)
     ledger3 = result3.row_accounting or {}
     assert ledger3.get("inferred_deletes") == 0, ledger3
+    assert ledger3.get("reactivated") == 1, ledger3
     assert ledger3.get("active_count") == 4, ledger3
 
 
@@ -165,3 +165,87 @@ def test_staging_inferred_deletes_count_transitions_not_already_active(tmp_path:
     assert census["reactivated"] == 1
     assert census["soft_deleted"] == 1
     assert rows == {"1": 0, "2": 1, "3": 0}
+
+
+def test_strip_lattice_from_upsert_drops_deleted_from_set_and_insert() -> None:
+    from services.mirror_engine import strip_lattice_from_upsert
+
+    rows, update_cols, target_cols = strip_lattice_from_upsert(
+        [{"id": "1", "name": "a", "_deleted": 0}],
+        ["name", "_deleted"],
+        ["id", "name", "_deleted"],
+        ("_deleted",),
+    )
+    assert rows == [{"id": "1", "name": "a"}]
+    assert update_cols == ["name"]
+    assert target_cols == ["id", "name"]
+
+
+def test_upsert_without_unique_preserves_tombstone(tmp_path: Path) -> None:
+    """No unique index → portable UPDATE+INSERT, never delete+insert DEFAULT."""
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _upsert_batch
+
+    db = tmp_path / "lattice_fallback.db"
+    engine = sa.create_engine(f"sqlite:///{db}")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "CREATE TABLE dst (id TEXT, name TEXT, _deleted INTEGER DEFAULT 0)"
+            )
+        )
+        conn.execute(
+            sa.text("INSERT INTO dst (id, name, _deleted) VALUES ('1', 'a', 1)")
+        )
+        table = sa.Table("dst", sa.MetaData(), autoload_with=conn)
+        written = _upsert_batch(
+            conn,
+            table,
+            [{"id": "1", "name": "b", "_deleted": 0}, {"id": "2", "name": "c"}],
+            ["id"],
+            ["id", "name", "_deleted"],
+            "sqlite",
+        )
+        rows = {
+            str(r[0]): (r[1], int(r[2]))
+            for r in conn.execute(sa.text("SELECT id, name, _deleted FROM dst")).fetchall()
+        }
+    assert written == 2
+    assert rows["1"] == ("b", 1)
+    assert rows["2"] == ("c", 0)
+
+
+def test_native_upsert_does_not_set_lattice_when_unique_exists(tmp_path: Path) -> None:
+    """ON CONFLICT SET must not include ``_deleted`` even when the payload does."""
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _upsert_batch
+
+    db = tmp_path / "lattice_native.db"
+    engine = sa.create_engine(f"sqlite:///{db}")
+    with engine.begin() as conn:
+        conn.execute(
+            sa.text(
+                "CREATE TABLE dst ("
+                "id TEXT PRIMARY KEY, name TEXT, _deleted INTEGER DEFAULT 0)"
+            )
+        )
+        conn.execute(
+            sa.text("INSERT INTO dst (id, name, _deleted) VALUES ('1', 'a', 1)")
+        )
+        table = sa.Table("dst", sa.MetaData(), autoload_with=conn)
+        _upsert_batch(
+            conn,
+            table,
+            [{"id": "1", "name": "b", "_deleted": 0}],
+            ["id"],
+            ["id", "name", "_deleted"],
+            "sqlite",
+        )
+        row = conn.execute(
+            sa.text("SELECT name, _deleted FROM dst WHERE id = '1'")
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "b"
+    assert int(row[1]) == 1

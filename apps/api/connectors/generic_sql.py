@@ -3583,7 +3583,9 @@ def _upsert_batch(
         row stage; falls back to delete+insert if MERGE fails.
       * Sybase ASE / SAP ASE (15.7+): native ``MERGE`` + NULL-safe ON via
         ``#temp`` stage; falls back to delete+insert if MERGE fails.
-      * Everyone else: chunked DELETE by equality keys followed by INSERT.
+      * Everyone else: chunked DELETE by equality keys followed by INSERT,
+        except when dest-owned lattice columns (mirror ``_deleted``) are
+        present — then portable UPDATE+INSERT (never DELETE).
 
     Returns the number of destination rows actually written in this batch.
     """
@@ -3642,6 +3644,13 @@ def _upsert_batch(
             key = tuple(row[c] for c in conflict_cols)
             deduped[key] = row
         rows = list(deduped.values())
+
+    from services.mirror_engine import lattice_column_names, strip_lattice_from_upsert
+
+    lattice = lattice_column_names(table_obj.c)
+    rows, update_cols, target_cols = strip_lattice_from_upsert(
+        rows, update_cols, target_cols, lattice
+    )
 
     def _native_upsert() -> int | None:
         try:
@@ -3940,6 +3949,12 @@ def _upsert_batch(
         return 0
 
     if apply_rows:
+        if lattice:
+            from connectors.merge_dialects import update_insert_upsert
+
+            return update_insert_upsert(
+                conn, table_obj, apply_rows, conflict_cols, target_cols
+            )
         _delete_by_keys(conn, table_obj, apply_rows, conflict_cols)
         result = conn.execute(table_obj.insert(), apply_rows)
         return max(0, getattr(result, "rowcount", None) or 0) or len(apply_rows)

@@ -1011,9 +1011,14 @@ TypeScript does not recompute dest.
   Driver `rowcount` is not this proof. Already-active dest keys in the
   snapshot are not reactivates. `RETURNING` / `OUTPUT` is a future
   enhancement of this kernel. Stream `extract_mirror_payload` carries
-  top-level census; SCD2 `active_checksum` is not `_deleted`. Dest-before
-  tombstone ∩ snapshot (revive counted when upsert materializes first)
-  is a future enhancement of this kernel, not a second path.
+  top-level census; SCD2 `active_checksum` is not `_deleted`. Upsert does
+  not own `_deleted`: native ON CONFLICT / MERGE SET exclude the lattice;
+  when no unique index exists the portable UPDATE+INSERT fallback
+  (`merge_dialects.update_insert_upsert`) runs instead of delete+insert
+  DEFAULT. Dest-after currently-deleted ∩ snapshot equals dest-before
+  tombstone ∩ snapshot — the writer cannot un-delete first. Fivetran SET
+  `_fivetran_deleted=false` on every synced row, so this-run reactivate
+  is invisible.
 * Oracle / SQL Server dest COUNT + leftover MERGE listing — algorithm in
   `dest_precount` dest-engine `COUNT(*)` / `SELECT pk` (never
   `sys.partitions` / `sys.dm_db_partition_stats.row_count` / Oracle

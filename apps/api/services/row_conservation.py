@@ -837,7 +837,8 @@ def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
     fidelity of *current* versions. That is temporal ``is_current``, not
     a tombstone. Do not treat it as ``COUNT(*) WHERE NOT _deleted``.
     Stream-path this-run ``soft_deleted`` / ``reactivated`` are dest-engine
-    transition counts, not driver rowcount.
+    transition counts, not driver rowcount. Upsert does not own ``_deleted``,
+    so currently-deleted ∩ snapshot equals dest-before tombstone ∩ snapshot.
     """
     data = dict(dest or {})
     sync = str(data.get("sync_mode") or data.get("mode") or "").lower()
