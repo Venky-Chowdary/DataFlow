@@ -183,6 +183,9 @@ def test_count_artifact_rows_csv_jsonl_json_independent_of_writer(tmp_path: Path
     empty = tmp_path / "empty.csv"
     empty.write_text("id,name\n", encoding="utf-8")
     assert count_artifact_rows(empty, fmt="csv") == 0
+    tsv_path = tmp_path / "export.tsv"
+    tsv_path.write_text("id\tname\n1\ta\n2\tb\n", encoding="utf-8")
+    assert count_artifact_rows(tsv_path, fmt="tsv") == 2
 
     jsonl_path = tmp_path / "export.jsonl"
     jsonl_path.write_text('{"id":1}\n{"id":2}\n', encoding="utf-8")
@@ -500,6 +503,104 @@ def test_count_jsonl_records_streams_objects_not_prefix_or_ingest(
     monkeypatch.setattr(Path, "read_text", _no_read_text)
     assert count_jsonl_records(wide) == 5000
     assert count_artifact_rows(wide, fmt="jsonl") == 5000
+
+
+def test_count_csv_rows_streams_rfc4180_not_line_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Dest COUNT is csv.reader records from disk, not wc -l.
+
+    A quoted embedded newline is one row. Blank / delimiter-only lines
+    are not dest rows. Header-only is 0. parse_csv_preview ingest stays
+    ingest. Path COUNT must not slurp the whole export.
+    """
+    from services.csv_profiler import count_csv_rows, parse_csv_preview
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    path = tmp_path / "export.csv"
+    path.write_bytes(content)
+    assert count_csv_rows(content) == 3
+    assert count_artifact_rows(path, fmt="csv") == 3
+    one, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    assert count_csv_rows(one) == 1
+    empty, _ = convert_rows(["id", "v"], [], source_format="csv", target_format="csv")
+    assert count_csv_rows(empty) == 0
+    empty_path = tmp_path / "empty.csv"
+    empty_path.write_bytes(empty)
+    assert count_artifact_rows(empty_path, fmt="csv") == 0
+    assert count_csv_rows(b"") == 0
+    assert count_csv_rows(b"a,b\n1,2\n\n,\n3,4\n\n") == 2
+    quoted, _ = convert_rows(
+        ["id", "note"],
+        [["1", "hello\nworld"], ["2", "b"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    assert quoted.count(b"\n") > 3
+    assert count_csv_rows(quoted) == 2
+    quoted_path = tmp_path / "quoted.csv"
+    quoted_path.write_bytes(quoted)
+    assert count_artifact_rows(quoted_path, fmt="csv") == 2
+    tsv, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="tsv",
+    )
+    assert count_csv_rows(tsv) == 2
+    bom = b"\xef\xbb\xbfid,name\n1,a\n2,b\n"
+    assert count_csv_rows(bom) == 2
+    headers, preview, _enc, _delim = parse_csv_preview(content)
+    assert headers == ["id", "v"]
+    assert preview == [["1", "a"], ["2", "b"], ["3", "c"]]
+
+    wide = tmp_path / "wide.csv"
+    with wide.open("w", encoding="utf-8", newline="") as handle:
+        handle.write("id,v\n")
+        for i in range(5000):
+            handle.write(f"{i},x\n")
+    assert count_csv_rows(wide) == 5000
+    assert count_artifact_rows(wide, fmt="csv") == 5000
+
+    stamped = stamp_artifact_census(
+        {"target_rows": 10_000, "skipped_readback": True},
+        {"path": str(path), "format": "csv"},
+    )
+    assert stamped[ARTIFACT_COUNT_KEY] == 3
+    assert stamped["target_rows"] == 3
+
+    orig_read_bytes = Path.read_bytes
+    orig_read_text = Path.read_text
+
+    def _no_read_bytes(self, *args, **kwargs):
+        if Path(self).resolve() == wide.resolve():
+            raise AssertionError(
+                "CSV COUNT must not read_bytes the whole export"
+            )
+        return orig_read_bytes(self, *args, **kwargs)
+
+    def _no_read_text(self, *args, **kwargs):
+        if Path(self).resolve() == wide.resolve():
+            raise AssertionError(
+                "CSV COUNT must not read_text the whole export"
+            )
+        return orig_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", _no_read_bytes)
+    monkeypatch.setattr(Path, "read_text", _no_read_text)
+    assert count_csv_rows(wide) == 5000
+    assert count_artifact_rows(wide, fmt="csv") == 5000
 
 
 def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(

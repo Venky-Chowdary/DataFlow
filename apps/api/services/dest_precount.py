@@ -44,7 +44,11 @@ non-blank line (``count_jsonl_records`` line stream), never
 ``parse_jsonl`` (raises, materializes). Empty file / only blank lines
 is 0. A scalar, array, or malformed line stays unmeasured — never
 COUNT of a prefix. Local JSONL is counted from the path; gzip JSONL
-still decompresses first. NDJSON aliases onto JSONL.
+still decompresses first. NDJSON aliases onto JSONL. CSV/TSV dest
+population is RFC 4180 ``csv.reader`` rows after the header
+(``count_csv_rows``), never ``wc -l``, never spreadsheet ``,,,,``
+blank lines. Quoted embedded newlines are one record. Local CSV/TSV
+is counted from the path; gzip still decompresses first.
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
@@ -52,7 +56,7 @@ append delta and first-write overwrite (missing table/object = 0) can close.
 Writer ``Table.upsert`` / PUT rowcount is not that proof. Object-store dest
 COUNT is the same artifact machine as local file export (Excel value rows,
 streamed Avro, Parquet/ORC footer, XML unique record-path, JSON unique
-array-of-object, JSONL object-per-line). A JSON-parse fallback that yields ``[]``
+array-of-object, JSONL object-per-line, CSV/TSV RFC 4180 records). A JSON-parse fallback that yields ``[]``
 is dest=0 — that would close overwrite on Parquet/Excel bytes. Unparseable
 or truncated part listings stay unmeasured; never sum a prefix. Catalog
 SKUs (``amazon_s3``) alias onto ``s3`` the same way Azure SQL aliases onto
@@ -1907,7 +1911,8 @@ def count_artifact_rows(
     counts the unique array-of-object from disk (ijson StAX), not
     ``json.loads`` of the whole export. JSONL counts one object per
     non-blank line from disk, not ``decode`` + ``splitlines`` of the
-    whole export.
+    whole export. CSV/TSV counts RFC 4180 records from disk, not
+    ``wc -l`` and not a slurp of the whole file.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -1937,6 +1942,14 @@ def count_artifact_rows(
 
         n = count_jsonl_records(artifact)
         return None if n is None else int(n)
+    if kind in {"csv", "tsv"} and not artifact.name.lower().endswith(".gz"):
+        from services.csv_profiler import count_csv_rows
+
+        try:
+            return int(count_csv_rows(artifact))
+        except Exception as exc:
+            logger.info("csv artifact count unavailable at %s: %s", artifact, exc)
+            return None
     content = _read_artifact_bytes(artifact)
     if content is None:
         return None
