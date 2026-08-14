@@ -1656,8 +1656,11 @@ def _to_sa_value(
             return bound
         if isinstance(bound, str) and not _is_string_type(sa_type):
             # Valid JSON text → native for JSONB; wrap leftovers stay text.
+            # json_loads_exact keeps digits that binary64 cannot hold.
+            from services.value_serializer import json_loads_exact
+
             try:
-                return json.loads(bound)
+                return json_loads_exact(bound)
             except (json.JSONDecodeError, ValueError, TypeError):
                 return bound
         return bound
@@ -2736,7 +2739,18 @@ def _serialize_source_cell(value: Any, col: Any, dialect: str) -> str:
 
     if _normalize_dest_db(dialect) == "mysql" and _is_mysql_timestamp_sa(col):
         value = mysql_timestamp_instant_wire(value)
+    if _is_json_sa(col):
+        from services.json_polarity import json_document_wire
+
+        return json_document_wire(value)
     return cell_to_string(value, preserve_sql_null=True)
+
+
+def _is_json_sa(col: Any) -> bool:
+    col_type = getattr(col, "type", None)
+    if col_type is None:
+        return False
+    return type(col_type).__name__.upper() in {"JSON", "JSONB"}
 
 
 def _serialize_source_row(row: Any, cols: list[Any], dialect: str) -> list[str]:

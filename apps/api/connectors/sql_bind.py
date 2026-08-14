@@ -1635,11 +1635,16 @@ def coerce_json_wire(value: Any, *, as_text: bool = True) -> Any:
             "refuse silent NULL invent (quarantine or remap upstream)"
         )
     try:
-        parsed = json.loads(text)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(text)
     except Exception:
         # Lossless wrap so scalars still load into JSON columns.
         return json.dumps(text, ensure_ascii=False) if as_text else text
     if as_text:
+        # Keep the original JSON text — json.dumps after loads would not
+        # change polarity, but would rewrite whitespace/key order. The
+        # engine text from col::text is the authority.
         return text
     return parsed
 

@@ -10,7 +10,6 @@ from typing import Any
 from connectors.base import ReadBatch
 from connectors.mysql_conn import get_connection
 from connectors.sql_identifiers import (
-    quote_column_list,
     quote_sql_identifier,
     quote_table_ref,
     require_safe_identifier,
@@ -23,6 +22,7 @@ if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services import reflection_cache
+from services.json_polarity import is_json_catalog_type
 from services.timezone_policy import (
     is_mysql_timestamp_data_type,
     mysql_timestamp_instant_wire,
@@ -36,30 +36,60 @@ def _cell(value: Any, *, instant: bool = False) -> str:
     return cell_to_string(value, preserve_sql_null=True)
 
 
-def _timestamp_instant_columns(cur, table: str) -> frozenset[str]:
-    """Columns whose DATA_TYPE is TIMESTAMP (UTC instant), not DATETIME."""
+def _mysql_column_types(cur, table: str) -> list[tuple[str, str]]:
+    """Ordered (name, data_type) from the session's own database."""
     cur.execute(
         "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS "
-        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+        "ORDER BY ORDINAL_POSITION",
         (table,),
     )
-    return frozenset(
-        str(name)
-        for name, data_type in cur.fetchall()
-        if is_mysql_timestamp_data_type(str(data_type or ""))
-    )
+    return [(str(name), str(data_type or "").lower()) for name, data_type in cur.fetchall()]
 
 
-def _instant_set(cur, table: str, *, identity: str = "") -> frozenset[str]:
+def _column_types(cur, table: str, *, identity: str = "") -> list[tuple[str, str]]:
     if identity:
         return reflection_cache.get_or_load_by_identity(
             identity,
             "",
             table,
-            "timestamp_instant_columns",
-            lambda: _timestamp_instant_columns(cur, table),
+            "column_data_types",
+            lambda: _mysql_column_types(cur, table),
         )
-    return _timestamp_instant_columns(cur, table)
+    return _mysql_column_types(cur, table)
+
+
+def _instant_set_from_types(types: list[tuple[str, str]]) -> frozenset[str]:
+    return frozenset(
+        name for name, data_type in types if is_mysql_timestamp_data_type(data_type)
+    )
+
+
+def _json_names_from_types(types: list[tuple[str, str]]) -> frozenset[str]:
+    return frozenset(
+        name for name, data_type in types if is_json_catalog_type(data_type)
+    )
+
+
+def _mysql_select_list(
+    columns: list[str] | None, types: list[tuple[str, str]]
+) -> str | None:
+    """Project JSON as CHAR so the engine spelling (not a decoded tree) is the wire."""
+    json_cols = _json_names_from_types(types)
+    if not json_cols and not columns:
+        return None
+    names = list(columns) if columns else [name for name, _ in types]
+    parts: list[str] = []
+    for name in names:
+        q = quote_sql_identifier(require_safe_identifier(name, preserve_case=True), "`")
+        if name in json_cols:
+            parts.append(
+                f"CASE WHEN {q} IS NULL THEN NULL ELSE "
+                f"CAST({q} AS CHAR CHARACTER SET utf8mb4) END AS {q}"
+            )
+        else:
+            parts.append(q)
+    return ", ".join(parts)
 
 
 def _wire_rows(fetched, headers: list[str], instant_cols: frozenset[str]) -> list[list[str]]:
@@ -174,18 +204,16 @@ def read_table_batch(
                 columns,
                 identity=identity,
             )
-            if columns:
-                col_list = quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in columns],
-                    quote_char="`",
-                )
-                query = f"SELECT {col_list} FROM {table_ref} ORDER BY {order_by} LIMIT %s OFFSET %s"  # nosec B608
-            else:
+            types = _column_types(cur, safe_table, identity=identity)
+            col_list = _mysql_select_list(columns, types)
+            if col_list is None:
                 query = f"SELECT * FROM {table_ref} ORDER BY {order_by} LIMIT %s OFFSET %s"  # nosec B608
+            else:
+                query = f"SELECT {col_list} FROM {table_ref} ORDER BY {order_by} LIMIT %s OFFSET %s"  # nosec B608
             cur.execute(query, (limit, offset))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
-            instant_cols = _instant_set(cur, safe_table, identity=identity)
+            instant_cols = _instant_set_from_types(types)
             rows = _wire_rows(fetched, headers, instant_cols)
             return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
@@ -232,14 +260,22 @@ def read_table_cursor_batch(
     )
     try:
         with conn.cursor() as cur:
-            if columns:
-                col_list = quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in columns],
-                    quote_char="`",
-                )
-                base = f"SELECT {col_list} FROM {table_ref}"  # nosec B608
-            else:
+            identity = reflection_cache.dsn_identity(
+                driver="mysql",
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                connection_string=connection_string,
+            )
+            types = _column_types(
+                cur, require_safe_identifier(table, preserve_case=True), identity=identity
+            )
+            col_list = _mysql_select_list(columns, types)
+            if col_list is None:
                 base = f"SELECT * FROM {table_ref}"  # nosec B608
+            else:
+                base = f"SELECT {col_list} FROM {table_ref}"  # nosec B608
             pk = (cursor_primary_key or "").strip()
             pk_q = (
                 quote_sql_identifier(require_safe_identifier(pk, preserve_case=True), "`")
@@ -268,17 +304,7 @@ def read_table_cursor_batch(
                 cur.execute(query, (limit,))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
-            identity = reflection_cache.dsn_identity(
-                driver="mysql",
-                host=host,
-                port=port,
-                database=database,
-                username=username,
-                connection_string=connection_string,
-            )
-            instant_cols = _instant_set(
-                cur, require_safe_identifier(table, preserve_case=True), identity=identity
-            )
+            instant_cols = _instant_set_from_types(types)
             rows = _wire_rows(fetched, headers, instant_cols)
             # Keyset pages are not a cardinality bound — page length must never
             # trip stream early-stop (fetch_offset >= total_rows).
