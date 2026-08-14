@@ -70,3 +70,42 @@ Oracle moved first because its object identity is not derivable from the typed
 name (quoted vs folded are different tables): the read side must resolve the
 stored spelling through `services/sql_object_identity.py`, the same resolver the
 writer and introspection use.
+
+## ADR — extract 2026-08-12 (create-new risk stamp)
+
+| Module | Change | Why |
+|--------|--------|-----|
+| `services/semantic_mapper.py` | 2103 → 1922, budget 2100 → 1980 | Projected-carrier → physical-DDL risk stamping → `services/create_new_risk_stamp.py` |
+| `services/create_new_risk_stamp.py` | new | One owner for "what does adopting the destination's physical type cost" |
+
+The stamp was already written to avoid importing `mapping_pipeline` so the two
+would not cycle; giving it a module states that boundary instead of relying on a
+comment. `semantic_mapper` keeps a private alias, so its own two call sites and
+the pipeline read unchanged.
+
+## ADR — extract 2026-08-12 (streaming foreign-key carry)
+
+| Module | Change | Why |
+|--------|--------|-----|
+| `src/transfer/stream.py` | 3418 → 3335, budget 3400 → 3350 | Source FK measurement, parents-first ordering, and post-load constraint carry → `src/transfer/stream_foreign_keys.py` |
+| `src/transfer/stream_foreign_keys.py` | new | One owner for "referential constraints cannot be created alongside the rows" |
+| `src/transfer/stream.py` | over budget again after the incremental fix | Reader-side row accounting for Gate-8 → `src/transfer/stream_row_accounting.py` |
+| `src/transfer/stream_row_accounting.py` | new | One owner for "a source count of zero is a measurement, not an absence" |
+
+`stream.py` had drifted 18 lines past its freeze. Foreign-key carry moved rather
+than the budget rising: it is a self-contained concern with a single reason to
+change (constraints are measured on the source, then re-added once every table
+has landed), it was used nowhere outside `stream.py`, and it depends only on
+endpoint resolution plus a lazy `services.foreign_key_orchestration` import.
+`stream.py` keeps private aliases so the streaming call sites read unchanged.
+
+### Wave — fast-path routing, source peek, sample selection
+
+| Extracted | From | Why it is a separable concern |
+| --- | --- | --- |
+| `src/transfer/copy_route.py` | `src/transfer/stream.py` | Deciding whether a route qualifies for the server-to-server COPY path, and shaping what that path reports. The decision is conservative by construction: it returns `None` for anything it cannot prove identical, so it never has to know how the row path reconciles differences. |
+| `src/transfer/source_peek.py` | `src/transfer/stream.py` | Reading a source's shape and a sample for preflight, without moving anything. Separable from the streaming loop that later answers the same question by doing the work. |
+| `services/sample_strategy.py` | `services/reconciliation.py` | Choosing which rows a read-back sample looks at. A uniform head sample misses the rare category where mappings are usually wrong, so skewed low-cardinality columns are stratified over — a different question from comparing the rows once chosen. |
+
+Both source modules stayed under budget afterwards without the ceiling being
+raised.

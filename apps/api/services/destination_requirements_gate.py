@@ -68,15 +68,28 @@ def build_destination_requirements_gate(
         return None
 
     if not (column_nullability or {}):
+        # Unmeasured ≠ proven. We could not read the destination's required-column
+        # contract, so this gate must NOT be presented as a green/proven pass.
+        # It is a SKIP carrying an explicit ``unmeasured`` flag: the NOT NULL
+        # contract is still enforced fail-closed at write (a truly unfilled
+        # required column is rejected at row 1, never silently dropped), so
+        # hard-blocking every existing-table transfer whose caller did not wire
+        # nullability metadata would be a false block, not added safety.
         return {
             "id": GATE_ID,
             "status": "skip",
             "message": (
                 "Destination nullability catalog unreadable — required-column "
-                "coverage is unmeasured, not proven"
+                "coverage is unmeasured (not proven). The NOT NULL contract is "
+                "still enforced at write."
             ),
             "duration_ms": 0,
-            "details": {"reason": "nullability_metadata_unavailable"},
+            "details": {
+                "reason": "nullability_metadata_unavailable",
+                "unmeasured": True,
+                "rule_id": f"{GATE_ID}.unmeasured",
+                "remediation_kind": "retry_validate",
+            },
         }
 
     unfilled = unfilled_required_columns(

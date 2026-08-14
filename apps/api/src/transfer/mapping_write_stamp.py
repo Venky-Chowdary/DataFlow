@@ -97,17 +97,25 @@ def stamp_additive_mappings_for_write(
     for k in list(samples_by_src.keys()):
         samples_by_src[k] = samples_by_src[k][:32]
     dest_db = str(getattr(request.destination, "format", "") or "").lower()
-    # Overwrite into a missing object → CREATE TABLE invent authority.
+    # Overwrite recreates the object, so the rows land in a new table whether or
+    # not one is there now — CREATE TABLE invent authority applies every run.
+    # Gating this on "existence unknown" meant it only helped the first run: on
+    # the second the probe reported the table it had just created, the stamp was
+    # skipped, every target type stayed pending and the schema-contract gate
+    # refused. Any schedule on overwrite failed from its second tick onward.
     table_exists = dest_table_exists
-    if table_exists is None:
-        try:
-            sync = resolve_effective_sync_mode(
-                str(getattr(request, "sync_mode", "") or "")
-            )
-            if is_overwrite_sync(sync) and not (dest_types or {}):
-                table_exists = False
-        except Exception:
-            table_exists = dest_table_exists
+    try:
+        from services.sync_cursor import destination_exists_for_typing
+
+        sync = resolve_effective_sync_mode(str(getattr(request, "sync_mode", "") or ""))
+        table_exists = destination_exists_for_typing(
+            sync,
+            table_exists,
+            has_live_column_types=bool(dest_types or {}),
+            dest_format=dest_db,
+        )
+    except Exception:
+        table_exists = dest_table_exists
     try:
         stamped, unstamped = stamp_additive_mapping_types(
             mappings,

@@ -212,6 +212,11 @@ def _dest_table_exists_tri_state(dst_info: dict[str, Any]) -> bool | None:
     """
     if dst_info.get("columns"):
         return True
+    measured = dst_info.get("table_exists")
+    if isinstance(measured, bool):
+        # The catalog was asked directly. Prefer that over the error-text guess
+        # below, which no engine promises to phrase any particular way.
+        return measured
     if dst_info.get("ok"):
         # Connected but zero columns — incomplete metadata, not create-new.
         return None
@@ -264,6 +269,54 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _declare_source_timezone(
+    mappings: list[dict],
+    zone: str,
+    *,
+    source_types: dict,
+) -> tuple[list[dict], dict]:
+    """Stamp an operator-declared zone onto the zoneless temporal columns.
+
+    Returns the mappings and the source types as they are *after* the
+    declaration. Both matter: the transform changes the value the writer sends,
+    and the type changes what every gate downstream understands the column to
+    carry. Updating only the first leaves the transfer blocked for a problem the
+    declaration already answered — the value would be written correctly by a
+    path nothing allowed to run.
+
+    Only zoneless columns are touched. A column that already carries an offset
+    has an instant the source was explicit about, and overriding it would move a
+    timestamp on the operator's behalf.
+    """
+    from services.timezone_policy import effective_source_type
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+    from services.type_system import datetime_timezone_polarity
+
+    out: list[dict] = []
+    declared_types: dict = dict(source_types or {})
+    for m in mappings:
+        entry = dict(m)
+        src_type = str(
+            entry.get("source_type") or source_types.get(entry.get("source") or "") or ""
+        )
+        existing = str(entry.get("transform") or "").strip().lower()
+        # A plain temporal transform is the mapper parsing the value, not a
+        # decision about its zone — the declaration refines it. Anything else is
+        # an operator choice and is left alone.
+        already_typed = existing not in {"", "none", "identity", "datetime", "date", "timestamp"}
+        if (
+            src_type
+            and datetime_timezone_polarity(src_type) == "ntz"
+            and not already_typed
+        ):
+            entry["transform"] = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
+            declared = effective_source_type(src_type, entry["transform"])
+            entry["source_type"] = declared
+            declared_types[str(entry.get("source") or "")] = declared
+        out.append(entry)
+    return out, declared_types
+
+
 def plan_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
@@ -275,8 +328,16 @@ def plan_transfer(
     schema_policy: str = "manual_review",
     validation_mode: str = "balanced",
     write_via_staging: bool = False,
+    source_timezone: str = "",
 ):
-    """Plan a real transfer: live schemas, real mapping, real preflight gates."""
+    """Plan a real transfer: live schemas, real mapping, real preflight gates.
+
+    ``source_timezone`` answers the one question the tool cannot answer itself:
+    a zoneless source column has no instant, so landing it on a carrier that
+    stores instants has to pick a zone. Guessing UTC is how a business day moves
+    for anyone whose data was not UTC, so the plan is blocked until the operator
+    says which zone the source meant.
+    """
     tool = "plan_transfer"
     src_table = (source_table or "").strip()
     if not src_table:
@@ -361,6 +422,15 @@ def plan_transfer(
         use_llm=False,
     )
     mappings = list(mapping.get("mappings") or [])
+    if source_timezone:
+        mappings, declared_source_types = _declare_source_timezone(
+            mappings,
+            source_timezone,
+            source_types=src_info.get("schema") or {},
+        )
+        # The declaration is a fact about the source, so it travels with the
+        # schema every gate reads — not just with the mapping.
+        src_info["schema"] = declared_source_types
 
     preflight = _run_preflight(
         src_conn=src_conn,
@@ -377,6 +447,7 @@ def plan_transfer(
         source_config=_endpoint_dict(src_info.get("endpoint")),
         dest_db_type=str(dst_info.get("db_type") or ""),
         dest_exists=dest_exists,
+        source_primary_key=_source_primary_key(src_info),
         write_via_staging=bool(write_via_staging),
     )
 
@@ -445,6 +516,18 @@ def plan_transfer(
     )
 
 
+def _source_primary_key(src_info: dict[str, Any]) -> str:
+    """The source's declared identity, as a comma-joined composite key.
+
+    Studio collects this on the Map screen; a chat request has no such screen,
+    so the catalog is the only place the Pilot can learn it — and it is the
+    better source anyway, since the source already declared it.
+    """
+    raw = src_info.get("raw") if isinstance(src_info.get("raw"), dict) else {}
+    cols = [str(c).strip() for c in (raw.get("primary_key_columns") or []) if str(c).strip()]
+    return ",".join(cols)
+
+
 def _run_preflight(
     *,
     src_conn: dict[str, Any],
@@ -461,6 +544,7 @@ def _run_preflight(
     source_config: dict[str, Any],
     dest_db_type: str,
     dest_exists: bool | None,
+    source_primary_key: str = "",
     write_via_staging: bool = False,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
@@ -539,6 +623,12 @@ def _run_preflight(
             source_connector_id=str(src_conn.get("id") or ""),
             source_config=source_config,
             confidence_threshold=confidence_threshold_for_mode(validation_mode),
+            # Key-addressed destinations (Mongo, Redis, vector stores) refuse a
+            # write they cannot address. Studio carries the key on a stream
+            # contract; the Pilot has no Map screen to fill one in, so without
+            # this the gate asked the operator to set a key the source catalog
+            # had already declared.
+            contract_primary_key=source_primary_key or None,
         )
         result = apply_policy_gates(
             result,
@@ -563,6 +653,18 @@ def _run_preflight(
             "blockers": [{"id": "preflight", "message": f"Preflight could not run: {exc}"}],
         }
 
+    # Confirm is gated on the proof bundle's transfer_decision, so the slim
+    # projection has to carry it. Dropping it did not make Confirm stricter, it
+    # made the decision unreadable: _transfer_decision saw nothing and every run
+    # fell back to "review", so no Pilot transfer could ever be confirmed however
+    # clean it was. Only the decision travels; the rest of the bundle stays out
+    # of the chat payload.
+    proof_bundle = result.get("proof_bundle")
+    decision = (
+        (proof_bundle or {}).get("transfer_decision")
+        if isinstance(proof_bundle, dict)
+        else None
+    )
     return {
         "run_id": result.get("run_id"),
         "passed": bool(result.get("passed")),
@@ -578,6 +680,7 @@ def _run_preflight(
             for b in (result.get("blockers") or [])
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
+        "proof_bundle": {"transfer_decision": decision} if isinstance(decision, dict) else {},
     }
 
 
@@ -646,6 +749,7 @@ def start_transfer(
     schema_policy: str = "manual_review",
     validation_mode: str = "balanced",
     limit: int = 0,
+    source_timezone: str = "",
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -659,6 +763,7 @@ def start_transfer(
         sync_mode=sync_mode,
         schema_policy=schema_policy,
         validation_mode=validation_mode,
+        source_timezone=source_timezone,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)

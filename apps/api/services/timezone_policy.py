@@ -79,9 +79,19 @@ class TimezoneTransferPolicy:
 
 
 def _polarity(type_name: str, *, dest_db: str = "") -> str | None:
+    """What a carrier holds: an instant, or a wall clock with no zone.
+
+    A document store's bare ``date`` token shares a name with SQL ``DATE`` but
+    stores an offset-normalized instant, so it is resolved through the same
+    carrier helper the binder and fingerprinter use. Without that this token was
+    unclassified, and the timezone question the operator most needs answered on
+    a Postgres-to-MongoDB route was never asked.
+    """
+    from services.document_instant import instant_date_carrier
     from services.type_system import datetime_timezone_polarity
 
-    return datetime_timezone_polarity(type_name, dest_db=dest_db)
+    resolved = instant_date_carrier(dest_db, type_name) if dest_db else type_name
+    return datetime_timezone_polarity(resolved or type_name, dest_db=dest_db)
 
 
 def _is_text_target(target_type: str) -> bool:
@@ -92,6 +102,50 @@ def _is_text_target(target_type: str) -> bool:
     )
 
     return normalize_logical_type(target_type) in {LOGICAL_STRING, LOGICAL_TEXT}
+
+
+#: Destinations whose only temporal carrier is an instant. BSON has `date` and
+#: nothing zoneless, so telling an operator here to "map to a wall-clock carrier"
+#: names an option the destination does not have — a remediation that cannot be
+#: followed is the same dead end as no remediation at all.
+_INSTANT_ONLY_DESTINATIONS: Final[frozenset[str]] = frozenset({"mongodb", "documentdb", "cosmosdb"})
+
+
+def _utc_invent_remediation(dest_db: str) -> str:
+    """Name only the exits this destination actually has."""
+    declare = (
+        "Declare the source zone on Map with an assume_timezone transform "
+        "(e.g. assume_timezone:UTC) so the instant is asserted rather than guessed"
+    )
+    if dest_db in _INSTANT_ONLY_DESTINATIONS:
+        return (
+            f"{declare}. This destination stores instants only, so there is no "
+            "wall-clock carrier to map to — the alternative is a string column, "
+            "which gives up engine date semantics."
+        )
+    return f"{declare}, or map to a wall-clock destination carrier."
+
+
+def effective_source_type(source_type: str, transform: str | None) -> str:
+    """The source type a declared zone makes true.
+
+    ``assume_timezone:X`` is the operator supplying the zone the source never
+    recorded, so from that point the column really does carry an instant. Every
+    decision that asks "is this zoneless?" has to read it the same way, or the
+    declaration changes the written value without changing the verdict — the
+    worst of both, a transfer still blocked for a problem it no longer has.
+    """
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+    from services.type_system import datetime_timezone_polarity
+
+    token = str(transform or "").strip().lower()
+    if not token.startswith(ASSUME_TIMEZONE_PREFIX):
+        return source_type
+    if not token[len(ASSUME_TIMEZONE_PREFIX):].strip():
+        return source_type
+    if datetime_timezone_polarity(source_type) != "ntz":
+        return source_type
+    return "TIMESTAMPTZ"
 
 
 def resolve_timezone_policy(
@@ -208,10 +262,7 @@ def resolve_timezone_policy(
                 "The source never proved a zone; writing an aware carrier invents "
                 "one (usually UTC) for every row."
             ),
-            remediation=(
-                "Declare the source zone with an explicit transform, or map to a "
-                "wall-clock destination carrier."
-            ),
+            remediation=_utc_invent_remediation(db),
         )
 
     if src == "ntz" and tgt == "ntz":

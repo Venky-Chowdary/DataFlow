@@ -1,3 +1,4 @@
+import { loadMethodLabel } from "../../lib/loadMethod";
 import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
@@ -192,7 +193,7 @@ export function TransferResultDashboard({
 
   const metaChips: Array<{ label: string; value: string; tone?: "warn" | "ok"; title?: string }> = [];
   if (ds?.load_method) {
-    metaChips.push({ label: "Load", value: ds.load_method });
+    metaChips.push({ label: "Load", value: loadMethodLabel(String(ds.load_method)) });
   }
   if (ds?.type === "pgvector" || ds?.type === "qdrant" || ds?.type === "weaviate" || ds?.type === "pinecone" || ds?.type === "milvus") {
     metaChips.push({
@@ -614,7 +615,7 @@ export function TransferResultDashboard({
               {ds?.load_method && (
                 <div>
                   <dt>Load method</dt>
-                  <dd>{ds.load_method}{ds.chunk_size ? ` · batch ${Number(ds.chunk_size).toLocaleString()}` : ""}</dd>
+                  <dd>{loadMethodLabel(String(ds.load_method))}{ds.chunk_size ? ` · batch ${Number(ds.chunk_size).toLocaleString()}` : ""}</dd>
                 </div>
               )}
               <div>

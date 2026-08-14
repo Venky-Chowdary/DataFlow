@@ -24,7 +24,7 @@ from services.semantic_types import (
     detect_semantic_type,
     normalize_value_for_target,
 )
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
 
 _MONTH_NAME_RE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
 _DATE_LIKE_RE = re.compile(
@@ -240,13 +240,20 @@ def _format_datetime(dt: datetime) -> str:
     never had, and the MySQL ``DATETIME`` writer then quarantined every row for
     being timezone-aware. Postgres→MySQL moved zero rows as a result. A value
     with no zone carries no zone downstream; only a real offset survives.
+
+    Sub-second precision survives too. Every branch here used to render seconds
+    and nothing finer, and the mapper stamps this transform on *every* timestamp
+    column by default, so a PostgreSQL ``timestamp(6)`` copied to an identical
+    ``timestamp(6)`` arrived with its microseconds gone — on every route, for
+    every row, with no finding raised. ``isoformat`` omits the fractional part
+    when it is zero, so whole-second values render exactly as they did.
     """
     if dt.tzinfo is None:
-        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+        return dt.isoformat()
     offset = dt.utcoffset()
     if offset is not None and offset.total_seconds() == 0:
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return dt.isoformat(timespec="seconds")
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.isoformat()
 
 
 def _to_utc_z(dt: datetime) -> str:
@@ -701,7 +708,12 @@ def _parse_json(value: Any) -> str | None:
         try:
             # JSONDecodeError subclasses ValueError — catch it first so bare
             # scalars wrap as JSON string literals (Mongo mixed fields → VARIANT).
-            parsed = json.loads(value, parse_constant=_json_reject_nonfinite)
+            # Numbers parse exactly: the stdlib routes every non-integer through
+            # binary64, which silently dropped digits off a DECIMAL landing in a
+            # JSON / JSONB / VARIANT / SUPER column. Values binary64 holds exactly
+            # still serialize as JSON numbers; the rest keep every digit as exact
+            # text, per this codebase's Decimal-to-JSON policy.
+            parsed = json_loads_exact(value, parse_constant=_json_reject_nonfinite)
         except json.JSONDecodeError:
             parsed = value  # wrap the raw scalar as a JSON string literal
         except ValueError:
@@ -1153,6 +1165,47 @@ def infer_transform_for_mapping(
     return "none"
 
 
+#: A zoneless source column carries wall-clock digits and no zone, so writing it
+#: to an instant carrier has to pick one. Guessing UTC is what silently shifts a
+#: business day; this transform is the operator supplying the fact the source
+#: never recorded, so the instant is asserted rather than invented.
+ASSUME_TIMEZONE_PREFIX = "assume_timezone:"
+
+
+def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
+    """Attach a declared zone to a zoneless datetime.
+
+    A value that already carries an offset is left alone: it has an instant, and
+    overriding it with a declared zone would move a timestamp the source was
+    explicit about.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    zone_name = transform[len(ASSUME_TIMEZONE_PREFIX):].strip()
+    if not zone_name:
+        return None, "assume_timezone needs a zone, e.g. assume_timezone:UTC"
+    try:
+        zone = ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return None, f"Unknown timezone: {zone_name!r}"
+
+    parsed = _parse_datetime(text)
+    if parsed is None:
+        return None, f"Invalid datetime: {text!r}"
+    try:
+        moment = datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None, f"Invalid datetime: {text!r}"
+    # An offset the source stated is an instant already; a declared zone must not
+    # move it.
+    if moment.tzinfo is not None:
+        return _format_datetime(moment), None
+    try:
+        return _format_datetime(moment.replace(tzinfo=zone)), None
+    except (ValueError, OverflowError) as exc:
+        return None, f"Could not apply zone {zone_name!r}: {exc}"
+
+
 def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     """Returns (value, error).
 
@@ -1242,6 +1295,9 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         if parsed is None:
             return None, f"Invalid datetime: {text!r}"
         return parsed, None
+
+    if transform.startswith(ASSUME_TIMEZONE_PREFIX):
+        return _apply_assume_timezone(text, transform)
 
     if transform == "time":
         parsed = _parse_time(text)

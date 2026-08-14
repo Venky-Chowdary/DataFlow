@@ -223,8 +223,16 @@ def _batch_payload(
     base_id: str,
     update: bool,
     merge_field: str | None,
-) -> tuple[str, str, dict[str, Any]]:
-    """Return (url, method, payload) for an Airtable batch request."""
+) -> tuple[str, str, dict[str, Any], list[int]]:
+    """Return (url, method, payload, source_indices) for an Airtable batch request.
+
+    ``source_indices[k]`` is the position in ``rows`` that produced
+    ``payload["records"][k]``. The PATCH branch sends only the rows that carry a
+    record id, so the two lists are not the same length, and a caller pairing
+    them positionally attributes a failure to the wrong row — which is how the
+    wrong ``mapped_row`` reached the DLQ and replay would have re-sent the wrong
+    payload.
+    """
     url = f"https://{DEFAULT_HOST}/v0/{base_id}/{table_name}"
     if update and merge_field:
         return (
@@ -234,18 +242,28 @@ def _batch_payload(
                 "records": [{"fields": dict(r)} for r in rows],
                 "performUpsert": {"fieldsToMergeOn": [merge_field]},
             },
+            list(range(len(rows))),
         )
     if update:
         # PATCH only rows with Airtable record id — never fall through to POST
         # create invent for the whole batch when some/all ids are missing.
-        records = [
-            {"id": rid, "fields": {k: v for k, v in r.items() if k.lower() != "id"}}
-            for r in rows
-            for rid in [r.get("id") or r.get("Id")]
-            if rid
-        ]
-        return url, "PATCH", {"records": records}
-    return url, "POST", {"records": [{"fields": dict(r)} for r in rows]}
+        records: list[dict[str, Any]] = []
+        indices: list[int] = []
+        for idx, r in enumerate(rows):
+            rid = r.get("id") or r.get("Id")
+            if not rid:
+                continue
+            records.append(
+                {"id": rid, "fields": {k: v for k, v in r.items() if k.lower() != "id"}}
+            )
+            indices.append(idx)
+        return url, "PATCH", {"records": records}, indices
+    return (
+        url,
+        "POST",
+        {"records": [{"fields": dict(r)} for r in rows]},
+        list(range(len(rows))),
+    )
 
 
 def _id_from_response(body: Any) -> str | None:
@@ -471,9 +489,15 @@ def write_mapped_rows(
             if len(produced_sample) < 50:
                 produced_sample.append(dict(d))
 
+        # Position in ``batch`` that each entry of ``batch_dicts`` came from.
+        # The filters below drop rows from one list and not the other, so this is
+        # what keeps a failure attributable to the row that caused it.
+        batch_sources = list(range(len(batch_dicts)))
+
         if update and merge_field:
             # performUpsert with empty merge value invents creates — quarantine.
             kept: list[dict[str, Any]] = []
+            kept_sources: list[int] = []
             dropped = 0
             from connectors.writer_common import append_write_quarantine_detail
 
@@ -501,6 +525,7 @@ def write_mapped_rows(
                     )
                     continue
                 kept.append(row)
+                kept_sources.append(j)
             if dropped and policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -515,8 +540,9 @@ def write_mapped_rows(
                     driver="airtable",
                 )
             batch_dicts = kept
+            batch_sources = kept_sources
 
-        url, method, payload = _batch_payload(
+        url, method, payload, payload_sources = _batch_payload(
             batch_dicts,
             table_name=table,
             base_id=base_id,
@@ -643,25 +669,32 @@ def write_mapped_rows(
             from connectors.writer_common import append_write_quarantine_detail
 
             reason = humanize_http_error(exc, "airtable")
-            # Quarantine each mapped batch row — empty mapped_row would stamp
-            # every column DF_MISSING and poison replay.
-            for j, src_row in enumerate(batch):
+            # Quarantine the rows this request actually carried, resolved back
+            # through the filters to the source row each one came from. Walking
+            # ``batch`` positionally against ``payload["records"]`` attached the
+            # wrong mapped_row and row number to the failure, so the DLQ named
+            # records that never left and replay would have re-sent their values.
+            recs = payload.get("records") if isinstance(payload, dict) else []
+            recs = recs if isinstance(recs, list) else []
+            for pos, dict_idx in enumerate(payload_sources):
+                src_idx = (
+                    batch_sources[dict_idx] if dict_idx < len(batch_sources) else dict_idx
+                )
+                src_row = batch[src_idx] if src_idx < len(batch) else {}
                 payload_rec: dict[str, Any] = {}
-                if isinstance(payload, dict):
-                    recs = payload.get("records") or []
-                    if j < len(recs) and isinstance(recs[j], dict):
-                        payload_rec = dict(recs[j].get("fields") or recs[j])
+                if pos < len(recs) and isinstance(recs[pos], dict):
+                    payload_rec = dict(recs[pos].get("fields") or recs[pos])
                 append_write_quarantine_detail(
                     all_rejected,
                     {
-                        "row": i + j + 1,
+                        "row": i + src_idx + 1,
                         "column": "",
                         "target": table,
                         "value": "",
                         "reason": reason,
                         "policy": policy,
                         "values": payload_rec or (
-                            batch_dicts[j] if j < len(batch_dicts) else {}
+                            batch_dicts[dict_idx] if dict_idx < len(batch_dicts) else {}
                         ),
                     },
                     mapped_row=src_row,

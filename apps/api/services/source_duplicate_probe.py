@@ -38,7 +38,29 @@ SQLISH_SOURCE_TYPES = frozenset({
     "snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto", "questdb",
 })
 
-PROBED_SOURCE_TYPES = SQLISH_SOURCE_TYPES | frozenset({"mongodb", "mongodb_atlas"})
+# Sources whose whole payload is readable, so uniqueness is proven by scanning
+# it rather than by asking the engine to GROUP BY. These have no query language
+# to push the aggregation into, and skipping them failed every uniqueness-required
+# sync closed — a file the platform can read end to end is the one case where
+# population proof is always available.
+OBJECT_PAYLOAD_SOURCE_TYPES = frozenset({
+    "s3", "minio", "s3_compatible", "aws_s3",
+    "gcs", "google_cloud_storage",
+    "adls", "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
+    "sftp",
+})
+
+PROBED_SOURCE_TYPES = (
+    SQLISH_SOURCE_TYPES
+    | frozenset(
+        {"mongodb", "mongodb_atlas", "dynamodb", "amazon_dynamodb", "salesforce"}
+    )
+    | OBJECT_PAYLOAD_SOURCE_TYPES
+)
+
+#: Rows scanned before a payload probe reports partial coverage instead of proof.
+_PAYLOAD_SCAN_CAP = 1_000_000
+_PAYLOAD_PAGE = 10_000
 
 
 @dataclass
@@ -187,6 +209,236 @@ def _mongo_duplicates(
     return out
 
 
+def _object_payload_duplicates(
+    cfg: dict[str, Any],
+    db_type: str,
+    key: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], int, bool]:
+    """Count identity keys across an object payload.
+
+    Returns ``(findings, rows_scanned, complete)``. ``complete`` is False when
+    the scan hit :data:`_PAYLOAD_SCAN_CAP` — the caller must then refuse to
+    claim population coverage, because an unscanned tail can still hold the
+    duplicate that a uniqueness-required sync would collide on.
+
+    The object is paged through the same reader the transfer uses, so the probe
+    and the load agree on parsing, encoding and column order rather than
+    reaching two different answers about the same bytes.
+    """
+    from collections import Counter
+
+    from src.transfer.batch_readers import _read_batch_impl
+
+    counts: Counter[tuple[str, ...]] = Counter()
+    scanned = 0
+    offset = 0
+    total: int | None = None
+    while True:
+        result = _read_batch_impl(
+            db_type,
+            cfg,
+            key,
+            None,
+            offset,
+            _PAYLOAD_PAGE,
+            known_total_rows=total,
+        )
+        batch = result[0] if isinstance(result, tuple) else result
+        headers = [str(h) for h in (getattr(batch, "headers", None) or [])]
+        rows = list(getattr(batch, "rows", None) or [])
+        if total is None:
+            total = getattr(batch, "total_rows", None)
+        if not rows:
+            break
+        missing = [c for c in pk_columns if c not in headers]
+        if missing:
+            # The key is not in the payload at all: that is a mapping question,
+            # not a duplicate one, and inventing "unique" here would green a
+            # column the file never carried.
+            raise ValueError(
+                f"identity column(s) {', '.join(missing)} are not present in {key}"
+            )
+        idx = [headers.index(c) for c in pk_columns]
+        for row in rows:
+            if isinstance(row, dict):
+                vals = tuple(_normalize_key_cell(row.get(c)) for c in pk_columns)
+            else:
+                vals = tuple(
+                    _normalize_key_cell(row[i] if i < len(row) else None) for i in idx
+                )
+            counts[vals] += 1
+        scanned += len(rows)
+        offset += len(rows)
+        if scanned >= _PAYLOAD_SCAN_CAP:
+            return _counter_findings(counts, pk_columns, limit), scanned, False
+        if total is not None and offset >= int(total):
+            break
+        if len(rows) < _PAYLOAD_PAGE:
+            break
+    return _counter_findings(counts, pk_columns, limit), scanned, True
+
+
+def _salesforce_duplicates(
+    cfg: dict[str, Any],
+    sobject: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], ProbeStatus, str]:
+    """Prove identity uniqueness for a Salesforce object.
+
+    ``Id`` is assigned by the platform and is unique by construction, so an
+    identity of ``Id`` needs no query — that is stronger evidence than any
+    sample, which is why it is reported as having run rather than skipped.
+
+    Any other field, including one flagged ``externalId``, can repeat, so it is
+    counted with a SOQL aggregate. Aggregating in the org rather than reading
+    the object back is what keeps this usable against a real tenant, where the
+    object may hold millions of rows and OFFSET is capped at 2000.
+    """
+    from connectors.salesforce import API_VERSION, _access, _validate_api_name
+    from connectors.saas_common import request
+
+    if [c.strip().lower() for c in pk_columns] == ["id"]:
+        return [], "ran", "Salesforce assigns Id; uniqueness is guaranteed by the platform"
+
+    if len(pk_columns) != 1:
+        # SOQL GROUP BY takes multiple fields, but COUNT() over a composite key
+        # cannot be read back to a single value without ambiguity here. Say so
+        # rather than approve a key this probe did not check.
+        return (
+            [],
+            "skipped_unsupported",
+            "Composite identity uniqueness is not probed against Salesforce — "
+            f"({', '.join(pk_columns)}) is unproven",
+        )
+
+    field = _validate_api_name(pk_columns[0].strip(), "field")
+    obj = _validate_api_name(sobject.strip(), "object")
+    access_token, url_base = _access(cfg)
+    soql = (
+        f"SELECT {field}, COUNT(Id) dupes FROM {obj} "  # nosec B608 — identifiers validated above
+        f"GROUP BY {field} HAVING COUNT(Id) > 1"
+    )
+    response = request(
+        method="GET",
+        url=f"{url_base}/services/data/{API_VERSION}/query",
+        token=access_token,
+        params={"q": soql},
+        timeout=60,
+    )
+    response.raise_for_status()
+    findings: list[dict[str, Any]] = []
+    for record in (response.json().get("records") or [])[: max(1, int(limit))]:
+        if not isinstance(record, dict):
+            continue
+        value = record.get(field)
+        findings.append(
+            {
+                "value": _finding_value(pk_columns, [value]),
+                "values": [value],
+                "columns": list(pk_columns),
+                "count": int(record.get("dupes") or 0),
+            }
+        )
+    return (
+        findings,
+        "ran",
+        f"Salesforce aggregate uniqueness probe on {obj}.({field})",
+    )
+
+
+def _dynamodb_duplicates(
+    cfg: dict[str, Any],
+    table: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], ProbeStatus, str]:
+    """Prove identity uniqueness for a DynamoDB source.
+
+    When the identity is the table's own key, DynamoDB has already enforced it:
+    two items cannot share a primary key, so the answer is structural and needs
+    no scan. That is stronger evidence than any sample, and it is why this is
+    reported as ``ran`` rather than skipped.
+
+    A non-key identity carries no such guarantee — a GSI does not enforce
+    uniqueness either — so those are counted across a real scan.
+    """
+    from collections import Counter
+
+    from connectors.dynamodb_reader import describe_key_schema, read_all_paginated
+
+    key_names = [
+        str(k.get("name") or "")
+        for k in describe_key_schema(cfg, table)
+        if k.get("name")
+    ]
+    wanted = [c.strip().lower() for c in pk_columns]
+    if key_names and wanted == [k.lower() for k in key_names]:
+        return (
+            [],
+            "ran",
+            f"DynamoDB enforces uniqueness on the table key ({', '.join(key_names)})",
+        )
+
+    batch = read_all_paginated(cfg, table, limit=_PAYLOAD_SCAN_CAP)
+    headers = [str(h) for h in (batch.headers or [])]
+    missing = [c for c in pk_columns if c not in headers]
+    if missing:
+        raise ValueError(
+            f"identity column(s) {', '.join(missing)} are not present in {table}"
+        )
+    idx = [headers.index(c) for c in pk_columns]
+    counts: Counter[tuple[str, ...]] = Counter()
+    for row in batch.rows or []:
+        counts[
+            tuple(_normalize_key_cell(row[i] if i < len(row) else None) for i in idx)
+        ] += 1
+    scanned = len(batch.rows or [])
+    return (
+        _counter_findings(counts, pk_columns, limit),
+        "ran",
+        f"DynamoDB scan uniqueness probe on {table}.({','.join(pk_columns)}) "
+        f"over {scanned:,} item(s)",
+    )
+
+
+def _normalize_key_cell(value: Any) -> str:
+    """Render one identity cell the way the destination key would compare it.
+
+    ``None`` is kept distinct from the empty string: a NULL key is a
+    nullability finding, not a duplicate of a row that carried ``''``.
+    """
+    if value is None:
+        return "\x00NULL"
+    return str(value)
+
+
+def _counter_findings(
+    counts: Any, pk_columns: list[str], limit: int
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for vals, count in counts.most_common():
+        if count < 2:
+            break
+        if len(out) >= max(1, int(limit)):
+            break
+        values = ["" if v == "\x00NULL" else v for v in vals]
+        out.append(
+            {
+                "value": _finding_value(pk_columns, values),
+                "values": values,
+                "columns": list(pk_columns),
+                "count": int(count),
+            }
+        )
+    return out
+
+
 def probe_source_duplicate_keys_result(
     *,
     source_connector_id: str = "",
@@ -255,6 +507,16 @@ def probe_source_duplicate_keys_result(
             cfg = dict(cfg)
             cfg.setdefault("type", db_type)
 
+        # Connector-specific settings arrive nested under "extra" from
+        # endpoint_to_dict, while connector readers take them as top-level keys.
+        # SFTP host-key trust lives there, and without it this probe opened an
+        # unverified connection to the source it is meant to vouch for.
+        nested_extra = cfg.get("extra")
+        if isinstance(nested_extra, dict) and nested_extra:
+            cfg = dict(cfg)
+            for extra_key, extra_value in nested_extra.items():
+                cfg.setdefault(extra_key, extra_value)
+
         if db_type in ("mongodb", "mongodb_atlas"):
             coll = source_collection or source_table
             if not coll:
@@ -269,6 +531,84 @@ def probe_source_duplicate_keys_result(
                 findings=findings,
                 status="ran",
                 message=f"Mongo uniqueness probe on {coll}.({pk_label})",
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
+
+        if db_type == "salesforce":
+            sobject = source_table or source_collection
+            if not sobject:
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="Salesforce source missing object for uniqueness probe",
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            findings, status, message = _salesforce_duplicates(
+                cfg, sobject, pk_columns, limit=limit
+            )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status=status,
+                message=message,
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
+
+        if db_type in ("dynamodb", "amazon_dynamodb"):
+            tbl = source_table or source_collection
+            if not tbl:
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="DynamoDB source missing table for uniqueness probe",
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            findings, status, message = _dynamodb_duplicates(
+                cfg, tbl, pk_columns, limit=limit
+            )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status=status,
+                message=message,
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
+
+        if db_type in OBJECT_PAYLOAD_SOURCE_TYPES:
+            obj = source_table or source_collection
+            if not obj:
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="Object source missing key for uniqueness probe",
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            findings, scanned, complete = _object_payload_duplicates(
+                cfg, db_type, obj, pk_columns, limit=limit
+            )
+            if not complete:
+                # A truncated scan proves the duplicates it found but cannot
+                # prove their absence, so it must not be stamped as population
+                # coverage.
+                return SourceDuplicateProbeResult(
+                    findings=findings,
+                    status="skipped_unsupported",
+                    message=(
+                        f"{db_type} payload exceeds the {_PAYLOAD_SCAN_CAP:,}-row "
+                        f"uniqueness scan cap ({scanned:,} read); uniqueness on "
+                        f"({pk_label}) is unproven for the remainder"
+                    ),
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status="ran",
+                message=(
+                    f"{db_type} payload uniqueness scan on {obj}.({pk_label}) "
+                    f"over {scanned:,} row(s)"
+                ),
                 db_type=db_type,
                 primary_key_columns=pk_columns,
             )

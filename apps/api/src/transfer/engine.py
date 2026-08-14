@@ -52,6 +52,7 @@ try:
     from services.row_filter import apply_row_filter
     from services.scd2_engine import apply_scd2
     from services.sync_cursor import (
+        destination_exists_for_typing,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -89,6 +90,7 @@ except (
     from src.services.row_filter import apply_row_filter
     from src.services.scd2_engine import apply_scd2
     from src.services.sync_cursor import (
+        destination_exists_for_typing,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -157,6 +159,7 @@ from services.batch_progress import (
     ThrottledCheckpoint,
     compute_transfer_progress_pct,
     effective_backfill_new_fields,
+    row_count_label,
 )
 
 try:
@@ -912,6 +915,7 @@ def _execute_preflight_parity_kwargs(
             dest_api_key=getattr(dest, "api_key", None) or None,
             dest_service_account=getattr(dest, "service_account", None) or None,
             dest_kind=dest.kind or "database",
+            dest_extra=dict(getattr(dest, "extra", None) or {}),
         )
     except Exception as exc:
         logger.warning(
@@ -1593,6 +1597,16 @@ def _auto_map(
             target_schema, dest_exists = _destination_schema_probe(
                 request.destination,
                 sync_mode=sync_mode,
+            )
+            # Overwrite recreates the table, and a keyspace store never has a
+            # column shape at all. Either way there is nothing to bind types to,
+            # so the mapper must invent rather than wait for a stamp that is
+            # never coming — see destination_exists_for_typing.
+            dest_exists = destination_exists_for_typing(
+                sync_mode,
+                dest_exists,
+                has_live_column_types=bool(target_schema),
+                dest_format=str(getattr(request.destination, "format", "") or ""),
             )
             if not target_schema:
                 # Empty columns: only invent identity create-new when the object
@@ -2728,7 +2742,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Writing {total_rows:,} rows…",
+                message=f"Writing {row_count_label(total_rows)} rows…",
             )
 
             def _check_cancelled() -> None:
@@ -2811,9 +2825,10 @@ class UniversalTransferEngine:
             resume_skipped_rows = 0
 
             if request.destination.kind == "database":
-                # Buffered path reloads the in-memory source; slice past committed
-                # rows so Resume does not re-write (or duplicate) progress. Still
-                # skip destructive full-refresh DROP when a durable checkpoint exists.
+                # Buffered path reloads the in-memory source. Positional
+                # ``records[skip_n:]`` is unsafe under source reorder — silent
+                # wrong-row skip. Idempotent resume re-applies the full
+                # population via upsert when a key exists (MERGE-class).
                 checkpoint_has_progress = _checkpoint_has_progress(checkpoint)
                 should_drop_full_refresh = should_drop_destination_for_sync(
                     request_sync_mode=request.sync_mode,
@@ -2848,25 +2863,28 @@ class UniversalTransferEngine:
                                     "note": "checkpoint ahead of or equal to source size",
                                 },
                             )
-                        resume_full_records = records
-                        resume_skipped_rows = skip_n
-                        records = records[skip_n:]
+                        if write_mode == "insert" and not conflict_columns:
+                            raise ValueError(
+                                "Cannot safely resume a buffered insert without primary key; "
+                                "use upsert sync mode or restart with full_refresh_overwrite"
+                            )
+                        # Force upsert so re-applying prior rows is idempotent.
+                        if conflict_columns:
+                            write_mode = "upsert"
+                        # Keep full population — no positional slice.
+                        resume_full_records = list(records)
+                        resume_skipped_rows = 0
+                        dest_summary_resume_note = (
+                            f"Idempotent resume after {skip_n:,} prior row(s) — "
+                            "re-applying full population via upsert (key-addressed)."
+                        )
                         total_rows = len(records)
                         mongo.update_job_status(
                             job_id,
                             "running",
                             total_rows=total_rows,
                             records_processed=0,
-                            message=f"Resuming after {skip_n:,} committed row(s)…",
-                        )
-                if resume and checkpoint_has_progress and write_mode == "insert":
-                    # Non-idempotent resume would duplicate; force upsert when PK known.
-                    if conflict_columns:
-                        write_mode = "upsert"
-                    else:
-                        raise ValueError(
-                            "Cannot safely resume a buffered insert without primary key; "
-                            "use upsert sync mode or restart with full_refresh_overwrite"
+                            message=dest_summary_resume_note,
                         )
 
                 def _write_destination_with_drop():
@@ -3855,7 +3873,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {total_rows:,} rows in batches…",
+                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
             )
 
             is_streaming = True
@@ -4611,7 +4629,7 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=f"Streaming {total_rows:,} rows in batches…",
+                message=f"Streaming {row_count_label(total_rows)} rows in batches…",
             )
 
             is_streaming = True

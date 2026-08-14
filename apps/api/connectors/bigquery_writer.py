@@ -16,10 +16,11 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
+    bind_rows_keeping_numbers,
     bind_sql_mapped_rows_with_quarantine,
     build_mapped_rows_with_details,
     dedupe_rows,
-    dedupe_rows_by_pk_and_lsn,
+    dedupe_rows_by_pk_and_lsn_keeping_numbers,
     null_safe_merge_on,
     quarantine_currency_markers_into_numeric,
     quarantine_unfit_arrays,
@@ -40,7 +41,9 @@ from connectors.writer_common import (
     sparse_present_bindings,
     reject_on_strict_policy,
     resolve_conflict_targets,
-    split_dense_sparse_rows,
+    resolve_row_number,
+    dedupe_rows_keeping_numbers,
+    split_dense_sparse_rows_with_numbers,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -348,6 +351,7 @@ def _bq_apply_sparse_upsert(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
     abort_on_reject: bool = False,
+    row_numbers: list[int] | None = None,
 ) -> tuple[int, int, list[tuple]]:
     """Per-row BigQuery DML omitting DF_MISSING — never SET col=NULL for absent CDC fields.
 
@@ -391,7 +395,7 @@ def _bq_apply_sparse_upsert(
                         sample = ""
                     rejected_details.append(
                         {
-                            "row": row_idx,
+                            "row": resolve_row_number(row_numbers, row_idx),
                             "column": "*",
                             "value": sample,
                             "reason": str(exc)[:300],
@@ -416,7 +420,7 @@ def _bq_apply_sparse_upsert(
                 if rejected_details is not None:
                     rejected_details.append(
                         {
-                            "row": row_idx,
+                            "row": resolve_row_number(row_numbers, row_idx),
                             "column": "*",
                             "value": "",
                             "reason": str(exc)[:300],
@@ -434,7 +438,7 @@ def _bq_apply_sparse_upsert(
                     sample = ""
                 rejected_details.append(
                     {
-                        "row": row_idx,
+                        "row": resolve_row_number(row_numbers, row_idx),
                         "column": "*",
                         "value": sample,
                         "reason": str(exc)[:300],
@@ -1098,14 +1102,30 @@ def write_mapped_rows(
                 rejected_details=rejected_details,
                 warnings=transform_errors,
             )
+        # Keep where each row came from: a sparse reject numbered by its index
+        # inside the sparse list points an operator at a different source row.
+        dense_row_numbers: list[int] | None = None
+        sparse_row_numbers: list[int] | None = None
         if write_mode == "upsert" and conflict:
-            mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
+            (
+                mapped_rows,
+                sparse_rows,
+                dense_row_numbers,
+                sparse_row_numbers,
+            ) = split_dense_sparse_rows_with_numbers(mapped_rows)
+            # Dedupe changes membership and order, so the numbers taken above
+            # must travel with it — a stale parallel list would name a
+            # confidently wrong source row in every later quarantine record.
             if DF_LSN_COL in target_cols:
-                mapped_rows = dedupe_rows_by_pk_and_lsn(
-                    mapped_rows, conflict, target_cols
+                mapped_rows, dense_row_numbers = (
+                    dedupe_rows_by_pk_and_lsn_keeping_numbers(
+                        mapped_rows, conflict, target_cols, dense_row_numbers
+                    )
                 )
             else:
-                mapped_rows = dedupe_rows(mapped_rows, conflict, target_cols)
+                mapped_rows, dense_row_numbers = dedupe_rows_keeping_numbers(
+                    mapped_rows, conflict, target_cols, dense_row_numbers
+                )
         elif write_mode == "upsert" and conflict_columns and not conflict:
             # Operator supplied PKs that do not resolve onto Map targets — refuse
             # rather than split-and-drop sparse CDC rows on the append path.
@@ -1137,9 +1157,12 @@ def write_mapped_rows(
             engine="bigquery",
             dialect_label="BigQuery",
             mappings=mappings,
+            row_numbers=dense_row_numbers,
         )
         if sparse_rows:
-            sparse_rows = bind_sql_mapped_rows_with_quarantine(
+            # Binding drops what it quarantines, so the survivors carry their
+            # own numbers forward to the sparse DML below.
+            sparse_rows, sparse_row_numbers = bind_rows_keeping_numbers(
                 sparse_rows,
                 target_cols,
                 decimal_target_types,
@@ -1148,7 +1171,13 @@ def write_mapped_rows(
                 engine="bigquery",
                 dialect_label="BigQuery",
                 mappings=mappings,
+                row_numbers=sparse_row_numbers,
             )
+        # Re-derive after binding: bind_sql_mapped_rows_with_quarantine drops the
+        # rows it quarantines, so the pre-bind snapshot would let the append path
+        # acknowledge a checksum covering values BigQuery never received. The
+        # MERGE branch rebuilds this again from its own partitioned row sets.
+        rows_for_checksum = list(mapped_rows) + list(sparse_rows)
         rejected_rows = _rejected_row_count(
             data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
         )
@@ -1247,6 +1276,7 @@ def write_mapped_rows(
                 rejected_details=rejected_details,
                 policy=policy,
                 abort_on_reject=str(policy or "").lower() == "fail",
+                row_numbers=sparse_row_numbers,
             )
             written += sparse_written
             rows_skipped += sparse_skipped

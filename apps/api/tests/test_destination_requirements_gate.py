@@ -59,8 +59,11 @@ def test_an_intentional_omission_does_not_fill_a_required_column():
 def test_unreadable_nullability_is_unmeasured_not_pass():
     gate = _gate(column_nullability={})
 
+    # Unmeasured ≠ proven: surfaced as skip carrying an explicit unmeasured flag,
+    # never a green pass. Enforcement still happens fail-closed at write.
     assert gate["status"] == "skip"
     assert gate["details"]["reason"] == "nullability_metadata_unavailable"
+    assert gate["details"].get("unmeasured") is True
 
 
 def test_create_new_destination_has_no_existing_requirements_to_check():

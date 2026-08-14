@@ -72,7 +72,12 @@ def introspect_endpoint(
     fmt = (resolved_fmt or "").lower()
     out["format"] = resolved_fmt
 
-    if fmt == "postgresql":
+    # pgvector is an extension, not a separate engine: the destination is an
+    # ordinary PostgreSQL table with a vector column, reached through the same
+    # connection config. Leaving it out of this branch meant existence and
+    # column types were never measured, so Validate refused create-new and
+    # overwrite for lack of facts one catalog query answers.
+    if fmt in {"postgresql", "pgvector"}:
         from connectors.postgresql import test_postgresql
 
         probe = test_postgresql(
@@ -87,10 +92,14 @@ def introspect_endpoint(
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.table and probe.ok:
             if not _mark_table_listed_if_present(out, endpoint.table):
-                # Explicit missing — Transfer Studio create-new (do not leave null).
+                # Absence from a bounded page is a hint, not proof. The SQL path
+                # below re-checks the specific table and is what Validate trusts;
+                # create-on-write is CREATE IF NOT EXISTS, so guessing "new" here
+                # is recoverable where refusing to answer would strand the run.
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
@@ -290,6 +299,34 @@ def introspect_endpoint(
             _attach_db_sample(out, endpoint)
         return out
 
+    if fmt == "sftp":
+        from connectors.sftp_common import test_sftp
+        from connectors.sftp_reader import list_files
+
+        ok, message = test_sftp(**cfg)
+        out["connected"] = ok
+        out["message"] = message
+        if not ok:
+            return out
+        directory = str(cfg.get("database") or "") or "/"
+        key = endpoint.table or endpoint.collection or ""
+        try:
+            names = list_files(cfg=cfg, directory=directory)
+        except Exception as exc:
+            # A directory we cannot list is unknown, never "the file is absent"
+            # — that answer would flip Map into create-new over a live file and
+            # overwrite it.
+            out["objects"] = []
+            out["sample_error"] = f"SFTP directory listing unavailable: {exc}"
+            return out
+        out["objects"] = [{"name": n, "type": "object"} for n in names[:200]]
+        if key:
+            # Existence is decided against the whole listing, not the 200 shown.
+            out["table_exists"] = key in set(names)
+            if out["table_exists"]:
+                _attach_db_sample(out, endpoint)
+        return out
+
     if fmt == "dynamodb":
         from connectors.dynamodb import test_dynamodb
 
@@ -318,6 +355,13 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "keyspace"} for t in probe.tables]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        if probe.ok and (endpoint.table or endpoint.collection):
+            # Sample the prefix for its document fields, as Mongo and
+            # Elasticsearch already do. Without this the auto-mapper saw a
+            # destination with no columns, mapped every source name to itself,
+            # and the write then failed on fields the keyspace does not have —
+            # even though the writer reads exactly these fields to type its bind.
+            _attach_db_sample(out, endpoint)
         return out
 
     if fmt == "elasticsearch":
@@ -389,6 +433,9 @@ def introspect_endpoint(
         except Exception:
             pass
         return out
+
+    if fmt in _SAAS_INTROSPECT_DRIVERS:
+        return _saas_introspect(out, endpoint, cfg, fmt)
 
     out["message"] = f"Introspection for `{fmt}` not yet implemented"
     return out
@@ -571,13 +618,15 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             return
 
         if fmt == "redis":
-            from connectors.redis_reader import read_keys_batch
+            from connectors.redis_reader import read_keys_batch, resolve_key_pattern
 
-            pattern = endpoint.table or endpoint.collection or endpoint.schema or "*"
+            pattern = resolve_key_pattern(
+                endpoint.table or endpoint.collection or endpoint.schema
+            )
             result = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
             batch = result[0] if isinstance(result, tuple) else result
             out["columns"] = batch.headers
-            out["schema"] = {c: "string" for c in batch.headers}
+            out["schema"] = _schema_from_batch(batch)
             out["row_estimate"] = (batch.total_rows or 0)
             # Redis namespaces are logical key prefixes — an empty SCAN is not
             # proof the destination is missing (would falsely flip Map create-new).
@@ -598,7 +647,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if bucket and key:
                 batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 out["columns"] = batch.headers
-                out["schema"] = {c: "string" for c in batch.headers}
+                out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
@@ -612,8 +661,24 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if bucket and key:
                 batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 out["columns"] = batch.headers
-                out["schema"] = {c: "string" for c in batch.headers}
+                out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
+                out["table_exists"] = True
+                _attach_batch_sample_rows(out, batch)
+            return
+
+        if fmt == "sftp":
+            from connectors.sftp_reader import read_object
+
+            directory = str(cfg.get("database") or "") or "/"
+            key = endpoint.table or endpoint.collection or ""
+            if key:
+                batch = read_object(
+                    cfg=cfg, bucket=directory, key=key, offset=0, limit=sample_limit
+                )
+                out["columns"] = batch.headers
+                out["schema"] = _schema_from_batch(batch)
+                out["row_estimate"] = batch.total_rows or 0
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
             return
@@ -659,7 +724,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     if batch.headers:
                         out["columns"] = out.get("columns") or batch.headers
                         if not out.get("schema"):
-                            out["schema"] = {c: "string" for c in batch.headers}
+                            out["schema"] = _schema_from_batch(batch)
                         out["table_exists"] = True
                         if not out.get("row_estimate"):
                             out["row_estimate"] = batch.total_rows or len(batch.rows)
@@ -695,7 +760,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 result = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
                 batch = result[0] if isinstance(result, tuple) else result
                 out["columns"] = batch.headers
-                out["schema"] = {c: "string" for c in batch.headers}
+                out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
                 # Empty indexes still exist — row count must not drive create-new.
                 if exists is True or (batch.headers and exists is not False):
@@ -840,6 +905,102 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         logger.warning(
             "schema probe failed for %s table=%s: %s", fmt, endpoint.table, e, exc_info=e
         )
+
+
+#: SaaS drivers whose Describe is already modelled in ``schema_introspect``.
+#: They declared ``introspect: True`` and answered "not yet implemented" here,
+#: so a Salesforce or HubSpot *destination* could never prove its object exists
+#: and every route into one failed G2 on unknown existence. The metadata was
+#: written and reachable; only this dispatch was missing.
+_SAAS_INTROSPECT_DRIVERS = frozenset({"salesforce", "hubspot"})
+
+
+def _saas_introspect(
+    out: dict, endpoint: EndpointConfig, cfg: dict, fmt: str
+) -> dict:
+    """Describe-backed introspect for SaaS objects, via the canonical helper."""
+    from services.schema_introspect import introspect_schema
+
+    obj = endpoint.table or endpoint.collection or endpoint.database or ""
+    try:
+        info = introspect_schema(
+            fmt,
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 443),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+            api_key=str(cfg.get("api_key") or ""),
+            table=obj,
+        )
+    except Exception as exc:
+        out["message"] = f"{fmt.title()} introspect failed: {exc}"
+        return out
+
+    objects = [str(t) for t in (info.get("tables") or []) if t]
+    if not info.get("ok"):
+        error = str(info.get("error") or f"{fmt.title()} introspect failed")
+        # Describe failing because the object is absent is a different answer
+        # from Describe failing because the session cannot read it. Only the
+        # first is proof, and neither means "create it" — a SaaS object cannot
+        # be created by a transfer.
+        if objects and obj and obj not in set(objects):
+            out["connected"] = True
+            out["table_exists"] = False
+            out["objects"] = [{"name": name, "type": "object"} for name in objects[:200]]
+            out["message"] = (
+                f"`{obj}` is not an object on this {fmt.title()} org. "
+                "Check the API name — objects cannot be created by a transfer."
+            )
+            return out
+        out["connected"] = bool(objects)
+        out["message"] = error
+        return out
+
+    out["connected"] = True
+    out["objects"] = [{"name": name, "type": "object"} for name in objects[:200]]
+    out["message"] = f"{fmt.title()} connected — {len(objects)} object(s)"
+    if not obj:
+        return out
+
+    columns = [c for c in (info.get("columns") or []) if c.get("name")]
+    # Existence is decided by the object list, not by whether Describe returned
+    # columns: an object that exists but describes empty is still not create-new.
+    out["table_exists"] = bool(columns) or obj in set(objects)
+    out["columns"] = [str(c["name"]) for c in columns]
+    out["schema"] = {
+        str(c["name"]): str(c.get("inferred_type") or "VARCHAR") for c in columns
+    }
+    out["column_nullability"] = {
+        str(c["name"]): bool(c.get("nullable", True)) for c in columns
+    }
+    for key in ("primary_key_columns", "unique_keys"):
+        if info.get(key):
+            out[key] = info[key]
+    return out
+
+
+def _schema_from_batch(batch: Any) -> dict[str, str]:
+    """Column types for a source that has no catalog to declare them.
+
+    Object stores, Redis and index sinks answer "what columns are here" from the
+    payload itself, so a bare ``string`` per header is a placeholder, not a
+    declaration. It was treated as one downstream: ``endpoint_source_column_types``
+    hands this to ``reconcile_source_types`` as the *declared* schema, which
+    outranks the reader's own inference by design — right for a relational
+    catalog, wrong here, and the result was that an S3 CSV landed three ``text``
+    columns where the identical upload landed ``bigint``/``numeric``/``date``.
+
+    Readers that can type their rows report it through ``meta['native_types']``.
+    Where a reader cannot, the placeholder stands and nothing changes.
+    """
+    headers = list(getattr(batch, "headers", None) or [])
+    meta = getattr(batch, "meta", None)
+    native = meta.get("native_types") if isinstance(meta, dict) else None
+    if isinstance(native, dict) and native:
+        return {c: str(native.get(c) or "string") for c in headers}
+    return {c: "string" for c in headers}
 
 
 def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 100) -> None:

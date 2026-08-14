@@ -603,7 +603,7 @@ def run_file_preflight(
     *,
     columns: list[str],
     column_types: dict[str, str],
-    row_count: int,
+    row_count: int | None,
     mappings: list[dict[str, Any]],
     column_nullability: dict[str, bool] | None = None,
     destination_connected: bool = False,
@@ -665,8 +665,15 @@ def run_file_preflight(
     except Exception:
         sync_mode = (sync_mode or "").strip().lower() or "full_refresh_append"
 
-    if row_count <= 0 and sample_rows:
-        row_count = len(sample_rows)
+    # Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a
+    # search index — report ``None`` rather than inventing a total, which is the
+    # honest answer and used to crash this comparison before a single gate ran.
+    # Unknown and zero are handled the same way here (size from the sample);
+    # the distinction stays visible downstream, where an unmeasured source count
+    # is already reported as such rather than as a measured zero.
+    row_count_known = isinstance(row_count, int) and row_count > 0
+    if not row_count_known:
+        row_count = len(sample_rows or [])
 
     # Preflight is a sample-based safety check, not a full table scan.  Cap the
     # sample size so very large file previews or database samples cannot make the
@@ -2066,8 +2073,16 @@ def inspect_destination_for_preflight(
     dest_api_key: str | None = None,
     dest_service_account: str | None = None,
     dest_kind: str = "database",
+    dest_extra: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Introspect destination for table existence and column schema."""
+    """Introspect destination for table existence and column schema.
+
+    ``dest_extra`` carries connector-specific settings that have no named
+    parameter here — today SFTP host-key trust. Without it this path rebuilt the
+    endpoint from named fields only, so Validate connected under *looser* trust
+    than the write would use, which is exactly the mismatch
+    :func:`connectors.sftp_common.host_key_settings` exists to prevent.
+    """
     out: dict[str, Any] = {
         "connected": False,
         "table_exists": None,
@@ -2151,6 +2166,7 @@ def inspect_destination_for_preflight(
             auth_role=dest_auth_role or "",
             api_key=dest_api_key or "",
             service_account=dest_service_account or "",
+            extra=dict(dest_extra or {}),
         )
         out["_probe_cfg"] = probe_config_from_endpoint(db_type, endpoint)
     else:
@@ -2159,7 +2175,11 @@ def inspect_destination_for_preflight(
 
     # Same honesty contract as /transfer/introspect: never steal columns from
     # another DB/schema when Validate re-probes the destination.
-    endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "destination"}
+    endpoint.extra = {
+        **(endpoint.extra or {}),
+        **dict(dest_extra or {}),
+        "introspect_purpose": "destination",
+    }
 
     from src.transfer.endpoint_intelligence import introspect_endpoint
 
@@ -2257,7 +2277,13 @@ def inspect_destination_for_preflight(
                     or dest_service_account
                     or "",
                     "ssl": bool(getattr(endpoint, "ssl", False)),
+                    "private_key": getattr(endpoint, "private_key", "") or "",
                 }
+            # Connector-specific settings (SFTP host-key trust) live in extra and
+            # have no named cfg key; without them the probe would connect under
+            # weaker trust than the write.
+            for key, value in dict(getattr(endpoint, "extra", None) or {}).items():
+                cfg.setdefault(key, value)
 
             probe_schema = str(
                 dest_schema
@@ -2320,6 +2346,13 @@ def inspect_destination_for_preflight(
                 api_key=str(
                     cfg.get("api_key") or getattr(endpoint, "api_key", "") or ""
                 ),
+                private_key=str(
+                    cfg.get("private_key") or getattr(endpoint, "private_key", "") or ""
+                ),
+                # SFTP: probe under the same host-key trust the write will use.
+                host_key=str(cfg.get("host_key") or ""),
+                known_hosts=str(cfg.get("known_hosts") or ""),
+                host_key_policy=str(cfg.get("host_key_policy") or ""),
             )
             can_write, can_create, priv_meta = resolve_write_flags(True, probe)
             out["can_write"] = can_write

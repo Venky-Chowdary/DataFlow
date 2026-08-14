@@ -201,6 +201,23 @@ def _pgvector_gate_existing_physical(
                 )
                 if phys_err:
                     return True, None, phys_err
+            # Every remaining mapped field is carried by the table's ``metadata``
+            # JSONB column, so name that carrier rather than leaving a gap. The
+            # gap read as "no physical type for this column" to the downstream
+            # coverage check, which refused the whole write — on a table where
+            # those fields were never meant to be columns. JSONB is the true
+            # carrier here and imposes no width or precision limit, so the
+            # per-cell truncation checks it feeds are correctly no-ops.
+            for col in mapped_targets:
+                if not col or str(col).lower() == "embedding":
+                    continue
+                if (
+                    effective.get(col)
+                    or effective.get(str(col).lower())
+                    or effective.get(str(col).upper())
+                ):
+                    continue
+                effective[col] = "JSONB"
             return True, effective, None
     finally:
         conn.close()

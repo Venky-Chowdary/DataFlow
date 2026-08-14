@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "ok": true,
+  "violations": [],
+  "chunks": [
+    {
+      "file": "index-CzhwJmVX.css",
+      "bytes": 1187836,
+      "kind": "css"
+    },
+    {
+      "file": "transfer-studio-Bd0mv399.js",
+      "bytes": 595776,
+      "kind": "js"
+    },
+    {
+      "file": "marketing-DxdQaPDR.js",
+      "bytes": 318964,
+      "kind": "js"
+    },
+    {
+      "file": "react-vendor-BFmgz7lG.js",
+      "bytes": 189864,
+      "kind": "js"
+    },
+    {
+      "file": "index-DowjNptY.js",
+      "bytes": 108256,
+      "kind": "js"
+    },
+    {
+      "file": "QueryPage-BegScym6.js",
+      "bytes": 62977,
+      "kind": "js"
+    },
+    {
+      "file": "JobsPage-ChcjDUrj.js",
+      "bytes": 53142,
+      "kind": "js"
+    },
+    {
+      "file": "SettingsPage-BECh8WLU.js",
+      "bytes": 51859,
+      "kind": "js"
+    },
+    {
+      "file": "vendor-SObH3mq0.css",
+      "bytes": 49654,
+      "kind": "css"
+    },
+    {
+      "file": "SchedulesPage-6dXMeZAd.js",
+      "bytes": 47402,
+      "kind": "js"
+    },
+    {
+      "file": "DashboardPage-CikUd1q6.js",
+      "bytes": 30239,
+      "kind": "js"
+    },
+    {
+      "file": "ConnectorsPage-BVoU6KS7.js",
+      "bytes": 26183,
+      "kind": "js"
+    },
+    {
+      "file": "DocsPage-CoePlgCu.js",
+      "bytes": 21713,
+      "kind": "js"
+    },
+    {
+      "file": "TransformsPage-DMGdkexd.js",
+      "bytes": 18839,
+      "kind": "js"
+    },
+    {
+      "file": "ContractsPage-CPzqPocu.js",
+      "bytes": 15455,
+      "kind": "js"
+    },
+    {
+      "file": "PilotPage-DEJDES4t.js",
+      "bytes": 12452,
+      "kind": "js"
+    },
+    {
+      "file": "BenchmarksPage-BcmONd3C.js",
+      "bytes": 12378,
+      "kind": "js"
+    },
+    {
+      "file": "topologyUtils-B8QlJLsq.js",
+      "bytes": 6683,
+      "kind": "js"
+    },
+    {
+      "file": "McpPage-CU2l2MsF.js",
+      "bytes": 6007,
+      "kind": "js"
+    },
+    {
+      "file": "vendor-BeIECPgq.js",
+      "bytes": 3851,
+      "kind": "js"
+    },
+    {
+      "file": "PageToolbar-BRGUvbel.js",
+      "bytes": 914,
+      "kind": "js"
+    },
+    {
+      "file": "PageSection-CNIYkm6f.js",
+      "bytes": 775,
+      "kind": "js"
+    },
+    {
+      "file": "StatCard-BN1EDhvM.js",
+      "bytes": 568,
+      "kind": "js"
+    }
+  ]
+}

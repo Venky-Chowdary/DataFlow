@@ -2036,6 +2036,7 @@ class DataPilotTools:
         schema_policy: str = "manual_review",
         validation_mode: str = "balanced",
         limit: int = 0,
+        source_timezone: str = "",
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -2050,6 +2051,7 @@ class DataPilotTools:
             schema_policy=schema_policy,
             validation_mode=validation_mode,
             limit=limit,
+            source_timezone=source_timezone,
         )
 
     def _analyze_result(

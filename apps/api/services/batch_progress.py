@@ -58,6 +58,19 @@ def compute_transfer_progress_pct(
     return None
 
 
+def row_count_label(total_rows: int | None) -> str:
+    """Operator-facing row count, or ``"an unknown number of"`` when unmeasured.
+
+    Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a search
+    index — report ``None`` rather than inventing a total. Progress messages
+    formatted that with ``{total_rows:,}``, which raises on ``None``, so an
+    honest "we do not know yet" killed the transfer before its first batch.
+    """
+    if total_rows is None:
+        return "an unknown number of"
+    return f"{int(total_rows):,}"
+
+
 def schema_policy_implies_backfill(schema_policy: str | None) -> bool:
     """propagate_* schema policies require additive destination columns."""
     return (schema_policy or "").strip().lower() in {

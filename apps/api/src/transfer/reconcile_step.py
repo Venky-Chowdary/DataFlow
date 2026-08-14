@@ -11,7 +11,12 @@ from connectors.writer_common import (
     transform_error_policy_for_validation_mode,
 )
 from services.dest_precount import PRECOUNT_KEY
-from services.reconcile_coverage import WRITTEN_BATCH_KEYS
+from services.reconcile_coverage import (
+    SOURCE_DIGEST_ENGINE_POPULATION,
+    SOURCE_DIGEST_REMAPPED_ROWS,
+    SOURCE_DIGEST_WRITER_ACK,
+    WRITTEN_BATCH_KEYS,
+)
 from services.reconciliation import (
     KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
@@ -64,19 +69,26 @@ def _compute_source_checksum(
     dest_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
-) -> str:
-    """Return the writer checksum, or recompute it from mapped source rows.
+) -> tuple[str, str]:
+    """Return ``(digest, provenance)`` for the source side of Gate-8.
 
-    Remap uses the same error policy / dest_kind / PK kwargs as the write path
-    so Gate-8 cannot invent a different quarantine hold-out set than the load.
+    When source ``records`` are available, always remap and fingerprint them.
+    Preferring the writer checksum first made Gate-8 circular: dest digest was
+    compared to the writer's own ack, not to the remapped source population.
+
+    The writer checksum remains the fallback when no records were supplied, and
+    the provenance is returned with it so the report can say so. That fallback
+    is not a corner case: a streaming pass hands over no rows, which is exactly
+    how the large tables move, and labelling those runs ``full_checksum`` claimed
+    two independent digests had agreed when only one digest existed.
     """
-    if writer_checksum:
-        return writer_checksum
     if not records:
-        return ""
+        return str(writer_checksum or ""), SOURCE_DIGEST_WRITER_ACK
     _, data_rows = records_to_matrix(records, columns)
     if target_cols is None:
-        target_cols, _ = resolve_target_columns(mappings, source_schema or {}, preserve_case=True)
+        target_cols, _ = resolve_target_columns(
+            mappings, source_schema or {}, preserve_case=True
+        )
     mapped_rows, _rejected = map_rows_for_fingerprint(
         headers=columns,
         data_rows=data_rows,
@@ -89,11 +101,14 @@ def _compute_source_checksum(
         dest_kind=dest_db_type or "",
         destination_pk_columns=destination_pk_columns,
     )
-    return checksum_rows(
-        mapped_rows,
-        target_cols,
-        dest_db_type=dest_db_type,
-        dest_types=dest_types,
+    return (
+        checksum_rows(
+            mapped_rows,
+            target_cols,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        ),
+        SOURCE_DIGEST_REMAPPED_ROWS,
     )
 
 
@@ -220,6 +235,112 @@ def _ladder_declined(report: dict[str, Any], rows: int, budget: int) -> dict[str
     return out
 
 
+def _maybe_engine_profile_ladder(
+    report: dict[str, Any],
+    *,
+    endpoint: EndpointConfig,
+    source_endpoint: EndpointConfig | None,
+    records: list[dict],
+    columns: list[str],
+    dest_summary: dict[str, Any],
+    mappings: list[dict],
+    dest_type: str,
+) -> dict[str, Any] | None:
+    """Engine-side L2 for oversized same-engine SQL routes, at any scale.
+
+    The in-memory ladder refuses above ``VERIFICATION_LADDER_MAX_ROWS`` and only
+    L1/L3 survive — so on exactly the large tables where a migration's stakes are
+    highest, the column-level checks that catch a silently nulled or truncated
+    field stop running. When both ends are the same SQL engine family, the engine
+    can still compute per-column NULL/min/max/sum in SQL over any number of rows,
+    so that signal is restored rather than declined. Returns ``None`` for small
+    populations (the richer in-memory ladder runs) and for any route it cannot
+    profile, leaving the existing decline in charge.
+    """
+    if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
+        return None
+    from services.column_profile import engine_profile_ladder, profile_supported
+    from services.verification_ladder import (
+        MAX_LADDER_ROWS,
+        attach_ladder_to_reconcile_report,
+    )
+
+    known = max(
+        _as_count(report.get("source_rows")),
+        _as_count(report.get("target_rows")),
+        len(records or []),
+    )
+    if known <= MAX_LADDER_ROWS:
+        return None
+
+    from .connector_capabilities import resolve_driver_type
+
+    source_type = resolve_driver_type(source_endpoint.format or "")
+    # Same- or cross-engine, as long as both ends are SQL engines the profiler
+    # knows how to render. Cross-engine narrows to value-based statistics itself.
+    if not (profile_supported(source_type) and profile_supported(dest_type)):
+        return None
+
+    from services.mapping_constraints import is_intentional_omit
+
+    pairs: list[tuple[str, str]] = []
+    types: dict[str, str] = {}
+    for m in mappings or []:
+        if is_intentional_omit(m):
+            continue
+        src = str(m.get("source") or "").strip()
+        tgt = str(m.get("target") or src).strip()
+        if not src or not tgt:
+            continue
+        pairs.append((src, tgt))
+        tt = str(m.get("target_type") or m.get("inferredType") or "").strip()
+        if tt:
+            types[tgt] = tt
+    if not pairs:
+        pairs = [(c, c) for c in (columns or []) if c]
+    if not pairs:
+        return None
+    physical = dest_summary.get("column_types") or dest_summary.get("target_types")
+    if isinstance(physical, dict):
+        for k, v in physical.items():
+            if v:
+                types[str(k)] = str(v)
+
+    src_cfg = resolve_connector_config(source_endpoint)
+    dst_cfg = resolve_connector_config(endpoint)
+    try:
+        ladder = engine_profile_ladder(
+            source_engine=source_type,
+            source_cfg=src_cfg,
+            source_schema=str(source_endpoint.schema or src_cfg.get("schema") or "public"),
+            source_table=str(
+                source_endpoint.table
+                or source_endpoint.collection
+                or src_cfg.get("table")
+                or ""
+            ),
+            dest_engine=dest_type,
+            dest_cfg=dst_cfg,
+            dest_schema=str(dst_cfg.get("schema") or dest_summary.get("schema") or "public"),
+            dest_table=str(
+                endpoint.table or dest_summary.get("table") or dst_cfg.get("table") or ""
+            ),
+            pairs=pairs,
+            types=types,
+            source_rows=_as_count(report.get("source_rows")),
+            target_rows=_as_count(report.get("target_rows")),
+            rejected_rows=_as_count(report.get("rejected_rows")),
+            coerced_null_rows=_as_count(report.get("coerced_null_rows")),
+            rows_skipped=_as_count(report.get("rows_skipped")),
+        )
+    except Exception as exc:  # noqa: BLE001 — any failure declines to the existing skip
+        logging.getLogger(__name__).info("engine profile ladder skipped: %s", exc)
+        return None
+    if ladder is None:
+        return None
+    return attach_ladder_to_reconcile_report(report, ladder)
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -244,6 +365,23 @@ def _maybe_attach_verification_ladder(
     from .connector_capabilities import resolve_driver_type
 
     dest_type = resolve_driver_type(endpoint.format)
+
+    # Oversized same-engine SQL routes: the in-memory ladder below declines, but
+    # the engine can still profile every column at full scale. Purely additive —
+    # only runs when the population exceeds the in-memory budget.
+    engine_profile = _maybe_engine_profile_ladder(
+        report,
+        endpoint=endpoint,
+        source_endpoint=source_endpoint,
+        records=records,
+        columns=columns,
+        dest_summary=dest_summary,
+        mappings=mappings,
+        dest_type=dest_type,
+    )
+    if engine_profile is not None:
+        return engine_profile
+
     if dest_type not in {"sqlite", "postgresql", "redshift"}:
         return report
 
@@ -489,6 +627,141 @@ def _referential_integrity_evidence(
     )
 
 
+def _writer_supplied_engine_digests(
+    dest_summary: dict[str, Any] | None,
+) -> tuple[str, str, int] | None:
+    """Both digests from a writer that computed them in the engine.
+
+    Returns ``(source_checksum, target_checksum, target_rows)``. Only the pair is
+    usable: a run that produced one of them and left the other to be recomputed
+    here would be comparing a numeric engine digest against a Python hex digest.
+    """
+    summary = dest_summary or {}
+    source = str(summary.get("engine_source_checksum") or "").strip()
+    target = str(summary.get("engine_target_checksum") or "").strip()
+    if not source or not target:
+        return None
+    rows = summary.get("rows_written")
+    return source, target, int(rows or 0)
+
+
+def _engine_digest_enabled() -> bool:
+    """Operator gate — default **off** until two gaps are closed.
+
+    The mechanism is proven on its own (see ``test_engine_checksum.py``, and it
+    is what caught the truncated-microseconds bug), but reading both populations
+    back is not yet safe as the default here:
+
+    * **Snapshot.** A PostgreSQL full refresh reads under REPEATABLE READ, so
+      rows inserted while it runs are correctly outside the transfer. Digesting
+      the source afterwards on a fresh connection sees them and reports a
+      mismatch on a transfer that was right. The digest has to run inside the
+      reader's snapshot, not after it.
+    * **Scope.** Whole-table digests are meaningless for an append or upsert
+      into a destination that already held rows; that case re-scopes the target
+      to the written keys further down, and a whole-population source digest
+      cannot be compared against it.
+
+    Until both are handled, this stays behind ``DATAFLOW_ENGINE_DIGEST=1`` so it
+    can be measured and exercised without deciding any operator's Gate-8 verdict.
+    """
+    from services.brand_env import getenv_brand
+
+    return (getenv_brand("ENGINE_DIGEST", "0") or "0").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _engine_population_digests(
+    *,
+    source_endpoint: EndpointConfig | None,
+    dest_cfg: dict[str, Any],
+    dest_db_type: str,
+    dest_schema: str,
+    dest_table: str,
+    mappings: list[dict],
+    source_schema: dict[str, str] | None,
+    dest_types: dict[str, str] | None,
+) -> tuple[str, str, int] | None:
+    """Digest both populations in their own engines, or ``None`` to fall back.
+
+    Gate-8 compares the two sides to each other, so when they render values
+    identically the comparison does not need Python to see a single row. That
+    is worth reaching for: per-cell fingerprinting is the largest cost in a
+    transfer by a wide margin.
+
+    Returns ``None`` — leaving today's path untouched — whenever anything is not
+    provably comparable: a different engine, a transform, a declared omission, a
+    type that is only nearly the same, or any error while querying. Falling back
+    costs time; guessing costs correctness.
+    """
+    if source_endpoint is None or source_endpoint.kind != "database":
+        return None
+    from services.engine_checksum import (
+        comparable_column_pairs,
+        engines_comparable,
+        postgresql_engine_checksum,
+    )
+
+    from .connector_capabilities import resolve_driver_type
+
+    source_driver = resolve_driver_type(source_endpoint.format or "")
+    if not engines_comparable(source_driver, dest_db_type):
+        return None
+    pairs = comparable_column_pairs(mappings, source_schema, dest_types)
+    if not pairs:
+        return None
+
+    source_table = source_endpoint.table or source_endpoint.collection or ""
+    if not source_table or not dest_table:
+        return None
+
+    from connectors.postgresql_conn import get_connection
+    from connectors.sql_identifiers import quote_table_ref
+
+    src_cfg = resolve_connector_config(source_endpoint)
+    try:
+        source_ref = quote_table_ref(
+            source_table, source_endpoint.schema or "public", dialect="postgresql"
+        )
+        dest_ref = quote_table_ref(
+            dest_table, dest_schema or "public", dialect="postgresql"
+        )
+    except Exception:
+        return None
+
+    def _digest(cfg: dict[str, Any], table_ref: str, columns: list[str]):
+        conn = get_connection(
+            host=cfg.get("host", ""),
+            port=int(cfg.get("port") or 5432),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+        try:
+            with conn.cursor() as cur:
+                return postgresql_engine_checksum(cur, table_ref, columns)
+        finally:
+            conn.close()
+
+    try:
+        source_digest = _digest(src_cfg, source_ref, [p[0] for p in pairs])
+        dest_digest = _digest(dest_cfg, dest_ref, [p[1] for p in pairs])
+    except Exception as exc:
+        logging.getLogger(__name__).info(
+            "Engine population digest unavailable, using row fingerprints: %s", exc
+        )
+        return None
+    if source_digest is None or dest_digest is None:
+        return None
+    return source_digest.checksum, dest_digest.checksum, dest_digest.row_count
+
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -505,8 +778,17 @@ def run_reconciliation(
     """Verify row counts and checksums against the destination."""
     # Destination facts a row checksum cannot prove (generator watermarks today).
     physical_state: dict[str, Any] = {}
+    # Where the source digest came from. Held in a box because the early-return
+    # paths below run before it is known, and the report must never claim two
+    # independent digests agreed when only the writer's was available.
+    digest_provenance: dict[str, str] = {"source": ""}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
+        if digest_provenance["source"] and "source_checksum_provenance" not in payload:
+            payload = {
+                **payload,
+                "source_checksum_provenance": digest_provenance["source"],
+            }
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
         stamped = _finalize_reconcile(payload, dest_summary=dest_summary)
@@ -547,8 +829,34 @@ def run_reconciliation(
     source_row_count = dest_summary.get("source_row_count")
     if isinstance(source_row_count, int) and source_row_count >= 0:
         source_rows = source_row_count
+    elif records:
+        source_rows = len(records)
+    elif endpoint.kind != "database":
+        # File/object exports have no cell-fidelity Gate-8; writer ack is enough
+        # for an *unproven* operational pass below. Do not invent conservation.
+        source_rows = int(rows_written or 0) + dropped_rows + rows_skipped
     else:
-        source_rows = len(records) if records else rows_written + dropped_rows + rows_skipped
+        # Never invent source_rows from writer ack on database destinations —
+        # that circularly balances short reads. Fail closed until the reader
+        # stamps a population count.
+        return _finalize({
+            "passed": False,
+            "unproven": True,
+            "migration_proven": False,
+            "message": (
+                "Source row count unmeasured — Gate-8 refuses conservation "
+                "invented from writer acknowledgements alone."
+            ),
+            "source_rows": None,
+            "target_rows": rows_written,
+            "rejected_rows": rejected_rows,
+            "coerced_null_rows": coerced_null_rows,
+            "rows_skipped": rows_skipped,
+            "details": {
+                "reason": "source_row_count_unmeasured",
+                "source_row_count_source": dest_summary.get("source_row_count_source"),
+            },
+        })
     if resume_full_source_rows:
         source_rows = resume_full_source_rows
     elif resumed_from:
@@ -717,10 +1025,11 @@ def run_reconciliation(
             "digest."
         )
 
+    source_checksum_provenance = ""
     if source_checksum_scope_note:
         source_checksum = ""
     else:
-        source_checksum = _compute_source_checksum(
+        source_checksum, source_checksum_provenance = _compute_source_checksum(
             records,
             columns,
             mapping_dicts,
@@ -734,6 +1043,7 @@ def run_reconciliation(
             validation_mode=validation_mode,
             destination_pk_columns=[str(c) for c in pk_cols if c] or None,
         )
+        digest_provenance["source"] = source_checksum_provenance
 
     # Mirror (inferred-delete) and SCD2 transfers already compute an active-row
     # checksum while applying history/soft deletes; use it directly so closed or
@@ -819,22 +1129,52 @@ def run_reconciliation(
             if x is not None and str(x) != ""
         ] or None
 
-    # Always full-table first for SQL. Keyed batch proof is a fallback when the
-    # sink legitimately has extras (upsert/append into non-empty) — never for a
-    # first load where target_rows == source_rows (would fingerprint a sample).
-    target_rows, target_checksum = verify_target(
-        db_type,
-        cfg,
-        schema=schema,
-        table_name=table_name,
-        fallback_rows=-1,
-        fallback_checksum="",
-        target_columns=target_cols,
-        limit=checksum_limit,
-        dest_types=dest_types,
-        written_ids=None,
-        pk_column=None,
-    )
+    # Both digests computed by the engines when they will render identically —
+    # the same population coverage at a fraction of the cost, since neither side
+    # has to bring rows into Python to hash them.
+    engine_digests = None
+    # A server-to-server COPY never brought rows into Python, so it computed both
+    # digests itself — the source one inside the same snapshot it copied. Those
+    # are the only two comparable values for such a run: recomputing either side
+    # here would compare two different algorithms and always disagree.
+    paired = _writer_supplied_engine_digests(dest_summary)
+    if paired is not None and not source_checksum_scope_note:
+        engine_digests = paired
+    elif _engine_digest_enabled() and not source_checksum_scope_note:
+        engine_digests = _engine_population_digests(
+            source_endpoint=source_endpoint,
+            dest_cfg=cfg,
+            dest_db_type=db_type,
+            dest_schema=schema,
+            dest_table=table_name,
+            mappings=mapping_dicts,
+            source_schema=source_schema,
+            dest_types=dest_types,
+        )
+
+    if engine_digests is not None:
+        source_checksum, target_checksum, target_rows = engine_digests
+        # Both sides re-read independently, in full — the strongest source a
+        # digest can have here, and in particular not the writer's own account.
+        source_checksum_provenance = SOURCE_DIGEST_ENGINE_POPULATION
+        digest_provenance["source"] = source_checksum_provenance
+    else:
+        # Always full-table first for SQL. Keyed batch proof is a fallback when the
+        # sink legitimately has extras (upsert/append into non-empty) — never for a
+        # first load where target_rows == source_rows (would fingerprint a sample).
+        target_rows, target_checksum = verify_target(
+            db_type,
+            cfg,
+            schema=schema,
+            table_name=table_name,
+            fallback_rows=-1,
+            fallback_checksum="",
+            target_columns=target_cols,
+            limit=checksum_limit,
+            dest_types=dest_types,
+            written_ids=None,
+            pk_column=None,
+        )
 
     strict_checksum = validation_mode in ("strict", "maximum")
 

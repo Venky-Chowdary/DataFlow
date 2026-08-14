@@ -13,14 +13,20 @@ Migration honesty (Airbyte/Fivetran-class):
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation, Overflow
+from decimal import Decimal, InvalidOperation, Overflow, localcontext
 from typing import Any
 
 # Significant fractional digits beyond this → likely IEEE binary residue.
 _IEEE_SCALE_HARD = 12
 # When median scale is low but max is high, treat high tail as float noise.
 _IEEE_SCALE_TAIL = 8
-_SCI_RE = re.compile(r"[eE][+-]?\d+")
+# A binary double carries ~15–17 significant decimal digits, so residue like
+# ``111.89999999999999`` always arrives with a long *significant* mantissa.
+# ``0.00000000000000000001`` and ``1.23E-10`` have a long scale but one to three
+# significant digits: they are exact decimals written small, not binary noise.
+# Requiring both keeps Excel residue on FLOAT without dragging exact decimals
+# there, where every digit past the 17th would be destroyed.
+_IEEE_MIN_SIGNIFICANT_DIGITS = 15
 
 
 def _canonical_numeric_text(value: Any) -> str | None:
@@ -87,6 +93,45 @@ def cell_int_digits_and_scale(value: Any) -> tuple[int, int]:
         return 0, 0
 
 
+def significant_digit_count(value: Any) -> int:
+    """Significant decimal digits in a cell, trailing zeros removed.
+
+    ``Decimal.normalize`` strips the padding an exporter added, so ``100`` and
+    ``52.310500000000000`` report 1 and 6 rather than 3 and 17.
+
+    Normalizing under the default 28-digit context *rounds*, so a 40-digit value
+    reported 28 — under-counting precisely in the range where the answer decides
+    whether something fits a 34-digit carrier. The count is taken under a
+    context wide enough to leave the value alone.
+    """
+    try:
+        text = _canonical_numeric_text(value)
+        if not text:
+            return 0
+        d = Decimal(text)
+        if not d.is_finite():
+            return 0
+        with localcontext() as ctx:
+            ctx.prec = max(len(d.as_tuple().digits) + 1, 28)
+            return len(d.normalize().as_tuple().digits)
+    except (InvalidOperation, Overflow, ValueError, TypeError):
+        return 0
+
+
+def looks_like_binary_residue(value: Any) -> bool:
+    """True when a cell carries the fingerprint of IEEE→decimal conversion.
+
+    Both halves are required. A long fractional scale alone is satisfied by any
+    small exact decimal, and a long significant mantissa alone is satisfied by a
+    wide exact one such as ``12345678901234567890.1234567890``, which no double
+    could have produced in the first place.
+    """
+    _int_digits, scale = cell_int_digits_and_scale(value)
+    if scale < _IEEE_SCALE_HARD:
+        return False
+    return significant_digit_count(value) >= _IEEE_MIN_SIGNIFICANT_DIGITS
+
+
 def _significant_scale(scales: list[int]) -> int:
     """Scale for invent: max among common scales; ignore IEEE tail outliers."""
     if not scales:
@@ -132,13 +177,15 @@ def observe_numeric_samples(
     int_digits_list: list[int] = []
     scales: list[int] = []
     ieee_signals: list[str] = []
+    # Scale of the widest cell that actually looks like binary residue. The tail
+    # heuristic below consults this instead of the raw maximum, so one exact
+    # small decimal cannot brand the whole column approximate.
+    residue_scale = 0
     parsed = 0
     for raw in rows[:500]:
         text = _canonical_numeric_text(raw)
         if not text:
             continue
-        if _SCI_RE.search(str(raw)):
-            ieee_signals.append("scientific_notation")
         try:
             d = Decimal(text)
             if not d.is_finite():
@@ -149,8 +196,12 @@ def observe_numeric_samples(
         parsed += 1
         int_digits_list.append(idig)
         scales.append(scale)
-        if scale >= _IEEE_SCALE_HARD:
+        # Scientific notation is a rendering, not a storage class: exporters emit
+        # ``9.87E+20`` for exact decimals all the time, so it is judged on the
+        # same mantissa evidence as any other spelling.
+        if looks_like_binary_residue(text):
             ieee_signals.append("hard_scale_residue")
+            residue_scale = max(residue_scale, scale)
 
     if not parsed:
         return {
@@ -178,7 +229,7 @@ def observe_numeric_samples(
         kind = "integer"
         notes.append("all samples integral")
     elif ieee_signals or (
-        max_scale_raw >= _IEEE_SCALE_TAIL and median_scale <= 4 and max_scale_raw > scale
+        residue_scale >= _IEEE_SCALE_TAIL and median_scale <= 4 and residue_scale > scale
     ):
         kind = "ieee_float"
         notes.append(
@@ -193,11 +244,18 @@ def observe_numeric_samples(
     if kind == "fixed_decimal" and scale_out > 0:
         scale_out = min(max_precision, scale_out + min(2, margin))
     int_out = max(1, max_int + (1 if max_int > 0 else 0))
+    # The cap may reclaim the head-room this function added, never a digit the
+    # samples actually used. Truncating observed scale here would hand the
+    # writer a carrier that silently rounds real values away, and it would do so
+    # before ``ddl_type`` gets to choose NUMERIC / BIGNUMERIC on destinations
+    # that can hold the value, or a lossless text carrier on those that cannot.
     if int_out + scale_out > max_precision:
-        scale_out = max(0, max_precision - int_out)
+        scale_out = max(scale, min(scale_out, max(0, max_precision - int_out)))
     if int_out + scale_out > max_precision:
-        int_out = max_precision - scale_out
-    precision = max(scale_out, min(max_precision, int_out + scale_out))
+        int_out = max(max(1, max_int), max_precision - scale_out)
+    precision = max(scale_out, int_out + scale_out)
+    if precision <= max_precision:
+        precision = min(max_precision, precision)
 
     if kind == "integer":
         # Wide integers beyond BIGINT → DECIMAL(p,0); else INTEGER.

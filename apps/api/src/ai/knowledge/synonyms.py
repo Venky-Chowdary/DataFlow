@@ -49,7 +49,13 @@ SYNONYM_DICTIONARY: dict[str, list[str]] = {
     "line_amount": ["line_amount", "line_amt", "line_total", "line_item_amount", "lineitem_amount"],
     "net_amount": ["net_amount", "net_amt", "net_total", "net"],
     "gross_amount": ["gross_amount", "gross_amt", "gross_total", "gross"],
-    "salary_amount": ["salary_amount", "salary_amt", "salary", "compensation_amount", "pay_amount", "wage_amount"],
+    # "compensation" belongs here beside "salary": the two groups overlap, and
+    # whichever claims a term first owns its canonical form. With only
+    # "compensation_amount" listed, "salary" resolved to salary_amount while bare
+    # "compensation" fell through to the HR "salary" group and resolved to
+    # "salary" — two declared synonyms that could never match each other, so
+    # mapping a salary column onto a compensation column invented a new field.
+    "salary_amount": ["salary_amount", "salary_amt", "salary", "compensation", "compensation_amount", "pay_amount", "wage_amount"],
     "commission_amount": ["commission_amount", "commission_amt", "commission", "comm"],
     "bonus_amount": ["bonus_amount", "bonus_amt", "bonus"],
     "order_number": ["order_number", "order_no", "order_num", "purchase_order", "po_number"],

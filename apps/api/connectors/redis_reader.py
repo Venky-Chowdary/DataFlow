@@ -104,6 +104,33 @@ def _decode(value: Any) -> str:
 _REDIS_COLLECTION_CAP = 10_000
 
 
+def redis_key_for(prefix: str, identity: Any) -> str:
+    """Canonical ``prefix:identity`` key layout shared by write and read-back.
+
+    The identity is sanitized, so a row keyed ``1`` is stored at ``prefix:col_1``
+    rather than ``prefix:1``. Gate-8 has to rebuild the exact same key to
+    re-read a batch, and a second copy of this rule would silently stop matching
+    the moment either side changed.
+    """
+    from connectors.sql_identifiers import sanitize_identifier
+
+    return f"{prefix}:{sanitize_identifier(str(identity), preserve_case=True)}"
+
+
+def resolve_key_pattern(name: str | None) -> str:
+    """Turn a configured keyspace name into a SCAN MATCH pattern.
+
+    A Redis "table" is a key prefix, and the keys under it are
+    ``prefix:something`` — so scanning for the bare prefix matches only a key of
+    exactly that name, which is almost never what exists. Callers that skipped
+    this saw an empty keyspace and concluded the destination had no fields.
+    """
+    pattern = (name or "").strip() or "*"
+    if pattern != "*" and "*" not in pattern and "?" not in pattern:
+        return f"{pattern}:*"
+    return pattern
+
+
 def _read_redis_value(client: Any, key: str, ktype: str) -> str:
     """Typed Redis value read — never WRONGTYPE on set/zset/stream; refuse truncation."""
     if ktype == "hash":

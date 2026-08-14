@@ -944,6 +944,24 @@ def write_mapped_rows(
                         # A refused CREATE INDEX downgrades that index in the
                         # certificate instead of failing the load.
                         apply_post_create_sql(fidelity_plan, cur.execute)
+                        # Re-read the destination catalog and settle PK / NOT NULL
+                        # / DEFAULT / UNIQUE from what SQLite actually took — an
+                        # emitted clause is a claim, not proof. Only for create-new
+                        # (we did not touch an existing table's structure).
+                        if not table_existed:
+                            from services.schema_fidelity import (
+                                certify_structure_on_destination,
+                            )
+
+                            certify_structure_on_destination(
+                                fidelity_plan,
+                                dialect="sqlite",
+                                schema="",
+                                table=table_name,
+                                fetchall=lambda sql, params: list(
+                                    cur.execute(sql, params).fetchall()
+                                ),
+                            )
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     else:
                         col_defs = ", ".join(

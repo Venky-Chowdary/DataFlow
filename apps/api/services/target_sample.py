@@ -25,6 +25,11 @@ from services.reconciliation import (
 
 logger = logging.getLogger(__name__)
 
+from services.keyed_read import execute_keyed_read  # noqa: E402
+from services.target_sample_vector import (  # noqa: E402
+    read_pgvector_target_sample,
+)
+
 
 def read_target_sample(
     db_type: str,
@@ -74,6 +79,12 @@ def read_target_sample(
         return bool(dest.get("ssl", default))
 
     try:
+        # pgvector is deliberately absent: it is PostgreSQL underneath, but its
+        # table is a fixed vector schema (id / content / embedding / metadata),
+        # so the mapped source columns are payload inside JSONB rather than
+        # columns to select. Reading it here would ask for columns that do not
+        # exist; a vector sink's honest assurance is writer_ack, not a per-cell
+        # compare it cannot support.
         if db_type in ("postgresql", "redshift"):
             # Redshift speaks the Postgres wire protocol; local CI and many
             # managed endpoints use the PG driver. Checksum verify already
@@ -117,11 +128,15 @@ def read_target_sample(
                                 require_safe_identifier(sort_key, preserve_case=True)
                             )
                             placeholders = ",".join(["%s"] * len(keys))
-                            cur.execute(
+                            execute_keyed_read(
+                                conn,
+                                cur,
                                 f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                                f"WHERE {key_col} IN ({placeholders}) "
+                                f"WHERE {{key}} IN ({placeholders}) "
                                 f"ORDER BY {order_sql} LIMIT %s",
-                                (*keys, int(limit)),
+                                key_col,
+                                keys,
+                                (int(limit),),
                             )
                         else:
                             cur.execute(
@@ -408,6 +423,17 @@ def read_target_sample(
                 raise TargetSampleUnavailable(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
                 ) from exc
+
+        if db_type == "dynamodb":
+            from services.target_sample_dynamodb import read_dynamodb_target_sample
+
+            return read_dynamodb_target_sample(
+                dest,
+                table_name=table_name,
+                keys=list(keys),
+                sort_key=sort_key,
+                limit=limit,
+            )
 
         if db_type == "sqlite" or (
             db_type == "generic_sql"
@@ -1465,68 +1491,15 @@ def read_target_sample(
                 return [dict(zip(names, row)) for row in result.fetchall()]
 
         if db_type == "pgvector":
-            from connectors.postgresql_conn import get_connection
-            from connectors.sql_identifiers import (
-                quote_sql_identifier,
-                quote_table_ref,
-                require_safe_identifier,
+            return read_pgvector_target_sample(
+                dest,
+                schema=schema,
+                table_name=table_name,
+                cols=cols,
+                keys=keys,
+                sort_key=sort_key,
+                limit=limit,
             )
-
-            table_ref = quote_table_ref(
-                table_name, schema or "public", dialect="postgresql"
-            )
-            conn = get_connection(
-                host=dest.get("host", ""),
-                port=dest.get("port", 5432),
-                database=dest.get("database", ""),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                connection_string=dest.get("connection_string", ""),
-                ssl=bool(dest.get("ssl", False)),
-            )
-            try:
-                with conn.cursor() as cur:
-                    if keys and sort_key:
-                        key_col = quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
-                        placeholders = ",".join(["%s"] * len(keys))
-                        cur.execute(
-                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
-                            f"FROM {table_ref} WHERE {key_col} IN ({placeholders}) LIMIT %s",
-                            (*keys, int(limit or 50)),
-                        )
-                    else:
-                        cur.execute(
-                            f"SELECT id, content, source_id, chunk_index, metadata "  # nosec B608
-                            f"FROM {table_ref} LIMIT %s",
-                            (int(limit or 50),),
-                        )
-                    names = [d[0] for d in cur.description] if cur.description else []
-                    out_rows = []
-                    for raw in cur.fetchall():
-                        rec = dict(zip(names, raw))
-                        meta = rec.get("metadata") or {}
-                        if isinstance(meta, str):
-                            try:
-                                meta = json.loads(meta)
-                            except Exception:
-                                meta = {}
-                        if not isinstance(meta, dict):
-                            meta = {}
-                        row = {
-                            "id": rec.get("id"),
-                            "content": rec.get("content"),
-                            "source_id": rec.get("source_id"),
-                            "chunk_index": rec.get("chunk_index"),
-                            **meta,
-                        }
-                        if cols and cols != ["*"]:
-                            row = {k: row.get(k) for k in cols}
-                        out_rows.append(row)
-                    return out_rows
-            finally:
-                conn.close()
 
         if db_type == "sftp":
             from connectors.sftp_common import (

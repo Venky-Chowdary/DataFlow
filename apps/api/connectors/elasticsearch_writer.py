@@ -548,15 +548,26 @@ def write_mapped_rows(
             )
 
         if conflict:
-            from connectors.writer_common import partition_dense_upsert_rows
-
-            mapped_rows = partition_dense_upsert_rows(
-                mapped_rows,
-                conflict,
-                target_cols=target_cols,
-                rejected_details=rejected_details,
-                policy=policy,
+            from connectors.writer_common import (
+                partition_dense_upsert_rows,
+                resolve_conflict_targets,
             )
+
+            # Resolve to the Map spelling first. _resolve_doc_id already matches
+            # these names case-insensitively, so a PK the operator wrote in a
+            # different case reaches the document id fine but would miss
+            # target_cols.index here and quarantine every row before identity
+            # resolution ever ran. Non-strict: an unresolvable name is left to
+            # the id resolver, which refuses a partial key on its own terms.
+            partition_keys = resolve_conflict_targets(conflict, target_cols, strict=False)
+            if partition_keys:
+                mapped_rows = partition_dense_upsert_rows(
+                    mapped_rows,
+                    partition_keys,
+                    target_cols=target_cols,
+                    rejected_details=rejected_details,
+                    policy=policy,
+                )
 
         from elasticsearch.helpers import bulk
 

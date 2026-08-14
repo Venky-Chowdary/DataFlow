@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
+import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
@@ -310,9 +311,16 @@ export function JobTheater({
     try {
       const res = await resumeJob(jobId);
       const nextId = res.job_id || jobId;
+      // A full refresh replaces the destination, so the server restarts it
+      // rather than continuing. Saying "continuing from the last checkpoint"
+      // for that run described something that did not happen.
       toast({
-        title: "Resume started",
-        message: "Continuing from the last checkpoint in Transfer Studio.",
+        title: res.restarted ? "Transfer restarted" : "Resume started",
+        message:
+          res.message
+          || (res.restarted
+            ? "Full refresh re-run from the beginning — it replaces the destination, so there is nothing to resume into."
+            : "Continuing from the last checkpoint in Transfer Studio."),
         tone: "success",
       });
       onResumed?.(nextId);
@@ -772,7 +780,7 @@ export function JobTheaterView({
           <div>
             <strong>Low Snowflake throughput on this job</strong>
             <p>
-              ~{displayRps.toLocaleString()} rows/s with load method {loadMethod || "insert"}.
+              ~{displayRps.toLocaleString()} rows/s using {loadMethodLabel(loadMethod || "insert")}.
               Prefer COPY INTO / larger batches (warehouse stream path) after redeploy if you still see INSERT-only loads.
             </p>
           </div>
@@ -874,10 +882,13 @@ export function JobTheaterView({
           </div>
         </article>
         {loadMethod && (
-          <article className="df2-theater-v3-metric" title="Snowflake/warehouse load path for this job">
+          <article
+            className="df2-theater-v3-metric"
+            title={loadMethodDescription(loadMethod)}
+          >
             <DtIcon name="transfer" size={16} />
             <div>
-              <strong>{loadMethod}</strong>
+              <strong>{loadMethodLabel(loadMethod)}</strong>
               <span>Load method</span>
             </div>
           </article>

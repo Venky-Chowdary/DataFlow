@@ -15,8 +15,10 @@ from services.migration_risk_contract import (
 from services.primary_key import pick_dynamodb_identity_column, resolve_identity_key
 from src.transfer.connector_capabilities import (
     TRANSFER_READY_CATALOG_IDS,
+    enrich_catalog_entry,
     get_capabilities,
     resolve_driver_type,
+    transfer_ready,
 )
 
 
@@ -314,13 +316,20 @@ def test_skip_row_excluded_from_replay_dlq_persist(monkeypatch) -> None:
     assert outcome["rejected_count"] == 0
 
 
-def test_transfer_ready_excludes_preflight_false_sftp_email() -> None:
-    assert "sftp" not in TRANSFER_READY_CATALOG_IDS
+def test_transfer_ready_excludes_preflight_false_email() -> None:
+    """email writes and can never be read back, so it stays out.
+
+    SFTP was here too until it gained introspect, a G2 privilege probe, a
+    population uniqueness scan and a Gate-8 read-back — all proven against a
+    real server in test_sftp_live_transfer.py.
+    """
     assert "email" not in TRANSFER_READY_CATALOG_IDS
-    for cid in ("sftp", "email"):
-        driver = resolve_driver_type(cid)
-        caps = get_capabilities(driver, cid)
-        assert caps.get("preflight") is False
+    driver = resolve_driver_type("email")
+    caps = get_capabilities(driver, "email")
+    assert caps.get("preflight") is False
+    assert transfer_ready(caps) is False
+    enriched = enrich_catalog_entry({"id": "email", "status": "live"})
+    assert enriched.get("transfer_ready") is False
 
 
 def test_transfer_ready_ids_require_preflight_when_not_file() -> None:

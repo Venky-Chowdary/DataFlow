@@ -46,6 +46,60 @@ class WriteResult(_WriteResult):
     driver: str = "paramiko"
 
 
+def _replace_remote(sftp: Any, temp_path: str, final_path: str) -> None:
+    """Move the staged upload onto the final path, atomically where possible.
+
+    ``posix-rename@openssh.com`` replaces the target in one step, so a consumer
+    polling the directory never sees a truncated file and never sees it vanish.
+    Only OpenSSH-derived servers implement it: paramiko always exposes the
+    client method, so testing ``hasattr`` asked the wrong side and every managed
+    file-transfer appliance without the extension failed the write outright
+    with "Operation unsupported" after the bytes had already landed.
+
+    The fallback is the portable two-step. It is not atomic — there is a window
+    where the destination does not exist — so it is only taken when the server
+    actually refused the atomic form. Any other failure (permission, quota,
+    missing directory) must propagate: retrying it as delete-then-rename would
+    destroy the operator's existing file first and then fail the same way.
+
+    paramiko maps only a few SFTP status codes onto errno (``ENOENT`` for
+    missing, ``EACCES`` for denied) and raises a bare ``IOError(text)`` for
+    everything else, including ``SFTP_OP_UNSUPPORTED``. So "the server will not
+    do this" is identified by errno *and* message, and an unrecognised error
+    with no errno stays fatal rather than being read as permission to fall back.
+    """
+    import errno
+
+    try:
+        sftp.posix_rename(temp_path, final_path)
+        return
+    except (AttributeError, OSError) as exc:
+        if isinstance(exc, OSError) and not _is_unsupported_operation(exc):
+            raise
+        logger.info(
+            "SFTP posix_rename unavailable (%s); falling back to remove+rename", exc
+        )
+
+    try:
+        sftp.remove(final_path)
+    except OSError as exc:
+        logger.debug("No existing %s to remove before rename: %s", final_path, exc)
+    sftp.rename(temp_path, final_path)
+
+
+def _is_unsupported_operation(exc: OSError) -> bool:
+    """True only when the server said it does not implement the request."""
+    import errno
+
+    code = getattr(exc, "errno", None)
+    if code in (errno.EOPNOTSUPP, errno.ENOSYS):
+        return True
+    if code is not None:
+        return False
+    text = str(exc).lower()
+    return "unsupported" in text or "not supported" in text or "not implemented" in text
+
+
 def write_mapped_rows(
     *,
     connection_string: str = "",
@@ -205,14 +259,7 @@ def write_mapped_rows(
                 with sftp.file(temp_path, "wb") as f:
                     f.write(body)
                     f.flush()
-                if hasattr(sftp, "posix_rename"):
-                    sftp.posix_rename(temp_path, cfg.path)
-                else:
-                    try:
-                        sftp.remove(cfg.path)
-                    except Exception as exc:
-                        logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-                    sftp.rename(temp_path, cfg.path)
+                _replace_remote(sftp, temp_path, cfg.path)
             except Exception:
                 try:
                     sftp.remove(temp_path)

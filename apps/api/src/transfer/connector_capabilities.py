@@ -35,7 +35,7 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     "sqlite": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "sqlserver": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "oracle": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "sftp": {"test": True, "read": True, "write": True, "introspect": False, "preflight": False},
+    "sftp": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "email": {"test": True, "read": False, "write": True, "introspect": False, "preflight": False, "dest_only": True},
     "iceberg": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "kafka": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
@@ -159,7 +159,10 @@ _TRANSFER_READY_CORE = frozenset({
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
     "salesforce", "hubspot",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
-    # sftp/email: RW caps but preflight:False — demoted until Validate gates exist.
+    # SFTP earns this with introspect (typed schema off the remote payload),
+    # Validate gates and a Gate-8 read-back, proven against a real SFTP server
+    # in test_sftp_live_transfer.py. email stays out: write-only, no read-back.
+    "sftp",
     "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
 })
 
@@ -589,7 +592,13 @@ def _source_only_ready(caps: dict[str, bool]) -> bool:
 
 
 def transfer_ready(caps: dict[str, bool]) -> bool:
-    """True when connector supports production read+write transfer."""
+    """True when connector supports production read+write transfer.
+
+    Validate-class preflight is mandatory for duplex / dest-only routes. File
+    sources are the sole exemption (schema arrives with the upload). Drivers
+    that advertise ``preflight: False`` (SFTP, email, …) must not inherit
+    Certified / Full-transfer tiles until Validate gates exist.
+    """
     # ``certified: False`` marks drivers that implement read+write but have not
     # yet passed the live PRODUCTION_SKU matrix; they must not advertise as
     # transfer-ready until they earn certification.
@@ -597,6 +606,9 @@ def transfer_ready(caps: dict[str, bool]) -> bool:
         return False
     if caps.get("file_source"):
         return True
+    # Dest-only / duplex without Validate-class preflight are not transfer-ready.
+    if caps.get("preflight") is False:
+        return False
     if caps.get("dest_only") and caps.get("write"):
         return True
     return bool(caps.get("read") and caps.get("write"))
@@ -709,8 +721,9 @@ def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool])
         return False
     if driver in TRANSFER_READY_CATALOG_IDS:
         return True
-    if driver in _DRIVER_CAPS or driver in _FILE_CAPS:
-        return True
+    # Caps membership alone is not enough — transfer_ready() already enforced
+    # read+write / preflight / certified. Reaching here means the driver is
+    # known but not yet in the SKU frozenset (or was filtered above).
     return False
 
 
@@ -776,6 +789,18 @@ def enrich_catalog_entry(entry: dict[str, Any]) -> dict[str, Any]:
     out["capabilities"] = caps
     out["effective_status"] = eff
     out["transfer_ready"] = ready
+    # Which *side* of a transfer this tile can actually take. ``transfer_ready``
+    # cannot answer that in either direction: a vector store writes but cannot
+    # be read, and a source-only connector reads without being duplex, so gating
+    # on it would drop every source-only driver from the source list while
+    # leaving write-only stores in it. Offering a tile in the wrong picker hands
+    # the operator a route that fails at Execute.
+    #
+    # A Planned tile is ready for neither side regardless of what its declared
+    # capabilities claim.
+    planned = tier == "planned"
+    out["source_ready"] = bool(not planned and source_ready(caps))
+    out["dest_ready"] = bool(not planned and dest_ready(caps))
     out["connect_only"] = is_connect_only
     out["capability_label"] = label
     out["certification_tier"] = tier

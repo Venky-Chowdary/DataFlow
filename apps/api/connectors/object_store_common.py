@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -310,7 +311,46 @@ def read_object_from_store(
         limit=limit,
         known_total=known_total_rows,
     )
-    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+    return ReadBatch(
+        headers=headers,
+        rows=rows,
+        offset=offset,
+        total_rows=total,
+        meta={"native_types": inferred_native_types(headers, rows)},
+    )
+
+
+def inferred_native_types(headers: list[str], rows: list[list[Any]]) -> dict[str, str]:
+    """Column types read from the object's own rows.
+
+    An object store holds the same CSV/JSON/Parquet payload an upload does, but
+    the reader handed the engine bare strings and no types, so every column
+    landed as text: the identical file uploaded directly produced
+    ``bigint``/``numeric``/``date`` while the S3 copy produced three ``text``
+    columns. The transfer still reported success, which is the part that makes
+    it worth inferring here rather than leaving to the destination.
+
+    This is the same ``infer_columns_from_rows`` the file parser uses, so both
+    paths reach one answer instead of two, and readers already carry types to
+    the engine through ``meta['native_types']``. Every reader that parses rows
+    out of an opaque payload shares it — object stores and SFTP alike — so a
+    payload cannot land typed over one transport and all-text over another.
+    """
+    if not headers or not rows:
+        return {}
+    try:
+        from services.schema_inference import infer_columns_from_rows
+
+        return {
+            str(col["name"]): str(col.get("inferred_type") or "VARCHAR")
+            for col in infer_columns_from_rows(list(headers), list(rows))
+            if col.get("name")
+        }
+    except Exception as exc:  # noqa: BLE001 — types are an enrichment, not a gate
+        logging.getLogger(__name__).info(
+            "object payload type inference unavailable: %s", exc
+        )
+        return {}
 
 
 def resolve_object_store_write_dest_types(

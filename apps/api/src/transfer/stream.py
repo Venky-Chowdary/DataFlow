@@ -46,6 +46,12 @@ from .adapters import (
     resolve_dest_table,
 )
 from .connector_capabilities import resolve_driver_type
+from .stream_row_accounting import stamp_incremental_no_op, stamp_source_row_count
+from .stream_foreign_keys import (
+    ForeignKeyContext as _ForeignKeyContext,
+    carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
+    foreign_key_context as _foreign_key_context,
+)
 
 from services.phase_profile import (  # noqa: E402
     PHASE_CHECKSUM,
@@ -633,7 +639,11 @@ def _write_batch(
                    "checksum": result.checksum, "driver": result.driver, **_writer_diagnostics(result)}
         return result.rows_written, result.checksum, summary
 
-    from .connector_dispatch import has_writer, write_via_registry
+    from .connector_dispatch import (
+        has_writer,
+        write_via_registry,
+        writer_extra_kwargs,
+    )
 
     if has_writer(dest_type):
         mode = write_mode
@@ -664,21 +674,8 @@ def _write_batch(
                 else None
             ),
         }
-        extra = {}
-        if dest_type == "kafka":
-            extra["schema_registry_url"] = str(
-                (getattr(dest, "extra", None) or {}).get("schema_registry_url")
-                or cfg.get("schema_registry_url")
-                or ""
-            )
+        extra = writer_extra_kwargs(dest_type, cfg=cfg, dest=dest, common=common)
         if dest_type == "iceberg":
-            # Forward catalog properties (warehouse, region, catalog_type, token, rest.*,
-            # glue.*, etc.) that are not already part of the common writer kwargs.
-            extra = {
-                k: v
-                for k, v in cfg.items()
-                if k not in common and v not in (None, "")
-            }
             # Iceberg full-refresh overwrite must truncate once per job, not per chunk.
             common["sync_mode"] = sync_mode
             common["file_batch_idx"] = chunk_idx
@@ -802,6 +799,9 @@ def stream_database_transfer(
             logger.warning("source snapshot release failed: %s", exc, exc_info=exc)
 
 
+from .copy_route import _try_copy_fast_path  # noqa: E402 — see module docstring
+
+
 def _stream_database_transfer_impl(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -871,6 +871,24 @@ def _stream_database_transfer_impl(
             f"Sync mode `{effective_sync}` requires primary_key for upsert; "
             "refuse silent insert fallback (set primary_key on the stream contract)"
         )
+
+    fast = _try_copy_fast_path(
+        source=source,
+        destination=destination,
+        mappings=mappings,
+        schema=schema,
+        src_type=src_type,
+        dest_type=dest_type,
+        src_cfg=src_cfg,
+        dest_cfg=dest_cfg,
+        effective_sync=effective_sync,
+        incremental=incremental,
+        source_filter=source_filter,
+        limit=limit,
+        checkpoint=checkpoint,
+    )
+    if fast is not None:
+        return fast
     # Parallel/chunked resume is only safe with idempotent writes.
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
     resume_key_resolved = False
@@ -891,8 +909,9 @@ def _stream_database_transfer_impl(
             write_mode = "upsert"
         else:
             raise ValueError(
-                "Cannot resume a streaming insert without a primary key; "
-                "set primary_key on the stream contract or use an upsert sync mode"
+                "Cannot resume a streaming insert without a primary key. "
+                "Re-run this transfer with Full refresh · Overwrite to reload it "
+                "safely, or set a primary key to make the replay idempotent."
             )
     # Decide up front whether an interrupted batch may be re-sent. Append-only
     # destinations get retries only for failures that prove nothing landed;
@@ -1357,8 +1376,14 @@ def _stream_database_transfer_impl(
     last_checksum = ""
     # Phase F1 — accumulate fingerprints during the write pass (avoids double source I/O).
     write_pass_fp = FingerprintAccumulator()
-    rejected_total = 0
-    coerced_null_total = 0
+    # Restore cumulative quarantine counts on resume — Gate-8 conservation is
+    # source - (rejected - coerced_null) - skipped. committed_offset already spans
+    # the full population on resume, so these counters must be cumulative too or a
+    # correct resumed load that quarantined rows in the first pass fails Gate-8.
+    rejected_total = int(getattr(checkpoint, "rejected_rows", 0) or 0) if resumed_pass else 0
+    coerced_null_total = (
+        int(getattr(checkpoint, "coerced_null_rows", 0) or 0) if resumed_pass else 0
+    )
     # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
     # Threaded to every writer so the streaming path matches the buffered path.
     stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
@@ -2020,7 +2045,12 @@ def _stream_database_transfer_impl(
                 destination_pk_columns=list(pk_target_cols or []) or None,
             )
             if mapped_fp:
-                inline_fps = row_fingerprints(mapped_fp, target_cols)
+                inline_fps = row_fingerprints(
+                    mapped_fp,
+                    target_cols,
+                    dest_db_type=dest_type,
+                    dest_types=fingerprint_dest_types,
+                )
         except Exception as exc:
             logger.warning("Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc)
 
@@ -2119,6 +2149,11 @@ def _stream_database_transfer_impl(
             # GA: keep full rejected_details across batches — never drop for a
             # UI sample cap (sample is stamped separately at finalize).
             merged_details = prev_details + new_details
+            # Drop the writer's per-batch source_row_count stamp: it counts only
+            # this batch's mapped rows and would clobber the aggregate. The full
+            # reader-side population is committed_offset, applied at finalize.
+            incoming.pop("source_row_count", None)
+            incoming.pop("source_row_count_source", None)
             dest_summary = {
                 **prev,
                 **incoming,
@@ -2164,6 +2199,10 @@ def _stream_database_transfer_impl(
         checkpoint.chunk_index = idx
         checkpoint.offset = committed_offset
         checkpoint.rows_processed = written
+        # Persist cumulative quarantine counts so a crash-resume restores them and
+        # Gate-8 conservation balances across passes.
+        checkpoint.rejected_rows = rejected_total
+        checkpoint.coerced_null_rows = coerced_null_total
         checkpoint.cursor_value = running_cursor or committed_keyset or ""
         checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
         checkpoint.es_search_after = es_search_after
@@ -2274,6 +2313,7 @@ def _stream_database_transfer_impl(
     if written == 0 and incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
         dest_summary["sync_mode"] = effective_sync
+        stamp_incremental_no_op(dest_summary)
         if resume_key_resolved:
             # Honest delivery label: the read side re-delivers the interrupted
             # batch, the write side resolves it on the identity key.
@@ -2403,7 +2443,14 @@ def _stream_database_transfer_impl(
                 destination_pk_columns=list(pk_target_cols or []) or None,
             )
             if mapped:
-                fp_accumulator.add_many(row_fingerprints(mapped, target_cols))
+                fp_accumulator.add_many(
+                    row_fingerprints(
+                        mapped,
+                        target_cols,
+                        dest_db_type=dest_type,
+                        dest_types=fingerprint_dest_types,
+                    )
+                )
             checksum_rows_read += len(batch.rows)
             if limit > 0 and checksum_rows_read >= limit:
                 break
@@ -2525,9 +2572,15 @@ def _stream_database_transfer_impl(
     dest_summary["chunk_size"] = chunk_size
     dest_summary["chunk_policy"] = chunk_policy
     dest_summary["batches"] = batches_completed
-    if not isinstance(dest_summary.get("source_row_count"), int) or dest_summary.get("source_row_count", 0) <= 0:
-        held_out = max(int(rejected_total or 0) - int(coerced_null_total or 0), 0)
-        dest_summary["source_row_count"] = int(written or 0) + held_out
+    # Gate-8 conservation must come from the *reader*, never written+held_out.
+    # Inventing source_row_count from writer ack circularly balances short reads.
+    # committed_offset is the authoritative full-stream population (sum of every
+    # committed batch's source rows), so it overrides any per-batch writer stamp
+    # that may have merged into the summary — the last batch's mapped-row count is
+    # not the population.
+    stamp_source_row_count(
+        dest_summary, reader_count=int(committed_offset or 0), rows_written=int(written or 0)
+    )
     if reconcile_sample:
         dest_summary["reconcile_sample"] = reconcile_sample[:_RECONCILE_SAMPLE_CAP]
     if load_methods_seen:
@@ -2586,94 +2639,6 @@ def _stream_database_transfer_impl(
                         f"{str(decision['status']).upper()} FK: {decision['dest_ddl']}"
                     )
     return written, ddl_log, dest_summary, columns
-
-
-@dataclass
-class _ForeignKeyContext:
-    """Measured source references for the tables of one multi-stream job."""
-
-    source_keys: dict[str, Any] = field(default_factory=dict)
-    order: list[str] = field(default_factory=list)
-    cycle: list[str] = field(default_factory=list)
-    column_maps: dict[str, dict[str, str]] = field(default_factory=dict)
-
-
-def _foreign_key_context(
-    source: EndpointConfig, tables: list[str]
-) -> _ForeignKeyContext:
-    """Measure source foreign keys and derive a parents-first load order.
-
-    A failure here never blocks the transfer: the keys are then reported as
-    unmeasured (``unknown``) rather than absent, and the streams keep the
-    operator's declared order.
-    """
-    context = _ForeignKeyContext()
-    names = [t for t in tables if t]
-    # A single table still declares references: its parents simply live on the
-    # destination already rather than in this job, so the keys are measured and
-    # planned against the destination catalog. Ordering is the only part that
-    # needs more than one stream.
-    if source.kind != "database" or not names:
-        return context
-    try:
-        from services.foreign_key_orchestration import (
-            dependency_order,
-            measure_source_foreign_keys,
-        )
-
-        src_type = resolve_driver_type(source.format)
-        src_cfg = resolve_connector_config(source)
-        context.source_keys = measure_source_foreign_keys(src_type, src_cfg, names)
-        if len(names) > 1:
-            context.order, context.cycle = dependency_order(names, context.source_keys)
-    except Exception as exc:
-        logger.debug("foreign key ordering skipped: %s", exc, exc_info=exc)
-    return context
-
-
-def _carry_foreign_keys_after_load(
-    destination: EndpointConfig,
-    context: _ForeignKeyContext,
-    table_map: dict[str, str] | None = None,
-) -> dict[str, Any] | None:
-    """Add the planned constraints once every table has landed, then re-read."""
-    if not context.source_keys or destination.kind != "database":
-        return None
-    try:
-        from services.foreign_key_orchestration import carry_foreign_keys, summarize
-
-        dest_type = resolve_driver_type(destination.format)
-        dest_cfg = resolve_connector_config(destination)
-        dest_schema = str(dest_cfg.get("schema") or "")
-        # Multi-stream lands each source table under its own name; a rename
-        # would arrive through the contract and change only this map.
-        table_map = dict(table_map or {}) or {t: t for t in context.source_keys}
-        summary = summarize(
-            carry_foreign_keys(
-                dest_dialect=dest_type,
-                dest_cfg=dest_cfg,
-                dest_schema=dest_schema,
-                source_keys=context.source_keys,
-                table_map=table_map,
-                column_maps=context.column_maps,
-                dest_columns={
-                    t: list(cols.values()) for t, cols in context.column_maps.items()
-                },
-            )
-        )
-        if context.cycle:
-            summary["cycle"] = list(context.cycle)
-        return summary
-    except Exception as exc:
-        logger.warning("foreign key carry failed: %s", exc, exc_info=exc)
-        return {
-            "decisions": [],
-            "counts": {"unknown": len(context.source_keys)},
-            "integrity_violations": 0,
-            "carried": 0,
-            "verdict": "unknown",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
 
 
 def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
@@ -3343,44 +3308,6 @@ def _read_staging_batches(
         release_engine(engine)
 
 
-def peek_stream_source(source: EndpointConfig) -> tuple[list[str], dict[str, str], int, list[dict]]:
-    """Return columns, schema, row count, and sample rows for preflight."""
-    from .connector_capabilities import resolve_driver_type
-    src_type = resolve_driver_type(source.format or "")
-    src_cfg = resolve_connector_config(source)
-    table = _source_name(source)
-    if not table:
-        raise ValueError("Source table/collection name required for streaming transfer")
-
-    src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
-
-    probe, _ = _unwrap_read(_read_batch(src_type, src_cfg, table, None, 0, CHUNK_SIZE, database=src_db))
-    columns = probe.headers
-    if not columns and probe.total_rows == 0:
-        raise ValueError(f"Source `{table}` has no columns or is empty")
-
-    if src_type in ("s3", "gcs", "adls"):
-        try:
-            from services.object_store_introspect import profile_object_batch
-            profiled = profile_object_batch(columns, probe.rows)
-            schema = profiled.get("schema") or {c: "string" for c in columns}
-        except Exception:
-            schema = {c: "string" for c in columns}
-    elif src_type == "redis":
-        schema = {c: "string" for c in columns}
-    else:
-        probe_meta = getattr(probe, "meta", None) or {}
-        native = probe_meta.get("native_types") or probe_meta.get("schema") or {}
-        if isinstance(native, dict) and native:
-            schema = {c: str(native.get(c) or "string") for c in columns}
-        else:
-            schema = _introspect_table_schema(src_type, src_cfg, table, columns)
-            if not schema:
-                schema = {c: "string" for c in columns}
-    sample_rows = [dict(zip(probe.headers, row)) for row in probe.rows[:100]]
-    return columns, schema, probe.total_rows, sample_rows
-
-
 def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> bool:
     if source.kind != "database" or destination.kind != "database":
         return False
@@ -3389,3 +3316,8 @@ def supports_streaming(source: EndpointConfig, destination: EndpointConfig) -> b
         resolve_driver_type(source.format) in _STREAMING_TYPES
         and resolve_driver_type(destination.format) in _STREAMING_TYPES
     )
+
+
+# Preflight's look-ahead lives in its own module (size budget); re-exported here
+# because callers import it from this module.
+from .source_peek import peek_stream_source  # noqa: E402,F401 — re-export

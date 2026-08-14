@@ -240,24 +240,53 @@ def dedupe_rows_by_pk_and_lsn(
     lsn_column: str = DF_LSN_COL,
 ) -> list[tuple]:
     """Keep the highest-LSN row per PK; fall back to last-wins when LSN absent."""
-    from connectors.writer_common import dedupe_rows, resolve_conflict_targets
+    kept, _numbers = dedupe_rows_by_pk_and_lsn_keeping_numbers(
+        rows, conflict_columns, target_cols, lsn_column=lsn_column
+    )
+    return kept
+
+
+def dedupe_rows_by_pk_and_lsn_keeping_numbers(
+    rows: list[tuple],
+    conflict_columns: list[str],
+    target_cols: list[str],
+    row_numbers: list[int] | None = None,
+    *,
+    lsn_column: str = DF_LSN_COL,
+) -> tuple[list[tuple], list[int] | None]:
+    """Dedupe by PK/LSN, and report which source row each survivor came from.
+
+    The winner is the highest LSN rather than the last arrival, so the surviving
+    row's number is not simply the last one seen for that key.
+    """
+    from connectors.writer_common import (
+        dedupe_rows_keeping_numbers,
+        resolve_conflict_targets,
+        resolve_row_number,
+    )
 
     if not conflict_columns or not rows:
-        return rows
+        return rows, row_numbers
     if lsn_column not in target_cols:
-        return dedupe_rows(rows, conflict_columns, target_cols)
+        return dedupe_rows_keeping_numbers(
+            rows, conflict_columns, target_cols, row_numbers
+        )
     conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
-        return rows
+        return rows, row_numbers
     indices = [target_cols.index(c) for c in conflict]
     lsn_idx = target_cols.index(lsn_column)
     best: dict[tuple, tuple] = {}
-    for row in rows:
+    best_numbers: dict[tuple, int] = {}
+    for position, row in enumerate(rows):
         key = tuple(row[i] for i in indices)
         prev = best.get(key)
         if prev is None or compare_lsn(row[lsn_idx], prev[lsn_idx]) >= 0:
             best[key] = row
-    return list(best.values())
+            best_numbers[key] = resolve_row_number(row_numbers, position)
+    if row_numbers is None:
+        return list(best.values()), None
+    return list(best.values()), [best_numbers[k] for k in best]
 
 
 def _format_file_pos_lsn(file_name: str, pos: Any) -> str:
