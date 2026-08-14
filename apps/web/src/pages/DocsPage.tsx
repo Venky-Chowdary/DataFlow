@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { DocsShotReel } from "../components/docs/DocsShotReel";
+import { Button } from "../components/ui/Button";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
@@ -110,12 +111,21 @@ function DocsHero({
           so every surface (Studio, Pipelines, Pilot, MCP) proves the load.
         </p>
         <div className="df2-docs-hero-actions">
-          <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" onClick={() => onJump("pipeline")}>
-            <DtIcon name="transfer" size={14} /> How a transfer runs
-          </button>
-          <button type="button" className="df2-btn df2-btn-sm" onClick={() => onJump("preflight")}>
-            <DtIcon name="shield" size={14} /> Preflight gates
-          </button>
+          <Button
+            variant="primary"
+            size="sm"
+            onClick={() => onJump("pipeline")}
+            leadingIcon={<DtIcon name="transfer" size={14} />}
+          >
+            How a transfer runs
+          </Button>
+          <Button
+            size="sm"
+            onClick={() => onJump("preflight")}
+            leadingIcon={<DtIcon name="shield" size={14} />}
+          >
+            Preflight gates
+          </Button>
         </div>
         <div className="df2-docs-hero-stats">
           <div className="df2-docs-hero-stat">

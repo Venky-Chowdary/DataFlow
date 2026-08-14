@@ -3,6 +3,7 @@ import { SectionLoader } from "../components/LoadingState";
 import { TransformDetailDrawer } from "../components/TransformDetailDrawer";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
@@ -330,6 +331,21 @@ export function TransformsPage({ connectors }: TransformsPageProps) {
       description="Post-load SQL models that run at the destination after a transfer lands — open a row for Dry run, Run, Export, or Edit."
     >
       <PageFrame>
+        {!editing && (
+          <PageContextBar
+            ariaLabel="Transform summary"
+            stats={[
+              { label: "Transforms", value: projects.length, icon: "layers" },
+              {
+                label: "Enabled",
+                value: projects.filter((p) => p.enabled).length,
+                icon: "check",
+                tone: "ok",
+              },
+              { label: "Destinations", value: destConnectors.length, icon: "database" },
+            ]}
+          />
+        )}
         {editing ? (
           <PageSection
             title={editing.id ? "Edit transform" : "New transform"}

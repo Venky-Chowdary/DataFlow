@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { FilterTabs } from "../components/ui/FilterTabs";
@@ -391,14 +392,15 @@ export function SettingsPage() {
                     <p className="df2-settings-hint">Completed jobs older than retention are archived. Default destination is managed on Connectors.</p>
                   </div>
                   <div className="df2-settings-section-footer">
-                    <button
-                      type="button"
-                      className="df2-btn df2-btn-primary"
+                    <Button
+                      variant="primary"
                       disabled={settingsLoading || settingsSaving}
+                      loading={settingsSaving}
+                      loadingLabel="Saving…"
                       onClick={() => void saveWorkspaceSettings()}
                     >
-                      {settingsSaving ? "Saving…" : "Save changes"}
-                    </button>
+                      Save changes
+                    </Button>
                   </div>
                 </section>
               </>

@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
+import { Button } from "../components/ui/Button";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { FilterBar } from "../components/ui/FilterBar";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
@@ -129,6 +131,24 @@ export function McpPage() {
         </PageFrame>
       ) : (
         <PageFrame className="df2-mcp-workspace df2-stack">
+          <PageContextBar
+            ariaLabel="MCP summary"
+            stats={[
+              {
+                label: "Endpoint",
+                value: online ? "Online" : "Offline",
+                icon: "zap",
+                tone: online ? "ok" : "danger",
+              },
+              { label: "Calls ok", value: okCount, icon: "check", tone: "ok" },
+              {
+                label: "Errors",
+                value: errCount,
+                icon: "alert",
+                tone: errCount ? "danger" : "muted",
+              },
+            ]}
+          />
           <section className="df2-mcp-endpoint-card" aria-label="MCP endpoint">
             <div className="df2-mcp-endpoint-copy">
               <div className="df2-mcp-endpoint-head">
@@ -147,14 +167,13 @@ export function McpPage() {
               </span>
             </div>
             <div className="df2-mcp-endpoint-actions">
-              <button
-                type="button"
-                className="df2-btn df2-btn-primary"
+              <Button
+                variant="primary"
                 onClick={() => copyText(mcpBase, "MCP server URL")}
+                leadingIcon={<DtIcon name="check" size={14} />}
               >
-                <DtIcon name="check" size={14} />
                 {copied === "MCP server URL" ? "Copied MCP URL" : "Copy MCP URL"}
-              </button>
+              </Button>
             </div>
           </section>
 

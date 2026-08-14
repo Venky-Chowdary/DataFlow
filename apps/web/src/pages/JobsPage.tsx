@@ -8,6 +8,7 @@ import { ButtonLoader, LoadingBlock } from "../components/LoadingState";
 import { EmptyState } from "../components/ui/EmptyState";
 import { Button } from "../components/ui/Button";
 import { CopyIdChip } from "../components/ui/CopyIdChip";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { FilterBar } from "../components/ui/FilterBar";
@@ -671,6 +672,30 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       description="Live progress, phases, quarantine, and Gate-8 proof for every transfer."
     >
       <PageFrame className="df2-jobs-workspace df2-jobs-workspace-v3">
+        <PageContextBar
+          ariaLabel="Job summary"
+          stats={[
+            { label: "Jobs", value: counts.all, icon: "jobs" },
+            {
+              label: "Running",
+              value: counts.running,
+              icon: "activity",
+              tone: counts.running ? "ok" : "muted",
+            },
+            {
+              label: "Failed",
+              value: counts.failed,
+              icon: "alert",
+              tone: counts.failed ? "danger" : "muted",
+            },
+            {
+              label: "Quarantine",
+              value: counts.quarantine,
+              icon: "shield",
+              tone: counts.quarantine ? "warn" : "muted",
+            },
+          ]}
+        />
         {jobs.length === 0 ? (
           <EmptyState
             page
@@ -679,9 +704,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             description="Run a transfer from Transfer Studio — live batch progress, phases, and proof reports appear here."
             action={
               onStartTransfer ? (
-                <button type="button" className="df2-btn df2-btn-primary" onClick={() => openStudio()}>
-                  <DtIcon name="transfer" size={14} /> Open Transfer Studio
-                </button>
+                <Button
+                  variant="primary"
+                  onClick={() => openStudio()}
+                  leadingIcon={<DtIcon name="transfer" size={14} />}
+                >
+                  Open Transfer Studio
+                </Button>
               ) : undefined
             }
           />

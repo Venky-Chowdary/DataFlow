@@ -63,10 +63,19 @@
    No square card shadows. One equal white surface. No inner frame.
    ═══════════════════════════════════════════════════════════ */
 
+/* Document / theater pages sit on the slate canvas so white cards read as
+   one enterprise system. Immersive Studio + Pilot stay a locked white viewport. */
 .df2-app .df2-content,
 .df2-app .df2-content-inner,
 .df2-app .df2-content-inner > .df2-screen-panel {
-  background: #fff;
+  background: var(--df-bg-canvas, #f3f5f7);
+}
+
+.df2-app .df2-content-inner.df2-content-flush,
+.df2-app .df2-content-inner.df2-content-studio,
+.df2-app .df2-content-inner.df2-content-flush > .df2-screen-panel,
+.df2-app .df2-content-inner.df2-content-studio > .df2-screen-panel {
+  background: var(--df-surface, #fff);
 }
 
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
@@ -96,6 +105,24 @@
 
 .df2-app .df2-main .df2-screen-panel [class*="df2-"]:not(.df2-btn):not(.df2-input):not(.df2-select):not(.df2-dropdown):not(.df2-modal):not(.df2-toast):not(.df2-popover):not(.df2-command-palette):not(.df2-nav-item):not(.df2-alert):not(.df2-toolbar-search):not(.df2-query-editor-textarea):hover {
   box-shadow: none !important;
+}
+
+/* Designed surfaces keep a hairline elevation on the canvas — not random df2-* boxes */
+.df2-app .df2-main .df2-screen-panel .df2-card,
+.df2-app .df2-main .df2-screen-panel .df2-card-elevated,
+.df2-app .df2-main .df2-screen-panel .df2-overview-v3-card,
+.df2-app .df2-main .df2-screen-panel .df2-metric-glass,
+.df2-app .df2-main .df2-screen-panel .df2-toolbar,
+.df2-app .df2-main .df2-screen-panel .df2-context-bar,
+.df2-app .df2-main .df2-screen-panel .df2-connector-card,
+.df2-app .df2-main .df2-screen-panel .df2-pipeline-card,
+.df2-app .df2-main .df2-screen-panel .df2-settings-section,
+.df2-app .df2-main .df2-screen-panel .df2-mcp-endpoint-card,
+.df2-app .df2-main .df2-screen-panel .df2-empty-page,
+.df2-app .df2-main .df2-screen-panel .df2-docs-hero,
+.df2-app .df2-main .df2-screen-panel .df2-xform-card,
+.df2-app .df2-main .df2-screen-panel .df2-contract-row {
+  box-shadow: var(--df-shadow-xs) !important;
 }
 
 /* Floating UI keeps elevation */
@@ -820,4 +847,119 @@
   .lp .lp-trust-grid {
     grid-template-columns: 1fr !important;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Enterprise surface — one canvas, one card, one toolbar
+   (last word; tokens only — no page-specific vN siblings)
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-app .df2-page-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.df2-app .df2-toolbar {
+  background: var(--df-surface, #fff);
+  border-color: var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-panel, 12px);
+}
+
+.df2-app .df2-page-workspace > .df2-toolbar,
+.df2-app .df2-page-workspace > .df2-alert {
+  margin-bottom: 0;
+}
+
+.df2-app .df2-context-bar {
+  margin-bottom: 0;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 55%, #fff) 0%, #fff 70%);
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 14%, var(--df-border, #e4e8ee));
+}
+
+.df2-app .df2-overview-v3-card,
+.df2-app .df2-metric-glass,
+.df2-app .df2-card,
+.df2-app .df2-settings-section,
+.df2-app .df2-mcp-endpoint-card,
+.df2-app .df2-docs-hero {
+  background: var(--df-surface, #fff);
+  border-color: var(--df-border, #e4e8ee);
+}
+
+.df2-app .df2-overview-v3 .df2-metric-glass-teal {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 92%, #fff) 0%, #fff 78%);
+}
+
+.df2-app .df2-overview-v3 .df2-metric-glass-value {
+  font-family: var(--df-font-display);
+  font-size: 1.55rem;
+  letter-spacing: -0.035em;
+}
+
+.df2-app .df2-overview-attention {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--df-radius-panel, 12px);
+  border: 1px solid var(--df-warning-border);
+  background: var(--df-warning-bg);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-overview-attention strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.df2-app .df2-overview-attention p {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-settings-section {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-panel, 12px);
+  overflow: hidden;
+  background: var(--df-surface, #fff);
+}
+
+.df2-app .df2-settings-nav {
+  background: var(--df-surface, #fff);
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-panel, 12px);
+}
+
+.df2-app .df2-settings-nav-item.active {
+  background: var(--df-brand-muted, #f0fdfa);
+  color: var(--df-brand-strong, #115e59);
+}
+
+.df2-app .df2-table tbody tr:hover {
+  background: var(--df-table-row-hover);
+}
+
+.df2-app .df2-empty-page {
+  background: var(--df-surface, #fff);
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-panel, 12px);
+}
+
+.df2-app .df2-page-error {
+  border-color: var(--df-danger-border);
+  background: var(--df-danger-bg);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-page-error strong {
+  color: var(--df-danger);
+}
+
+.df2-app .df2-page-error p {
+  font-family: var(--df-font-sans);
+  color: var(--df-text-secondary);
 }

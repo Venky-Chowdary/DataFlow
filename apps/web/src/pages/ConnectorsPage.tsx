@@ -8,6 +8,7 @@ import { Button } from "../components/ui/Button";
 import { ConnectorCard } from "../components/ui/ConnectorCard";
 import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { PageToolbar } from "../components/ui/PageToolbar";
@@ -248,6 +249,20 @@ export function ConnectorsPage({
       description="Saved connections and the transfer-ready catalog."
     >
       <PageFrame className="df2-connectors-page">
+        <PageContextBar
+          ariaLabel="Connector summary"
+          stats={[
+            { label: "Connections", value: connectors.length, icon: "connectors" },
+            { label: "Healthy", value: healthyCount, icon: "check", tone: "ok" },
+            {
+              label: "Need attention",
+              value: errorCount,
+              icon: "alert",
+              tone: errorCount ? "warn" : "muted",
+            },
+            { label: "Pipelines", value: schedules.length, icon: "activity" },
+          ]}
+        />
         <PageToolbar
           searchValue={tab === "connections" && connectors.length > 0 ? query : undefined}
           onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
@@ -333,12 +348,16 @@ export function ConnectorsPage({
                   description="Browse the catalog, enter credentials once, and reuse connections across Transfer Studio, Pipelines, and Datawrap Pilot."
                   action={
                     <div className="df2-empty-actions-row">
-                      <button type="button" className="df2-btn df2-btn-primary" onClick={() => setTab("catalog")}>
-                        <DtIcon name="search" size={14} /> Browse catalog
-                      </button>
-                      <button type="button" className="df2-btn df2-btn-ghost" onClick={() => onAdd()}>
+                      <Button
+                        variant="primary"
+                        onClick={() => setTab("catalog")}
+                        leadingIcon={<DtIcon name="search" size={14} />}
+                      >
+                        Browse catalog
+                      </Button>
+                      <Button variant="ghost" onClick={() => onAdd()}>
                         Add connection
-                      </button>
+                      </Button>
                     </div>
                   }
                 />

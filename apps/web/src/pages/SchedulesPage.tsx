@@ -3,6 +3,7 @@ import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PipelineCard } from "../components/ui/PipelineCard";
+import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
@@ -408,6 +409,19 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       description="Recurring sync schedules (not ADF/Informatica DAG pipelines) — same Map→Validate→Execute engine."
     >
       <PageFrame className="df2-pipeline-page">
+        <PageContextBar
+          ariaLabel="Schedule summary"
+          stats={[
+            { label: "Schedules", value: schedules.length, icon: "activity" },
+            { label: "Active", value: enabledCount, icon: "check", tone: "ok" },
+            {
+              label: "Paused",
+              value: pausedCount,
+              icon: "alert",
+              tone: pausedCount ? "warn" : "muted",
+            },
+          ]}
+        />
       {!loading && (
         <PageToolbar
           className={showForm ? "df2-toolbar--creating" : ""}
