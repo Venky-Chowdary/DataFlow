@@ -338,6 +338,7 @@ def _write_batch(
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
             empty_cells_as_null=empty_cells_as_null,
+            source_schema_catalog=source_schema_catalog,
         )
         if not result.ok:
             _raise_write_failure(result, "MySQL batch write failed")
@@ -1414,37 +1415,24 @@ def _stream_database_transfer_impl(
         "sqlite",
         "generic_sql",
     )
-    # Property 6 — source catalog for create-new fidelity certificate (PG/SQLite sinks).
+    # Property 6 — source catalog for create-new fidelity (any SQL sink that
+    # consumes it). Always introspect SQL sources: a contract PK is not a
+    # substitute for nullability / defaults / unique keys.
     source_schema_catalog: dict[str, Any] | None = None
     _src_schema_types: dict[str, str] = {}
     _src_schema_nulls: dict[str, bool] = {}
     _src_keys: dict[str, Any] = {}
-    if not keyset_pk_cols and src_type in _pk_introspect_types:
-        # Most transfers never declare a stream contract, so requiring a
-        # contract PK would drop every one of them onto OFFSET. The source
-        # catalog already knows the real key — ask it, so the common case keeps
-        # seek reads and gets uniqueness from the database rather than a guess.
+    if src_type in _pk_introspect_types:
         try:
             _src_schema_types, _src_schema_nulls, _src_keys = _introspect_table_schema_rich(
                 src_type, src_cfg, table, columns
             )
-            keyset_pk_cols = [
-                c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
-            ]
+            if not keyset_pk_cols:
+                keyset_pk_cols = [
+                    c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
+                ]
         except Exception as exc:
-            logger.debug("source primary-key introspection failed: %s", exc, exc_info=exc)
-    elif src_type in _pk_introspect_types and dest_type in (
-        "sqlite",
-        "postgresql",
-        "redshift",
-    ):
-        # Contract already supplied a PK — still need nullability/defaults for fidelity.
-        try:
-            _src_schema_types, _src_schema_nulls, _src_keys = _introspect_table_schema_rich(
-                src_type, src_cfg, table, columns
-            )
-        except Exception as exc:
-            logger.debug("source schema fidelity introspection failed: %s", exc, exc_info=exc)
+            logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
     if _src_keys or _src_schema_nulls or _src_schema_types:
         try:
             from services.schema_fidelity import (

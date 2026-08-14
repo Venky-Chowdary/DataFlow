@@ -11,7 +11,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 3 | Source reads are snapshot-consistent | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property3_source_snapshot_consistent.py -q` (3 passed) | PostgreSQL full-refresh REPEATABLE READ + LSN/export_snapshot; SQLite deferred txn; inline write-pass fingerprints (no second scan by default) | MySQL consistent snapshot; Mongo majority/clusterTime; Oracle flashback SCN; SQL Server SI; Snowflake/BQ time-travel; incremental sync (watermark by design) |
 | 4 | Writes are exactly-once observable | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property4_observable_exactly_once.py -q` (3 passed) | SQLite+PostgreSQL insert ledger (same-txn; row_start/row_end/attempt); kill-mid-chunk resume = clean checksum | Mongo/Kafka/object-store/warehouse sinks (NOT_GUARANTEED); MySQL live kill proof (Docker down); quarantine salvage path still not same-txn |
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
-| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py -q` (7 passed) | SQLite create-new PK/NOT NULL/DEFAULT/UNIQUE + certificate; live PG PK/NOT NULL/DEFAULT/UNIQUE; missing-catalog / unprobed CHECK·FK never silent | MySQL/Oracle/SQL Server DDL carry; CHECK/FK carry (certified unsupported); identity RESTART; partitioning |
+| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py -q` (10 passed) | SQLite create-new PK/NOT NULL/DEFAULT/UNIQUE + certificate; live PG PK/NOT NULL/DEFAULT/UNIQUE; live MySQL/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + destination catalog certify; missing-catalog / unprobed CHECK·FK never silent; MySQL TEXT/BLOB UNIQUE refused (no invented prefix) | Oracle/SQL Server dedicated-writer DDL carry (generic_sql planner exists); CHECK/FK carry (certified unsupported); identity RESTART; partitioning |
 | 7 | Referential integrity across multi-table migration | UNPROVEN | — | — | — |
 | 8 | Semantic value fidelity | UNPROVEN | — | — | — |
 | 9 | Every row is accounted for | UNPROVEN | — | — | — |
@@ -256,25 +256,35 @@ line — operators could not tell carry from loss.
 2. SQLite introspect now surfaces PRAGMA `notnull` + `dflt_value` (was always
    nullable=True). PG introspect surfaces non-`nextval` defaults.
 3. Rich introspect keys include `defaults` / identity / generated / collation.
-4. Stream builds `source_schema_catalog` and passes it to SQLite/PG writers;
-   CREATE TABLE emits PK / NOT NULL / safe DEFAULT / UNIQUE; report stamped on
-   `destination_summary.schema_fidelity`.
+4. Stream builds `source_schema_catalog` for every SQL source (a contract PK
+   is not a substitute for nullability/defaults/unique keys) and passes it to
+   SQLite / PostgreSQL / MySQL writers; CREATE TABLE emits PK / NOT NULL /
+   safe DEFAULT / UNIQUE; report stamped on `destination_summary.schema_fidelity`.
 5. Unsafe defaults (arbitrary SQL) refuse silently — `unsupported`, not emitted.
+6. MySQL/MariaDB: `mysql_writer` consumes the same planner +
+   `settle_create_new_on_destination` certify path. TEXT/BLOB/JSON UNIQUE/PK
+   is refused rather than inventing a prefix length. MariaDB 10.x index
+   catalog is read without MySQL-8-only `STATISTICS.EXPRESSION`.
 
 ### Proof output (this host)
 
 ```
 pytest tests/test_property6_schema_fidelity.py -q
-5 passed in 8.55s
+10 passed in 1.61s
 
 SQLite E2E: people → people_out carries PK/NOT NULL/DEFAULT/UNIQUE;
   schema_fidelity.carried includes those aspects; CHECK/FK certified unsupported.
 Live PG: same carry + information_schema verifies NOT NULL / DEFAULT / PK / UNIQUE.
+Live MySQL/MariaDB 10.11: same carry + information_schema verifies
+  NOT NULL / DEFAULT / PK / UNIQUE; row values survived.
 ```
 
 ### NOT claimed / remaining for PROVEN
-* MySQL / Oracle / SQL Server create-new constraint carry
+* Oracle / SQL Server dedicated-writer create-new constraint carry
+  (`generic_sql` already plans; native writers are the remaining hole)
 * FOREIGN KEY ordering (Property 7) and CHECK expression rewrite
 * Views, triggers, generated expressions, identity RESTART, partitioning
 * Name-collision remaps under adversarial identifier fixtures (policy coded;
   not yet matrix-proven)
+* Bare Map `VARCHAR` (no length) materializing as MySQL `TEXT` — UNIQUE on that
+  column is correctly refused; typed `VARCHAR(n)` is the certified path

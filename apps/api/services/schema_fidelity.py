@@ -599,26 +599,52 @@ def plan_create_new_fidelity(
         except ValueError:
             return None
 
+    def _dest_type(col: str) -> str:
+        try:
+            return str(target_types[dest_cols.index(col)] or "")
+        except (ValueError, IndexError):
+            return ""
+
     # --- CARRY: primary key ---
     pk_dest: list[str] = [
         c for c in (_dest_name_for_source(x) for x in catalog.primary_key) if c
     ]
     if catalog.primary_key and len(pk_dest) == len(catalog.primary_key):
-        quoted = ", ".join(_q(c, dest) for c in pk_dest)
-        table_constraints.append(f"PRIMARY KEY ({quoted})")
-        report.items.append(
-            SchemaFidelityItem(
-                aspect="primary_key",
-                name=",".join(pk_dest),
-                status="carried",
-                reason=(
-                    "PRIMARY KEY emitted on CREATE TABLE (provisional until "
-                    "destination catalog re-read)."
-                ),
-                source_detail=",".join(catalog.primary_key),
-                dest_ddl=f"PRIMARY KEY ({quoted})",
+        unindexable = [
+            c for c in pk_dest if dest in {"mysql", "mariadb"} and _mysql_index_requires_prefix(_dest_type(c))
+        ]
+        if unindexable:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=",".join(pk_dest),
+                    status="unsupported",
+                    reason=(
+                        "MySQL/MariaDB cannot PRIMARY KEY TEXT/BLOB/JSON without a "
+                        "prefix length; refusing an invented prefix (that would "
+                        "enforce a different uniqueness rule than the source). "
+                        f"Unindexable: {','.join(unindexable)}."
+                    ),
+                    source_detail=",".join(catalog.primary_key),
+                )
             )
-        )
+            pk_dest = []
+        else:
+            quoted = ", ".join(_q(c, dest) for c in pk_dest)
+            table_constraints.append(f"PRIMARY KEY ({quoted})")
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=",".join(pk_dest),
+                    status="carried",
+                    reason=(
+                        "PRIMARY KEY emitted on CREATE TABLE (provisional until "
+                        "destination catalog re-read)."
+                    ),
+                    source_detail=",".join(catalog.primary_key),
+                    dest_ddl=f"PRIMARY KEY ({quoted})",
+                )
+            )
     elif catalog.primary_key:
         report.items.append(
             SchemaFidelityItem(
@@ -736,6 +762,23 @@ def plan_create_new_fidelity(
         dest_uk_s = [c for c in dest_uk if c]
         if set(dest_uk_s) == pk_set and pk_set:
             continue  # covered by PRIMARY KEY
+        if dest in {"mysql", "mariadb"} and any(
+            _mysql_index_requires_prefix(_dest_type(c)) for c in dest_uk_s
+        ):
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="unique",
+                    name=",".join(dest_uk_s),
+                    status="unsupported",
+                    reason=(
+                        "MySQL/MariaDB cannot UNIQUE-index TEXT/BLOB/JSON without a "
+                        "prefix length; refusing an invented prefix (that would "
+                        "enforce a different uniqueness rule than the source)."
+                    ),
+                    source_detail=",".join(uk),
+                )
+            )
+            continue
         quoted = ", ".join(_q(c, dest) for c in dest_uk_s)
         table_constraints.append(f"UNIQUE ({quoted})")
         struct_unique.append(list(dest_uk_s))
@@ -1829,6 +1872,74 @@ def certify_structure_on_destination(
             )
 
 
+def plan_covers_unique(
+    plan: CreateFidelityPlan | None,
+    columns: list[str] | None,
+) -> bool:
+    """True when CREATE already emits a PK or UNIQUE on exactly these columns.
+
+    Upsert writers must not add a second UNIQUE KEY for conflict columns the
+    Property 6 plan already carried — that is a duplicate index, not a
+    write-path requirement.
+    """
+    if plan is None or not columns:
+        return False
+    want = {str(c).casefold() for c in columns if str(c).strip()}
+    if not want:
+        return False
+    if plan.primary_key and {str(c).casefold() for c in plan.primary_key} == want:
+        return True
+    return any(
+        {str(c).casefold() for c in uk} == want
+        for uk in (plan.unique_constraints or [])
+    )
+
+
+def settle_create_new_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dest_dialect: str,
+    dest_schema: str,
+    dest_table: str,
+    table_already_exists: bool,
+    execute: Callable[[str], Any],
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+    cursor: Any | None = None,
+) -> dict[str, Any] | None:
+    """Run post-CREATE DDL and certify from the destination catalog.
+
+    Callers render CREATE from the plan, then call this. An emitted clause is a
+    claim; only the destination catalog may settle ``carried``.
+    """
+    if plan is None:
+        return None
+    apply_post_create_sql(plan, execute)
+    if not table_already_exists:
+        certify_structure_on_destination(
+            plan,
+            dialect=dest_dialect,
+            schema=dest_schema,
+            table=dest_table,
+            fetchall=fetchall,
+        )
+        certify_identity_on_destination(
+            plan,
+            dialect=dest_dialect,
+            schema=dest_schema,
+            table=dest_table,
+            fetchall=fetchall,
+        )
+        if cursor is not None:
+            certify_placement_on_destination(
+                plan,
+                dialect=dest_dialect,
+                cursor=cursor,
+                schema=dest_schema,
+                table=dest_table,
+            )
+    return plan.report.to_dict()
+
+
 def apply_post_create_sql(
     plan: CreateFidelityPlan | None,
     execute: Callable[[str], Any],
@@ -1907,6 +2018,19 @@ def empty_unsupported_report(
 # ---------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------
+
+
+def _mysql_index_requires_prefix(typ: str) -> bool:
+    """True when MySQL/MariaDB would need a prefix length to index this type.
+
+    TEXT/BLOB/JSON cannot be a PRIMARY KEY or UNIQUE without a prefix. Inventing
+    ``(255)`` would enforce a different uniqueness rule than the source, so the
+    planner refuses rather than approximating.
+    """
+    u = re.sub(r"\s+", "", (typ or "").strip().upper())
+    if not u:
+        return False
+    return bool(re.match(r"^(TINY|MEDIUM|LONG)?(TEXT|BLOB)\b|^JSON\b", u))
 
 
 def _q(ident: str, dialect: str) -> str:

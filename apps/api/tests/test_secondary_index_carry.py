@@ -321,3 +321,36 @@ def test_probe_of_an_unknown_dialect_is_unavailable_not_empty():
     result = probe_secondary_indexes("neo4j", None, "", "orders")
     assert result.status == "unavailable"
     assert result.items == ()
+
+
+def test_mysql_index_probe_survives_missing_expression_column():
+    """MariaDB 10.x has no STATISTICS.EXPRESSION — that is not 'no indexes'."""
+
+    class _Cur:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.connection = self
+
+        def rollback(self) -> None:
+            return None
+
+        def execute(self, sql: str, params: tuple) -> None:
+            self.calls += 1
+            if "EXPRESSION" in sql:
+                raise Exception("(1054, \"Unknown column 'EXPRESSION' in 'SELECT'\")")
+            self._rows = [
+                ("PRIMARY", 0, 1, "id", "A", "BTREE"),
+                ("email", 0, 1, "email", "A", "BTREE"),
+                ("idx_status", 1, 1, "status", "A", "BTREE"),
+            ]
+
+        def fetchall(self):
+            return list(self._rows)
+
+    result = probe_secondary_indexes("mysql", _Cur(), "dataflow", "people")
+    assert result.status == "measured", result.detail
+    by_name = {i.name: i for i in result.items}
+    assert "idx_status" in by_name
+    assert by_name["idx_status"].columns == (IndexColumn("status"),)
+    assert not by_name["idx_status"].unique
+    assert by_name["email"].unique

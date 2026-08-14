@@ -351,17 +351,39 @@ def _strip_quotes(ident: str) -> str:
 
 
 def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
-    rows = _rows(
-        cursor,
-        """
-        SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
-               COLLATION, INDEX_TYPE, EXPRESSION
-        FROM information_schema.STATISTICS
-        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
-        ORDER BY INDEX_NAME, SEQ_IN_INDEX
-        """,
-        (schema, table),
-    )
+    # EXPRESSION exists on MySQL 8.0.13+ functional indexes. MariaDB 10.x and
+    # older MySQL raise 1054 Unknown column — that is not "no indexes".
+    try:
+        rows = _rows(
+            cursor,
+            """
+            SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
+                   COLLATION, INDEX_TYPE, EXPRESSION
+            FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+            ORDER BY INDEX_NAME, SEQ_IN_INDEX
+            """,
+            (schema, table),
+        )
+    except Exception:  # noqa: BLE001 — MariaDB/old MySQL lack EXPRESSION
+        conn = getattr(cursor, "connection", None)
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001, S110 — clear the failed EXPRESSION probe
+                pass
+        raw = _rows(
+            cursor,
+            """
+            SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
+                   COLLATION, INDEX_TYPE
+            FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+            ORDER BY INDEX_NAME, SEQ_IN_INDEX
+            """,
+            (schema, table),
+        )
+        rows = [(*r, None) for r in raw]
     grouped: dict[str, dict[str, Any]] = {}
     for name, non_unique, _seq, column, collation, index_type, expression in rows:
         entry = grouped.setdefault(

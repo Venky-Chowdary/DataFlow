@@ -436,14 +436,17 @@ def destination_generator_columns(
     return {str(r[0]) for r in (rows or [])}
 
 
-def psycopg2_fetchall(cursor: DBAPICursor) -> FetchAll:
-    """Adapt a DB-API cursor (``%s`` paramstyle) to the catalog reader."""
+def dbapi_percent_fetchall(cursor: DBAPICursor) -> FetchAll:
+    """Adapt a DB-API cursor (``%s`` paramstyle: psycopg2, pymysql) to the catalog reader."""
 
     def _run(sql: str, params: QueryParams) -> Sequence[CatalogRow]:
         cursor.execute(sql.replace("?", "%s"), params)
         return cursor.fetchall()
 
     return _run
+
+
+psycopg2_fetchall = dbapi_percent_fetchall
 
 
 def sqlalchemy_fetchall(conn: SqlAlchemyConnection) -> FetchAll:

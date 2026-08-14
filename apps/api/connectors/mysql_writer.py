@@ -259,6 +259,44 @@ def _open_mysql(
     return conn
 
 
+def _mysql_insert_sql(
+    *,
+    table_q: str,
+    target_cols: list[str],
+    write_mode: str,
+    conflict_columns: list[str] | None,
+) -> str:
+    """INSERT / ON DUPLICATE KEY SQL for the current mapped column list."""
+    placeholders = ", ".join(["%s"] * len(target_cols))
+    col_names = ", ".join(quote_sql_identifier(c, "`") for c in target_cols)
+    if write_mode == "upsert" and conflict_columns:
+        conflict = [c for c in conflict_columns if c in target_cols]
+        if conflict:
+            update_cols = [c for c in target_cols if c not in conflict]
+            if update_cols:
+                if DF_LSN_COL in target_cols:
+                    from connectors.writer_common import mysql_lsn_values_newer_sql
+
+                    newer = mysql_lsn_values_newer_sql(DF_LSN_COL, quote="`")
+                    updates = ", ".join(
+                        f"{quote_sql_identifier(c, '`')}=IF({newer}, VALUES({quote_sql_identifier(c, '`')}), {quote_sql_identifier(c, '`')})"
+                        for c in update_cols
+                    )
+                else:
+                    updates = ", ".join(
+                        f"{quote_sql_identifier(c, '`')}=VALUES({quote_sql_identifier(c, '`')})"
+                        for c in update_cols
+                    )
+                return (
+                    f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders}) "  # nosec B608
+                    f"ON DUPLICATE KEY UPDATE {updates}"
+                )
+            return (
+                f"INSERT IGNORE INTO {table_q} ({col_names}) VALUES ({placeholders})"
+            )
+    return f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"  # nosec B608
+
+
 @dataclass
 class _MysqlMaterializedBatch:
     mapped_rows: list[tuple]
@@ -575,39 +613,13 @@ def write_mapped_rows(
     written = 0
     chunks_completed = 0
     child_flush_error: str | None = None
-    placeholders = ", ".join(["%s"] * len(target_cols))
     table_q = quote_sql_identifier(table_name, "`")
-    col_names = ", ".join(quote_sql_identifier(c, "`") for c in target_cols)
-    if write_mode == "upsert" and conflict_columns:
-        conflict = [c for c in conflict_columns if c in target_cols]
-        if conflict:
-            update_cols = [c for c in target_cols if c not in conflict]
-            if update_cols:
-                if DF_LSN_COL in target_cols:
-                    from connectors.writer_common import mysql_lsn_values_newer_sql
-
-                    newer = mysql_lsn_values_newer_sql(DF_LSN_COL, quote="`")
-                    updates = ", ".join(
-                        f"{quote_sql_identifier(c, '`')}=IF({newer}, VALUES({quote_sql_identifier(c, '`')}), {quote_sql_identifier(c, '`')})"
-                        for c in update_cols
-                    )
-                else:
-                    updates = ", ".join(
-                        f"{quote_sql_identifier(c, '`')}=VALUES({quote_sql_identifier(c, '`')})"
-                        for c in update_cols
-                    )
-                insert_sql = (
-                    f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders}) "  # nosec B608
-                    f"ON DUPLICATE KEY UPDATE {updates}"
-                )
-            else:
-                insert_sql = (
-                    f"INSERT IGNORE INTO {table_q} ({col_names}) VALUES ({placeholders})"
-                )
-        else:
-            insert_sql = f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"  # nosec B608
-    else:
-        insert_sql = f"INSERT INTO {table_q} ({col_names}) VALUES ({placeholders})"  # nosec B608
+    insert_sql = _mysql_insert_sql(
+        table_q=table_q,
+        target_cols=target_cols,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+    )
 
     proxy_dest = is_public_proxy_host(host) or is_public_proxy_host(connection_string)
     job_id = str(_kwargs.get("job_id") or "").strip()
@@ -653,21 +665,123 @@ def write_mapped_rows(
     def _run_setup(cursor) -> None:
         nonlocal target_types, converted_rows, dest_types, additive_refuse
         nonlocal mapped_rows, sparse_rows, transform_errors, rejected_details, rows_for_checksum
+        nonlocal insert_sql
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="mysql")
         if create_table:
-            col_defs = ", ".join(
-                f"{quote_sql_identifier(c, '`')} {t}" for c, t in zip(target_cols, target_types)
+            from services.identity_carry import dbapi_percent_fetchall
+            from services.schema_fidelity import (
+                empty_unsupported_report,
+                plan_covers_unique,
+                render_create_column_defs,
+                resolve_create_fidelity_plan,
+                settle_create_new_on_destination,
             )
-            if write_mode == "upsert" and conflict_columns:
-                conflict_cols = [c for c in conflict_columns if c in target_cols]
-                if conflict_cols:
-                    index_name = sanitize_identifier(
-                        f"uidx_{table_name}_{'_'.join(conflict_cols)}"
+
+            fidelity_plan = None
+            try:
+                fidelity_plan = resolve_create_fidelity_plan(
+                    source_schema_catalog=_kwargs.get("source_schema_catalog"),
+                    mappings=mappings,
+                    target_columns=target_cols,
+                    target_types=target_types,
+                    dest_dialect="mysql",
+                    table_already_exists=bool(table_existed),
+                    dest_table=table_name,
+                    dest_schema="",
+                )
+            except Exception as exc:  # noqa: BLE001 — planner failure is types-only + certificate
+                logger.warning(
+                    "MySQL schema fidelity plan failed (types-only CREATE): %s",
+                    exc,
+                )
+                fidelity_plan = None
+                _kwargs["_schema_fidelity_report"] = empty_unsupported_report(
+                    source_dialect="",
+                    dest_dialect="mysql",
+                    reason=(
+                        f"Schema fidelity planner raised ({type(exc).__name__}); "
+                        "create-new emitted column types only."
+                    ),
+                ).to_dict()
+            if fidelity_plan is not None:
+                if fidelity_plan.column_renames and fidelity_plan.dest_columns:
+                    target_cols[:] = list(fidelity_plan.dest_columns)
+                    insert_sql = _mysql_insert_sql(
+                        table_q=table_q,
+                        target_cols=target_cols,
+                        write_mode=write_mode,
+                        conflict_columns=conflict_columns,
                     )
-                    cols = ", ".join(quote_sql_identifier(c, "`") for c in conflict_cols)
-                    col_defs += f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
-            cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})")
+                col_defs = render_create_column_defs(
+                    columns=target_cols,
+                    types=target_types,
+                    plan=(None if table_existed else fidelity_plan),
+                    dialect="mysql",
+                )
+                if (
+                    write_mode == "upsert"
+                    and conflict_columns
+                    and not table_existed
+                    and not plan_covers_unique(fidelity_plan, list(conflict_columns))
+                ):
+                    conflict_cols = [c for c in conflict_columns if c in target_cols]
+                    if conflict_cols:
+                        index_name = sanitize_identifier(
+                            f"uidx_{table_name}_{'_'.join(conflict_cols)}"
+                        )
+                        cols = ", ".join(
+                            quote_sql_identifier(c, "`") for c in conflict_cols
+                        )
+                        col_defs += (
+                            f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
+                        )
+                suffix = ""
+                if not table_existed:
+                    suffix = (fidelity_plan.create_suffix or "").strip()
+                create_sql = f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})"
+                if suffix:
+                    create_sql = f"{create_sql} {suffix}"
+                cursor.execute(create_sql)
+                _kwargs["_schema_fidelity_report"] = settle_create_new_on_destination(
+                    fidelity_plan,
+                    dest_dialect="mysql",
+                    dest_schema="",
+                    dest_table=table_name,
+                    table_already_exists=bool(table_existed),
+                    execute=cursor.execute,
+                    fetchall=dbapi_percent_fetchall(cursor),
+                    cursor=cursor,
+                )
+            else:
+                col_defs = ", ".join(
+                    f"{quote_sql_identifier(c, '`')} {t}"
+                    for c, t in zip(target_cols, target_types)
+                )
+                if write_mode == "upsert" and conflict_columns:
+                    conflict_cols = [c for c in conflict_columns if c in target_cols]
+                    if conflict_cols:
+                        index_name = sanitize_identifier(
+                            f"uidx_{table_name}_{'_'.join(conflict_cols)}"
+                        )
+                        cols = ", ".join(
+                            quote_sql_identifier(c, "`") for c in conflict_cols
+                        )
+                        col_defs += (
+                            f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
+                        )
+                cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})")
+                _kwargs.setdefault(
+                    "_schema_fidelity_report",
+                    empty_unsupported_report(
+                        source_dialect="",
+                        dest_dialect="mysql",
+                        reason=(
+                            "Schema fidelity plan unavailable; "
+                            "create-new emitted column types only."
+                        ),
+                    ).to_dict(),
+                )
             # Empty physical-type answers are never cached (see
             # ``_fetch_mysql_column_types``), so a just-created table has no
             # stale entry to drop — only real ALTER paths invalidate.
@@ -1254,6 +1368,11 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
+            meta=(
+                {"schema_fidelity": _kwargs["_schema_fidelity_report"]}
+                if isinstance(_kwargs.get("_schema_fidelity_report"), dict)
+                else {}
+            ),
         )
     except Exception as exc:
         close_quietly(conn)

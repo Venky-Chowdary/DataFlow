@@ -1516,6 +1516,7 @@ def _write_destination_database(
             or (getattr(endpoint, "extra", None) or {}).get("destination_column_types")
             or {}
         ),
+        "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog"),
     }
 
     if db_type == "snowflake":
