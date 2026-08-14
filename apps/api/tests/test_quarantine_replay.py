@@ -113,9 +113,9 @@ def test_quarantine_replay_sqlite_edits_and_rewrites(tmp_path: Path):
     assert int((q2body.get("dest_dlq") or {}).get("open_rows") or 0) == 0
     closure = q2body.get("quarantine_closure") or {}
     assert closure.get("verdict") == "closed"
-    assert int(closure.get("open_count") or -1) == 0
+    assert closure.get("open_count") == 0
     assert closure.get("migration_proven") is False
-    assert int(q2body.get("open_count") or -1) == 0
+    assert q2body.get("open_count") == 0
 
     again = client.post(
         f"/api/v1/connectors/jobs/{job_id}/quarantine/replay",
