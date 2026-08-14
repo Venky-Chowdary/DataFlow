@@ -818,7 +818,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "recommended_batch_size": 10000,
     },
     "delta": {
-        "transfer_ready": True,
+        "transfer_ready": False,
         "tier": TIER_STRATEGIC,
         "pattern": "batch",
         "supports_cdc": False,
@@ -829,11 +829,14 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": True,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["Delta schema enforcement can reject type changes; enable schema evolution if needed."],
+        "common_issues": [
+            "Delta Lake writer is Planned — no transfer driver in this build.",
+            "Delta schema enforcement can reject type changes; enable schema evolution if needed.",
+        ],
         "recommended_batch_size": 10000,
     },
     "hudi": {
-        "transfer_ready": True,
+        "transfer_ready": False,
         "tier": TIER_STRATEGIC,
         "pattern": "batch",
         "supports_cdc": False,
@@ -844,7 +847,10 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": True,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["Hudi requires a record key and pre-combine field for upserts."],
+        "common_issues": [
+            "Apache Hudi writer is Planned — no transfer driver in this build.",
+            "Hudi requires a record key and pre-combine field for upserts.",
+        ],
         "recommended_batch_size": 10000,
     },
     "generic_sql": {

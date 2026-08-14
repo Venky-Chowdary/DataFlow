@@ -1101,6 +1101,24 @@ rowcount is not that proof.
     writers, live snapshot→stream ITs, and Properties 10–12 stay
     Planned / UNPROVEN.
 
+  CDC DDD-3 gap recovery when dest is keyed (this host, after 2026-08-14
+  slice):
+    Focused suite 82 passed in 11.67s (`test_cdc_incremental_snapshot` +
+    Debezium parity + CDC transfer + retention probe + F4 + capability
+    honesty + Iceberg DV codec + Iceberg CDC delete).
+    * `when_needed` + retention gap + dest unkeyed / query-CDC → still
+      `blocking_snapshot` (existing Debezium when_needed).
+    * `when_needed` + gap + dest-engine COUNT>0 with listed PKs +
+      log-native `source_key` → `incremental_snapshot` (no blocking
+      dump; poll interleaves DDD-3 chunks; stream-wins).
+    * Lost-window events stay gone. `migration_proven` stays False.
+      At-least-once. `initial` / `never` still refuse.
+    * Retry does not double-enqueue an in-flight signal.
+    * Mocked Mongo CDC runner no longer false-skips (`fake_mongo`).
+    * Delta/Hudi sidecar `transfer_ready` is False (no writer modules).
+    Still Planned: F4 streaming as default, live snapshot→stream ITs,
+    Iceberg MoR writes, `hdfs://` COUNT, Delta/Hudi drivers.
+
   XML artifact dest COUNT (this host, after 2026-08-14 slice):
     221 passed, 8 skipped in 35.35s (Property 9 command).
     Identity: unique repeating record-path, never parse_xml max_rows,

@@ -491,8 +491,8 @@ def apply_inferred_leftover_deletes(
     Vector destinations own identity COUNT, not this PK anti-join.
     Iceberg applies the same anti-join through dest-engine snapshot
     listing + CoW delete (existing ``delete_by_primary_keys``). Filesystem
-    MoR is already applied in that listing (surviving rows). V3 deletion
-    vectors stay unmeasured.
+    and catalog MoR (v2 position/equality and v3 deletion-vector-v1) is
+    already applied in that listing (surviving rows).
     """
     if not complete_snapshot:
         return None

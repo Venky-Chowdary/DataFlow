@@ -48,6 +48,9 @@ from services.cdc_engine import (
     max_watermark,
 )
 from services.cdc_snapshot_mode import (
+    KIND_INCREMENTAL,
+    adapter_supports_incremental_interleave,
+    measure_dest_already_keyed,
     resolve_cdc_snapshot_plan,
     resolve_snapshot_mode,
     snapshot_plan_stamp,
@@ -1249,8 +1252,22 @@ def _run_cdc_shared_multi_table(
         stream_contracts,
         cfg_snapshot_mode=str(src_cfg.get("snapshot_mode") or ""),
     )
+    from services.cdc_snapshot_window import _pk_columns
+
     snapshot_plan = resolve_cdc_snapshot_plan(
-        snapshot_mode, watermark=shared_wm, retention=ret
+        snapshot_mode,
+        watermark=shared_wm,
+        retention=ret,
+        dest_already_keyed=measure_dest_already_keyed(
+            dest_type,
+            dest_cfg,
+            [
+                (name, _pk_columns(cfg["primary_key"]))
+                for name, cfg in stream_cfg.items()
+            ],
+            schema=str(dest_cfg.get("schema") or ""),
+        ),
+        incremental_capable=adapter_supports_incremental_interleave(cdc),
     )
     run_snapshot = bool(snapshot_plan["run_snapshot"])
     run_stream = bool(snapshot_plan["run_stream"])
@@ -1258,6 +1275,20 @@ def _run_cdc_shared_multi_table(
         f"CDC snapshot_mode={snapshot_mode.value} snapshot_plan={snapshot_plan['kind']}"
         f"{' lost_window=1' if snapshot_plan.get('lost_window') else ''} shared_reader=1"
     )
+    if snapshot_plan.get("kind") == KIND_INCREMENTAL:
+        from services.cdc_incremental_snapshot import enqueue_gap_recovery_snapshots
+
+        signals = enqueue_gap_recovery_snapshots(
+            str(getattr(cdc, "source_key", "") or ""),
+            [
+                (name, cfg["primary_key"])
+                for name, cfg in stream_cfg.items()
+            ],
+        )
+        ddl_log.append(
+            f"CDC incremental gap recovery signals={len(signals)} "
+            f"(DDD-3 stream-wins; not blocking dump)"
+        )
 
     total_rows = 0
     stream_health: dict[str, dict[str, Any]] = {
@@ -2281,7 +2312,16 @@ def _run_cdc_single_stream(
         cfg_snapshot_mode=str(src_cfg.get("snapshot_mode") or ""),
     )
     snapshot_plan = resolve_cdc_snapshot_plan(
-        snapshot_mode, watermark=watermark, retention=ret
+        snapshot_mode,
+        watermark=watermark,
+        retention=ret,
+        dest_already_keyed=measure_dest_already_keyed(
+            dest_type,
+            dest_cfg,
+            [(dest_table, pk_target_cols)],
+            schema=str(dest_cfg.get("schema") or ""),
+        ),
+        incremental_capable=adapter_supports_incremental_interleave(cdc),
     )
     run_snapshot = bool(snapshot_plan["run_snapshot"])
     run_stream = bool(snapshot_plan["run_stream"])
@@ -2289,6 +2329,17 @@ def _run_cdc_single_stream(
         f"CDC snapshot_mode={snapshot_mode.value} snapshot_plan={snapshot_plan['kind']}"
         f"{' lost_window=1' if snapshot_plan.get('lost_window') else ''}"
     )
+    if snapshot_plan.get("kind") == KIND_INCREMENTAL:
+        from services.cdc_incremental_snapshot import enqueue_gap_recovery_snapshots
+
+        signals = enqueue_gap_recovery_snapshots(
+            str(getattr(cdc, "source_key", "") or ""),
+            [(table_name, pk_source_cols)],
+        )
+        ddl_log.append(
+            f"CDC incremental gap recovery signals={len(signals)} "
+            f"(DDD-3 stream-wins; not blocking dump)"
+        )
 
     if run_snapshot:
         with _cdc_span("cdc.snapshot", job_id=str(job_id or "")):

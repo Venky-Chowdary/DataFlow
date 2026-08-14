@@ -26,9 +26,16 @@ then streams from the new tip. That is at-least-once upsert of the live
 population, not continuous CDC across the gap, and never ``migration_proven``.
 
 ``initial`` already spent its one snapshot; a later gap cannot invent another
-without the operator changing mode. ``never`` forbids a snapshot. Incremental
-DDD-3 gap recovery (chunked, dest already keyed) is the documented enhancement
-— this kernel does not enqueue a signal in the same run as a blocking snapshot
+without the operator changing mode. ``never`` forbids a snapshot.
+
+When dest already has keys **and** the log reader can interleave DDD-3
+chunks, ``when_needed`` + retention gap selects ``incremental_snapshot``
+instead of a blocking table dump (healthcare / banking / logistics
+cutover: do not lock a 50M-row ledger for hours). Lost-window events are
+still gone. Recovery re-upserts **current** source keys in PK-ordered
+chunks, stream-wins, at-least-once — never ``migration_proven``. Query-CDC
+fallback and an unmeasured / empty dest stay on the blocking path. This
+kernel never enqueues a signal in the same run as a blocking snapshot
 (that would double-scan the table).
 """
 
@@ -40,7 +47,7 @@ from typing import Any
 KIND_SKIP = "skip"
 KIND_BLOCKING = "blocking_snapshot"
 KIND_REFUSE = "refuse"
-# Future enhancement: KIND_INCREMENTAL = "incremental_snapshot"  # DDD-3, dest already keyed
+KIND_INCREMENTAL = "incremental_snapshot"
 
 
 class SnapshotMode(str, Enum):
@@ -158,6 +165,8 @@ def classify_snapshot_plan(
     *,
     watermark: Any = None,
     retention_status: str = "",
+    dest_already_keyed: bool = False,
+    incremental_capable: bool = False,
 ) -> dict[str, Any]:
     """Named snapshot plan for one CDC run.
 
@@ -170,7 +179,9 @@ def classify_snapshot_plan(
     closed *before* poll. Not a silent skip.
 
     ``lost_window`` is True whenever retention is ``gap``. Recovery never claims
-    ``migration_proven``. Incremental-as-gap-recovery is not selected here.
+    ``migration_proven``. ``incremental_snapshot`` is selected only when
+    ``when_needed`` + dest already keyed + the log reader can interleave
+    DDD-3 chunks. Otherwise gap recovery stays a blocking snapshot.
     """
     parsed = mode if isinstance(mode, SnapshotMode) else parse_snapshot_mode(mode)
     present = watermark_present(watermark)
@@ -220,6 +231,30 @@ def classify_snapshot_plan(
                 "CDC resume is before retained log history. snapshot_mode=initial "
                 "already ran its one-time snapshot and will not snapshot again. Set "
                 "snapshot_mode=when_needed (or reset the watermark) and re-run. "
+                f"{lost_note}"
+            ),
+        }
+
+    if (
+        resume_broken
+        and parsed == SnapshotMode.WHEN_NEEDED
+        and dest_already_keyed
+        and incremental_capable
+    ):
+        return {
+            "kind": KIND_INCREMENTAL,
+            "snapshot_mode": parsed.value,
+            "run_snapshot": False,
+            "run_stream": True,
+            "lost_window": True,
+            "resume_broken": True,
+            "migration_proven": False,
+            "next_action": "incremental_snapshot_then_stream",
+            "reason": "retention_gap_when_needed_dest_keyed",
+            "message": (
+                "Resume token is present but purged. Destination already has keys — "
+                "DDD-3 incremental snapshot interleaved with streaming (stream-wins). "
+                "Not a blocking table dump. "
                 f"{lost_note}"
             ),
         }
@@ -286,17 +321,70 @@ def snapshot_plan_stamp(plan: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+def measure_dest_already_keyed(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    tables: list[tuple[str, list[str]]],
+    *,
+    schema: str = "",
+) -> bool:
+    """True only when dest-engine COUNT > 0 and at least one PK is listed.
+
+    Unmeasured COUNT / key list is False — fail toward a blocking snapshot,
+    never invent ``dest already keyed``. Empty dest is False.
+    """
+    from services.dest_precount import destination_key_list, destination_row_count
+
+    engine = str(dest_type or "").strip().lower()
+    cfg = dest_cfg if isinstance(dest_cfg, dict) else {}
+    for table, key_columns in tables:
+        name = str(table or "").strip()
+        cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
+        if not name or not cols:
+            continue
+        try:
+            n = destination_row_count(engine, cfg, schema=schema or "", table_name=name)
+        except Exception:
+            continue
+        if n is None or int(n) <= 0:
+            continue
+        try:
+            keys = destination_key_list(
+                engine, cfg, schema=schema or "", table_name=name, key_columns=cols
+            )
+        except Exception:
+            continue
+        if keys:
+            return True
+    return False
+
+
+def adapter_supports_incremental_interleave(cdc: Any) -> bool:
+    """Log-native readers interleave DDD-3 chunks. Query CDC does not."""
+    if cdc is None:
+        return False
+    source_key = str(getattr(cdc, "source_key", "") or "").strip()
+    if not source_key:
+        return False
+    cls = type(cdc).__name__
+    return cls != "CdcEngine"
+
+
 def resolve_cdc_snapshot_plan(
     mode: SnapshotMode | str,
     *,
     watermark: Any = None,
     retention: Any = None,
+    dest_already_keyed: bool = False,
+    incremental_capable: bool = False,
 ) -> dict[str, Any]:
     """Classify, then fail-closed on ``refuse`` before the job polls a purged cursor."""
     plan = classify_snapshot_plan(
         mode,
         watermark=watermark,
         retention_status=_retention_status(retention),
+        dest_already_keyed=dest_already_keyed,
+        incremental_capable=incremental_capable,
     )
     if plan.get("kind") != KIND_REFUSE:
         return plan

@@ -248,6 +248,44 @@ def _signal_store_lock() -> Iterator[None]:
             logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
+def enqueue_gap_recovery_snapshots(
+    source_key: str,
+    tables: list[tuple[str, str | list[str]]],
+    *,
+    chunk_size: int = 1000,
+) -> list[SnapshotSignal]:
+    """Enqueue DDD-3 incremental snapshots after a retention gap.
+
+    Skips a table that already has a pending/running signal so a retry
+    does not double-scan. Empty PK is refused. Does not start a blocking
+    snapshot — the caller must have selected ``incremental_snapshot``.
+    """
+    key = str(source_key or "").strip()
+    if not key:
+        raise ValueError(
+            "CDC incremental gap recovery requires source_key so poll can "
+            "interleave DDD-3 chunks"
+        )
+    existing = {
+        str(getattr(sig, "table", "") or "")
+        for sig in list_signals(key)
+        if str(getattr(sig, "status", "") or "") in {"pending", "running", "in_progress"}
+    }
+    out: list[SnapshotSignal] = []
+    for table, primary_key in tables:
+        name = str(table or "").strip()
+        if not name:
+            continue
+        if name in existing:
+            continue
+        out.append(
+            request_incremental_snapshot(
+                key, name, primary_key=primary_key, chunk_size=chunk_size
+            )
+        )
+    return out
+
+
 def request_incremental_snapshot(
     source_key: str,
     table: str,

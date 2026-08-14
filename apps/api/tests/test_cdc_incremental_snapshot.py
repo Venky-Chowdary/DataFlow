@@ -60,3 +60,92 @@ def test_debezium_envelope_parse() -> None:
     trow = debezium_to_row(tomb)
     assert trow is not None
     assert trow.get("__deleted") is True
+
+
+def test_when_needed_gap_dest_keyed_is_incremental_not_blocking() -> None:
+    """Healthcare/banking cutover: dest already keyed → DDD-3, not a table lock."""
+    from services.cdc_snapshot_mode import (
+        KIND_BLOCKING,
+        KIND_INCREMENTAL,
+        SnapshotMode,
+        adapter_supports_incremental_interleave,
+        classify_snapshot_plan,
+    )
+
+    blocking = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="lsn-old", retention_status="gap"
+    )
+    assert blocking["kind"] == KIND_BLOCKING
+    assert blocking["run_snapshot"] is True
+
+    plan = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED,
+        watermark="lsn-old",
+        retention_status="gap",
+        dest_already_keyed=True,
+        incremental_capable=True,
+    )
+    assert plan["kind"] == KIND_INCREMENTAL
+    assert plan["run_snapshot"] is False
+    assert plan["run_stream"] is True
+    assert plan["lost_window"] is True
+    assert plan["migration_proven"] is False
+    assert plan["next_action"] == "incremental_snapshot_then_stream"
+
+    keyed_but_query_cdc = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED,
+        watermark="lsn-old",
+        retention_status="gap",
+        dest_already_keyed=True,
+        incremental_capable=False,
+    )
+    assert keyed_but_query_cdc["kind"] == KIND_BLOCKING
+
+    class _LogReader:
+        source_key = "src:pg"
+
+    class CdcEngine:
+        source_key = "src:query"
+
+    assert adapter_supports_incremental_interleave(_LogReader()) is True
+    assert adapter_supports_incremental_interleave(CdcEngine()) is False
+    assert adapter_supports_incremental_interleave(None) is False
+
+
+def test_enqueue_gap_recovery_skips_in_flight_signal(tmp_path, monkeypatch) -> None:
+    from services.cdc_incremental_snapshot import enqueue_gap_recovery_snapshots
+
+    monkeypatch.setattr(snap_mod, "_PATH", str(tmp_path / "signals.json"))
+    monkeypatch.setattr(snap_mod, "_DATA_DIR", str(tmp_path))
+    first = enqueue_gap_recovery_snapshots("src:pg", [("orders", "id")])
+    assert len(first) == 1
+    again = enqueue_gap_recovery_snapshots("src:pg", [("orders", "id"), ("lines", "id")])
+    assert [s.table for s in again] == ["lines"]
+
+
+def test_measure_dest_already_keyed_unmeasured_is_false(monkeypatch) -> None:
+    from services.cdc_snapshot_mode import measure_dest_already_keyed
+
+    monkeypatch.setattr(
+        "services.dest_precount.destination_row_count", lambda *_a, **_k: None
+    )
+    assert (
+        measure_dest_already_keyed(
+            "postgresql", {}, [("orders", ["id"])], schema="public"
+        )
+        is False
+    )
+
+    monkeypatch.setattr(
+        "services.dest_precount.destination_row_count", lambda *_a, **_k: 3
+    )
+    monkeypatch.setattr(
+        "services.dest_precount.destination_key_list",
+        lambda *_a, **_k: [("1",), ("2",), ("3",)],
+    )
+    assert (
+        measure_dest_already_keyed(
+            "postgresql", {}, [("orders", ["id"])], schema="public"
+        )
+        is True
+    )
