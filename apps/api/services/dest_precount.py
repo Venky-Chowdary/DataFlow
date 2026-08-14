@@ -120,10 +120,11 @@ source key and one leftover dest key to a false balance. Incremental
 CDC must not run that split — the batch is not the source key set, and
 leftover would look like almost every dest row. This module **lists**
 dest keys so a complete overwrite snapshot can MERGE-delete ``D \\ S``;
-it never deletes them itself. Iceberg listing and dest COUNT are one
-current-snapshot population (filesystem data files or catalog
-``scan().to_arrow()``), never metadata ``record-count`` /
-``scan().count()``. ``row_conservation.apply_inferred_leftover_deletes``
+it never deletes them itself. Iceberg dest COUNT is dest-engine
+population of current-snapshot data files (Parquet footer / JSONL
+stream), never metadata ``record-count`` / ``scan().count()`` /
+``len(to_pylist())``. Key list and leftover MERGE still read snapshot
+rows. ``row_conservation.apply_inferred_leftover_deletes``
 applies the anti-join only when the source census is complete overwrite
 (SQL and Iceberg CoW). Incremental CDC must not call that apply. Mirror
 already applies inferred soft-deletes on full re-sync. Iceberg MoR /
@@ -1425,25 +1426,143 @@ def _iceberg_missing_table(exc: BaseException) -> bool:
 def _iceberg_row_count(
     cfg: dict[str, Any], *, schema: str, table_name: str
 ) -> int | None:
-    """Dest COUNT is ``len`` of the leftover-MERGE snapshot, never ``scan().count()``.
+    """Dest COUNT of current-snapshot data files. Never ``scan().count()``.
 
-    pyiceberg ``scan().count()`` is typically manifest ``record-count`` — the
-    same honesty hole as ``sys.partitions`` / Oracle ``ALL_TABLES.num_rows``.
-    Missing table (or namespace) is 0. Unreadable snapshot is ``None``.
+    Spark ``COUNT(*)`` on Iceberg uses manifest ``record-count`` and bails
+    to a full row scan when delete files exist. Manifest ``record-count``
+    is writer-stamped — the same honesty hole as ``sys.partitions``. Dest
+    COUNT opens each live data file and uses the dest-engine population
+    already proven for artifacts (Parquet footer ``num_rows``, JSONL
+    object-per-line). MoR / deletion vectors stay unmeasured — equality
+    deletes and overlapping position deletes make ``data − deletes`` a
+    lie (Iceberg #14864). Missing table is 0. Unreadable snapshot is
+    ``None``. Key list / leftover MERGE still materialize snapshot rows.
     """
-    rows = _iceberg_snapshot_rows(cfg, schema=schema, table_name=table_name, cols=())
-    if rows is None:
+    from connectors.iceberg_writer import resolve_iceberg_write_path
+
+    endpoint = _iceberg_endpoint(cfg, table_name, schema)
+    try:
+        path = resolve_iceberg_write_path(endpoint)
+    except RuntimeError:
         return None
-    return len(rows)
+    if path == "catalog":
+        return _iceberg_catalog_file_count(endpoint)
+    return _iceberg_filesystem_file_count(cfg, schema=schema, table_name=table_name)
+
+
+def _count_iceberg_data_file(path: Path) -> int | None:
+    """Dest-engine population of one snapshot data file. Never manifest record-count."""
+    return count_artifact_rows(path)
+
+
+def _iceberg_local_path(uri: str, *, warehouse: str = "") -> Path | None:
+    raw = str(uri or "").strip()
+    if raw.startswith("file:"):
+        raw = raw.split(":", 1)[1]
+        if raw.startswith("//"):
+            raw = raw[2:]
+    if not raw:
+        return None
+    candidates = [Path(raw)]
+    root = str(warehouse or "").strip()
+    if root:
+        candidates.append(Path(root) / raw)
+    for path in candidates:
+        if path.is_file():
+            return path
+    return None
+
+
+def _iceberg_filesystem_file_count(
+    cfg: dict[str, Any], *, schema: str, table_name: str
+) -> int | None:
+    from connectors.iceberg_writer import (
+        _load_metadata,
+        _resolve_iceberg_table_dir,
+        snapshot_data_files,
+        snapshot_has_delete_files,
+    )
+
+    table_dir = _resolve_iceberg_table_dir(cfg, table_name, schema or None)
+    meta_dir = table_dir / "metadata"
+    if not meta_dir.is_dir():
+        return 0
+    versions = sorted(meta_dir.glob("v*.metadata.json"))
+    if not versions:
+        return 0
+    current_meta = _load_metadata(versions[-1])
+    if not current_meta:
+        return 0
+    if snapshot_has_delete_files(current_meta):
+        logger.info("iceberg MoR delete files present; dest COUNT unmeasured")
+        return None
+    try:
+        files = snapshot_data_files(table_dir, current_meta)
+    except ValueError as exc:
+        logger.info("iceberg snapshot data files unreadable: %s", exc)
+        return None
+    total = 0
+    for _rel, path in files:
+        n = _count_iceberg_data_file(path)
+        if n is None:
+            return None
+        total += n
+    return total
+
+
+def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
+    """Sql/REST catalog COUNT via live data-file footers. Never ``scan().count()``."""
+    from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+
+    parsed = parse_iceberg_catalog_config(endpoint)
+    catalog = load_catalog(endpoint)
+    identifier = parsed["namespace"] + (parsed["table_name"],)
+    try:
+        tbl = catalog.load_table(identifier)
+    except Exception as exc:
+        if _iceberg_missing_table(exc):
+            return 0
+        raise
+    try:
+        inspect = tbl.inspect
+        deletes = inspect.delete_files()
+        if getattr(deletes, "num_rows", 0):
+            logger.info("iceberg catalog delete files present; dest COUNT unmeasured")
+            return None
+        data_files = inspect.data_files()
+    except Exception as exc:
+        logger.info("iceberg catalog file listing failed: %s", exc)
+        return None
+    n_files = int(getattr(data_files, "num_rows", 0) or 0)
+    if n_files == 0:
+        return 0
+    try:
+        paths = [str(p) for p in data_files.column("file_path").to_pylist()]
+    except Exception as exc:
+        logger.info("iceberg catalog file_path listing failed: %s", exc)
+        return None
+    total = 0
+    for uri in paths:
+        local = _iceberg_local_path(uri, warehouse=str(parsed.get("warehouse") or ""))
+        if local is None:
+            logger.info("iceberg catalog data-file not a local path: %s", uri)
+            return None
+        n = _count_iceberg_data_file(local)
+        if n is None:
+            return None
+        total += n
+    return total
 
 
 def _iceberg_snapshot_rows(
     cfg: dict[str, Any], *, schema: str, table_name: str, cols: Sequence[str]
 ) -> list[dict[str, Any]] | None:
-    """Current snapshot rows. Dest COUNT, key list, and leftover MERGE share this.
+    """Current snapshot rows. Key list and leftover MERGE share this.
 
-    Catalog path materializes ``scan().to_arrow()``. Metadata ``record-count``
-    and ``scan().count()`` are never this population. Missing table is ``[]``.
+    Dest COUNT does not use this materialization — it footers live data
+    files. Catalog path materializes ``scan().to_arrow()`` for keys only.
+    Metadata ``record-count`` and ``scan().count()`` are never dest
+    population. Missing table is ``[]``.
     """
     from connectors.iceberg_writer import resolve_iceberg_write_path
 

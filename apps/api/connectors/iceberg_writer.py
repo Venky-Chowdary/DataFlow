@@ -409,6 +409,40 @@ def _load_metadata(meta_path: Path) -> dict[str, Any] | None:
     return json.loads(meta_path.read_text(encoding="utf-8"))
 
 
+def snapshot_data_files(
+    table_dir: Path, current_meta: dict[str, Any] | None
+) -> list[tuple[str, Path]]:
+    """Current snapshot data-file paths. Missing file raises (fail closed).
+
+    Dest COUNT sums dest-engine population of these files (Parquet footer /
+    JSONL line stream). Upsert CoW still materializes rows from the same
+    list. Metadata ``record-count`` is writer-stamped and is not dest.
+    """
+    if not current_meta:
+        return []
+    out: list[tuple[str, Path]] = []
+    for ref in current_meta.get("data-files") or []:
+        rel = str(ref.get("path") or "").strip()
+        if not rel:
+            raise ValueError("Iceberg metadata references a data-file with empty path")
+        path = table_dir / rel
+        if not path.exists():
+            raise ValueError(
+                f"Iceberg data-file missing for upsert merge: {rel} "
+                "(refuse silent row loss — repair snapshot or rewrite table)"
+            )
+        out.append((rel, path))
+    return out
+
+
+def snapshot_has_delete_files(current_meta: dict[str, Any] | None) -> bool:
+    """True when the snapshot lists delete files (MoR). Footer sum would lie."""
+    if not current_meta:
+        return False
+    deletes = current_meta.get("delete-files") or current_meta.get("delete_files") or []
+    return bool(deletes)
+
+
 def _evolve_schema(
     existing: dict[str, Any] | None,
     columns: list[str],
@@ -479,20 +513,10 @@ def _load_existing_rows(table_dir: Path, columns: list[str], current_meta: dict[
 
     Fail-closed: missing or unreadable referenced files abort the upsert so we
     never silently drop existing rows (Airbyte/warehouse silent-loss class).
+    Dest COUNT does not use this materialization — it footers the same files.
     """
-    if not current_meta:
-        return []
     rows: list[dict[str, Any]] = []
-    for ref in current_meta.get("data-files") or []:
-        rel = str(ref.get("path") or "").strip()
-        if not rel:
-            raise ValueError("Iceberg metadata references a data-file with empty path")
-        path = table_dir / rel
-        if not path.exists():
-            raise ValueError(
-                f"Iceberg data-file missing for upsert merge: {rel} "
-                "(refuse silent row loss — repair snapshot or rewrite table)"
-            )
+    for rel, path in snapshot_data_files(table_dir, current_meta):
         if rel.endswith(".parquet"):
             try:
                 import pyarrow.parquet as pq

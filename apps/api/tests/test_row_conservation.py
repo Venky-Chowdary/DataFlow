@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import gzip
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -4487,35 +4488,94 @@ def test_iceberg_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: P
     assert census[MISSING_KEYS_KEY] == 1
 
 
-def test_iceberg_dest_count_is_len_of_snapshot_population(monkeypatch):
-    """Catalog and filesystem dest COUNT are |snapshot|, never scan().count()."""
-    from services import dest_precount as dp
+def test_iceberg_dest_count_is_file_footer_not_manifest_record_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Filesystem dest COUNT is Parquet footer / JSONL stream, never writer record-count.
 
-    monkeypatch.setattr(
-        dp,
-        "_iceberg_snapshot_rows",
-        lambda *a, **k: [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}],
+    Spark COUNT(*) on Iceberg uses manifest record-count and bails to a
+    full scan when delete files exist. Manifest record-count is
+    writer-stamped (sys.partitions class). MoR delete files stay
+    unmeasured — data − deletes is a lie for overlapping position
+    deletes and equality deletes.
+    """
+    from connectors.iceberg_writer import write_mapped_rows
+    from services.dest_precount import destination_row_count
+
+    warehouse = tmp_path / "wh"
+    cfg = _iceberg_cfg(warehouse)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+        {"source": "_df_lsn", "target": "_df_lsn", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="orders",
+        headers=["id", "v", "_df_lsn"],
+        data_rows=[["1", "a", "0/10"], ["2", "b", "0/10"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["id"],
     )
-    assert (
-        dp.destination_row_count(
-            "iceberg", {"type": "iceberg"}, schema="default", table_name="orders"
-        )
-        == 4
+    assert written.ok, written.error
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 2
+
+    meta_dir = warehouse / "orders" / "metadata"
+    if not meta_dir.is_dir():
+        meta_dir = next(warehouse.rglob("v*.metadata.json")).parent
+    versions = sorted(meta_dir.glob("v*.metadata.json"))
+    assert versions
+    meta_path = versions[-1]
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    for ref in meta.get("data-files") or []:
+        ref["record-count"] = 99999
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 2
+
+    import pyarrow.parquet as pq
+
+    def _no_materialize(*_a, **_k):
+        raise AssertionError("Iceberg dest COUNT must not materialize data pages")
+
+    monkeypatch.setattr(pq, "read_table", _no_materialize)
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 2
+
+    meta["delete-files"] = [{"path": "data/deletes.parquet"}]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") is None
+
+
+def test_iceberg_dest_count_missing_data_file_is_unmeasured_not_prefix(
+    tmp_path: Path,
+):
+    """Truncated snapshot is unmeasured — never COUNT of the files still on disk."""
+    from connectors.iceberg_writer import write_mapped_rows
+    from services.dest_precount import destination_row_count
+
+    warehouse = tmp_path / "wh"
+    cfg = _iceberg_cfg(warehouse)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+        {"source": "_df_lsn", "target": "_df_lsn", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="orders",
+        headers=["id", "v", "_df_lsn"],
+        data_rows=[["1", "a", "0/10"], ["2", "b", "0/10"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["id"],
     )
-    monkeypatch.setattr(dp, "_iceberg_snapshot_rows", lambda *a, **k: [])
-    assert (
-        dp.destination_row_count(
-            "iceberg", {"type": "iceberg"}, schema="default", table_name="orders"
-        )
-        == 0
-    )
-    monkeypatch.setattr(dp, "_iceberg_snapshot_rows", lambda *a, **k: None)
-    assert (
-        dp.destination_row_count(
-            "iceberg", {"type": "iceberg"}, schema="default", table_name="orders"
-        )
-        is None
-    )
+    assert written.ok, written.error
+    data_files = list((warehouse / "orders" / "data").glob("*"))
+    if not data_files:
+        data_files = list(warehouse.rglob("data/*"))
+    assert data_files
+    data_files[0].unlink()
+    assert destination_row_count("iceberg", cfg, schema="", table_name="orders") is None
 
 
 def _iceberg_sql_catalog(tmp_path: Path) -> tuple[str, str]:
@@ -4548,12 +4608,53 @@ def test_iceberg_sql_catalog_missing_table_is_measured_zero(tmp_path: Path):
     )
 
 
+def test_iceberg_sql_catalog_count_is_file_footer_not_scan_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """SqlCatalog dest COUNT footers live data files. Never scan().count() / to_arrow."""
+    warehouse, uri = _iceberg_sql_catalog(tmp_path)
+    from connectors.iceberg_writer import write_mapped_rows
+    from pyiceberg.table import DataScan
+
+    cfg = _iceberg_sql_cfg(warehouse, uri)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=uri,
+        warehouse=warehouse,
+        table_name="default.orders",
+        headers=["id", "v"],
+        data_rows=[["1", "a"], ["2", "b"]],
+        mappings=mappings,
+        write_mode="append",
+        create_table=True,
+    )
+    assert written.ok, written.error
+
+    def _no_count(self):
+        raise AssertionError("Iceberg dest COUNT must not scan().count()")
+
+    def _no_arrow(self):
+        raise AssertionError("Iceberg dest COUNT must not to_arrow the table")
+
+    monkeypatch.setattr(DataScan, "count", _no_count)
+    monkeypatch.setattr(DataScan, "to_arrow", _no_arrow)
+    assert (
+        destination_row_count(
+            "iceberg", cfg, schema="default", table_name="orders"
+        )
+        == 2
+    )
+
+
 def test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len(
     tmp_path: Path,
 ):
     """SqlCatalog leftover MERGE: dest {1,2,3,99} vs S {1,2,3} → delete 99.
 
-    Dest COUNT is len(snapshot rows), never pyiceberg scan().count()
+    Dest COUNT is dest-engine file footers, never pyiceberg scan().count()
     metadata. Incremental remains a hard no-op.
     """
     from connectors.iceberg_writer import write_mapped_rows
