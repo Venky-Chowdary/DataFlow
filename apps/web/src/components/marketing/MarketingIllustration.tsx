@@ -217,9 +217,9 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
   }
 
   if (kind === "mapping") {
-    const src = ["order_amt", "pay_amt", "tax_amt", "cust_email"];
-    const dst = ["total_amount", "payment_amount", "tax_amount", "email"];
-    const scores = ["0.92", "0.99", "rev", "0.79"];
+    const src = ["order_amt", "pay_amt", "tax_amt", "cust_id"];
+    const dst = ["total_amount", "payment_amount", "tax_amount", "customer_key"];
+    const scores = ["0.92", "0.99", "0.99", "rev"];
     return (
       <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Semantic column mapping">
         <rect width="480" height="280" rx="16" fill="#f8fafc" stroke="#e2e8f0" />

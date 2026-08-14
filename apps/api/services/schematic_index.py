@@ -150,6 +150,10 @@ _DOMAIN_LEAVES = frozenset({
     "address", "email", "phone", "time", "uuid", "hash", "index", "seq",
     "amt", "num", "nbr", "no", "cd", "dt", "ts",
 })
+# Identity-kind leaves are not interchangeable. Synonym retrieval lists
+# ``key`` / ``pk`` / ``uuid`` under canonical ``id``, which would otherwise
+# boost ``customer_id`` onto warehouse ``customer_key`` at 0.97.
+IDENTITY_KIND_LEAVES = frozenset({"id", "key", "pk", "code", "uuid", "guid", "oid"})
 # Back-compat alias used by older call sites.
 _GENERIC_LEAVES = _DOMAIN_LEAVES | _ENTITY_STOPWORDS
 
@@ -226,6 +230,12 @@ def schematic_match_boost(source: str, target: str) -> float | None:
         src_tokens = (src_tokens - {"amt"}) | {"amount"}
     if "amt" in tgt_tokens:
         tgt_tokens = (tgt_tokens - {"amt"}) | {"amount"}
+    src_id = src_tokens & IDENTITY_KIND_LEAVES
+    tgt_id = tgt_tokens & IDENTITY_KIND_LEAVES
+    if src_id and tgt_id and src_id != tgt_id:
+        # Surface ``id`` vs ``key`` is not proven identity, even when the
+        # million-variant index collapsed both onto canonical ``id``.
+        return None
     src_q = _entity_qualifiers(src_tokens)
     tgt_q = _entity_qualifiers(tgt_tokens)
 

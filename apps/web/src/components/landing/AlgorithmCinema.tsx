@@ -62,8 +62,8 @@ interface MappingEdge {
 const MAPPING_EDGES: MappingEdge[] = [
   { source: "order_amt", target: "total_amount", confidence: 0.92, role: "order total" },
   { source: "pay_amt", target: "payment_amount", confidence: 0.99, role: "payment" },
-  { source: "tax_amt", target: "tax_amount", confidence: 0.75, role: "tax" },
-  { source: "cust_email", target: "email", confidence: 0.79, role: "email" },
+  { source: "tax_amt", target: "tax_amount", confidence: 0.99, role: "tax" },
+  { source: "cust_id", target: "customer_key", confidence: 0.78, role: "identity" },
 ];
 
 export function MappingCinema() {
@@ -71,9 +71,9 @@ export function MappingCinema() {
   const tick = useVisibleCycle(7, 900, inView);
 
   const drawn = Math.min(MAPPING_EDGES.length, tick + 1);
-  const reviewIndex = 2;
-  const reviewActive = tick === 3;
-  const pinned = tick >= 4;
+  const reviewIndex = 3;
+  const reviewActive = tick === 4;
+  const pinned = tick >= 5;
 
   return (
     <figure ref={ref} className="lp-cinema-stage lp-cinema-mapping" aria-label="Semantic mapping animation">
@@ -151,15 +151,16 @@ export function MappingCinema() {
           <>
             <span className="lp-cinema-chip is-warn">review</span>
             <span>
-              <code>tax_amt → tax_amount</code> · same amount family, thin qualifier — Map confirms.
-              The engine does not treat every amt as payment.
+              <code>cust_id → customer_key</code> · same customer entity, different identity
+              kind (CRM id ≠ warehouse surrogate) — Map confirms. The engine does not
+              auto-pin id onto key.
             </span>
           </>
         ) : pinned ? (
           <>
             <span className="lp-cinema-chip is-ok">pinned</span>
             <span>
-              <code>tax_amt → tax_amount</code> stays in review until an operator pins it.
+              <code>cust_id → customer_key</code> stays in review until an operator pins it.
             </span>
           </>
         ) : (

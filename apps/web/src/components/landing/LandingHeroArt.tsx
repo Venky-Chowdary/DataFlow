@@ -79,13 +79,13 @@ export function LandingHeroArt() {
             <text x="250" y="279" fontSize="12" fill="#94a3b8">→</text>
             <text x="280" y="279" fontSize="12" fontWeight="700" fill="#0f172a">total_amount</text>
             <rect x="116" y="302" width="328" height="36" rx="10" fill="#fffbeb" />
-            <text x="136" y="325" fontSize="12" fill="#0f766e">tax_amt</text>
+            <text x="136" y="325" fontSize="12" fill="#0f766e">cust_id</text>
             <text x="250" y="325" fontSize="12" fill="#94a3b8">→</text>
-            <text x="280" y="325" fontSize="12" fontWeight="700" fill="#0f172a">tax_amount</text>
+            <text x="280" y="325" fontSize="12" fontWeight="700" fill="#0f172a">customer_key</text>
             <rect x="116" y="350" width="140" height="28" rx="8" fill="#fef3c7" />
             <text x="186" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#b45309">review</text>
             <rect x="272" y="350" width="172" height="28" rx="8" fill="#ccfbf1" />
-            <text x="358" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#0f766e">same role ≠ same col</text>
+            <text x="358" y="369" textAnchor="middle" fontSize="11" fontWeight="700" fill="#0f766e">id ≠ key</text>
           </g>
 
           {/* Proof chip */}

@@ -201,7 +201,7 @@ function TransferStudioMock() {
           {[
             ["order_amt", "total_amount", "0.92"],
             ["pay_amt", "payment_amount", "0.99"],
-            ["tax_amt", "tax_amount", "review"],
+            ["cust_id", "customer_key", "review"],
           ].map(([s, d, c]) => (
             <div key={s} className="lp-mkt-ui-map-row">
               <code>{s}</code>
@@ -523,7 +523,7 @@ export function TransferStudioPage({
         <div className="lp-mkt-scenario">
           <ol>
             <li>Upload <code>sample-orders.csv</code> and select PostgreSQL <code>public.orders</code> (or Load sample in Studio).</li>
-            <li>Review map: <code>order_amt → total_amount</code> (qualifier pin), <code>tax_amt → tax_amount</code> (review — G4 holds).</li>
+            <li>Review map: <code>order_amt → total_amount</code> (qualifier pin), <code>cust_id → customer_key</code> (review — G4 holds; id ≠ warehouse key).</li>
             <li>Preflight: G1–G3 pass; G5 flags currency-symbol rows — quarantine policy captures them.</li>
             <li>Write clean rows; Job Theater shows checksum match on written set + quarantined rows with reasons.</li>
           </ol>
@@ -1079,7 +1079,7 @@ export function MigrationsSolutionPage({
       caps={[
         {
           title: "Messy real-world schemas",
-          body: "Amounts, emails, and identifiers align when qualifiers match. Same-role collisions (order vs payment vs tax) wait for Map review.",
+          body: "Amounts, emails, and identifiers align when qualifiers match. Same-role collisions (order vs payment; CRM id vs warehouse key) wait for Map review.",
         },
         {
           title: "Quarantine you can act on",

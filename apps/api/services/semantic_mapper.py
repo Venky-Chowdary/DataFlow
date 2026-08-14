@@ -889,6 +889,18 @@ _DOMAIN_LEAVES = frozenset({
     "address", "email", "phone", "time", "uuid", "hash", "index", "seq",
 })
 _GENERIC_LEAVES = _DOMAIN_LEAVES | _ENTITY_STOPWORDS
+# Same-entity ``id`` vs ``key`` is a false friend (CRM id ≠ warehouse surrogate).
+# Keep this set aligned with schematic_index.IDENTITY_KIND_LEAVES.
+_IDENTITY_KIND_LEAVES = frozenset({"id", "key", "pk", "code", "uuid", "guid", "oid"})
+# Typed measure subtypes that must appear on the destination. ``tax`` is not
+# ``total``; a generic amount bucket is not a proven tax/discount/salary column.
+_MEASURE_KIND_TOKENS = frozenset({
+    "tax", "vat", "gst", "discount", "net", "gross", "fee", "tip", "duty",
+    "freight", "salary", "commission", "bonus", "payment", "unit",
+})
+_MONEY_LEAVES = frozenset({"amount", "total", "balance", "price", "cost"})
+# Below G4 strict (~0.85) even if Map forgets requires_review.
+_AMBIGUOUS_PAIR_CAP = 0.78
 
 
 def _qualifier_tokens(name: str) -> set[str]:
@@ -1007,6 +1019,54 @@ def _entity_agreement(source: str, target: str) -> float:
     if not src_q and not tgt_q:
         return 0.55
     return 0.35
+
+
+def _identity_kind_leaves(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _IDENTITY_KIND_LEAVES
+
+
+def _identity_leaf_mismatch(source: str, target: str) -> bool:
+    """True when both names carry identity-kind leaves that are not the same token.
+
+    ``cust_id`` vs ``customer_id`` shares leaf ``id`` (pin). ``cust_id`` vs
+    ``customer_key`` is the same entity with a different identity kind — Map
+    must confirm. High lexical similarity must not skip G4.
+    """
+    src = _identity_kind_leaves(source)
+    tgt = _identity_kind_leaves(target)
+    if not src or not tgt:
+        return False
+    return src != tgt
+
+
+def _measure_kind_tokens(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _MEASURE_KIND_TOKENS
+
+
+def _measure_kind_mismatch(source: str, target: str) -> bool:
+    """True when the source is a typed measure the destination does not share.
+
+    ``tax_amt`` vs ``tax_amount`` shares ``tax``. ``tax_amt`` vs ``total_amount``
+    looks like a compound amount bucket because ``total`` is a domain leaf —
+    that must not auto-pin as identity.
+    """
+    src = _measure_kind_tokens(source)
+    if not src:
+        return False
+    tgt = _measure_kind_tokens(target)
+    return src.isdisjoint(tgt)
+
+
+def _money_leaves(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _MONEY_LEAVES
+
+
+def _shared_money_family(source: str, target: str) -> bool:
+    return bool(_money_leaves(source) and _money_leaves(target))
+
+
+def _reason_forces_review(reason: str) -> bool:
+    return "review required" in (reason or "").lower()
 
 
 def _is_bare_domain_leaf(name: str) -> bool:
@@ -1202,6 +1262,17 @@ def _score_pair(
 
     def _finish(score: float, reason: str) -> tuple[float, str]:
         adjusted = max(0.0, min(0.995, float(score) - type_penalty + type_boost + sample_boost))
+        review_bits: list[str] = []
+        if _identity_leaf_mismatch(source, target):
+            src_l = "/".join(sorted(_identity_kind_leaves(source)))
+            tgt_l = "/".join(sorted(_identity_kind_leaves(target)))
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append(f"identity leaf mismatch ({src_l}≠{tgt_l})")
+        if _measure_kind_mismatch(source, target):
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append("measure-kind mismatch")
+        if review_bits:
+            reason = f"{reason} · {' · '.join(review_bits)} — review required"
         return adjusted, reason
 
     if src_norm == tgt_norm:
@@ -1226,6 +1297,14 @@ def _score_pair(
     agreement = _entity_agreement(source, target)
     if agreement == 0.0:
         form_ratio = _similarity(src_sem, tgt_sem_raw)
+        if _shared_money_family(source, target):
+            # Same measure family, different entity (order_amt vs payment_amount).
+            # Propose below G4 so Map confirms — do not auto-pin, and do not hide
+            # the only dest amount behind create_new.
+            return _finish(
+                min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
+                "Conflicting entity qualifiers on same measure — review required",
+            )
         return _finish(min(0.42, form_ratio * 0.55), "Conflicting entity qualifiers")
 
     src_canon = _canonical_form(source)
@@ -1236,18 +1315,21 @@ def _score_pair(
             return _finish(0.76, "Canonical schematic resolution (specific→bare leaf)")
         return _finish(0.99, "Canonical schematic resolution (exact target)")
     if src_canon and tgt_canon and src_canon == tgt_canon and _qualifiers_compatible(source, target):
-        src_q = _qualifier_tokens(source)
-        tgt_q = _qualifier_tokens(target)
-        if not src_q and tgt_q:
-            pass  # generic → specific: fall through
-        elif src_q and _is_bare_domain_leaf(target):
-            return _finish(0.76, "Canonical schematic resolution (specific→generic)")
-        elif src_q and not tgt_q:
-            pass  # compound domain target — fall through
-        elif _normalize(target) == _normalize(expanded):
-            return _finish(0.985, "Canonical schematic resolution (expanded form)")
+        if _identity_leaf_mismatch(source, target):
+            pass  # same canonical ``id`` is not proven identity when leaves differ
         else:
-            return _finish(0.93, "Canonical schematic resolution")
+            src_q = _qualifier_tokens(source)
+            tgt_q = _qualifier_tokens(target)
+            if not src_q and tgt_q:
+                pass  # generic → specific: fall through
+            elif src_q and _is_bare_domain_leaf(target):
+                return _finish(0.76, "Canonical schematic resolution (specific→generic)")
+            elif src_q and not tgt_q:
+                pass  # compound domain target — fall through
+            elif _normalize(target) == _normalize(expanded):
+                return _finish(0.985, "Canonical schematic resolution (expanded form)")
+            else:
+                return _finish(0.93, "Canonical schematic resolution")
 
     if _normalize(target) == _normalize(expanded):
         return _finish(0.94, "Abbreviation expansion match")
@@ -1648,6 +1730,8 @@ def map_columns(
         elif reason.startswith("Exact") and score_gap >= 0.08:
             # Decisive Exact with compatible types — review not required.
             requires_review = False
+        if _reason_forces_review(reason) or _identity_leaf_mismatch(source, target) or _measure_kind_mismatch(source, target):
+            requires_review = True
         assigned_sources.add(source)
         used_targets.add(target)
         mappings.append(
@@ -1736,6 +1820,12 @@ def map_columns(
                 if near_lossy:
                     requires_review = True
                     near_score = min(float(near_score), 0.84)
+                if (
+                    _identity_leaf_mismatch(source, near_tgt)
+                    or _measure_kind_mismatch(source, near_tgt)
+                ):
+                    requires_review = True
+                    near_score = min(float(near_score), _AMBIGUOUS_PAIR_CAP)
                 mappings.append(
                     {
                         "source": source,
@@ -1895,6 +1985,12 @@ def map_columns(
             source, best_target, target_columns
         ):
             requires_review = False
+        if best_target and (
+            _reason_forces_review(best_reason)
+            or _identity_leaf_mismatch(source, best_target)
+            or _measure_kind_mismatch(source, best_target)
+        ):
+            requires_review = True
         mappings.append(
             {
                 "source": source,

@@ -27,3 +27,12 @@ def test_schematic_match_boost():
 
     score = schematic_match_boost("billing_cust_id", "customer_id")
     assert score is not None and score >= 0.95
+
+
+def test_schematic_refuses_id_vs_key_identity_false_friend():
+    from services.schematic_index import schematic_match_boost
+
+    assert schematic_match_boost("customer_id", "customer_key") is None
+    assert schematic_match_boost("employee_id", "employee_key") is None
+    # Same leaf still boosts when the index agrees.
+    assert schematic_match_boost("cust_id", "customer_id") is not None

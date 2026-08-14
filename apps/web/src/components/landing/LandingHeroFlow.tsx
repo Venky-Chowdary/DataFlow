@@ -166,11 +166,11 @@ export function LandingHeroFlow() {
               Source
             </header>
             <strong>PostgreSQL</strong>
-            <p>orders · three amount columns</p>
+            <p>orders · amounts + identity</p>
             <ul>
               <li>order_amt</li>
               <li>pay_amt</li>
-              <li>tax_amt</li>
+              <li>cust_id</li>
             </ul>
           </article>
 
@@ -194,9 +194,9 @@ export function LandingHeroFlow() {
                 <em>pin</em>
               </li>
               <li className="is-review">
-                <code>tax_amt</code>
+                <code>cust_id</code>
                 <span>→</span>
-                <code>tax_amount</code>
+                <code>customer_key</code>
                 <em>review</em>
               </li>
             </ul>
@@ -222,7 +222,7 @@ export function LandingHeroFlow() {
             <ul>
               <li>total_amount</li>
               <li>payment_amount</li>
-              <li>tax_amount</li>
+              <li>customer_key</li>
             </ul>
           </article>
         </div>
@@ -237,7 +237,7 @@ export function LandingHeroFlow() {
 
         <footer className="lp-hero-flow-proof">
           <span>
-            <em>amt</em> is a family, not a column
+            <em>id ≠ key</em>
           </span>
           <span>
             <em>G4</em> holds until Map confirms

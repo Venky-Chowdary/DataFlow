@@ -157,9 +157,9 @@ export function LandingDataPlane3D() {
           <header><span className="lp-d3-led" /> Semantic map</header>
           <p><code>order_amt</code> → <b>total_amount</b></p>
           <p><code>pay_amt</code> → <b>payment_amount</b></p>
-          <p><code>tax_amt</code> → <b>tax_amount</b> review</p>
+          <p><code>cust_id</code> → <b>customer_key</b> review</p>
           <div className="lp-d3-bar"><span /></div>
-          <footer>Same role ≠ same column</footer>
+          <footer>id ≠ warehouse key</footer>
         </aside>
 
         <aside className="lp-d3-hud lp-d3-hud--proof">
