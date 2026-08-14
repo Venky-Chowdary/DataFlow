@@ -202,6 +202,14 @@ PostgreSQL (live): same kill/resume/checksum proof green.
   same-txn ledger skip (insert) or conflict-key upsert.
 * Mongo / Kafka / object stores / warehouses: **NOT_GUARANTEED** (no ledger).
 * Quarantine salvage (per-row commit then ledger) is still not same-txn.
+* Idle collection-scoped change stream: poll persists PyMongo
+  ``postBatchResumeToken`` after empty getMore (unit:
+  `tests/test_debezium_parity.py::test_idle_change_stream_persists_post_batch_resume_token`).
+  Same identity as a Postgres idle-slot advance. Not lag proof. Not
+  continuous CDC. Not ``migration_proven``. Dummy heartbeat-collection
+  writes remain a future enhancement of this kernel when the server does
+  not advance a collection-scoped token. Opening ``watch()`` without an
+  expired token (skip the lost window) remains forbidden.
 
 ---
 

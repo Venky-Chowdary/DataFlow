@@ -698,6 +698,76 @@ def test_pg_heartbeat_advances_idle_slot_instead_of_emitting_wal() -> None:
     assert cdc.consistent_point_lsn == "0/900"
 
 
+def test_idle_change_stream_persists_post_batch_resume_token() -> None:
+    """Idle getMore must persist postBatchResumeToken — same identity as PG slot advance.
+
+    Collection-scoped watches never move the token while idle, then a capped
+    oplog wraps (error 286). PyMongo updates ``stream.resume_token`` after
+    empty ``try_next``. Poll yields that token as a position-only heartbeat.
+    An empty getMore with no token must not invent one.
+    """
+    from connectors.mongodb_change_stream import MongodbChangeStreamCdc
+    from services.cdc_lease import configure_store, reset_store
+    from services.cdc_multi_table import should_ack_shared_batch
+    from services.cdc_resume_tokens import is_durable_log_resume_token
+
+    configure_store(backend="memory")
+    idle_token = {"_data": "post-batch-idle"}
+    cfg = {
+        "host": "localhost",
+        "port": 27017,
+        "database": "test",
+        "username": "",
+        "password": "",
+        "auth_source": "",
+        "ssl": False,
+        "connection_string": "",
+        "cursor_key": "idle-cs-unit",
+        "lease_holder_id": "idle-cs-unit",
+    }
+
+    def _reader(stream: MagicMock, *, cursor_key: str) -> MongodbChangeStreamCdc:
+        local = {**cfg, "cursor_key": cursor_key, "lease_holder_id": cursor_key}
+        coll = MagicMock()
+        coll.watch.return_value.__enter__ = MagicMock(return_value=stream)
+        coll.watch.return_value.__exit__ = MagicMock(return_value=False)
+        db = MagicMock()
+        db.__getitem__ = MagicMock(return_value=coll)
+        client = MagicMock()
+        client.__getitem__ = MagicMock(return_value=db)
+        with patch("connectors.mongodb_change_stream._mongo_client", return_value=client):
+            return MongodbChangeStreamCdc(
+                local,
+                collection="orders",
+                primary_key="_id",
+                columns=["_id", "amount"],
+                max_wait_seconds=0.05,
+            )
+
+    try:
+        stream = MagicMock()
+        stream.resume_token = idle_token
+        stream.try_next.return_value = None
+        batches = list(_reader(stream, cursor_key="idle-cs-token").poll())
+        assert len(batches) == 1
+        change = batches[0]
+        assert change.inserts == []
+        assert change.updates == []
+        assert change.deletes == []
+        assert change.total_changes == 0
+        assert change.resume_token == idle_token
+        assert change.ack_barrier is True
+        assert is_durable_log_resume_token(change.resume_token)
+        assert should_ack_shared_batch(change)
+
+        empty = MagicMock()
+        empty.resume_token = None
+        empty.try_next.return_value = None
+        assert list(_reader(empty, cursor_key="idle-cs-none").poll()) == []
+    finally:
+        reset_store()
+
+
 def test_sqlserver_and_oracle_have_incremental_chunk() -> None:
     mssql = SqlServerNativeCdc({"host": "localhost"}, table="orders", primary_key="id")
     oracle = OracleLogMinerCdc({"username": "APP"}, table="orders", primary_key="id")

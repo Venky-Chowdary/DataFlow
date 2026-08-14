@@ -17,7 +17,14 @@ hours). ``ChangeStreamHistoryLost`` (286) and collection ``invalidate`` are
 retention gaps. Poll must not open ``watch()`` without the expired token —
 that starts at current clusterTime and skips the lost window. ``when_needed``
 blocking-snapshots current documents, then captures a **new** resume token.
-Not continuous CDC. Not ``migration_proven``.
+Idle namespaces are the default Atlas failure: no events means the token
+never moves and the capped oplog wraps. PyMongo updates ``resume_token``
+after empty getMores (``postBatchResumeToken``). Poll persists that token
+as a position-only heartbeat — the same identity as a Postgres idle-slot
+advance and the Kafka connector heartbeat topic. Dummy writes to a
+heartbeat collection remain a future enhancement of this kernel when the
+server does not advance a collection-scoped token. Not lag proof. Not
+continuous CDC. Not ``migration_proven``.
 """
 
 from __future__ import annotations
@@ -548,9 +555,13 @@ class MongodbChangeStreamCdc:
                 last_token: Any = None
                 while time.monotonic() - start < self.max_wait_seconds:
                     change = stream.try_next()
+                    # Empty getMore still publishes postBatchResumeToken.
+                    # Skipping it is the Atlas idle-namespace wrap.
+                    token = getattr(stream, "resume_token", None)
+                    if token is not None:
+                        last_token = token
                     if change is None:
                         continue
-                    last_token = stream.resume_token
                     op = change.get("operationType")
                     doc = self._full_doc(change)
                     if op in ("insert", "replace", "update"):
@@ -578,6 +589,8 @@ class MongodbChangeStreamCdc:
                     if len(inserts) + len(updates) + len(deletes) >= self.batch_size:
                         break
 
+                # Empty DML + token is a position-only heartbeat (PG idle-slot
+                # identity). Apply persists the watermark; lag is not 0.
                 if inserts or updates or deletes or last_token is not None:
                     yield ChangeBatch(
                         inserts=inserts,

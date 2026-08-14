@@ -320,8 +320,10 @@ def classify_mongo_oplog_retention(
 
     - Resume token is valid only while the oplog entry still exists.
     - Capped oplog + idle namespace is the default Atlas failure (window is
-      hours, not days). Kafka heartbeats exist to advance idle tokens — that
-      is a documented future enhancement of *this* kernel, not a second path.
+      hours, not days). Poll persists PyMongo ``postBatchResumeToken`` after
+      empty getMores (Kafka heartbeat identity). Dummy heartbeat-collection
+      writes remain a future enhancement of this kernel when a
+      collection-scoped watch does not advance the token.
     - Opening ``watch()`` without the expired token starts at current
       clusterTime and **skips** the lost window. Forbidden on poll.
     - Collection ``invalidate`` (drop/rename): ``resumeAfter`` cannot continue.
