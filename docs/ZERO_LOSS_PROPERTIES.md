@@ -265,18 +265,24 @@ line — operators could not tell carry from loss.
    `settle_create_new_on_destination` certify path. TEXT/BLOB/JSON UNIQUE/PK
    is refused rather than inventing a prefix length. MariaDB 10.x index
    catalog is read without MySQL-8-only `STATISTICS.EXPRESSION`.
+7. Widthless Map `VARCHAR` (Studio default) inherits measured source `(n)` via
+   `inherit_measured_string_width` — SSOT in the Decision Kernel, wired through
+   dest-type resolution, CREATE, generic_sql, and DDL identity. Over-cap widths
+   promote to LONGTEXT/CLOB/MAX; explicit TEXT/CLOB stay unbounded; bounded
+   Map `VARCHAR(10)` stays Map≡CREATE.
 
 ### Proof output (this host)
 
 ```
-pytest tests/test_property6_schema_fidelity.py -q
-10 passed in 1.61s
+pytest tests/test_inherit_measured_string_width.py tests/test_property6_schema_fidelity.py -q
+24 passed in 2.06s
+  (unit inherit matrix + SQLite E2E + live PG + live MariaDB typed-stamp
+   Property 6 + live MariaDB bare-VARCHAR inherit UNIQUE/COLUMN_TYPE)
 
-SQLite E2E: people → people_out carries PK/NOT NULL/DEFAULT/UNIQUE;
-  schema_fidelity.carried includes those aspects; CHECK/FK certified unsupported.
-Live PG: same carry + information_schema verifies NOT NULL / DEFAULT / PK / UNIQUE.
-Live MySQL/MariaDB 10.11: same carry + information_schema verifies
-  NOT NULL / DEFAULT / PK / UNIQUE; row values survived.
+Broader related suite (generic_sql create-new, CHECK carry, DDL identity,
+Map≡CREATE, invent SSOT, SaaS/Kafka dest-types): 87 passed in 2.90s.
+Module-size freeze: writer_common 5082/5120, generic_sql 5460/5600,
+type_system 7422/7450 — no ceiling raised.
 ```
 
 ### NOT claimed / remaining for PROVEN
@@ -286,5 +292,5 @@ Live MySQL/MariaDB 10.11: same carry + information_schema verifies
 * Views, triggers, generated expressions, identity RESTART, partitioning
 * Name-collision remaps under adversarial identifier fixtures (policy coded;
   not yet matrix-proven)
-* Bare Map `VARCHAR` (no length) materializing as MySQL `TEXT` — UNIQUE on that
-  column is correctly refused; typed `VARCHAR(n)` is the certified path
+* Live CHECK certify on MariaDB/PG create-new (planner emits portable CHECKs;
+  destination catalog certify is coded, not yet a live Property 6 matrix row)
