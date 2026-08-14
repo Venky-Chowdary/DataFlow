@@ -3491,72 +3491,87 @@ def quarantine_unfit_strings(
     policy: str,
     *,
     dialect_label: str = "VARCHAR",
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out / NULL cells that exceed bounded VARCHAR/NVARCHAR/CHAR width.
 
     Preflight only sees samples — production rows longer than samples used to
     reach SQL Server and silently truncate. Quarantine is fail-closed.
-    Unlimited carriers (TEXT, NVARCHAR(MAX), STRING) are skipped.
+    Unlimited carriers (TEXT, NVARCHAR(MAX), STRING) skip the width check
+    and still run encoding-capacity (utf8mb3 TEXT cannot store emoji).
     """
 
     from services.ddl_compatibility import parse_varchar_width
+    from services.encoding_capacity import quarantine_unfit_encoding
 
     width_cols: list[tuple[int, int, str]] = []
     for i, typ in enumerate(target_types):
         width = parse_varchar_width(typ)
         if width is not None:
             width_cols.append((i, width, typ))
-    if not width_cols:
-        return mapped_rows
 
-    from services.value_serializer import cell_to_string
+    kept = mapped_rows
+    if width_cols:
+        from services.value_serializer import cell_to_string
 
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, width, typ in width_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
+        out: list[tuple] = []
+        for row_idx, row in enumerate(mapped_rows):
+            cells = list(row)
+            hold_out = False
+            for col_idx, width, typ in width_cols:
+                if col_idx >= len(cells) or cells[col_idx] is None:
+                    continue
+                from services.value_serializer import is_missing_sentinel
 
-            if is_missing_sentinel(cells[col_idx]):
+                if is_missing_sentinel(cells[col_idx]):
+                    continue
+                if fits_varchar(
+                    cells[col_idx], width, typ, dialect_label=dialect_label
+                ):
+                    continue
+                sample = cell_to_string(cells[col_idx])[:120]
+                units = string_storage_units(
+                    cells[col_idx], typ, dialect_label=dialect_label
+                )
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": row_idx + 1,
+                        "column": target_cols[col_idx],
+                        "target": target_cols[col_idx],
+                        "value": sample,
+                        "reason": (
+                        f"value length {units} exceeds {dialect_label}({width}) "
+                        "— quarantined (would truncate on write)"
+                        ),
+                        "policy": "write_quarantine",
+                        "chars": [],
+                    },
+                    mapped_row=cells,
+                    target_cols=target_cols,
+                )
+                if policy == "coerce_null":
+                    from services.value_serializer import DF_MISSING_SENTINEL
+                    cells[col_idx] = DF_MISSING_SENTINEL
+                else:
+                    hold_out = True
+                    break
+            if hold_out:
                 continue
-            if fits_varchar(
-                cells[col_idx], width, typ, dialect_label=dialect_label
-            ):
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            units = string_storage_units(
-                cells[col_idx], typ, dialect_label=dialect_label
-            )
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    f"value length {units} exceeds {dialect_label}({width}) "
-                    "— quarantined (would truncate on write)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                from services.value_serializer import DF_MISSING_SENTINEL
-                cells[col_idx] = DF_MISSING_SENTINEL
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
+            out.append(tuple(cells))
+        kept = out
+
+    engine = (dest_db or "").strip() or _infer_dest_db_from_dialect_label(
+        dialect_label
+    )
+    return quarantine_unfit_encoding(
+        kept,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dest_db=engine,
+    )
 
 
 # Engines whose ARRAY element slot is non-nullable by contract.
@@ -4104,6 +4119,7 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=f"{label} VARCHAR",
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_arrays(
             mapped_rows,

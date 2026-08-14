@@ -1832,7 +1832,18 @@ def _to_sa_value(
             ddl_type=str(sa_type or logical or "FLOAT"),
         )
 
-    # uuid, string/text are already bound-friendly
+    if t in (LOGICAL_STRING, LOGICAL_TEXT) or _is_string_type(sa_type):
+        from services.encoding_capacity import bind_unicode_text
+
+        # CESU-8 / surrogate leaks become Unicode scalars. Dest that cannot
+        # encode a scalar raises — quarantine holds the cell, never '?'.
+        return bind_unicode_text(
+            value,
+            engine=str(db_type or dialect_name or ""),
+            dest_type=str(logical or ""),
+        )
+
+    # uuid leftover; string/text already bound above
     return value
 
 

@@ -13,7 +13,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
-| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py -q` (80 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label: PG `EXTRACT(TIMEZONE)` under UTC is 0 after `INSERT +05:30` (label not stored); `DATETIMEOFFSET` bind keeps `+05:30`; dest TIMESTAMPTZ is `unsupported` not `carried` | Encoding round-trip; decimal rounding; UCA 0900 vs 1400; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); generic_sql SA `collation=` |
+| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py -q` (100 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label: dest TIMESTAMPTZ is `unsupported` not `carried`; encoding: dest `OCTET_LENGTH` of 😀 is 4 (`F09F9880`), utf8mb3 INSERT errors under strict SQL (never `?`) | Decimal rounding; UCA 0900 vs 1400; NFC/NFD; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
 | 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py -q` (40 passed on this host: identity 14 + live execute_tracked 2 + certificate 24; SQLite always + live PG 16 → MariaDB 10.11) | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Writer `records_processed` cannot hide a dest shortfall (DMS MISSING_TARGET class). Append uses dest delta. Empty incremental pass is a measured zero. | Upsert/CDC keyed conservation; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
@@ -440,7 +440,6 @@ Includes:
 
 ### NOT claimed / remaining for PROVEN (collation slice)
 
-* Encoding round-trip / charset capacity beyond utf8mb3→utf8mb4 promote
 * Decimal rounding, float binary
 * UCA 0900 vs 1400 linguistic equality
 * Oracle / SQL Server live COLLATE certify (planner covers SQL Server BIN/CI_AS)
@@ -682,5 +681,59 @@ is invented.
 * Snowflake `TIMESTAMP_TZ` live
 * Exactly-once / 100% of all routes — not claimed
 
+## Property 8 — PARTIAL (2026-08-14, encoding capacity)
 
+**Claim:** Charset *names* are not capacity. MySQL `utf8`/`UTF8` is three-byte
+(BMP). Oracle `UTF8` is CESU-8 (UTR #26). PostgreSQL `UTF8` is Unicode.
+We classify physical form, recompose CESU-8 / UTF-16 surrogate leaks to
+Unicode scalars, quarantine cells dest cannot encode, and certify from the
+destination engine (`OCTET_LENGTH` / `HEX`). We never substitute `?` and
+never copy PostgreSQL `UTF8` onto MySQL as `CHARACTER SET UTF8`.
+
+**Why this is the unique product:** AWS DMS documents character substitution
+and historically lacked utf8mb4. Oracle `UTF8` → PostgreSQL UTF8 yields
+`invalid byte sequence 0xed 0xa0 0xbd` (CESU-8 high surrogate). Python
+`bytes.decode('latin-1')` fallbacks make checksums of `str` look green.
+MySQL non-strict SQL mode stores `?`. DataFlow: dest-engine proof that 😀
+is four UTF-8 bytes (`F09F9880`), not six CESU-8 bytes; utf8mb3 INSERT
+under `STRICT_TRANS_TABLES` errors and the row is absent; bind of U+1F600
+into utf8mb3 raises and the write matrix quarantines.
+
+**Algorithm (canonical, one place):** `apps/api/services/encoding_capacity.py`
+
+1. `classify_capacity(engine, type, charset)` — MySQL `latin1` is cp1252
+   (euro fits); ISO-8859-1 is not. MySQL `utf8` is utf8mb3. Oracle `UTF8`
+   is CESU-8; `AL32UTF8` is UTF-8. Unmeasured dest charset is
+   `unsupported`, not `carried`.
+2. Decode to Unicode scalars. CESU-8 six-byte supplementary sequences and
+   surrogate pairs leaked into Python `str` recompose. Unpaired surrogates
+   and ill-formed UTF-8 raise — U+FFFD invent is silent loss. U+FFFD
+   already in the source is prior loss and still a character.
+3. Bind / quarantine: dest that cannot encode a scalar holds the cell out.
+   Create-new MySQL canonicalizes `UTF8`/`utf8mb3` → `utf8mb4` so we do
+   not invent a BMP dest.
+4. Fidelity aspect `encoding`: PG TEXT → MySQL utf8mb4 is `carried`;
+   NVARCHAR → utf8mb3 is `unsupported`. Independent of collation equality
+   and of `CHARACTER SET` DDL cosmetics.
+
+**Measured (this host, PostgreSQL 16 + MariaDB 10.11):**
+```
+100 passed in 4.95s  (Property 8 combined, including this slice)
+  Live MariaDB utf8mb3: INSERT 😀 under STRICT_TRANS_TABLES raises;
+    COUNT(*)=0. Non-strict stores '?' / HEX 3F — dest-engine proof we
+    must never take that path.
+  Live PG TEXT 😀 → MariaDB: dest CHARACTER_SET utf8mb4; OCTET_LENGTH=4;
+    HEX=F09F9880 (not EDA0BDEDB880); encoding aspect carried; SQL NULL
+    stays SQL NULL.
+  Unit: CESU-8 bytes recompose; surrogate leak recomposes; utf8mb3
+    bind/quarantine holds U+1F600; PG UTF8 is not copied as MySQL utf8.
+```
+
+### NOT claimed / remaining for PROVEN (encoding slice)
+
+* Oracle live CESU-8 (`UTF8`) → PG `convert_to` certify
+* GB18030 / Shift-JIS live
+* NFC vs NFD uniqueness (UAX #15) — classified, not normalized silently
+* SQL Server VARCHAR code-page matrix beyond cp1252 default
+* Exactly-once / 100% of all routes — not claimed
 

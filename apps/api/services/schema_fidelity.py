@@ -21,6 +21,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
 from services.collation_carry import destination_column_collations, plan_collation_carry
+from services.encoding_capacity import plan_encoding_carry
 from services.identity_carry import plan_identity_carry
 from services.offset_label import plan_offset_label_carry
 from services.physical_placement_ddl import plan_physical_placement, verify_placement
@@ -41,6 +42,7 @@ REQUIRED_ASPECTS: tuple[str, ...] = (
     "generated",
     "collation",
     "offset_label",
+    "encoding",
     "charset",
     "index",
     "partitioning",
@@ -930,6 +932,23 @@ def plan_create_new_fidelity(
     for decision in offset_plan:
         report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
 
+    dest_charsets = {
+        d.dest_column: d.dest_charset
+        for d in collation_plan.decisions
+        if d.dest_charset
+    }
+    encoding_plan = plan_encoding_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        dest_charset_for_column=dest_charsets.get,
+    )
+    for decision in encoding_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
     # --- CARRY: physical placement (partitioning / tablespace / clustering) ---
     placement = plan_physical_placement(
         source_storage=catalog.physical_storage,
@@ -954,6 +973,7 @@ def plan_create_new_fidelity(
         skip_identity=bool(identity_plan.decisions),
         skip_collation=bool(collation_plan.decisions),
         skip_offset_label=bool(offset_plan),
+        skip_encoding=bool(encoding_plan),
         skip_charset=charset_emitted,
     )
 
@@ -2498,6 +2518,7 @@ def _emit_unsupported_catalog(
     skip_identity: bool = False,
     skip_collation: bool = False,
     skip_offset_label: bool = False,
+    skip_encoding: bool = False,
     skip_charset: bool = False,
 ) -> None:
     if catalog.foreign_keys:
@@ -2624,6 +2645,13 @@ def _emit_unsupported_catalog(
             False,
             "Originating offset label could not be planned for this destination.",
             "No aware-temporal columns on the source catalog.",
+        )
+    if not skip_encoding:
+        _aspect_list(
+            "encoding",
+            bool(catalog.charsets),
+            "Unicode encoding capacity could not be planned for this destination.",
+            "No character columns on the source catalog.",
         )
     if not skip_charset:
         if catalog.charsets:

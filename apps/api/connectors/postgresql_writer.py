@@ -749,6 +749,7 @@ def _pg_materialize_mapped_batch(
         rejected_details,
         policy,
         dialect_label=string_dialect,
+        dest_db=_decimal_dest or "postgresql",
     )
     mapped_rows = quarantine_unfit_arrays(
         mapped_rows,

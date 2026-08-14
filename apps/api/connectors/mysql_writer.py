@@ -404,6 +404,7 @@ def _mysql_materialize_mapped_batch(
         rejected_details,
         policy,
         dialect_label="MySQL VARCHAR",
+        dest_db="mysql",
     )
     mapped_rows = quarantine_unfit_json(
         mapped_rows,

@@ -203,11 +203,16 @@ def classify_equality(
 
 
 def _mysql_dest_spelling(eq: EqualityClass) -> tuple[str, str, str]:
-    """(charset, collation, refusal). Portable names only — no UCA-version invent."""
-    charset = eq.charset if eq.charset.lower() in {"utf8mb4", "utf8mb3", "utf8", "latin1"} else "utf8mb4"
+    """(charset, collation, refusal). Portable names only — no UCA-version invent.
+
+    PostgreSQL reports ``UTF8``. MySQL ``utf8``/``UTF8`` is utf8mb3 (BMP). Copying
+    the source spelling would invent a dest that cannot store supplementary
+    characters the source held — the encoding-capacity hole. Canonicalize to
+    lowercase MySQL names, then promote 3-byte UTF-8 to utf8mb4.
+    """
+    token = (eq.charset or "").strip().lower()
+    charset = token if token in {"utf8mb4", "utf8mb3", "utf8", "latin1"} else "utf8mb4"
     if charset in {"utf8", "utf8mb3"}:
-        # 3-byte UTF-8 cannot hold supplementary-plane characters. Promote
-        # rather than emit a dest that would truncate emoji the source held.
         charset = "utf8mb4"
     if eq.case == "sensitive":
         return charset, f"{charset}_bin", ""
