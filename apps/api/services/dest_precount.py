@@ -50,10 +50,11 @@ population is RFC 4180 ``csv.reader`` rows after the header
 blank lines. Quoted embedded newlines are one record. Local CSV/TSV
 is counted from the path; gzip CSV/TSV streams. Excel / Avro /
 Parquet / ORC gzip still decompresses first (workbook / footer
-parsers need a byte image). Object-store GET gzip of CSV/JSON/JSONL/XML
-streams through ``GzipFile`` (the GET body stays compressed; COUNT does
-not materialize a second decompressed copy). Excel/Avro/Parquet/ORC GET
-gzip still decompresses (byte-image parsers).
+parsers need a byte image). Object-store GET of CSV/JSON/JSONL/XML
+streams the HTTP body (gzip through ``GzipFile(fileobj=StreamingBody)``).
+COUNT does not ``Body.read()`` the object, does not hold every part in
+RAM, and does not ``gzip.decompress`` a second copy. Excel/Avro/Parquet/ORC
+GET still materializes one object (byte-image parsers).
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
@@ -1472,10 +1473,14 @@ def _object_store_kind(db_type: str) -> str:
     return key
 
 
-def _object_store_list_and_get(
+def _object_store_list_keys(
     kind: str, cfg: dict[str, Any], bucket: str, key: str
-) -> list[tuple[str, bytes]] | None:
-    """Payloads for dest COUNT. ``[]`` is missing (measured zero). ``None`` is unknowable."""
+) -> list[str] | None:
+    """Object keys for dest COUNT. ``[]`` is missing (measured zero). ``None`` is unknowable.
+
+    Listing is not GET. COUNT opens one key at a time so a multi-part
+    export is never held as N payloads in RAM.
+    """
     from connectors.object_store_common import (
         normalize_object_base_key,
         object_parts_prefix,
@@ -1498,85 +1503,53 @@ def _object_store_list_and_get(
     except Exception as exc:
         logger.info("object-store list failed for dest COUNT: %s", exc)
         return None
-    read_keys = object_store_read_keys(base, listed)
-    payloads: list[tuple[str, bytes]] = []
-    for obj_key in read_keys:
-        body = _object_store_get_bytes(kind, cfg, bucket, obj_key)
-        if body is False:
-            continue
-        if body is None:
-            return None
-        payloads.append((obj_key, body))
-    return payloads
-
-
-def _object_store_get_bytes(
-    kind: str, cfg: dict[str, Any], bucket: str, key: str
-) -> bytes | None | bool:
-    """bytes on hit, False if missing, None if unknowable."""
-    try:
-        if kind == "s3":
-            from botocore.exceptions import ClientError
-            from connectors.aws_common import boto3_client
-
-            try:
-                return boto3_client("s3", cfg).get_object(Bucket=bucket, Key=key)["Body"].read()
-            except ClientError as exc:
-                code = str((exc.response or {}).get("Error", {}).get("Code") or "")
-                http = str((exc.response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode") or "")
-                if code in {"404", "NoSuchKey", "NotFound"} or http == "404":
-                    return False
-                raise
-        if kind == "gcs":
-            from connectors.gcs_common import gcs_client
-
-            blob = gcs_client(cfg).bucket(bucket).get_blob(key)
-            if blob is None:
-                return False
-            return blob.download_as_bytes()
-        if kind == "adls":
-            from connectors.adls_common import blob_service_client
-
-            try:
-                return (
-                    blob_service_client(cfg)
-                    .get_blob_client(bucket, key)
-                    .download_blob()
-                    .readall()
-                )
-            except Exception as exc:
-                name = type(exc).__name__
-                if "NotFound" in name or "404" in str(exc):
-                    return False
-                raise
-    except Exception as exc:
-        logger.info("object-store GET failed for dest COUNT (%s/%s): %s", bucket, key, exc)
-        return None
-    return None
+    return list(object_store_read_keys(base, listed))
 
 
 def _object_store_row_count(
     db_type: str, cfg: dict[str, Any], *, table_name: str
 ) -> int | None:
-    """Dest-engine artifact COUNT of GET bodies. Missing object is 0.
+    """Dest-engine artifact COUNT of GET streams. Missing object is 0.
 
-    Same format machine as local ``count_artifact_rows``. A truncated or
-    unparseable part is unmeasured — never JSON-fallback empty, never the
-    sum of a prefix. Writer PUT rowcount is not this proof.
+    Same format machine as local ``count_artifact_rows``. One key is
+    opened, counted, and closed before the next — never a list of GET
+    bodies. A truncated or unparseable part is unmeasured — never
+    JSON-fallback empty, never the sum of a prefix. Writer PUT rowcount
+    is not this proof.
     """
+    from services.object_streaming import open_object_store_binary
+
     bucket = str(cfg.get("database") or "").strip()
     key = str(table_name or "").strip()
     if not bucket or not key:
         return None
     kind = _object_store_kind(db_type)
-    payloads = _object_store_list_and_get(kind, cfg, bucket, key)
-    if payloads is None:
+    keys = _object_store_list_keys(kind, cfg, bucket, key)
+    if keys is None:
         return None
-    if not payloads:
+    if not keys:
         return 0
     total = 0
-    for obj_key, body in payloads:
-        n = _count_artifact_payload(body, name=str(obj_key))
+    for obj_key in keys:
+        opened = open_object_store_binary(kind, cfg, bucket, str(obj_key))
+        if opened is False:
+            continue
+        if opened is None:
+            return None
+        stream, closer = opened
+        try:
+            n = _count_artifact_stream(stream, name=str(obj_key))
+        except Exception as exc:
+            logger.info(
+                "object-store dest COUNT failed for %s/%s: %s", bucket, obj_key, exc
+            )
+            n = None
+        finally:
+            if closer is not None:
+                try:
+                    closer()
+                except Exception:
+                    pass
         if n is None:
             logger.info(
                 "object-store dest COUNT unmeasured for %s/%s", bucket, obj_key
@@ -1900,19 +1873,21 @@ def _count_artifact_kind(kind: str, content: bytes) -> int | None:
     return None
 
 
-def _count_artifact_payload(
-    content: bytes,
+def _count_artifact_stream(
+    source: Any,
     *,
     name: str,
     fmt: str | None = None,
 ) -> int | None:
-    """Dest-engine COUNT of an object-store GET body. Same machine as a local file.
+    """Dest-engine COUNT of an object-store GET stream. Same machine as a local file.
 
-    Gzip keys of CSV/JSON/JSONL/XML stream through ``GzipFile`` — COUNT does
-    not ``gzip.decompress`` a second full copy. CSV encoding sniff is
-    prefix-then-rest on that stream (no ``seek(0)``). Excel/Avro/Parquet/ORC gzip
-    still decompresses. Unparseable / unsupported / missing parser stay
-    unmeasured — never JSON-fallback empty (that is dest=0).
+    CSV/JSON/JSONL/XML (including gzip) walk ``source`` forward-only —
+    ``GzipFile(fileobj=StreamingBody)``, never ``Body.read()`` of the object
+    and never ``gzip.decompress`` of a second copy. CSV encoding sniff is
+    prefix-then-rest (no ``seek(0)``). Excel/Avro/Parquet/ORC still
+    materialize one object (byte-image / footer parsers). Unparseable /
+    unsupported / missing parser stay unmeasured — never JSON-fallback
+    empty (that is dest=0).
     """
     label = str(name or "")
     compressed = label.lower().endswith(".gz")
@@ -1922,7 +1897,7 @@ def _count_artifact_payload(
     if compressed:
         if kind in _STREAMING_COUNT_KINDS:
             try:
-                stream = gzip.GzipFile(fileobj=io.BytesIO(content), mode="rb")
+                stream = gzip.GzipFile(fileobj=source, mode="rb")
             except Exception as exc:
                 logger.info("artifact gzip stream failed for %s: %s", name, exc)
                 return None
@@ -1937,12 +1912,35 @@ def _count_artifact_payload(
                 except Exception:
                     pass
         try:
-            body = gzip.decompress(content)
+            body = gzip.decompress(source.read())
         except Exception as exc:
             logger.info("artifact gzip decode failed for %s: %s", name, exc)
             return None
         return _count_artifact_kind(kind, body)
-    return _count_artifact_kind(kind, content)
+    if kind in _STREAMING_COUNT_KINDS:
+        try:
+            return _count_streaming_kind(kind, source)
+        except Exception as exc:
+            logger.info("artifact stream count failed for %s: %s", name, exc)
+            return None
+    try:
+        raw = source.read()
+    except Exception as exc:
+        logger.info("artifact slurp failed for %s: %s", name, exc)
+        return None
+    if not isinstance(raw, (bytes, bytearray)):
+        return None
+    return _count_artifact_kind(kind, bytes(raw))
+
+
+def _count_artifact_payload(
+    content: bytes,
+    *,
+    name: str,
+    fmt: str | None = None,
+) -> int | None:
+    """In-RAM GET body. Streaming GET uses ``_count_artifact_stream``."""
+    return _count_artifact_stream(io.BytesIO(content), name=name, fmt=fmt)
 
 
 def count_artifact_rows(
@@ -1965,8 +1963,9 @@ def count_artifact_rows(
     whole export. CSV/TSV counts RFC 4180 records from disk, not
     ``wc -l`` and not a slurp of the whole file. Local CSV/JSON/JSONL/XML
     gzip streams; Excel/Avro/Parquet/ORC gzip still decompresses first.
-    Object-store GET gzip of CSV/JSON/JSONL/XML streams through
-    ``GzipFile``; Excel/Avro/Parquet/ORC GET gzip still decompresses.
+    Object-store GET of CSV/JSON/JSONL/XML streams the HTTP body through
+    ``GzipFile`` when gzip; Excel/Avro/Parquet/ORC GET still materializes
+    one object.
     """
     raw = str(path or "").strip()
     if not raw:

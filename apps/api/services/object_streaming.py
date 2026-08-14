@@ -9,6 +9,7 @@ but at least the network payload is no longer held as a single byte buffer.
 
 from __future__ import annotations
 
+import io
 import logging
 import os
 from services.brand_env import getenv_brand
@@ -199,6 +200,106 @@ def read_rows_from_spill(
     records = result.data[offset : offset + limit]
     rows = _records_to_matrix(records, headers)
     return headers, rows, known_total if known_total is not None else len(result.data)
+
+
+class _ChunkReader(io.RawIOBase):
+    """File-like over an iterator of byte chunks (Azure ``download_blob().chunks()``).
+
+    Dest COUNT and spill both need ``read(n)``. The iterator is one-shot —
+    the same contract as boto3 ``StreamingBody``. One chunk is buffered;
+    the object is not concatenated in RAM.
+    """
+
+    def __init__(self, chunks: Any) -> None:
+        super().__init__()
+        self._chunks = iter(chunks)
+        self._buf = b""
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        mv = memoryview(b)
+        n = len(mv)
+        if n == 0:
+            return 0
+        while len(self._buf) < n:
+            try:
+                nxt = next(self._chunks)
+            except StopIteration:
+                break
+            if not nxt:
+                continue
+            self._buf += bytes(nxt)
+        if not self._buf:
+            return 0
+        take = min(n, len(self._buf))
+        mv[:take] = self._buf[:take]
+        self._buf = self._buf[take:]
+        return take
+
+
+def open_object_store_binary(
+    kind: str, cfg: dict[str, Any], bucket: str, key: str
+) -> tuple[Any, Any] | bool | None:
+    """Readable GET body + closer. ``False`` if missing, ``None`` if unknowable.
+
+    Does not ``Body.read()`` / ``download_as_bytes()`` / ``readall()`` the
+    object. Dest COUNT of CSV/JSON/JSONL/XML (including gzip) walks this
+    stream. Excel/Avro/Parquet/ORC still materialize one object inside
+    COUNT — those parsers need a byte image. Spill downloaders stay the
+    ingest path (disk), not dest COUNT.
+    """
+    try:
+        if kind == "s3":
+            from botocore.exceptions import ClientError
+            from connectors.aws_common import boto3_client
+
+            try:
+                body = boto3_client("s3", cfg).get_object(Bucket=bucket, Key=key)["Body"]
+            except ClientError as exc:
+                code = str((exc.response or {}).get("Error", {}).get("Code") or "")
+                http = str(
+                    (exc.response or {}).get("ResponseMetadata", {}).get("HTTPStatusCode")
+                    or ""
+                )
+                if code in {"404", "NoSuchKey", "NotFound"} or http == "404":
+                    return False
+                raise
+            closer = getattr(body, "close", None)
+            return body, closer if callable(closer) else None
+        if kind == "gcs":
+            from connectors.gcs_common import gcs_client
+
+            blob = gcs_client(cfg).bucket(bucket).get_blob(key)
+            if blob is None:
+                return False
+            handle = blob.open("rb")
+            closer = getattr(handle, "close", None)
+            return handle, closer if callable(closer) else None
+        if kind == "adls":
+            from connectors.adls_common import blob_service_client
+
+            try:
+                downloader = (
+                    blob_service_client(cfg).get_blob_client(bucket, key).download_blob()
+                )
+            except Exception as exc:
+                name = type(exc).__name__
+                if "NotFound" in name or "404" in str(exc):
+                    return False
+                raise
+            stream = _ChunkReader(downloader.chunks())
+            return stream, stream.close
+    except Exception as exc:
+        _logger.info(
+            "object-store GET stream failed for dest COUNT (%s/%s): %s",
+            bucket,
+            key,
+            exc,
+        )
+        return None
+    return None
 
 
 def download_s3_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:

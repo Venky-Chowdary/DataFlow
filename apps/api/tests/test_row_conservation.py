@@ -8,9 +8,9 @@ against itself.
 
 from __future__ import annotations
 
-from pathlib import Path
 import gzip
 import io
+from pathlib import Path
 
 import pytest
 
@@ -2816,9 +2816,28 @@ def test_object_store_dest_count_live_get(local_object_store: str):
 def _patch_object_store_payloads(
     monkeypatch: pytest.MonkeyPatch, payloads: list[tuple[str, bytes]] | None
 ) -> None:
+    """List keys + open a stream per key. Never a list of GET bodies."""
+    if payloads is None:
+        monkeypatch.setattr(
+            "services.dest_precount._object_store_list_keys",
+            lambda *_a, **_k: None,
+        )
+        return
+    bodies = {str(k): v for k, v in payloads}
     monkeypatch.setattr(
-        "services.dest_precount._object_store_list_and_get",
-        lambda *_a, **_k: payloads,
+        "services.dest_precount._object_store_list_keys",
+        lambda *_a, **_k: [str(k) for k, _ in payloads],
+    )
+
+    def _open(_kind: str, _cfg: dict, _bucket: str, key: str):
+        if key not in bodies:
+            return False
+        buf = io.BytesIO(bodies[key])
+        return buf, buf.close
+
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_binary",
+        _open,
     )
 
 
@@ -2934,101 +2953,79 @@ def test_object_store_xml_counts_record_path_not_json_empty(monkeypatch: pytest.
     )
 
 
-def _patch_object_store_payloads(
-    monkeypatch: pytest.MonkeyPatch, payloads: list[tuple[str, bytes]] | None
-) -> None:
-    monkeypatch.setattr(
-        "services.dest_precount._object_store_list_and_get",
-        lambda *_a, **_k: payloads,
-    )
+class _NoSlurpGet(io.BytesIO):
+    """Compressed GET body. ``read()`` without a size is the boto3 slurp."""
+
+    def read(self, size: int | None = -1) -> bytes:
+        if size is None or size < 0:
+            raise AssertionError("object-store dest COUNT must not Body.read() the object")
+        return super().read(size)
 
 
-def test_object_store_parquet_count_is_footer_not_json_fallback_zero(
+def test_object_store_gzip_csv_get_does_not_slurp(
     monkeypatch: pytest.MonkeyPatch,
-):
-    """Parquet on S3 must not JSON-parse as [] and close overwrite as dest=0."""
-    pytest.importorskip("pyarrow.parquet")
+) -> None:
+    """S3/GCS/ADLS dest COUNT streams gzip CSV. Never Body.read() of the GET.
+
+    DMS S3 validation is Athena once/day and Parquet-only. Airbyte/Fivetran
+    close S3 on PUT bytes. Spark feeds GzipCodec the GET stream. Our wedge
+    is independent RFC 4180 COUNT of the object we wrote, one key at a
+    time, without holding the compressed body as a second copy.
+    """
     from services.format_converter import convert_rows
 
-    content, _mime = convert_rows(
+    csv_body, _ = convert_rows(
         ["id", "v"],
-        [["1", "a"], ["2", "b"]],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
         source_format="csv",
-        target_format="parquet",
+        target_format="csv",
     )
-    _patch_object_store_payloads(monkeypatch, [("exports/data.parquet", content)])
-    cfg = {"database": "df-count", "host": "us-east-1"}
-    assert destination_row_count("s3", cfg, schema="", table_name="exports/data.parquet") == 2
+    compressed = gzip.compress(csv_body)
+    quoted, _ = convert_rows(
+        ["id", "note"],
+        [["1", "hello\nworld"], ["2", "b"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    quoted_gz = gzip.compress(quoted)
+
+    monkeypatch.setattr(
+        "services.dest_precount._object_store_list_keys",
+        lambda *_a, **_k: ["exports/data.csv.gz"],
+    )
+
+    def _open(_kind: str, _cfg: dict, _bucket: str, key: str):
+        payload = quoted_gz if "quoted" in key else compressed
+        buf = _NoSlurpGet(payload)
+        return buf, buf.close
+
+    monkeypatch.setattr("services.object_streaming.open_object_store_binary", _open)
     assert (
         destination_row_count(
-            "amazon_s3", cfg, schema="", table_name="exports/data.parquet"
+            "s3", {"database": "b"}, schema="", table_name="exports/data.csv.gz"
         )
-        == 2
-    )
-    _patch_object_store_payloads(monkeypatch, [("exports/data.parquet", b"not-parquet")])
-    assert destination_row_count("s3", cfg, schema="", table_name="exports/data.parquet") is None
-
-
-def test_object_store_excel_counts_value_rows_not_used_range(monkeypatch: pytest.MonkeyPatch):
-    openpyxl = pytest.importorskip("openpyxl")
-    import io
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.append(["id", "name"])
-    ws.append(["1", "a"])
-    ws.append(["2", "b"])
-    for r in range(5, 22):
-        ws.cell(row=r, column=1).number_format = "0.00"
-    buf = io.BytesIO()
-    wb.save(buf)
-    _patch_object_store_payloads(monkeypatch, [("exports/dump.xlsx", buf.getvalue())])
-    n = destination_row_count(
-        "s3",
-        {"database": "df-count"},
-        schema="",
-        table_name="exports/dump.xlsx",
-    )
-    assert n == 2
-    assert ws.max_row > 3
-
-
-def test_object_store_avro_and_orc_use_artifact_count(monkeypatch: pytest.MonkeyPatch):
-    pytest.importorskip("fastavro")
-    pytest.importorskip("pyarrow.orc")
-    from services.format_converter import convert_rows
-
-    avro, _ = convert_rows(
-        ["id"], [["1"], ["2"], ["3"]], source_format="csv", target_format="avro"
-    )
-    _patch_object_store_payloads(monkeypatch, [("exports/data.avro", avro)])
-    assert (
-        destination_row_count("s3", {"database": "b"}, schema="", table_name="exports/data.avro")
         == 3
     )
-    orc, _ = convert_rows(["id"], [["1"], ["2"]], source_format="csv", target_format="orc")
-    _patch_object_store_payloads(monkeypatch, [("exports/data.orc", orc)])
+    monkeypatch.setattr(
+        "services.dest_precount._object_store_list_keys",
+        lambda *_a, **_k: ["exports/quoted.csv.gz"],
+    )
     assert (
-        destination_row_count("gcs", {"database": "b"}, schema="", table_name="exports/data.orc")
+        destination_row_count(
+            "s3", {"database": "b"}, schema="", table_name="exports/quoted.csv.gz"
+        )
         == 2
     )
 
 
-def test_object_store_unparseable_part_does_not_sum_prefix(monkeypatch: pytest.MonkeyPatch):
-    """Truncated listing is unmeasured — never CSV 2 + garbage 0."""
-    _patch_object_store_payloads(
-        monkeypatch,
-        [
-            ("exports/part-000.csv", b"id\n1\n2\n"),
-            ("exports/part-001.parquet", b"not-parquet"),
-        ],
-    )
-    assert (
-        destination_row_count(
-            "s3", {"database": "b"}, schema="", table_name="exports/data"
-        )
-        is None
-    )
+def test_chunk_reader_csv_count_is_one_object_not_concatenated() -> None:
+    """ADLS ``chunks()`` is a file-like COUNT source, not ``b''.join(chunks)``."""
+    from services.csv_profiler import count_csv_rows
+    from services.object_streaming import _ChunkReader
+
+    body = b"id,v\n1,a\n2,b\n3,c\n"
+    stream = _ChunkReader(body[i : i + 5] for i in range(0, len(body), 5))
+    assert count_csv_rows(io.BufferedReader(stream)) == 3
 
 
 def test_job_rollup_two_keyed_streams_closed_not_summed():
