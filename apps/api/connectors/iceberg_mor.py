@@ -64,16 +64,20 @@ class _MorPlan:
 def filesystem_mor_count(
     table_dir: Path,
     meta: dict[str, Any],
-    data_files: Sequence[tuple[str, Path]],
+    data_files: Sequence[tuple[str, Path | None]],
     *,
-    count_data_file: Callable[[Path], int | None],
-    project_file: Callable[[Path, Sequence[str]], list[dict[str, Any]] | None],
+    count_data_file: Callable[[str, Path | None], int | None],
+    project_file: Callable[
+        [str, Path | None, Sequence[str]], list[dict[str, Any]] | None
+    ],
 ) -> int | None:
     """Dest COUNT after applying current-snapshot delete files.
 
     Position-only uses Parquet/JSONL dest-engine population minus unique
     in-range pos — never data-page projection, never delete ``record-count``.
     Equality deletes project equality columns (required by the spec).
+    ``Path`` may be ``None`` for catalog object-store data files (COUNT
+    Range-GETs the footer; delete parquet is resolved locally first).
     """
     try:
         plan = _load_mor_plan(table_dir, meta, data_files)
@@ -90,10 +94,12 @@ def filesystem_mor_count(
 def filesystem_mor_snapshot_rows(
     table_dir: Path,
     meta: dict[str, Any],
-    data_files: Sequence[tuple[str, Path]],
+    data_files: Sequence[tuple[str, Path | None]],
     *,
     cols: Sequence[str],
-    project_file: Callable[[Path, Sequence[str]], list[dict[str, Any]] | None],
+    project_file: Callable[
+        [str, Path | None, Sequence[str]], list[dict[str, Any]] | None
+    ],
 ) -> list[dict[str, Any]] | None:
     """Projected snapshot rows after MoR. Same population as dest COUNT."""
     wanted = [str(c) for c in cols if str(c).strip()]
@@ -120,7 +126,7 @@ def filesystem_mor_snapshot_rows(
 def _load_mor_plan(
     table_dir: Path,
     meta: dict[str, Any],
-    data_files: Sequence[tuple[str, Path]],
+    data_files: Sequence[tuple[str, Path | None]],
 ) -> _MorPlan:
     refs = list(meta.get("delete-files") or meta.get("delete_files") or [])
     if not refs:
@@ -189,13 +195,13 @@ def _load_mor_plan(
 
 def _position_only_count(
     plan: _MorPlan,
-    data_files: Sequence[tuple[str, Path]],
-    count_data_file: Callable[[Path], int | None],
+    data_files: Sequence[tuple[str, Path | None]],
+    count_data_file: Callable[[str, Path | None], int | None],
 ) -> int:
     deleted = _position_pos_by_rel(plan, [rel for rel, _p in data_files])
     total = 0
     for rel, path in data_files:
-        n = count_data_file(path)
+        n = count_data_file(rel, path)
         if n is None:
             raise IcebergMorUnmeasured(f"data-file population unmeasured: {rel}")
         dropped = {pos for pos in deleted.get(rel, set()) if 0 <= pos < n}
@@ -205,14 +211,16 @@ def _position_only_count(
 
 def _project_and_filter(
     plan: _MorPlan,
-    data_files: Sequence[tuple[str, Path]],
+    data_files: Sequence[tuple[str, Path | None]],
     cols: Sequence[str],
-    project_file: Callable[[Path, Sequence[str]], list[dict[str, Any]] | None],
+    project_file: Callable[
+        [str, Path | None, Sequence[str]], list[dict[str, Any]] | None
+    ],
 ) -> list[dict[str, Any]] | None:
     deleted_pos = _position_pos_by_rel(plan, [rel for rel, _p in data_files])
     out: list[dict[str, Any]] = []
     for rel, path in data_files:
-        rows = project_file(path, cols)
+        rows = project_file(rel, path, cols)
         if rows is None:
             return None
         data_seq = plan.data_seq.get(rel)

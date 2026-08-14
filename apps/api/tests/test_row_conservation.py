@@ -5730,6 +5730,81 @@ def test_iceberg_catalog_mor_equality_with_entries_sequence(
     ) == 3
 
 
+def test_iceberg_catalog_mor_position_delete_object_store_range_get(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Remote data-file COUNT stays Range-GET footer; delete parquet is GET-spooled."""
+    from services.dest_precount import destination_row_count
+    from services.object_streaming import RangeGetSource
+
+    data_path = tmp_path / "part-0.parquet"
+    del_path = tmp_path / "pos-deletes.parquet"
+    data_uri = "s3://lake/wh/ns/orders/data/part-0.parquet"
+    del_uri = "s3://lake/wh/ns/orders/data/pos-deletes.parquet"
+    _write_iceberg_delete_parquet(
+        data_path, {"id": ["1", "2", "3"], "v": ["a", "b", "c"]}
+    )
+    _write_iceberg_delete_parquet(
+        del_path, {"file_path": [data_uri, data_uri], "pos": [1, 1]}
+    )
+    data_bytes = data_path.read_bytes()
+    del_bytes = del_path.read_bytes()
+    bodies = {
+        "wh/ns/orders/data/part-0.parquet": data_bytes,
+        "wh/ns/orders/data/pos-deletes.parquet": del_bytes,
+    }
+
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_mor(
+            [data_uri],
+            [{"file_path": del_uri, "content": 1, "file_format": "PARQUET"}],
+        ),
+    )
+
+    def _open_seekable(kind: str, store_cfg: dict, bucket: str, key: str):
+        assert kind == "s3" and bucket == "lake"
+        content = bodies.get(key)
+        if content is None:
+            return False
+        src = RangeGetSource(len(content), lambda start, n: content[start : start + n])
+        return src, src.close
+
+    def _open_binary(kind: str, store_cfg: dict, bucket: str, key: str):
+        assert kind == "s3" and bucket == "lake"
+        content = bodies.get(key)
+        if content is None:
+            return False
+        return io.BytesIO(content), None
+
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_seekable", _open_seekable
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_binary", _open_binary
+    )
+    cfg = {
+        "type": "iceberg",
+        "connection_string": f"sqlite:///{tmp_path / 'catalog.db'}",
+        "warehouse": "s3://lake/wh",
+        "table": "orders",
+        "schema": "default",
+        "username": "AKIA",
+        "password": "secret",
+        "host": "us-east-1",
+        "extra": {
+            "s3.endpoint": "http://127.0.0.1:9000",
+            "s3.path-style-access": True,
+            "s3.access-key-id": "AKIA",
+            "s3.secret-access-key": "secret",
+            "s3.region": "us-east-1",
+        },
+    }
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="orders"
+    ) == 2
+
+
 def test_iceberg_catalog_object_store_count_is_range_footer_not_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

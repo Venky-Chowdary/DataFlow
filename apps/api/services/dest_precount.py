@@ -1856,8 +1856,8 @@ def _iceberg_filesystem_file_count(
             table_dir,
             current_meta,
             files,
-            count_data_file=_count_iceberg_data_file,
-            project_file=_project_iceberg_local,
+            count_data_file=_mor_count_local,
+            project_file=_mor_project_local,
         )
     total = 0
     for _rel, path in files:
@@ -1947,21 +1947,150 @@ def _iceberg_catalog_snapshot(
     return uris, meta
 
 
-def _iceberg_catalog_local_files(
+def _mor_count_local(_rel: str, path: Path | None) -> int | None:
+    if path is None:
+        return None
+    return _count_iceberg_data_file(path)
+
+
+def _mor_project_local(
+    _rel: str, path: Path | None, cols: Sequence[str]
+) -> list[dict[str, Any]] | None:
+    if path is None:
+        return None
+    return _project_iceberg_local(path, cols)
+
+
+def _mor_count_catalog(
+    rel: str,
+    path: Path | None,
+    *,
+    endpoint: dict[str, Any],
+    warehouse: str,
+) -> int | None:
+    if path is not None:
+        return _count_iceberg_data_file(path)
+    return _count_iceberg_data_uri(rel, endpoint=endpoint, warehouse=warehouse)
+
+
+def _mor_project_catalog(
+    rel: str,
+    path: Path | None,
+    cols: Sequence[str],
+    *,
+    endpoint: dict[str, Any],
+    warehouse: str,
+) -> list[dict[str, Any]] | None:
+    if path is not None:
+        return _project_iceberg_local(path, cols)
+    return _iceberg_project_data_uri(
+        rel, endpoint=endpoint, warehouse=warehouse, cols=cols
+    )
+
+
+def _iceberg_catalog_data_files(
     uris: Sequence[str], *, warehouse: str
-) -> list[tuple[str, Path]] | None:
-    files: list[tuple[str, Path]] = []
+) -> list[tuple[str, Path | None]]:
+    files: list[tuple[str, Path | None]] = []
     for uri in uris:
         local = _iceberg_local_path(str(uri), warehouse=warehouse)
         if local is None:
             resolved = _resolve_iceberg_data_uri(str(uri), warehouse)
             if resolved != str(uri):
                 local = _iceberg_local_path(resolved, warehouse=warehouse)
-        if local is None:
-            logger.info("iceberg catalog MoR requires local delete/data parquet: %s", uri)
-            return None
         files.append((str(uri), local))
     return files
+
+
+def _spool_iceberg_delete_uri(
+    uri: str, *, endpoint: dict[str, Any], warehouse: str
+) -> Path | None:
+    """Local path of a delete parquet. Object-store URIs GET into a temp file."""
+    from services.object_streaming import (
+        open_object_store_binary,
+        parse_object_store_uri,
+    )
+
+    raw = str(uri or "").strip()
+    local = _iceberg_local_path(raw, warehouse=warehouse)
+    if local is not None:
+        return local
+    resolved = _resolve_iceberg_data_uri(raw, warehouse)
+    if resolved != raw:
+        local = _iceberg_local_path(resolved, warehouse=warehouse)
+        if local is not None:
+            return local
+    loc = parse_object_store_uri(resolved)
+    if loc is None:
+        logger.info("iceberg catalog delete file not local or object URI: %s", uri)
+        return None
+    store_cfg = _iceberg_object_store_cfg(endpoint, loc)
+    opened = open_object_store_binary(loc.kind, store_cfg, loc.bucket, loc.key)
+    if opened is False or opened is None:
+        logger.info("iceberg catalog delete file GET unmeasured: %s", uri)
+        return None
+    handle, closer = opened
+    tmp_path: Path | None = None
+    try:
+        tmp = tempfile.NamedTemporaryFile(
+            prefix="df-iceberg-del-", suffix=".parquet", delete=False
+        )
+        tmp_path = Path(tmp.name)
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            tmp.write(chunk)
+        tmp.flush()
+        tmp.close()
+        return tmp_path
+    except Exception as exc:
+        logger.info("iceberg catalog delete file spool failed: %s", exc)
+        if tmp_path is not None:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+        return None
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def _prepare_catalog_mor(
+    uris: Sequence[str],
+    mor_meta: dict[str, Any],
+    *,
+    endpoint: dict[str, Any],
+    warehouse: str,
+) -> tuple[list[tuple[str, Path | None]], dict[str, Any], list[Path]] | None:
+    """Resolve data URIs and spool remote delete parquet. Temps must be unlinked."""
+    files = _iceberg_catalog_data_files(uris, warehouse=warehouse)
+    rewritten = dict(mor_meta)
+    temps: list[Path] = []
+    refs: list[dict[str, Any]] = []
+    for ref in list(mor_meta.get("delete-files") or []):
+        if not isinstance(ref, dict):
+            return None
+        raw = str(ref.get("path") or ref.get("file_path") or "").strip()
+        path = _spool_iceberg_delete_uri(raw, endpoint=endpoint, warehouse=warehouse)
+        if path is None:
+            for tmp in temps:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            return None
+        cloned = dict(ref)
+        cloned["path"] = str(path)
+        refs.append(cloned)
+        if path.name.startswith("df-iceberg-del-"):
+            temps.append(path)
+    rewritten["delete-files"] = refs
+    return files, rewritten, temps
 
 
 def _parquet_column_names(pf: Any) -> set[str]:
@@ -2205,17 +2334,31 @@ def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
     if mor_meta:
         from connectors.iceberg_mor import filesystem_mor_count
 
-        files = _iceberg_catalog_local_files(paths, warehouse=warehouse)
-        if files is None:
-            return None
-        root = Path(str(warehouse or "/"))
-        return filesystem_mor_count(
-            root,
-            mor_meta,
-            files,
-            count_data_file=_count_iceberg_data_file,
-            project_file=_project_iceberg_local,
+        prepared = _prepare_catalog_mor(
+            paths, mor_meta, endpoint=endpoint, warehouse=warehouse
         )
+        if prepared is None:
+            return None
+        files, meta, temps = prepared
+        try:
+            root = Path(str(warehouse or "/"))
+            return filesystem_mor_count(
+                root,
+                meta,
+                files,
+                count_data_file=lambda rel, path: _mor_count_catalog(
+                    rel, path, endpoint=endpoint, warehouse=warehouse
+                ),
+                project_file=lambda rel, path, cols: _mor_project_catalog(
+                    rel, path, cols, endpoint=endpoint, warehouse=warehouse
+                ),
+            )
+        finally:
+            for tmp in temps:
+                try:
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
     total = 0
     for uri in paths:
         n = _count_iceberg_data_uri(uri, endpoint=endpoint, warehouse=warehouse)
@@ -2258,17 +2401,29 @@ def _iceberg_snapshot_rows(
         if mor_meta:
             from connectors.iceberg_mor import filesystem_mor_snapshot_rows
 
-            files = _iceberg_catalog_local_files(uris, warehouse=warehouse)
-            if files is None:
-                return None
-            root = Path(str(warehouse or "/"))
-            return filesystem_mor_snapshot_rows(
-                root,
-                mor_meta,
-                files,
-                cols=wanted,
-                project_file=_project_iceberg_local,
+            prepared = _prepare_catalog_mor(
+                uris, mor_meta, endpoint=endpoint, warehouse=warehouse
             )
+            if prepared is None:
+                return None
+            files, meta, temps = prepared
+            try:
+                root = Path(str(warehouse or "/"))
+                return filesystem_mor_snapshot_rows(
+                    root,
+                    meta,
+                    files,
+                    cols=wanted,
+                    project_file=lambda rel, path, cols: _mor_project_catalog(
+                        rel, path, cols, endpoint=endpoint, warehouse=warehouse
+                    ),
+                )
+            finally:
+                for tmp in temps:
+                    try:
+                        tmp.unlink(missing_ok=True)
+                    except Exception:
+                        pass
         rows: list[dict[str, Any]] = []
         for uri in uris:
             part = _iceberg_project_data_uri(
@@ -2308,7 +2463,7 @@ def _iceberg_snapshot_rows(
             current_meta,
             files,
             cols=wanted,
-            project_file=_project_iceberg_local,
+            project_file=_mor_project_local,
         )
     rows = []
     for _rel, file_path in files:
