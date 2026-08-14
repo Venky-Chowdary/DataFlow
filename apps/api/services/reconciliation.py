@@ -1728,45 +1728,32 @@ def verify_s3_object(
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
-    """Reconcile an S3 object by downloading and parsing its contents.
+    """Gate-8 cell checksum of S3 GET streams. Never JSON-fallback empty.
 
-    Multi-chunk writers emit ``part-*`` keys under a stem prefix; aggregate
-    those parts when present so Gate-8 does not fall through to writer-ack
-    while most rows live only in part objects.
+    Dest COUNT of the same keys is ``destination_row_count``. This digest
+    walks records (CSV RFC 4180, JSONL objects, JSON root array, Parquet/
+    Avro values) off the GET body. Gzip CSV as UTF-8 JSON garbage is not
+    dest=0. XML/Excel/ORC cell walk stays unmeasured. Missing object is
+    ``(0, "")``.
     """
     try:
-        from connectors.aws_common import boto3_client
-        from connectors.object_store_common import (
-            normalize_object_base_key,
-            object_parts_prefix,
-            object_store_read_keys,
-        )
-        from connectors.s3_reader import list_objects
+        from services.dest_precount import checksum_object_store
 
-        cfg = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "ssl": ssl,
-            "database": bucket,
-        }
-        client = boto3_client("s3", cfg)
-        base = normalize_object_base_key(key)
-        parts_prefix = object_parts_prefix(base)
-        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
-        read_keys = object_store_read_keys(base, listed)
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for obj_key in read_keys:
-            body = client.get_object(Bucket=bucket, Key=obj_key)["Body"].read()
-            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
-            if not headers:
-                headers = list(hdrs or [])
-            all_rows.extend(rows)
-        columns = headers or target_columns or []
-        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
+        return checksum_object_store(
+            "s3",
+            {
+                "host": host,
+                "port": port,
+                "username": username,
+                "password": password,
+                "connection_string": connection_string,
+                "ssl": ssl,
+                "database": bucket,
+            },
+            table_name=key,
+            columns=target_columns,
+            limit=limit,
+        )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -1782,37 +1769,22 @@ def verify_gcs_blob(
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
-    """Reconcile a GCS blob by downloading and parsing its contents."""
+    """Gate-8 cell checksum of GCS GET streams. Never JSON-fallback empty."""
     try:
-        from connectors.gcs_common import gcs_client
-        from connectors.gcs_reader import list_objects
-        from connectors.object_store_common import (
-            normalize_object_base_key,
-            object_parts_prefix,
-            object_store_read_keys,
-        )
+        from services.dest_precount import checksum_object_store
 
-        cfg = {
-            "host": host,
-            "port": port,
-            "connection_string": connection_string,
-        }
-        client = gcs_client(cfg)
-        base = normalize_object_base_key(key)
-        parts_prefix = object_parts_prefix(base)
-        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
-        read_keys = object_store_read_keys(base, listed)
-        bucket_obj = client.bucket(bucket)
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for obj_key in read_keys:
-            body = bucket_obj.blob(obj_key).download_as_bytes()
-            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
-            if not headers:
-                headers = list(hdrs or [])
-            all_rows.extend(rows)
-        columns = headers or target_columns or []
-        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
+        return checksum_object_store(
+            "gcs",
+            {
+                "host": host,
+                "port": port,
+                "connection_string": connection_string,
+                "database": bucket,
+            },
+            table_name=key,
+            columns=target_columns,
+            limit=limit,
+        )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -1832,42 +1804,23 @@ def verify_adls_blob(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
-    """Independent Azure Blob / ADLS Gen2 read-back (parity with S3/GCS Gate-8)."""
+    """Gate-8 cell checksum of Azure Blob / ADLS GET streams. Never JSON ``[]``."""
     try:
-        from connectors.adls_common import blob_service_client
-        from connectors.adls_reader import list_objects
-        from connectors.object_store_common import (
-            normalize_object_base_key,
-            object_parts_prefix,
-            object_store_read_keys,
-        )
+        from services.dest_precount import checksum_object_store
 
-        cfg = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "service_account": service_account,
-            "database": container,
-        }
-        client = blob_service_client(cfg)
-        base = normalize_object_base_key(key)
-        parts_prefix = object_parts_prefix(base)
-        listed = list_objects(cfg, container, parts_prefix) if parts_prefix else []
-        read_keys = object_store_read_keys(base, listed)
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for obj_key in read_keys:
-            body = client.get_blob_client(container, obj_key).download_blob().readall()
-            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
-            if not headers:
-                headers = list(hdrs or [])
-            all_rows.extend(rows)
-        columns = headers or target_columns or []
-        return len(all_rows), canonical_checksum_from_iter(
-            all_rows,
-            columns,
+        return checksum_object_store(
+            "adls",
+            {
+                "host": host,
+                "port": port,
+                "username": username,
+                "password": password,
+                "connection_string": connection_string,
+                "service_account": service_account,
+                "database": container,
+            },
+            table_name=key,
+            columns=target_columns,
             limit=limit,
             dest_db_type="adls",
             dest_types=dest_types,

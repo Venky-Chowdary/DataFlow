@@ -3018,6 +3018,169 @@ def test_object_store_gzip_csv_get_does_not_slurp(
     )
 
 
+def test_object_store_gzip_csv_gate8_checksum_is_not_json_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gate-8 of gzip CSV GET is the RFC 4180 digest, not JSON-fallback dest=0.
+
+    DMS S3 validation is Athena/Parquet. Airbyte/Fivetran close on PUT bytes.
+    ``json.loads`` of gzip CSV as UTF-8 is ``JSONDecodeError`` → ``[]`` →
+    dest=0 checksum while COUNT=N. Cell fidelity walks the same GET stream
+    COUNT already uses.
+    """
+    from services.csv_profiler import iter_csv_dicts
+    from services.dest_precount import checksum_object_store
+    from services.format_converter import convert_rows
+    from services.reconciliation import canonical_checksum_from_iter, verify_s3_object
+
+    csv_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    compressed = gzip.compress(csv_body)
+    monkeypatch.setattr(
+        "services.dest_precount._object_store_list_keys",
+        lambda *_a, **_k: ["exports/data.csv.gz"],
+    )
+
+    def _open(_kind: str, _cfg: dict, _bucket: str, key: str):
+        buf = _NoSlurpGet(compressed)
+        return buf, buf.close
+
+    monkeypatch.setattr("services.object_streaming.open_object_store_binary", _open)
+    cfg = {"database": "b"}
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/data.csv.gz")
+        == 3
+    )
+    n, digest = checksum_object_store("s3", cfg, table_name="exports/data.csv.gz")
+    assert n == 3
+    assert digest
+    expected = canonical_checksum_from_iter(list(iter_csv_dicts(csv_body)))
+    assert digest == expected
+    wrapped_n, wrapped_digest = verify_s3_object(
+        bucket="b",
+        key="exports/data.csv.gz",
+        host="",
+        port=0,
+        username="",
+        password="",
+        connection_string="",
+        ssl=False,
+    )
+    assert (wrapped_n, wrapped_digest) == (n, digest)
+
+
+def test_object_store_unparseable_json_gate8_is_unmeasured_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Garbage JSON GET must not checksum as dest=0 (``json.loads`` → ``[]``)."""
+    from services.dest_precount import checksum_object_store
+
+    _patch_object_store_payloads(monkeypatch, [("exports/data.json", b"not-json{")])
+    cfg = {"database": "b"}
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/data.json")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/data.json") == (-1, "")
+    _patch_object_store_payloads(monkeypatch, [("exports/data.json", b"[]")])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/data.json")
+        == 0
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/data.json") == (0, "")
+
+
+def test_object_store_wrapped_json_gate8_unmeasured_count_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Wrapped JSON has StAX COUNT; one-shot GET cannot checksum without buffering."""
+    from services.dest_precount import checksum_object_store
+
+    body = b'{"records":[{"id":1},{"id":2},{"id":3}]}'
+    _patch_object_store_payloads(monkeypatch, [("exports/data.json", body)])
+    cfg = {"database": "b"}
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/data.json")
+        == 3
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/data.json") == (-1, "")
+
+
+def test_object_store_xml_gate8_unmeasured_count_still_works(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """XML unique-path COUNT is not a JSON-[] checksum. Cell walk stays unmeasured."""
+    from services.dest_precount import checksum_object_store
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="xml",
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/data.xml", content)])
+    cfg = {"database": "b"}
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/data.xml")
+        == 2
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/data.xml") == (-1, "")
+
+
+def test_object_store_parquet_gate8_checksum_is_value_walk_not_json_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parquet GET checksum is cell values, not JSON [] dest=0. Footer stays COUNT."""
+    pytest.importorskip("pyarrow.parquet")
+    from services.dest_precount import checksum_object_store
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="parquet",
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/data.parquet", content)])
+    cfg = {"database": "b"}
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/data.parquet")
+        == 2
+    )
+    n, digest = checksum_object_store("s3", cfg, table_name="exports/data.parquet")
+    assert n == 2
+    assert digest
+    _patch_object_store_payloads(monkeypatch, [("exports/data.parquet", b"not-parquet")])
+    assert checksum_object_store("s3", cfg, table_name="exports/data.parquet") == (
+        -1,
+        "",
+    )
+
+
+def test_object_store_poison_jsonl_gate8_does_not_checksum_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Poison JSONL line is unmeasured. Never digest of the lines before it."""
+    from services.dest_precount import checksum_object_store
+
+    body = b'{"id":1}\nnot-json\n{"id":2}\n'
+    _patch_object_store_payloads(monkeypatch, [("exports/data.jsonl", body)])
+    cfg = {"database": "b"}
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/data.jsonl")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/data.jsonl") == (
+        -1,
+        "",
+    )
+
+
 def test_chunk_reader_csv_count_is_one_object_not_concatenated() -> None:
     """ADLS ``chunks()`` is a file-like COUNT source, not ``b''.join(chunks)``."""
     from services.csv_profiler import count_csv_rows

@@ -54,7 +54,13 @@ parsers need a byte image). Object-store GET of CSV/JSON/JSONL/XML
 streams the HTTP body (gzip through ``GzipFile(fileobj=StreamingBody)``).
 COUNT does not ``Body.read()`` the object, does not hold every part in
 RAM, and does not ``gzip.decompress`` a second copy. Excel/Avro/Parquet/ORC
-GET still materializes one object (byte-image parsers).
+GET still materializes one object (byte-image parsers). Gate-8 cell
+checksum of those same GET streams is ``checksum_object_store`` — never
+``json.loads`` fallback empty (gzip CSV / Parquet as UTF-8 JSON garbage
+was dest=0). JSON root array, JSONL objects, CSV RFC 4180 dicts, and
+Parquet/Avro value walks feed ``canonical_checksum_from_iter``. Wrapped
+JSON, XML, Excel, and ORC cell walks stay unmeasured this kernel (COUNT
+still measures cardinality). Empty well-formed is ``(0, "")``.
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
@@ -252,6 +258,15 @@ _ARTIFACT_FORMATS = frozenset({
     "csv", "tsv", "json", "jsonl", "parquet", "excel", "avro", "orc", "xml",
 })
 _STREAMING_COUNT_KINDS = frozenset({"csv", "tsv", "json", "jsonl", "xml"})
+
+
+class UnmeasuredArtifact(Exception):
+    """Dest population cannot be checksummed. Never hash a prefix or JSON ``[]``.
+
+    Gate-8 ``json.loads`` fallback empty is dest=0 — the same hole COUNT
+    already refuses. Poison JSONL, ambiguous JSON, XML unique-path, and
+    byte-image kinds without a value walk stay unmeasured.
+    """
 
 
 def _count(conn: Any, table_ref: str) -> int:
@@ -1557,6 +1572,233 @@ def _object_store_row_count(
             return None
         total += n
     return total
+
+
+def _skip_json_ws_bom(source: Any) -> bytes:
+    """Next significant JSON byte. UTF-8 BOM and whitespace are not content."""
+    while True:
+        b = source.read(1)
+        if not b:
+            return b""
+        if b in (b" ", b"\t", b"\n", b"\r"):
+            continue
+        if b == b"\xef":
+            rest = source.read(2)
+            if rest == b"\xbb\xbf":
+                continue
+            return b + rest
+        return b
+
+
+def _iter_json_root_array_dicts(source: Any) -> Any:
+    """Writer JSON ``[{...}]`` as dicts. Wrapped / scalar-array JSON is unmeasured.
+
+    Dest COUNT of JSON is unique-path ijson StAX (wrapped ``{\"records\":[]}``
+    still has cardinality). Gate-8 needs cell values on a one-shot GET, so
+    uniqueness cannot be decided after buffering every object. Root array
+    is what ``convert_rows`` writes. Preferred-wrapper ranking is ingest,
+    not this digest.
+    """
+    from services.csv_profiler import _PrefixedRaw
+
+    first = _skip_json_ws_bom(source)
+    if first != b"[":
+        raise UnmeasuredArtifact("json_not_root_array")
+    try:
+        import ijson
+    except ImportError as exc:
+        raise UnmeasuredArtifact("json_checksum_needs_ijson") from exc
+    prefixed = io.BufferedReader(_PrefixedRaw(first, source))
+    for rec in ijson.items(prefixed, "item"):
+        if not isinstance(rec, dict):
+            raise UnmeasuredArtifact("json_array_non_object")
+        yield rec
+
+
+def _iter_parquet_records(body: bytes) -> Any:
+    """Cell values of one Parquet object. Footer ``num_rows`` is COUNT, not this."""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise UnmeasuredArtifact("parquet_checksum_needs_pyarrow") from exc
+    try:
+        table = pq.read_table(io.BytesIO(body))
+    except Exception as exc:
+        raise UnmeasuredArtifact("parquet_unparseable") from exc
+    for batch in table.to_batches():
+        for rec in batch.to_pylist():
+            if not isinstance(rec, dict):
+                raise UnmeasuredArtifact("parquet_non_record")
+            yield rec
+
+
+def _iter_avro_records(body: bytes) -> Any:
+    """Cell values of one Avro object. Same ``fastavro.reader`` as COUNT."""
+    try:
+        import fastavro
+    except ImportError as exc:
+        raise UnmeasuredArtifact("avro_checksum_needs_fastavro") from exc
+    try:
+        for rec in fastavro.reader(io.BytesIO(body)):
+            if not isinstance(rec, dict):
+                raise UnmeasuredArtifact("avro_non_record")
+            yield rec
+    except UnmeasuredArtifact:
+        raise
+    except Exception as exc:
+        raise UnmeasuredArtifact("avro_unparseable") from exc
+
+
+def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
+    """CSV/JSON/JSONL records from a forward-only GET. XML cells stay unmeasured."""
+    if kind in {"csv", "tsv"}:
+        from services.csv_profiler import iter_csv_dicts
+
+        yield from iter_csv_dicts(source)
+        return
+    if kind == "jsonl":
+        from services.file_parser import iter_jsonl_dicts
+
+        yield from iter_jsonl_dicts(source)
+        return
+    if kind == "json":
+        yield from _iter_json_root_array_dicts(source)
+        return
+    raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
+
+
+def _iter_byte_image_kind(kind: str, body: bytes, *, name: str) -> Any:
+    """Parquet/Avro value walk of one materialized object. Never JSON ``[]``."""
+    if kind == "parquet":
+        yield from _iter_parquet_records(body)
+        return
+    if kind == "avro":
+        yield from _iter_avro_records(body)
+        return
+    raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
+
+
+def _iter_artifact_records(
+    source: Any,
+    *,
+    name: str,
+    fmt: str | None = None,
+) -> Any:
+    """Dest-engine records of an object-store GET. Same gzip machine as COUNT.
+
+    CSV/JSON/JSONL (including gzip) walk ``source`` forward-only.
+    Parquet/Avro still materialize one object. Excel/ORC/XML and wrapped
+    JSON raise ``UnmeasuredArtifact`` — never ``json.loads`` fallback empty.
+    """
+    label = str(name or "")
+    compressed = label.lower().endswith(".gz")
+    if compressed:
+        label = label[: -len(".gz")]
+    kind = _infer_artifact_format(Path(label), fmt)
+    if compressed:
+        if kind in _STREAMING_COUNT_KINDS:
+            try:
+                stream = gzip.GzipFile(fileobj=source, mode="rb")
+            except Exception as exc:
+                raise UnmeasuredArtifact(f"gzip_stream_failed:{name}") from exc
+            try:
+                yield from _iter_streaming_kind(kind, stream, name=name)
+            finally:
+                try:
+                    stream.close()
+                except Exception:
+                    pass
+            return
+        try:
+            body = gzip.decompress(source.read())
+        except Exception as exc:
+            raise UnmeasuredArtifact(f"gzip_decode_failed:{name}") from exc
+        yield from _iter_byte_image_kind(kind, body, name=name)
+        return
+    if kind in _STREAMING_COUNT_KINDS:
+        yield from _iter_streaming_kind(kind, source, name=name)
+        return
+    try:
+        raw = source.read()
+    except Exception as exc:
+        raise UnmeasuredArtifact(f"artifact_slurp_failed:{name}") from exc
+    if not isinstance(raw, (bytes, bytearray)):
+        raise UnmeasuredArtifact(f"artifact_non_bytes:{name}")
+    yield from _iter_byte_image_kind(kind, bytes(raw), name=name)
+
+
+def checksum_object_store(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    table_name: str,
+    columns: list[str] | None = None,
+    limit: int = 0,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Gate-8 cell checksum of object-store GET streams. Never JSON-fallback empty.
+
+    Same keys and GET handles as dest COUNT. One key is opened, walked,
+    and closed before the next — never a list of GET bodies. Gzip CSV as
+    UTF-8 JSON garbage is not dest=0. Unparseable / wrapped JSON / XML /
+    Excel / ORC cell walk is ``(-1, "")``. Empty well-formed is
+    ``(0, "")``. Cardinality remains dest COUNT; this digest is cell
+    fidelity of the records we could walk. CDC stays at-least-once upsert.
+    """
+    from services.object_streaming import open_object_store_binary
+    from services.reconciliation import canonical_checksum_from_iter
+
+    bucket = str(cfg.get("database") or "").strip()
+    key = str(table_name or "").strip()
+    if not bucket or not key:
+        return -1, ""
+    kind = _object_store_kind(db_type)
+    keys = _object_store_list_keys(kind, cfg, bucket, key)
+    if keys is None:
+        return -1, ""
+    if not keys:
+        return 0, ""
+
+    n = 0
+
+    def records() -> Any:
+        nonlocal n
+        for obj_key in keys:
+            opened = open_object_store_binary(kind, cfg, bucket, str(obj_key))
+            if opened is False:
+                continue
+            if opened is None:
+                raise UnmeasuredArtifact("object_store_get_unknowable")
+            stream, closer = opened
+            try:
+                for rec in _iter_artifact_records(stream, name=str(obj_key)):
+                    n += 1
+                    yield rec
+            finally:
+                if closer is not None:
+                    try:
+                        closer()
+                    except Exception:
+                        pass
+
+    try:
+        digest = canonical_checksum_from_iter(
+            records(),
+            columns,
+            limit=limit,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
+    except UnmeasuredArtifact as exc:
+        logger.info("object-store Gate-8 checksum unmeasured: %s", exc)
+        return -1, ""
+    except Exception as exc:
+        logger.info("object-store Gate-8 checksum failed: %s", exc)
+        return -1, ""
+    if n == 0:
+        return 0, ""
+    return n, digest
 
 
 def precount_table(db_type: str, cfg: dict[str, Any], table_name: str) -> int | None:

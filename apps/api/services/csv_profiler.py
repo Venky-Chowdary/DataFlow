@@ -144,16 +144,69 @@ def parse_csv_preview(content: bytes, encoding: str | None = None, preview_rows:
     return headers, preview, enc, delim
 
 
-def _csv_count_rows_from_reader(reader_file: io.TextIOBase, delim: str) -> int:
+def _csv_iter_dicts_from_reader(
+    reader_file: io.TextIOBase, delim: str
+) -> Any:
     reader = csv.reader(reader_file, delimiter=delim)
-    count = 0
+    header: list[str] | None = None
     for i, row in enumerate(reader):
         if i == 0:
+            header = [str(c) for c in row]
             continue
-        if is_blank_row(row):
+        if header is None or is_blank_row(row):
             continue
-        count += 1
-    return count
+        yield {
+            header[j]: (row[j] if j < len(row) else "")
+            for j in range(len(header))
+        }
+
+
+def _csv_open_text(
+    content: bytes | str | Path, encoding: str | None = None
+) -> tuple[io.TextIOBase, str, Any]:
+    """Text reader + delimiter + optional Path closer. Same sniff as COUNT."""
+    if isinstance(content, (bytes, str)):
+        prefix = _csv_prefix_bytes(content)
+        enc = encoding or detect_encoding(prefix)
+        sample = prefix[:_DELIMITER_PREFIX].decode(enc, errors="replace")
+        delim = detect_delimiter(sample)
+        return _csv_count_open(content, enc), delim, None
+    closer = None
+    if isinstance(content, Path):
+        from services.dest_precount import open_artifact_binary
+
+        source, closer = open_artifact_binary(content)
+    elif hasattr(content, "read"):
+        source = content
+    else:
+        raise TypeError("CSV COUNT expects bytes, str, Path, or a readable stream")
+    prefix = source.read(_ENCODING_PREFIX)
+    if not isinstance(prefix, (bytes, bytearray)):
+        raise TypeError("CSV COUNT stream must yield bytes")
+    prefix_b = bytes(prefix)
+    enc = encoding or detect_encoding(prefix_b)
+    sample = prefix_b[:_DELIMITER_PREFIX].decode(enc, errors="replace")
+    delim = detect_delimiter(sample)
+    return _csv_text_from_binary(source, prefix_b, enc), delim, closer
+
+
+def iter_csv_dicts(
+    content: bytes | str | Path, encoding: str | None = None
+) -> Any:
+    """Same RFC 4180 population as ``count_csv_rows``, as dicts for Gate-8."""
+    reader_file, delim, closer = _csv_open_text(content, encoding)
+    try:
+        yield from _csv_iter_dicts_from_reader(reader_file, delim)
+    finally:
+        try:
+            reader_file.close()
+        except Exception:
+            pass
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
 
 
 def count_csv_rows(content: bytes | str | Path, encoding: str | None = None) -> int:
@@ -168,49 +221,9 @@ def count_csv_rows(content: bytes | str | Path, encoding: str | None = None) -> 
     the same buffer. Path gzip is one ``gzip.open``, not a prefix open
     plus a COUNT open. A one-shot stream (object-store GET gzip that is
     not rewindable) is prefix-then-rest — COUNT does not ``seek(0)``.
+    Gate-8 cell checksum walks the same records via ``iter_csv_dicts``.
     """
-    if isinstance(content, (bytes, str)):
-        prefix = _csv_prefix_bytes(content)
-        enc = encoding or detect_encoding(prefix)
-        sample = prefix[:_DELIMITER_PREFIX].decode(enc, errors="replace")
-        delim = detect_delimiter(sample)
-        reader_file = _csv_count_open(content, enc)
-        try:
-            return _csv_count_rows_from_reader(reader_file, delim)
-        finally:
-            reader_file.close()
-
-    closer = None
-    reader_file: io.TextIOBase | None = None
-    try:
-        if isinstance(content, Path):
-            from services.dest_precount import open_artifact_binary
-
-            source, closer = open_artifact_binary(content)
-        elif hasattr(content, "read"):
-            source = content
-        else:
-            raise TypeError("CSV COUNT expects bytes, str, Path, or a readable stream")
-        prefix = source.read(_ENCODING_PREFIX)
-        if not isinstance(prefix, (bytes, bytearray)):
-            raise TypeError("CSV COUNT stream must yield bytes")
-        prefix_b = bytes(prefix)
-        enc = encoding or detect_encoding(prefix_b)
-        sample = prefix_b[:_DELIMITER_PREFIX].decode(enc, errors="replace")
-        delim = detect_delimiter(sample)
-        reader_file = _csv_text_from_binary(source, prefix_b, enc)
-        return _csv_count_rows_from_reader(reader_file, delim)
-    finally:
-        if reader_file is not None:
-            try:
-                reader_file.close()
-            except Exception:
-                pass
-        if closer is not None:
-            try:
-                closer()
-            except Exception:
-                pass
+    return sum(1 for _ in iter_csv_dicts(content, encoding))
 
 
 def parse_csv_full(content: bytes, encoding: str | None = None) -> tuple[list[str], list[list[str]], str, str]:

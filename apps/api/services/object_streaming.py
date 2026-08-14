@@ -245,9 +245,10 @@ def open_object_store_binary(
     """Readable GET body + closer. ``False`` if missing, ``None`` if unknowable.
 
     Does not ``Body.read()`` / ``download_as_bytes()`` / ``readall()`` the
-    object. Dest COUNT of CSV/JSON/JSONL/XML (including gzip) walks this
-    stream. Excel/Avro/Parquet/ORC still materialize one object inside
-    COUNT — those parsers need a byte image. Spill downloaders stay the
+    object.     Dest COUNT of CSV/JSON/JSONL/XML (including gzip) walks this
+    stream. Gate-8 cell checksum of those same kinds walks the same
+    handle. Excel/Avro/Parquet/ORC still materialize one object inside
+    COUNT / checksum — those parsers need a byte image. Spill downloaders stay the
     ingest path (disk), not dest COUNT.
     """
     try:

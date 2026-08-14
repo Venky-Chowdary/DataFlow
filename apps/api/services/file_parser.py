@@ -187,21 +187,39 @@ def _jsonl_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
     raise TypeError("JSONL COUNT expects bytes, str, Path, or a readable stream")
 
 
-def _count_jsonl_records_stream(reader: Any) -> int | None:
-    """One JSON object per non-blank line. A poison line is unmeasured, not a prefix."""
-    count = 0
+def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
+    """One JSON object per non-blank line. Poison / non-object is unmeasured."""
+    from services.dest_precount import UnmeasuredArtifact
+
     for raw in reader:
         line = raw.strip()
         if not line:
             continue
         try:
             obj = json.loads(line)
-        except json.JSONDecodeError:
-            return None
+        except json.JSONDecodeError as exc:
+            raise UnmeasuredArtifact("jsonl_poison_line") from exc
         if not isinstance(obj, dict):
-            return None
-        count += 1
-    return count
+            raise UnmeasuredArtifact("jsonl_non_object")
+        yield obj
+
+
+def iter_jsonl_dicts(content: bytes | str | Path) -> Any:
+    """Same JSONL population as ``count_jsonl_records``, as dicts for Gate-8.
+
+    A poison or non-object line raises ``UnmeasuredArtifact`` — never yield
+    a prefix (truncated DISTINCT lesson). COUNT is ``sum`` of this walk.
+    """
+    closer = None
+    try:
+        reader, closer = _jsonl_count_open(content)
+        yield from _iter_jsonl_dicts_from_reader(reader)
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
 
 
 def count_jsonl_records(content: bytes | str | Path) -> int | None:
@@ -218,21 +236,14 @@ def count_jsonl_records(content: bytes | str | Path) -> int | None:
     the document). Path inputs are counted from disk; bytes (object-store
     GET) stream from a buffer already in RAM. Local gzip JSONL streams.
     Object-store GET gzip streams through a caller-owned ``GzipFile``.
+    Gate-8 cell checksum walks the same records via ``iter_jsonl_dicts``.
     """
-    closer = None
     try:
-        reader, closer = _jsonl_count_open(content)
-        return _count_jsonl_records_stream(reader)
+        return sum(1 for _ in iter_jsonl_dicts(content))
     except (OSError, UnicodeDecodeError, UnicodeEncodeError, TypeError):
         return None
     except Exception:
         return None
-    finally:
-        if closer is not None:
-            try:
-                closer()
-            except Exception:
-                pass
 
 
 def parse_json(content: bytes) -> tuple[list[str], list[list[str]], int]:
