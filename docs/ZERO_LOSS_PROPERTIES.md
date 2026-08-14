@@ -1122,6 +1122,10 @@ rowcount is not that proof.
 
   Iceberg MoR equality-delete writes + WebHDFS dest COUNT (this host,
   after 2026-08-14 slice):
+    Focused Iceberg MoR/hdfs nodes: 32 passed in 1.59s. Broader
+    Iceberg leftover/upsert/COUNT: 71 passed, 188 deselected in 2.52s.
+    CDC matrix: 159 passed, 17 skipped, 0 failed in 13.64s (live
+    PG/MySQL/Oracle ITs skipped — ports/env unset; skip ≠ pass).
     Filesystem CDC / leftover-MERGE deletes write Iceberg v2
     equality-delete parquet (content=2, `equality-ids` from schema
     field ids, `sequence-number` stamped on data + delete files).
