@@ -929,6 +929,19 @@ rowcount is not that proof.
     verified-success sentence as the job error. `engine.py` unchanged.
     Frontend not run this slice (no UI change).
 
+  JSON artifact dest COUNT StAX (this host, after 2026-08-14 slice):
+    Property 5 + Property 9 + `test_json_tabular.py`: 282 passed,
+    9 skipped in 38.43s. Identity: unique array-of-object via ijson.parse,
+    never `json.loads` of the whole export, never ingest lone-object-as-one,
+    never preferred-wrapper ranking. Writer 3 → dest 3; wrapped
+    `{"records":[...]}` → 2; empty `[]` → 0; document object unmeasured;
+    scalar `[1,2,3]` unmeasured not dest=3; sibling orders+items
+    unmeasured; nested items under records → outer 3 not inner 6;
+    5000-record file from path → 5000; `json.loads` is not called when
+    ijson is available. `extract_json_records` ingest unchanged.
+    Cardinality ≠ Gate-8. `engine.py` unchanged. Frontend not run this
+    slice (no UI change).
+
   Snowflake / BigQuery / DuckDB / Databricks dest COUNT (this host, after 2026-08-14 slice):
     232 passed, 8 skipped in 35.47s (Property 9 command).
     Dest-engine `SELECT COUNT(*)`, never INFORMATION_SCHEMA /
