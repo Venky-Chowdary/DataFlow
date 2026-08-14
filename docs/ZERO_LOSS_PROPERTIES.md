@@ -1099,8 +1099,7 @@ rowcount is not that proof.
     at-least-once (`EXACTLY_ONCE_CLAIMED=False`). F4 streaming transport
     unit tests now run (7 passed); capability remains
     `cdc_streaming_status=planned_opt_in`. Delta/Hudi writers, live
-    snapshot→stream ITs, MoR upsert writes, and Properties 10–12 stay
-    Planned / UNPROVEN.
+    snapshot→stream ITs, and Properties 10–12 stay Planned / UNPROVEN.
 
   CDC DDD-3 gap recovery when dest is keyed (this host, after 2026-08-14
   slice):
@@ -1118,7 +1117,7 @@ rowcount is not that proof.
     * Mocked Mongo CDC runner no longer false-skips (`fake_mongo`).
     * Delta/Hudi sidecar `transfer_ready` is False (no writer modules).
     Still Planned: F4 streaming as default, live snapshot→stream ITs,
-    Iceberg MoR upsert writes, Delta/Hudi drivers.
+    Delta/Hudi drivers.
 
   Iceberg MoR equality-delete writes + WebHDFS dest COUNT (this host,
   after 2026-08-14 slice):
@@ -1138,8 +1137,23 @@ rowcount is not that proof.
     Range-GETs WebHDFS `OPEN&offset&length` only when
     `webhdfs.endpoint` / `hdfs.webhdfs` is set — RPC `:8020` stays
     unmeasured. Incremental leftover MERGE stays a hard no-op.
-    MoR upsert writes, live namenode COUNT, Delta/Hudi drivers, F4
-    default streaming, live snapshot→stream ITs, and exactly-once
+    Live namenode COUNT, Delta/Hudi drivers, F4 default streaming,
+    live snapshot→stream ITs, and exactly-once stay Planned / UNPROVEN.
+
+  Iceberg MoR upsert writes (this host, after 2026-08-14 slice):
+    Filesystem upserts on an existing snapshot write an equality-delete
+    of the updated PK plus a new data file at the **same** snapshot
+    sequence (Iceberg spec / Flink upsert pattern: equality deletes
+    apply only when `data_seq < delete_seq`, so the new image survives).
+    Inserts append a higher-seq data file and keep prior delete files
+    (re-insert after CDC delete is not a phantom undelete). Stale LSN
+    is a no-op (0 rows, no snapshot). Dest-only columns overlay from
+    the MoR survivor. Overwrite/replace stay copy-on-write. First
+    snapshot of an empty table is a single data file. Writer ack is
+    applied incoming keys, not the full table rewrite count.
+    Capability: `merge-on-read-upserts-deletes, copy-on-write-overwrite`.
+    Live namenode COUNT, Delta/Hudi drivers, F4 default streaming,
+    live snapshot→stream ITs, Properties 10–12, and exactly-once
     stay Planned / UNPROVEN.
 
   XML artifact dest COUNT (this host, after 2026-08-14 slice):
@@ -1525,7 +1539,7 @@ TypeScript does not recompute dest.
   then existing delete; dest COUNT = dest-engine file footers, never
   `scan().count()` / manifest `record-count`). Missing
   catalog table = 0. Dest-engine v2/v3 MoR COUNT measured; filesystem
-  equality-delete writes measured; MoR upsert writes Planned.
+  equality-delete writes and MoR upsert writes measured.
   `hdfs://` COUNT measured only with WebHDFS endpoint (mocked).
 * Multi-table job rollup — **PARTIAL** on named SQLite fixture: two overwrite
   tables (2+3) close as job dest 5, not last-table 3. Mixed/keyed kinds are not

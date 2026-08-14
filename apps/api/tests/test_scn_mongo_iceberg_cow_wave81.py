@@ -6,8 +6,8 @@ Research anchors
   bare integers must not share a compare family (silent invent).
 - MongoDB change-stream resume tokens are opaque (``_data``) — prefix isolate.
 - Iceberg V3 MoR / deletion vectors are competitor-class for CDC lakes; Datawrap
-  filesystem upserts stay Copy-on-Write; CDC/leftover deletes write v2
-  equality-delete files — advertise the split honestly.
+  filesystem overwrite stays Copy-on-Write; upserts and CDC/leftover deletes
+  write v2 equality-delete files — advertise the split honestly.
 """
 
 from __future__ import annotations
@@ -70,14 +70,14 @@ def test_iceberg_capability_honest_copy_on_write():
 
     caps = get_connector_capability("iceberg")
     assert caps.get("write_strategy") == (
-        "copy-on-write-upserts, merge-on-read-deletes"
+        "merge-on-read-upserts-deletes, copy-on-write-overwrite"
     )
     assert caps.get("supports_merge_on_read") is True
     assert caps.get("supports_lsn_guard") is True
     issues = " ".join(caps.get("common_issues") or []).lower()
     assert "copy-on-write" in issues
-    assert "equality-delete" in issues or "merge-on-read" in issues
-    assert "mor upsert" in issues or "upsert writes stay planned" in issues
+    assert "equality-delete" in issues or "equality delete" in issues
+    assert "overwrite" in issues
 
 
 def test_iceberg_snapshot_stamps_write_strategy(tmp_path):

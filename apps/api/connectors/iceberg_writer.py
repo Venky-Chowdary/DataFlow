@@ -7,10 +7,12 @@ Two paths:
    tables. Supports append, overwrite, and MERGE/upsert via ``Table.upsert``.
 
 2. Filesystem mode (bare local path, no catalog): V2 metadata-file writer.
-   Upserts/overwrites stay copy-on-write and compact delete files. CDC and
-   leftover-MERGE deletes write Iceberg v2 equality-delete files (content=2)
-   so dest-engine COUNT / leftover listing apply MoR instead of rewriting
-   every data file. MoR upsert writes stay Planned.
+   Overwrite/replace stay copy-on-write. Upserts write Iceberg v2
+   equality-delete files for updated keys plus a new data file at the
+   same snapshot sequence (spec: equality deletes apply only when
+   ``data_seq < delete_seq``, so the new image survives). CDC and
+   leftover-MERGE deletes write equality-delete files. Dest-engine
+   COUNT / leftover listing apply the same MoR kernel.
 """
 
 from __future__ import annotations
@@ -686,6 +688,20 @@ def _load_existing_rows(table_dir: Path, columns: list[str], current_meta: dict[
     return rows
 
 
+def _upsert_pk_key(row: dict[str, Any], pk_cols: Sequence[str]) -> tuple:
+    """Comparable PK tuple. Never stringify None → ``\"None\"``."""
+    from connectors.writer_common import _is_nullish_conflict_key
+
+    out: list[str] = []
+    for col in pk_cols:
+        val = row.get(col)
+        if _is_nullish_conflict_key(val):
+            out.append("")
+        else:
+            out.append(str(val))
+    return tuple(out)
+
+
 def _merge_upsert_rows(
     existing: list[dict[str, Any]],
     incoming: list[dict[str, Any]],
@@ -698,28 +714,15 @@ def _merge_upsert_rows(
     No LSN on either side → last wins (batch overwrite). Sparse CDC: ``DF_MISSING``
     keys are omitted and never wipe prior column values.
     """
-    from connectors.writer_common import compare_lsn
+    from connectors.writer_common import compare_lsn, _is_nullish_conflict_key
     from services.value_serializer import is_missing_sentinel
-
-    from connectors.writer_common import _is_nullish_conflict_key
-
-    def _key(row: dict[str, Any]) -> tuple:
-        # Never stringify None → "None" (collides with literal / invents PK).
-        out: list[str] = []
-        for c in pk_cols:
-            val = row.get(c)
-            if _is_nullish_conflict_key(val):
-                out.append("")
-            else:
-                out.append(str(val))
-        return tuple(out)
 
     def _present(row: dict[str, Any]) -> dict[str, Any]:
         return {k: v for k, v in row.items() if not is_missing_sentinel(v)}
 
     best: dict[tuple, dict[str, Any]] = {}
     for row in existing:
-        key = _key(row)
+        key = _upsert_pk_key(row, pk_cols)
         if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
             continue
         best[key] = dict(row)
@@ -739,7 +742,7 @@ def _merge_upsert_rows(
                 f"{[c for c in pk_cols if _is_nullish_conflict_key(clean.get(c))]}; "
                 "refuse NULL=NULL invent duplicates"
             )
-        key = _key(row)
+        key = _upsert_pk_key(row, pk_cols)
         prev = best.get(key)
         if prev is None:
             # Sparse insert of an unknown PK would invent NULL for absent columns
@@ -763,6 +766,58 @@ def _merge_upsert_rows(
             merged.update(clean)
             best[key] = merged
     return list(best.values())
+
+
+def _mor_upsert_delta(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+    *,
+    pk_cols: list[str],
+    lsn_col: str = "_df_lsn",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """MoR upsert payload: new data-file rows + equality-delete PK rows.
+
+    Inserts write only a new data image. Updates write an equality delete
+    of the surviving PK (old data files keep their bytes) plus the merged
+    image. LSN-discarded keys are omitted (no snapshot). ``_merge_upsert_rows``
+    still validates sparse/null PK rules and produces the merged images.
+    """
+    from connectors.writer_common import compare_lsn, _is_nullish_conflict_key
+    from services.value_serializer import is_missing_sentinel
+
+    merged = _merge_upsert_rows(
+        existing, incoming, pk_cols=pk_cols, lsn_col=lsn_col
+    )
+    merged_by = {_upsert_pk_key(row, pk_cols): row for row in merged}
+    existing_by: dict[tuple, dict[str, Any]] = {}
+    for row in existing:
+        key = _upsert_pk_key(row, pk_cols)
+        if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
+            continue
+        existing_by[key] = row
+    last_incoming: dict[tuple, dict[str, Any]] = {}
+    for row in incoming:
+        last_incoming[_upsert_pk_key(row, pk_cols)] = row
+
+    new_rows: list[dict[str, Any]] = []
+    eq_deletes: list[dict[str, Any]] = []
+    for key, row in last_incoming.items():
+        applied = merged_by.get(key)
+        if applied is None:
+            continue
+        prev = existing_by.get(key)
+        clean = {
+            k: v for k, v in row.items() if not is_missing_sentinel(v)
+        }
+        if prev is None:
+            new_rows.append(applied)
+            continue
+        if lsn_col in clean or lsn_col in prev:
+            if compare_lsn(clean.get(lsn_col), prev.get(lsn_col)) <= 0:
+                continue
+        new_rows.append(applied)
+        eq_deletes.append({c: prev.get(c) for c in pk_cols})
+    return new_rows, eq_deletes
 
 def _row_as_dict(columns: list[str], row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
@@ -2349,6 +2404,8 @@ def _write_mapped_rows_filesystem(
 
     mode = (write_mode or "append").lower()
     upsert_modes = {"upsert", "merge", "cdc", "incremental_deduped"}
+    mor_upsert = False
+    pending_eq_rows: list[dict[str, Any]] = []
     if mode in upsert_modes:
         pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
         if not pk_cols:
@@ -2429,11 +2486,65 @@ def _write_mapped_rows_filesystem(
                 rejected_details=rejected_details,
                 driver="iceberg",
             )
-        rel_path, n_written, checksum, file_warnings = _write_data_file(
-            table_dir / "data", load_cols, merged, column_types=write_types
-        )
-        operation = "overwrite"  # Iceberg CoW upsert lands as overwrite snapshot
-        data_files = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]
+        prior_data_refs = [
+            dict(ref)
+            for ref in ((current_meta or {}).get("data-files") or [])
+            if isinstance(ref, dict) and str(ref.get("path") or "").strip()
+        ]
+        if prior_data_refs:
+            try:
+                new_rows, pending_eq_rows = _mor_upsert_delta(
+                    existing_rows, incoming, pk_cols=pk_cols
+                )
+            except ValueError as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=0,
+                    error=str(exc)[:500],
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
+            if not new_rows:
+                return WriteResult(
+                    ok=True,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=1,
+                    rejected_details=rejected_details,
+                    rejected_rows=_rejected_row_count(
+                        data_rows, mapped_rows, rejected_details, policy
+                    ),
+                    driver="iceberg",
+                )
+            rel_path, n_written, checksum, file_warnings = _write_data_file(
+                table_dir / "data",
+                load_cols,
+                new_rows,
+                column_types=write_types,
+            )
+            mor_upsert = True
+            operation = "overwrite"
+            data_files = prior_data_refs + [
+                {
+                    "path": rel_path,
+                    "record-count": n_written,
+                    "checksum": checksum,
+                }
+            ]
+        else:
+            rel_path, n_written, checksum, file_warnings = _write_data_file(
+                table_dir / "data", load_cols, merged, column_types=write_types
+            )
+            operation = "overwrite"
+            data_files = [
+                {"path": rel_path, "record-count": n_written, "checksum": checksum}
+            ]
     else:
         rel_path, n_written, checksum, file_warnings = _write_data_file(
             table_dir / "data", target_cols, mapped_rows, column_types=write_types
@@ -2445,7 +2556,10 @@ def _write_mapped_rows_filesystem(
         if mode in {"overwrite", "replace"}:
             data_files = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]
 
-    compact = mode in upsert_modes or mode in {"overwrite", "replace"}
+    compact = (
+        not mor_upsert
+        and (mode in upsert_modes or mode in {"overwrite", "replace"})
+    )
     prior_deletes = [] if compact else _snapshot_delete_files(current_meta)
     prior_data = [dict(ref) for ref in data_files[:-1]] if data_files else []
     _ensure_data_file_sequences(prior_data)
@@ -2455,8 +2569,48 @@ def _write_mapped_rows_filesystem(
         new_seq = 1
     else:
         delete_files = prior_deletes
-        write_strategy = "merge-on-read" if delete_files else "copy-on-write"
+        write_strategy = "merge-on-read" if (delete_files or pending_eq_rows or mor_upsert) else "copy-on-write"
         new_seq = _max_iceberg_sequence(prior_data, delete_files) + 1
+    if mor_upsert and pending_eq_rows:
+        try:
+            eq_rel, eq_n, eq_ck = _write_equality_delete_file(
+                table_dir / "data",
+                list(pk_cols),
+                pending_eq_rows,
+                column_types=write_types,
+            )
+        except ValueError as exc:
+            if "requires pyarrow" not in str(exc):
+                raise
+            rel_path, n_written, checksum, file_warnings = _write_data_file(
+                table_dir / "data", load_cols, merged, column_types=write_types
+            )
+            data_files = [
+                {
+                    "path": rel_path,
+                    "record-count": n_written,
+                    "checksum": checksum,
+                    "sequence-number": 1,
+                }
+            ]
+            delete_files = []
+            write_strategy = "copy-on-write"
+            new_seq = 1
+            prior_data = []
+            pending_eq_rows = []
+            mor_upsert = False
+        else:
+            delete_files.append(
+                {
+                    "path": eq_rel,
+                    "content": 2,
+                    "equality-ids": _equality_ids_for_columns(schema_json, pk_cols),
+                    "sequence-number": new_seq,
+                    "record-count": eq_n,
+                    "checksum": eq_ck,
+                }
+            )
+            write_strategy = "merge-on-read"
     if data_files:
         newest = dict(data_files[-1])
         newest["sequence-number"] = new_seq
@@ -2477,6 +2631,7 @@ def _write_mapped_rows_filesystem(
             "operation": operation,
             "added-records": str(n_written),
             "added-data-files": "1",
+            "added-delete-files": str(1 if mor_upsert and pending_eq_rows else 0),
             "dataflow.checksum": checksum,
             "dataflow.write_mode": mode,
             "dataflow.write_strategy": write_strategy,

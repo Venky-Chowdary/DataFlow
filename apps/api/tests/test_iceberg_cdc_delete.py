@@ -265,7 +265,7 @@ def test_resolve_projected_names_requires_every_pk_part() -> None:
 
 
 def test_iceberg_upsert_after_mor_delete_does_not_resurrect(tmp_path: Path) -> None:
-    """CoW upsert must MoR-load first, then compact. Deleted keys stay gone."""
+    """MoR upsert must not resurrect a previously equality-deleted key."""
     from services.dest_precount import destination_row_count
 
     table = "orders"
@@ -305,9 +305,10 @@ def test_iceberg_upsert_after_mor_delete_does_not_resurrect(tmp_path: Path) -> N
     table_dir = _resolve_iceberg_table_dir(_cfg(tmp_path), table, None)
     versions = sorted((table_dir / "metadata").glob("v*.metadata.json"))
     meta = _load_metadata(versions[-1])
-    assert not (meta.get("delete-files") or []), "upsert CoW must compact delete files"
+    deletes = list(meta.get("delete-files") or [])
+    assert deletes, "MoR upsert keeps prior equality deletes and adds update deletes"
     assert (meta.get("properties") or {}).get("dataflow.write_strategy") == (
-        "copy-on-write"
+        "merge-on-read"
     )
     rows = _load_existing_rows(table_dir, ["id", "note", DF_LSN_COL], meta)
     ids = {str(r.get("id")) for r in rows}
