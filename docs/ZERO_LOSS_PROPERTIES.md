@@ -14,7 +14,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py tests/test_unicode_form_carry.py tests/test_property8_unicode_form.py -q` (137 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16 + unicode-form 21; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal unscaled integer; unicode form: PG TEXT / MariaDB `general_ci`/`bin` UNIQUE BOTH_LAND for NFC vs NFD; MariaDB `unicode_ci` SECOND_REJECT; dest HEX `C3A9` vs `CC81`; bind does not NFC | UCA 0900 vs 1400 live MySQL 8; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
-| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_dialect_profiles.py tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py tests/test_stream_append_precount.py tests/test_execute_tracked_sqlite_to_csv_to_sqlite_roundtrip.py tests/test_milvus_writer.py tests/test_qdrant_writer.py tests/test_pinecone_writer.py tests/test_weaviate_writer.py tests/test_enterprise_hardening.py::test_strict_g8_writer_ack_for_dest_only tests/test_enterprise_hardening.py::test_strict_g8_qdrant_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_pinecone_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_weaviate_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_refuses_conservation_when_source_count_unmeasured tests/test_json_tabular.py tests/test_property5_five_layer_verification.py tests/test_adls_databricks_gate8_verify.py tests/test_sftp_gate8_wave39.py tests/test_sftp_host_key_propagation.py tests/test_gate8_sample_unavailable_wave100.py tests/test_excel_phantom_rows.py -q` (336 passed, 9 skipped in 39.90s on this host: 2 moto/object-store emulator absent, 3 Qdrant localhost:6333 unreachable, SQL Server :1433 leftover+SCD2 down, Oracle :1521 leftover+SCD2 down). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (29 passed); `npm run build` tsc+vite clean | Overwrite: dest COUNT(*). Complete PK census splits MISSING_TARGET vs EXTRA_TARGET. Complete overwrite snapshot MERGE-deletes dest keys not in S (`leftover = D \\ S`) before Gate-8 COUNT — SQL (sqlite/pg/mysql plus Oracle/SQL Server dest-engine `COUNT(*)`, never partition stats) plus Snowflake/BigQuery/DuckDB/Databricks/Redshift dest-engine `COUNT(*)` (never `INFORMATION_SCHEMA` / `__TABLES__` / `SVV_TABLE_INFO.tbl_rows` / `to_regclass`) plus ClickHouse `COUNT(*) FROM table FINAL` (never `system.tables.total_rows`; leftover MERGE unapplied — mutations async) and Iceberg filesystem CoW plus pyiceberg SqlCatalog (`len` of snapshot rows, never `scan().count()`); incremental CDC is a hard no-op. Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**. Dest-before before first write. Mirror: `COUNT(*) WHERE NOT _deleted`. Job closed iff every stream closed. File/object export: independent artifact record COUNT (CSV/JSON/JSONL/Parquet plus Excel value-bearing rows, streamed Avro, ORC footer `nrows`, XML unique record-path — never openpyxl used-range, never `parse_xml` ingest cap, never writer bytes). S3/GCS/ADLS GET uses that same machine — never JSON-fallback empty. Gate-8 cell checksum of those GET streams is `checksum_object_store` (CSV RFC 4180 / JSONL objects / JSON root array / streamed Avro OCF records / Parquet+ORC values / Excel value-bearing rows, never used-range / XML unique-path cell dicts and JSON unique-path cell dicts (root array or wrapped), second StAX pass, one-shot GET spooled). Vector/RAG: `COUNT(DISTINCT source_id)` (pgvector SQL, Milvus entity query, Qdrant point scroll, Pinecone list+fetch, Weaviate object listing) — never chunk COUNT(*) / collection rowCount / vectorCount / Aggregate meta.count / writer ack. SCD2: `COUNT(*) WHERE is_current` (sqlite/pg/mysql plus Oracle/SQL Server BIT/`NUMBER(1)` `= 1`, never `IS TRUE`; Snowflake/BQ/DuckDB/Databricks/Redshift BOOLEAN `IS TRUE`). Writer ack never closes. | Inferred deletes on incremental upsert/CDC without tombstone; stream-path this-run `soft_deleted` census; Oracle/SQL Server live leftover and SCD2 current COUNT when :1433/:1521 down; live Snowflake/BigQuery/Databricks/Redshift/ClickHouse clusters (PG-wire stand-in used for Redshift leftover MERGE); ClickHouse leftover MERGE (mutations async); live Pinecone index / Weaviate cluster; live moto/MinIO object-store GET; live Milvus cluster; live Qdrant (skipped this host); live shared-reader CDC dest-before on PG logical; Iceberg MoR / deletion vectors; exactly-once |
+| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_dialect_profiles.py tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py tests/test_stream_append_precount.py tests/test_execute_tracked_sqlite_to_csv_to_sqlite_roundtrip.py tests/test_milvus_writer.py tests/test_qdrant_writer.py tests/test_pinecone_writer.py tests/test_weaviate_writer.py tests/test_enterprise_hardening.py::test_strict_g8_writer_ack_for_dest_only tests/test_enterprise_hardening.py::test_strict_g8_qdrant_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_pinecone_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_weaviate_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_refuses_conservation_when_source_count_unmeasured tests/test_json_tabular.py tests/test_property5_five_layer_verification.py tests/test_adls_databricks_gate8_verify.py tests/test_sftp_gate8_wave39.py tests/test_sftp_host_key_propagation.py tests/test_gate8_sample_unavailable_wave100.py tests/test_excel_phantom_rows.py -q` (337 passed, 9 skipped in 40.22s on this host: 2 moto/object-store emulator absent, 3 Qdrant localhost:6333 unreachable, SQL Server :1433 leftover+SCD2 down, Oracle :1521 leftover+SCD2 down). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (29 passed); `npm run build` tsc+vite clean | Overwrite: dest COUNT(*). Complete PK census splits MISSING_TARGET vs EXTRA_TARGET. Complete overwrite snapshot MERGE-deletes dest keys not in S (`leftover = D \\ S`) before Gate-8 COUNT — SQL (sqlite/pg/mysql plus Oracle/SQL Server dest-engine `COUNT(*)`, never partition stats) plus Snowflake/BigQuery/DuckDB/Databricks/Redshift dest-engine `COUNT(*)` (never `INFORMATION_SCHEMA` / `__TABLES__` / `SVV_TABLE_INFO.tbl_rows` / `to_regclass`) plus ClickHouse `COUNT(*) FROM table FINAL` (never `system.tables.total_rows`; leftover MERGE unapplied — mutations async) and Iceberg filesystem CoW plus pyiceberg SqlCatalog (`len` of snapshot rows, never `scan().count()`); incremental CDC is a hard no-op. Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**. Dest-before before first write. Mirror: `COUNT(*) WHERE NOT _deleted`. Job closed iff every stream closed. File/object export: independent artifact record COUNT (CSV/JSON/JSONL/Parquet plus Excel value-bearing rows, streamed Avro, ORC footer `nrows`, XML unique record-path — never openpyxl used-range, never `parse_xml` ingest cap, never writer bytes). S3/GCS/ADLS GET uses that same machine — never JSON-fallback empty. Gate-8 cell checksum of those GET streams is `checksum_object_store` (CSV RFC 4180 / JSONL objects / JSON root array / streamed Avro OCF records / Parquet+ORC values / Excel value-bearing rows, never used-range / XML unique-path cell dicts and JSON unique-path cell dicts (root array or wrapped), second StAX pass, one-shot GET spooled). Vector/RAG: `COUNT(DISTINCT source_id)` (pgvector SQL, Milvus entity query, Qdrant point scroll, Pinecone list+fetch, Weaviate object listing) — never chunk COUNT(*) / collection rowCount / vectorCount / Aggregate meta.count / writer ack. SCD2: `COUNT(*) WHERE is_current` (sqlite/pg/mysql plus Oracle/SQL Server BIT/`NUMBER(1)` `= 1`, never `IS TRUE`; Snowflake/BQ/DuckDB/Databricks/Redshift BOOLEAN `IS TRUE`). Writer ack never closes. | Inferred deletes on incremental upsert/CDC without tombstone; stream-path this-run `soft_deleted` census; Oracle/SQL Server live leftover and SCD2 current COUNT when :1433/:1521 down; live Snowflake/BigQuery/Databricks/Redshift/ClickHouse clusters (PG-wire stand-in used for Redshift leftover MERGE); ClickHouse leftover MERGE (mutations async); live Pinecone index / Weaviate cluster; live moto/MinIO object-store GET; live Milvus cluster; live Qdrant (skipped this host); live shared-reader CDC dest-before on PG logical; Iceberg MoR / deletion vectors; exactly-once |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
 | 12 | Adversarial and chaos testing | UNPROVEN | — | — | — |
@@ -664,8 +664,10 @@ rowcount is not that proof.
    GET gzip of those kinds streams through `GzipFile` (never
    `gzip.decompress` a second copy). CSV encoding sniff is
    prefix-then-rest on a one-shot stream (no `seek(0)` on the GET body).
-   Excel/Parquet/ORC gzip still decompresses first (workbook / footer).
-   Avro is sequential OCF (header + blocks), not a footer format. Writer `rows` /
+   Excel/Parquet/ORC gzip stream-decompress into one rewindable image
+   (`GzipFile` + `rewindable_byte_source`; Hadoop GzipCodec is not
+   splittable — not a fake sequential COUNT). Never
+   `gzip.decompress(source.read())`. Avro is sequential OCF (header + blocks), not a footer format. Writer `rows` /
    bytes-landed never closes dest. File replace is overwrite
    (dest-before 0). Cardinality ≠ cell checksum — Gate-8 stays
    `skipped_readback` / `migration_proven=false`. Remote URI without a
@@ -681,8 +683,9 @@ rowcount is not that proof.
     body (`open_object_store_binary` — S3 `StreamingBody`, GCS
     `blob.open`, ADLS `chunks()`); gzip is `GzipFile(fileobj=stream)`.
     COUNT does not `Body.read()` the object and does not hold every part
-    in RAM. CSV encoding sniff is prefix-then-rest (no `seek(0)`).
-    Excel/Parquet/ORC GET still materializes one object. JSON-parse
+    in RAM.     CSV encoding sniff is prefix-then-rest (no `seek(0)`).
+    Excel/Parquet/ORC GET gzip uses `GzipFile` + spool (footer/workbook
+    image). JSON-parse
     fallback empty is dest=0 and is forbidden. Unparseable or truncated
     parts stay unmeasured — never sum a prefix. Missing table or
     object is **0**. `amazon_s3` aliases onto `s3`. Iceberg key census
@@ -813,7 +816,7 @@ rowcount is not that proof.
       unmeasured not JSON-empty. Live moto S3 missing-key=0 / JSON COUNT=2
       skipped this host (moto absent).
     Object-store Gate-8 checksum (this host, after 2026-08-14 slice):
-      336 passed, 9 skipped in 39.90s (Property 5 + 9 + ADLS/SFTP Gate-8 + Excel phantom).
+      337 passed, 9 skipped in 40.22s (Property 5 + 9 + ADLS/SFTP Gate-8 + Excel phantom).
       Gzip CSV GET: COUNT=3 and cell digest matches local `iter_csv_dicts`
       (not JSON-fallback dest=0; `_NoSlurpGet` forbids `Body.read()`).
       Garbage JSON GET: COUNT unmeasured, checksum `(-1, "")` not empty
@@ -842,7 +845,11 @@ rowcount is not that proof.
       `iter_avro_dicts`; sample ids `{1,2,3}`; empty header-only `(0, "")`;
       garbage `(-1, "")` not dest=0). Gzip Avro streams (`GzipFile`, never
       `gzip.decompress`; `_NoSlurpGet` forbids `Body.read()`); one-shot
-      gzip GET n=3. Excel/Parquet/ORC gzip stay byte-image.
+      gzip GET n=3. Gzip Parquet/ORC/Excel spool one decompressed image
+      (`GzipFile` + `rewindable_byte_source`, never `gzip.decompress` /
+      `Body.read()`): local `.parquet.gz`/`.orc.gz`/`.xlsx.gz` COUNT=2;
+      GET checksum n=2; garbage `.parquet.gz` unmeasured; one-shot gzip
+      Parquet n=2. Footer `nrows` stays COUNT — not a fake sequential walk.
 
   Vector / RAG identity (this host, after 2026-08-14 slice): 109 passed,
     1 skipped (moto) in 6.91s.
@@ -1016,7 +1023,8 @@ rowcount is not that proof.
     `.xml.gz` / `.avro.gz` COUNT via `gzip.open` stream, never `read_bytes` of the
     compressed file. Writer CSV gzip 3 → dest 3; JSONL gzip 2; JSON gzip
     3; XML gzip 2; Avro gzip 3; quoted-newline CSV gzip 2; corrupt gzip unmeasured.
-    Excel/Parquet/ORC gzip still decompresses first. Avro sequential OCF
+    Excel/Parquet/ORC gzip stream-decompress into one rewindable image
+    (this slice). Avro sequential OCF
     gzip streams (this slice). Object-store GET gzip of CSV/JSON/JSONL/XML/Avro
     now streams (next paragraph).
     Cardinality ≠ Gate-8. `engine.py` unchanged. Frontend not run this
@@ -1030,7 +1038,7 @@ rowcount is not that proof.
     gzip 2; JSON gzip 3; XML gzip 2; Avro gzip 3; quoted-newline CSV gzip 2;
     corrupt gzip unmeasured; uncompressed CSV GET still 3.
     `gzip.decompress` is not called on streaming kinds (monkeypatched).
-    Excel/Parquet/ORC GET gzip still decompresses first.
+    Excel/Parquet/ORC GET gzip stream-decompress into one rewindable image.
     GET still holds the compressed body in RAM (the GET already paid
     that). Streaming HTTP GET into GzipFile without buffering the
     object is a future of this kernel. Cardinality ≠ Gate-8.
@@ -1055,7 +1063,7 @@ rowcount is not that proof.
     `read()` raises → dest 3; quoted-newline gzip GET → 2. ADLS
     `chunks()` file-like CSV → 3, never `b''.join`. Duplicate
     object-store pytest defs removed (one `_patch_object_store_payloads`).
-    Excel/Parquet/ORC still materialize one object. Avro sequential OCF
+    Excel/Parquet/ORC gzip spool one decompressed image. Avro sequential OCF
     streams. Live moto/MinIO
     GET skipped when the emulator is absent. Cardinality ≠ Gate-8.
     `engine.py` unchanged. Frontend not run this slice (no UI change).
@@ -1276,7 +1284,9 @@ TypeScript does not recompute dest.
   ambiguous siblings / document XML stay unmeasured). Parquet GET checksum is a
   value walk (n=2), not JSON empty; garbage Parquet unmeasured. Excel GET
   checksum is value-bearing rows (n=2, not used-range / `max_row`). ORC
-  GET checksum is a value walk (n=2); footer `nrows` stays COUNT. Avro GET
+  GET checksum is a value walk (n=2); footer `nrows` stays COUNT. Gzip
+  Parquet/ORC/Excel GET is `GzipFile` + spool (n=2), never
+  `gzip.decompress(source.read())`. Avro GET
   checksum is sequential OCF records (n=3), not a gzip byte-image; empty
   header-only is `(0, "")`; garbage is `(-1, "")`. Poison
   JSONL does not digest the prefix. Dest sample of those GET streams is
