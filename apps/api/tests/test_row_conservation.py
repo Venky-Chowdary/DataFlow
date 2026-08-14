@@ -8,6 +8,8 @@ against itself.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from services.row_conservation import (
     DEST_READBACK,
     DEST_UNMEASURED,
@@ -247,3 +249,162 @@ def test_account_job_ignores_records_processed_when_dest_count_exists():
     assert ledger.writer_ack == 10_000
     assert ledger.rows_quarantined == 0
     assert ledger.balanced is False
+
+
+def test_extract_batch_keys_are_distinct_and_skip_nulls():
+    from services.row_conservation import extract_batch_keys
+
+    keys = extract_batch_keys(
+        [
+            {"id": 1, "label": "a"},
+            {"id": 1, "label": "a2"},
+            {"id": 2, "label": "b"},
+            {"id": None, "label": "x"},
+        ],
+        ["id"],
+    )
+    assert keys == [(1,), (2,)]
+
+
+def test_key_census_splits_inserts_from_updates():
+    from services.row_conservation import KeyCensus
+
+    census = KeyCensus(unique_batch_keys=10, dest_preexisting=7)
+    assert census.inserts == 3
+    assert census.updates == 7
+    assert census.deletes == 0
+    assert census.expected_delta == 3
+    assert KeyCensus.from_mapping({"unique_batch_keys": 2, "dest_preexisting": 5}) is None
+
+
+def test_keyed_census_closes_on_dest_delta_not_writer_ack():
+    from services.row_conservation import KeyCensus
+
+    census = KeyCensus(unique_batch_keys=10, dest_preexisting=9)
+    ledger = account_population(
+        rows_read=10,
+        dest_count=31,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=30,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=10,
+        sync_mode="upsert",
+        census=census,
+    )
+    assert ledger.conservation_kind == KIND_KEYED
+    assert ledger.inserts == 1
+    assert ledger.updates == 9
+    assert ledger.dest_delta == 1
+    assert ledger.rows_written == 1
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.writer_ack == 10
+    assert ledger.writer_ack_delta == -9
+
+
+def test_keyed_census_detects_dest_shortfall():
+    from services.row_conservation import KeyCensus
+
+    census = KeyCensus(unique_batch_keys=4, dest_preexisting=1)
+    ledger = account_population(
+        rows_read=4,
+        dest_count=32,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=30,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=4,
+        sync_mode="upsert",
+        census=census,
+    )
+    assert ledger.inserts == 3
+    assert ledger.dest_delta == 2
+    assert ledger.unaccounted == 1
+    assert ledger.balanced is False
+
+
+def test_keyed_census_with_quarantine_stays_unproven():
+    from services.row_conservation import KeyCensus
+
+    census = KeyCensus(unique_batch_keys=4, dest_preexisting=3)
+    ledger = account_population(
+        rows_read=4,
+        dest_count=31,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=30,
+        rejected_rows=1,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="upsert",
+        census=census,
+    )
+    assert ledger.balanced is False
+    assert ledger.rows_written is None
+    assert "quarantined" in ledger.note
+
+
+def test_account_job_reads_keyed_census_from_dest_summary():
+    job = {
+        "records_processed": 10,
+        "sync_mode": "upsert",
+        "reconciliation": {
+            "phase": "post_write_verified",
+            "source_rows": 10,
+            "target_rows": 31,
+            "rejected_rows": 0,
+            "rows_skipped": 0,
+            "target_checksum": "deadbeef",
+            "message": "Verified",
+        },
+        "destination_summary": {
+            "target_rows_before": 30,
+            "keyed_census": {"unique_batch_keys": 10, "dest_preexisting": 9},
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.conservation_kind == KIND_KEYED
+    assert ledger.balanced is True
+    assert ledger.inserts == 1
+    assert ledger.updates == 9
+    assert ledger.rows_written == 1
+    assert ledger.writer_ack == 10
+
+
+def test_sqlite_destination_key_hits_are_dest_engine_distinct(tmp_path: Path):
+    import sqlite3
+
+    from services.dest_precount import destination_key_hits
+
+    path = tmp_path / "p9_hits.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        conn.executemany(
+            "INSERT INTO items (id, label) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    hits = destination_key_hits(
+        "sqlite",
+        {"database": str(path)},
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (9,), (1,)],
+    )
+    assert hits == 2
+    empty = destination_key_hits(
+        "sqlite",
+        {"database": str(path)},
+        schema="",
+        table_name="missing",
+        key_columns=["id"],
+        keys=[(1,)],
+    )
+    assert empty == 0

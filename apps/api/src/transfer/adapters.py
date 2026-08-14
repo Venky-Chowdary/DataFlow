@@ -1393,14 +1393,39 @@ def write_destination_database(
     the destination summary for ``reconcile()`` to check the delta against.
     Keyword options are forwarded verbatim to ``_write_destination_database``.
     """
-    from services.dest_precount import PRECOUNT_KEY, precount_destination
+    from services.dest_precount import PRECOUNT_KEY, destination_key_hits, precount_destination
+    from services.dialect_profiles import schema_from_cfg
+    from services.row_conservation import CENSUS_KEY, KeyCensus, extract_batch_keys
+    from src.transfer.connector_capabilities import resolve_driver_type
 
-    rows_before = precount_destination(endpoint, resolve_connector_config(endpoint))
+    cfg = resolve_connector_config(endpoint)
+    rows_before = precount_destination(endpoint, cfg)
+    write_mode = str(options.get("write_mode") or "")
+    conflict_columns = list(options.get("conflict_columns") or [])
+    census_payload = None
+    if write_mode.lower() == "upsert" and conflict_columns and rows_before:
+        db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
+        batch_keys = extract_batch_keys(records, conflict_columns, mappings)
+        hits = destination_key_hits(
+            db_type,
+            cfg,
+            schema=schema_from_cfg(db_type, cfg),
+            table_name=resolve_dest_table(db_type, endpoint, "dt_import"),
+            key_columns=conflict_columns,
+            keys=batch_keys,
+        )
+        if hits is not None:
+            census_payload = KeyCensus(
+                unique_batch_keys=len(batch_keys),
+                dest_preexisting=hits,
+            ).to_dict()
     rows_written, ddl_log, summary = _write_destination_database(
         endpoint, records, columns, schema, mappings, **options
     )
     if rows_before is not None and isinstance(summary, dict):
         summary.setdefault(PRECOUNT_KEY, int(rows_before))
+    if census_payload is not None and isinstance(summary, dict):
+        summary[CENSUS_KEY] = census_payload
     return rows_written, ddl_log, summary
 
 

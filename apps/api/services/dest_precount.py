@@ -30,9 +30,14 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "PRECOUNT_KEY",
     "destination_row_count",
+    "destination_key_hits",
     "precount_destination",
     "precount_table",
 ]
+
+# Dest-engine IN-list chunk. Partitioning the key set (not overlapping) so
+# summed COUNT(DISTINCT) equals the full census.
+_KEY_HIT_CHUNK = 400
 
 # Key used to carry the pre-write count on the writer's destination summary.
 PRECOUNT_KEY = "target_rows_before"
@@ -153,6 +158,155 @@ def destination_row_count(
         logger.warning("Pre-write destination count failed: %s", exc)
         return None
     return None
+
+
+def destination_key_hits(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    key_columns: list[str],
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    """How many of these keys dest already holds — dest-engine, not writer ack.
+
+    Upsert/CDC ``records_processed`` counts updates as writes. ``COUNT(*)``
+    does not move. The independent split is: keys in this batch that already
+    exist on dest (updates) versus keys that do not (inserts). ``None`` means
+    the probe could not run; callers must leave keyed conservation unproven.
+    """
+    cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
+    table = (table_name or "").strip()
+    if not table or not cols:
+        return None
+    unique: list[tuple[Any, ...]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for raw in keys or []:
+        tup = tuple(raw)
+        if len(tup) != len(cols) or any(v is None for v in tup):
+            continue
+        if tup in seen:
+            continue
+        seen.add(tup)
+        unique.append(tup)
+    if not unique:
+        return 0
+    # Missing / empty dest: no hits, and IN against a missing table would error.
+    n = destination_row_count(db_type, cfg, schema=schema, table_name=table)
+    if n is None:
+        return None
+    if n == 0:
+        return 0
+    try:
+        return _key_hits_sql(db_type, cfg, schema=schema, table_name=table, cols=cols, keys=unique)
+    except Exception as exc:  # pragma: no cover - destination-specific failure
+        logger.warning("Pre-write destination key census failed: %s", exc)
+        return None
+
+
+def _key_hits_sql(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+
+    dialect = "mysql" if db_type == "mysql" else db_type
+    qchar = "`" if dialect == "mysql" else '"'
+    table_ref = quote_table_ref(
+        table_name,
+        schema if dialect == "postgresql" else None,
+        dialect="postgresql" if dialect == "postgresql" else dialect,
+    )
+    col_sql = ", ".join(quote_sql_identifier(c, qchar) for c in cols)
+    ph = "%s" if dialect in {"postgresql", "mysql"} else "?"
+    total = 0
+    if dialect == "sqlite":
+        import sqlite3
+
+        database = str(cfg.get("database") or "")
+        if not database:
+            return None
+        with sqlite3.connect(database) as conn:
+            total = _sum_distinct_hits(conn, table_ref, col_sql, cols, keys, ph)
+        return total
+    if dialect in {"postgresql", "redshift"}:
+        from connectors.postgresql_conn import get_connection
+
+        conn = get_connection(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or (5439 if db_type == "redshift" else 5432)),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+        try:
+            return _sum_distinct_hits(conn, table_ref, col_sql, cols, keys, ph)
+        finally:
+            conn.close()
+    if dialect == "mysql":
+        from connectors.mysql_conn import get_connection
+
+        conn = get_connection(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 3306),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+        try:
+            return _sum_distinct_hits(conn, table_ref, col_sql, cols, keys, ph)
+        finally:
+            conn.close()
+    return None
+
+
+def _sum_distinct_hits(
+    conn: Any,
+    table_ref: str,
+    col_sql: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+    ph: str,
+) -> int:
+    total = 0
+    width = len(cols)
+    for i in range(0, len(keys), _KEY_HIT_CHUNK):
+        chunk = keys[i : i + _KEY_HIT_CHUNK]
+        if width == 1:
+            in_sql = ", ".join(ph for _ in chunk)
+            sql = (
+                f"SELECT COUNT(DISTINCT {col_sql}) FROM {table_ref} "  # nosec B608
+                f"WHERE {col_sql} IN ({in_sql})"
+            )
+            params: tuple[Any, ...] = tuple(row[0] for row in chunk)
+        else:
+            row_ph = "(" + ", ".join(ph for _ in cols) + ")"
+            in_sql = ", ".join(row_ph for _ in chunk)
+            sql = (
+                f"SELECT COUNT(*) FROM ("  # nosec B608
+                f"SELECT DISTINCT {col_sql} FROM {table_ref} "
+                f"WHERE ({col_sql}) IN ({in_sql})"
+                f") _df_key_hits"
+            )
+            params = tuple(v for row in chunk for v in row)
+        cur = conn.cursor()
+        try:
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            total += int(row[0]) if row and row[0] is not None else 0
+        finally:
+            cur.close()
+    return total
 
 
 def precount_table(db_type: str, cfg: dict[str, Any], table_name: str) -> int | None:
