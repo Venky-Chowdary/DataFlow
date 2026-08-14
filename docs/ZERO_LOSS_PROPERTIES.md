@@ -14,7 +14,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py tests/test_unicode_form_carry.py tests/test_property8_unicode_form.py -q` (137 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16 + unicode-form 21; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal unscaled integer; unicode form: PG TEXT / MariaDB `general_ci`/`bin` UNIQUE BOTH_LAND for NFC vs NFD; MariaDB `unicode_ci` SECOND_REJECT; dest HEX `C3A9` vs `CC81`; bind does not NFC | UCA 0900 vs 1400 live MySQL 8; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
-| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py -q` (40 passed on this host: identity 14 + live execute_tracked 2 + certificate 24; SQLite always + live PG 16 → MariaDB 10.11) | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Writer `records_processed` cannot hide a dest shortfall (DMS MISSING_TARGET class). Append uses dest delta. Empty incremental pass is a measured zero. | Upsert/CDC keyed conservation; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
+| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py -q` (50 passed on this host: identity 22 + live execute_tracked 4 + certificate 24; SQLite always + live PG 16 → MariaDB 10.11) | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Keyed upsert: dest-engine key census closes `dest_delta == inserts`; updates do not change COUNT(*). Writer `records_processed` cannot hide a dest shortfall. Append uses dest delta. Empty incremental pass is a measured zero. | CDC tombstone deletes; duplicate CDC events per key; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
 | 12 | Adversarial and chaos testing | UNPROVEN | — | — | — |
@@ -601,27 +601,35 @@ digest is writer-ack still exposes dest COUNT(*) when dest was re-read.
 3. Overwrite: dest `COUNT(*)` is the written population.
 4. Append: `COUNT(*)_after − COUNT(*)_before` (a table that already held
    30 rows is not proof the batch landed).
-5. Upsert/CDC into a non-empty dest: COUNT(*) is not conservation; the
-   ledger stays unproven. Empty dest upsert is insert cardinality.
+5. Upsert/CDC into a non-empty dest: dest-engine key census closes
+   ``dest_delta == inserts_new_keys - deletes``. Updates do not change
+   COUNT(*). Without a census the ledger stays unproven.
 6. Incremental empty pass (read 0, write 0): measured zero, not unmeasured.
 7. Writer ack is diagnostic (`writer_ack_delta`); it never closes the
    identity.
 
 **Measured (this host, SQLite + PostgreSQL 16 → MariaDB 10.11):**
 ```
-40 passed in 1.60s
+50 passed in 2.65s
   Live SQLite overwrite: dest COUNT(*)=4; certificate uses 4 even when
     records_processed is forged to 10,000.
   Live PG 16 → MariaDB 10.11 overwrite: dest COUNT(*)=4; Gate-8
     target_rows=4; certificate rows_written_source=gate8_dest_readback.
+  Live SQLite upsert: dest held 3 keys; batch 3 updates + 1 insert;
+    dest COUNT(*) 3 → 4; inserts=1 updates=3 dest_delta=1; writer ack
+    forged to 10,000; keyed ledger balanced.
+  Live PG → MariaDB upsert: same split; dest labels updated; census
+    dest_preexisting=3.
   Unit: writer ack 10,000 vs dest 9,997 → unaccounted 3; coerced-null
-    not double-counted; append delta; upsert nonempty refused; empty
-    incremental pass balanced.
+    not double-counted; append delta; upsert nonempty without census
+    refused; keyed census dest_delta 1 vs writer 10 balanced; empty
+    incremental pass balanced; stream accumulator 2+1 hits → preexisting 3.
 ```
 
 ### NOT claimed / remaining for PROVEN (conservation slice)
 
-* Keyed upsert / CDC event conservation (updates do not change COUNT(*))
+* CDC tombstone / delete apply (dest COUNT delta vs deletes)
+* Duplicate CDC events per key (event conservation vs key conservation)
 * Oracle / SQL Server live dest COUNT certify
 * dest-only sinks (pgvector, Milvus) and file/object exports — no SQL
   read-back by design
