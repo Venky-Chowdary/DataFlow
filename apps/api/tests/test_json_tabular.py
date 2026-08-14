@@ -175,3 +175,41 @@ def test_count_json_records_unique_path_not_ingest_document_or_guess(
 
     monkeypatch.setattr("json.loads", _dom_forbidden)
     assert count_json_records(nested) == 3
+
+
+def test_iter_json_dicts_unique_path_not_ingest_or_inner_items():
+    """Gate-8 emits COUNT's unique path. Ingest ranking and inner lists stay ingest."""
+    pytest.importorskip("ijson")
+    from services.json_tabular import iter_json_dicts
+
+    rows = list(iter_json_dicts(b'[{"id":1},{"id":2},{"id":3}]'))
+    assert [r["id"] for r in rows] == [1, 2, 3]
+    wrapped = list(iter_json_dicts(b'{"records":[{"id":1},{"id":2},{"id":3}]}'))
+    assert [r["id"] for r in wrapped] == [1, 2, 3]
+    assert list(iter_json_dicts(b"[]")) == []
+    assert list(iter_json_dicts(b'{"records":[]}')) == []
+    nested = (
+        b'{"records":['
+        b'{"id":1,"items":[{"sku":"a"},{"sku":"b"}]},'
+        b'{"id":2,"items":[{"sku":"c"},{"sku":"d"}]},'
+        b'{"id":3,"items":[{"sku":"e"},{"sku":"f"}]}'
+        b"]}"
+    )
+    nested_rows = list(iter_json_dicts(nested))
+    assert [r["id"] for r in nested_rows] == [1, 2, 3]
+    assert all("items" in r for r in nested_rows)
+
+    from services.dest_precount import UnmeasuredArtifact
+
+    sibling = (
+        b'{"orders":[{"id":1},{"id":2}],"items":[{"id":"a"},{"id":"b"}]}'
+    )
+    with pytest.raises(UnmeasuredArtifact):
+        list(iter_json_dicts(sibling))
+    with pytest.raises(UnmeasuredArtifact):
+        list(iter_json_dicts(b'{"note":{"to":"T","from":"F"}}'))
+    with pytest.raises(UnmeasuredArtifact):
+        list(iter_json_dicts(b"[1,2,3]"))
+    with pytest.raises(UnmeasuredArtifact):
+        list(iter_json_dicts(b"not-json"))
+

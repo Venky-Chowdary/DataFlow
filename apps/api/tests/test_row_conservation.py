@@ -3094,20 +3094,143 @@ def test_object_store_unparseable_json_gate8_is_unmeasured_not_empty(
     assert checksum_object_store("s3", cfg, table_name="exports/data.json") == (0, "")
 
 
-def test_object_store_wrapped_json_gate8_unmeasured_count_still_works(
+def test_object_store_json_gate8_checksum_is_unique_path_not_root_array_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Wrapped JSON has StAX COUNT; one-shot GET cannot checksum without buffering."""
-    from services.dest_precount import checksum_object_store
+    """JSON GET checksum is unique-path cell dicts, not root-array-only and not JSON [].
 
-    body = b'{"records":[{"id":1},{"id":2},{"id":3}]}'
-    _patch_object_store_payloads(monkeypatch, [("exports/data.json", body)])
+    COUNT already streams the unique array-of-object. Gate-8 is a second
+    ijson pass at that path (one-shot GET is spooled). Preferred-wrapper
+    ranking is ingest. Sibling collections and document objects stay
+    unmeasured. Empty well-formed is ``(0, "")``.
+    """
+    from services.dest_precount import checksum_artifact_stream, checksum_object_store
+    from services.format_converter import convert_rows
+    from services.json_tabular import iter_json_dicts
+    from services.reconciliation import canonical_checksum_from_iter, read_target_sample
+
+    wrapped = b'{"records":[{"id":1},{"id":2},{"id":3}]}'
+    _patch_object_store_payloads(monkeypatch, [("exports/data.json", wrapped)])
     cfg = {"database": "b"}
     assert (
         destination_row_count("s3", cfg, schema="", table_name="exports/data.json")
         == 3
     )
-    assert checksum_object_store("s3", cfg, table_name="exports/data.json") == (-1, "")
+    n, digest = checksum_object_store("s3", cfg, table_name="exports/data.json")
+    assert n == 3
+    assert digest
+    expected = canonical_checksum_from_iter(list(iter_json_dicts(wrapped)))
+    assert digest == expected
+    rows = read_target_sample(
+        "s3",
+        cfg,
+        schema="",
+        table_name="exports/data.json",
+        columns=["id"],
+        limit=50,
+    )
+    assert len(rows) == 3
+    assert {r["id"] for r in rows} == {1, 2, 3}
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="json",
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/root.json", content)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/root.json")
+        == 3
+    )
+    root_n, root_digest = checksum_object_store(
+        "s3", cfg, table_name="exports/root.json"
+    )
+    assert root_n == 3
+    assert root_digest == canonical_checksum_from_iter(list(iter_json_dicts(content)))
+
+    empty_wrap = b'{"records":[]}'
+    _patch_object_store_payloads(monkeypatch, [("exports/empty.json", empty_wrap)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/empty.json")
+        == 0
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/empty.json") == (
+        0,
+        "",
+    )
+
+    nested = (
+        b'{"records":['
+        b'{"id":1,"items":[{"sku":"a"},{"sku":"b"}]},'
+        b'{"id":2,"items":[{"sku":"c"},{"sku":"d"}]},'
+        b'{"id":3,"items":[{"sku":"e"},{"sku":"f"}]}'
+        b"]}"
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/nested.json", nested)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/nested.json")
+        == 3
+    )
+    nested_n, nested_digest = checksum_object_store(
+        "s3", cfg, table_name="exports/nested.json"
+    )
+    assert nested_n == 3
+    assert nested_digest
+    nested_rows = list(iter_json_dicts(nested))
+    assert [r["id"] for r in nested_rows] == [1, 2, 3]
+    assert all("items" in r for r in nested_rows)
+
+    document = b'{"note":{"to":"T","from":"F"}}'
+    _patch_object_store_payloads(monkeypatch, [("exports/doc.json", document)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/doc.json")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/doc.json") == (
+        -1,
+        "",
+    )
+
+    sibling = (
+        b'{"orders":[{"id":1},{"id":2}],"items":[{"id":"a"},{"id":"b"}]}'
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/sib.json", sibling)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/sib.json")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/sib.json") == (
+        -1,
+        "",
+    )
+
+    scalars = b"[1,2,3]"
+    _patch_object_store_payloads(monkeypatch, [("exports/scalars.json", scalars)])
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/scalars.json")
+        is None
+    )
+    assert checksum_object_store("s3", cfg, table_name="exports/scalars.json") == (
+        -1,
+        "",
+    )
+
+    compressed = gzip.compress(wrapped)
+    oneshot_n, oneshot_digest = checksum_artifact_stream(
+        _oneshot_gzip(compressed), name="export.json"
+    )
+    assert oneshot_n == 3
+    assert oneshot_digest == digest
+
+    _patch_object_store_payloads(
+        monkeypatch, [("exports/data.json.gz", compressed)]
+    )
+    gz_n, gz_digest = checksum_object_store(
+        "s3", cfg, table_name="exports/data.json.gz"
+    )
+    assert gz_n == 3
+    assert gz_digest == digest
 
 
 def test_object_store_xml_gate8_checksum_is_unique_path_not_json_empty(

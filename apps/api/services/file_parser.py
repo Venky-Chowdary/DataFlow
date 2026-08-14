@@ -1648,56 +1648,6 @@ def _xml_elem_record(elem: Any) -> dict[str, Any]:
     return FileParser._flatten_xml_item(raw)
 
 
-def _xml_source_can_rewind(source: Any) -> bool:
-    """Whether a second StAX pass can ``seek(0)`` after consuming the stream.
-
-    CPython ``GzipFile.seekable()`` is True even when the compressed
-    ``fileobj`` cannot rewind after EOF (a one-shot HTTP GET). Rewind
-    capability is the byte container, not the codec wrapper: local gzip
-    wrapping a file seeks; gzip wrapping a StreamingBody must spool.
-    """
-    inner = source.fileobj if isinstance(source, gzip.GzipFile) else source
-    try:
-        return bool(inner.seekable())
-    except Exception:
-        return False
-
-
-def _xml_rewindable(source: Any) -> tuple[Any, Any]:
-    """Rewindable byte source. One-shot GET is spooled; never hash a prefix.
-
-    Unique-path identity is known only after the document ends. Pass 1
-    discovers; pass 2 emits. Seekable handles (``BytesIO``, local files,
-    gzip wrapping a file) rewind in place. A StreamingBody — including
-    gzip wrapping a non-seekable prefix stream — is copied once to a
-    ``SpooledTemporaryFile`` (RAM until 8 MiB, then disk). Hadoop's
-    local two-pass, not a second parser and not O(n) record buffering
-    of every sibling collection.
-    """
-    import tempfile
-
-    if _xml_source_can_rewind(source):
-        try:
-            source.seek(0)
-            return source, None
-        except (OSError, AttributeError, io.UnsupportedOperation, ValueError):
-            pass
-    spool = tempfile.SpooledTemporaryFile(max_size=8 * 1024 * 1024)
-    try:
-        while True:
-            chunk = source.read(1024 * 1024)
-            if not chunk:
-                break
-            if not isinstance(chunk, (bytes, bytearray)):
-                raise TypeError("XML stream must yield bytes")
-            spool.write(chunk)
-        spool.seek(0)
-    except Exception:
-        spool.close()
-        raise
-    return spool, spool.close
-
-
 def _iter_xml_dicts_at_path(
     source: Any, xml_iterparse: Any, parent_path: str, tag: str
 ) -> Any:
@@ -1775,7 +1725,7 @@ def iter_xml_dicts(content: bytes | str | Path) -> Any:
     document XML, XXE, and malformed raise ``UnmeasuredArtifact``.
     Empty well-formed yields nothing.
     """
-    from services.dest_precount import UnmeasuredArtifact
+    from services.dest_precount import UnmeasuredArtifact, rewindable_byte_source
 
     try:
         from defusedxml.ElementTree import iterparse as xml_iterparse
@@ -1789,7 +1739,7 @@ def iter_xml_dicts(content: bytes | str | Path) -> Any:
     spool_closer = None
     try:
         source, closer = _xml_count_open(content)
-        rewindable, spool_closer = _xml_rewindable(source)
+        rewindable, spool_closer = rewindable_byte_source(source)
         found = _xml_stax_unique(rewindable, xml_iterparse)
         if found is None:
             raise UnmeasuredArtifact("xml_unmeasured")

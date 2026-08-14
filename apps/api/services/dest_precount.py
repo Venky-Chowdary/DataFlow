@@ -59,10 +59,9 @@ checksum of those same GET streams is ``checksum_object_store`` — never
 ``json.loads`` fallback empty (gzip CSV / Parquet as UTF-8 JSON garbage
 was dest=0). JSON root array, JSONL objects, CSV RFC 4180 dicts, and
 Parquet/Avro/ORC/Excel value walks feed ``canonical_checksum_from_iter``.
-Wrapped JSON cell walks stay unmeasured this kernel (COUNT
-still measures cardinality; one-shot unique-path cannot hash cells
-without buffering every element). XML unique-path cell dicts are a
-second StAX pass of the COUNT path. Empty well-formed is ``(0, "")``. Dest sample
+JSON unique-path cell dicts (root array or wrapped ``{\"records\":[]}``)
+and XML unique-path cell dicts are a second StAX pass of the COUNT path
+(one-shot GET is spooled once). Empty well-formed is ``(0, "")``. Dest sample
 of those GET streams is ``sample_object_store`` / ``sample_artifact_records``
 — never JSON-fallback ``[]`` (that greens a lost write). SFTP dest COUNT
 and Gate-8 checksum walk the same artifact machine via ``open_sftp_binary``
@@ -154,6 +153,7 @@ from __future__ import annotations
 import gzip
 import io
 import logging
+import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -270,9 +270,60 @@ class UnmeasuredArtifact(Exception):
     """Dest population cannot be checksummed. Never hash a prefix or JSON ``[]``.
 
     Gate-8 ``json.loads`` fallback empty is dest=0 — the same hole COUNT
-    already refuses. Poison JSONL, ambiguous JSON, and wrapped JSON
-    stay unmeasured. XML unique-path cell dicts are a second StAX pass.
+    already refuses. Poison JSONL and ambiguous sibling collections stay
+    unmeasured. JSON and XML unique-path cell dicts are a second StAX pass.
     """
+
+
+_ARTIFACT_SPOOL_MAX = 8 * 1024 * 1024
+
+
+def source_can_rewind(source: Any) -> bool:
+    """Whether a second pass can ``seek(0)`` after consuming the stream.
+
+    CPython ``GzipFile.seekable()`` is True even when the compressed
+    ``fileobj`` cannot rewind after EOF (a one-shot HTTP GET). Rewind
+    capability is the byte container, not the codec wrapper: local gzip
+    wrapping a file seeks; gzip wrapping a StreamingBody must spool.
+    """
+    inner = source.fileobj if isinstance(source, gzip.GzipFile) else source
+    try:
+        return bool(inner.seekable())
+    except Exception:
+        return False
+
+
+def rewindable_byte_source(source: Any) -> tuple[Any, Any]:
+    """Rewindable byte source. One-shot GET is spooled; never hash a prefix.
+
+    Unique-path identity is known only after the document ends. Pass 1
+    discovers; pass 2 emits. Seekable handles (``BytesIO``, local files,
+    gzip wrapping a file) rewind in place. A StreamingBody — including
+    gzip wrapping a non-seekable prefix stream — is copied once to a
+    ``SpooledTemporaryFile`` (RAM until 8 MiB, then disk). Hadoop's
+    local two-pass, not a second parser and not O(n) record buffering
+    of every sibling collection. JSON and XML Gate-8 share this kernel.
+    """
+    if source_can_rewind(source):
+        try:
+            source.seek(0)
+            return source, None
+        except (OSError, AttributeError, io.UnsupportedOperation, ValueError):
+            pass
+    spool = tempfile.SpooledTemporaryFile(max_size=_ARTIFACT_SPOOL_MAX)
+    try:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            if not isinstance(chunk, (bytes, bytearray)):
+                raise TypeError("artifact stream must yield bytes")
+            spool.write(chunk)
+        spool.seek(0)
+    except Exception:
+        spool.close()
+        raise
+    return spool, spool.close
 
 
 def _count(conn: Any, table_ref: str) -> int:
@@ -1617,46 +1668,6 @@ def _sftp_row_count(cfg: dict[str, Any], *, table_name: str) -> int | None:
                 pass
 
 
-def _skip_json_ws_bom(source: Any) -> bytes:
-    while True:
-        b = source.read(1)
-        if not b:
-            return b""
-        if b in (b" ", b"\t", b"\n", b"\r"):
-            continue
-        if b == b"\xef":
-            rest = source.read(2)
-            if rest == b"\xbb\xbf":
-                continue
-            return b + rest
-        return b
-
-
-def _iter_json_root_array_dicts(source: Any) -> Any:
-    """Writer JSON ``[{...}]`` as dicts. Wrapped / scalar-array JSON is unmeasured.
-
-    Dest COUNT of JSON is unique-path ijson StAX (wrapped ``{\"records\":[]}``
-    still has cardinality). Gate-8 needs cell values on a one-shot GET, so
-    uniqueness cannot be decided after buffering every object. Root array
-    is what ``convert_rows`` writes. Preferred-wrapper ranking is ingest,
-    not this digest.
-    """
-    from services.csv_profiler import _PrefixedRaw
-
-    first = _skip_json_ws_bom(source)
-    if first != b"[":
-        raise UnmeasuredArtifact("json_not_root_array")
-    try:
-        import ijson
-    except ImportError as exc:
-        raise UnmeasuredArtifact("json_checksum_needs_ijson") from exc
-    prefixed = io.BufferedReader(_PrefixedRaw(first, source))
-    for rec in ijson.items(prefixed, "item"):
-        if not isinstance(rec, dict):
-            raise UnmeasuredArtifact("json_array_non_object")
-        yield rec
-
-
 def _iter_parquet_records(body: bytes) -> Any:
     """Cell values of one Parquet object. Footer ``num_rows`` is COUNT, not this."""
     try:
@@ -1735,7 +1746,9 @@ def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
         yield from iter_jsonl_dicts(source)
         return
     if kind == "json":
-        yield from _iter_json_root_array_dicts(source)
+        from services.json_tabular import iter_json_dicts
+
+        yield from iter_json_dicts(source)
         return
     if kind == "xml":
         from services.file_parser import iter_xml_dicts
@@ -1772,9 +1785,9 @@ def _iter_artifact_records(
 
     CSV/JSON/JSONL (including gzip) walk ``source`` forward-only.
     Parquet/Avro/ORC/Excel still materialize one object (byte-image /
-    workbook parsers). Wrapped JSON raises ``UnmeasuredArtifact``. XML
-    unique-path cell dicts are a second StAX pass of the COUNT path
-    (one-shot GET is spooled once). Never ``json.loads`` fallback empty.
+    workbook parsers). JSON unique-path cell dicts (root array or wrapped)
+    and XML unique-path cell dicts are a second StAX pass of the COUNT
+    path (one-shot GET is spooled once). Never ``json.loads`` fallback empty.
     """
     label = str(name or "")
     compressed = label.lower().endswith(".gz")
@@ -1975,7 +1988,7 @@ def checksum_object_store(
 
     Same keys and GET handles as dest COUNT. One key is opened, walked,
     and closed before the next — never a list of GET bodies. Gzip CSV as
-    UTF-8 JSON garbage is not dest=0. Unparseable / wrapped JSON / XML /
+    UTF-8 JSON garbage is not dest=0. Unparseable / ambiguous JSON / XML /
     Excel / ORC cell walk is ``(-1, "")``. Empty well-formed is
     ``(0, "")``. Cardinality remains dest COUNT; this digest is cell
     fidelity of the records we could walk. CDC stays at-least-once upsert.

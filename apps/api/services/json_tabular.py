@@ -271,14 +271,17 @@ def _json_path_depth(path: str) -> int:
     return path.count(".") + 1
 
 
-def _json_count_from_stats(acc: dict[str, list[int]]) -> int | None:
-    """Unique shallowest array-of-object, else unique empty wrapper 0, else None.
+def _json_unique_from_stats(
+    acc: dict[str, list[int]],
+) -> tuple[int, str | None] | None:
+    """Unique shallowest array-of-object as ``(n, path)``.
 
     A collection is an array of objects (maps ≥ 1, no scalars, no nested
     arrays). Nested inner lists lose to the outer path. Sibling collections
     at the same depth stay unmeasured — never guess ``data`` over ``items``.
     Ingest preferred-wrapper ranking and single-object-as-one-row are not
-    this COUNT. Scalar arrays are unmeasured, not dest=N.
+    this identity. Scalar arrays are unmeasured, not dest=N. Empty wrapper
+    is ``(0, path)``. COUNT returns ``n``; Gate-8 emits dicts at ``path``.
     """
     objects: list[tuple[int, str, int]] = []
     empties: list[tuple[int, str]] = []
@@ -293,7 +296,7 @@ def _json_count_from_stats(acc: dict[str, list[int]]) -> int | None:
         at_min = [item for item in objects if item[0] == min_depth]
         if len(at_min) != 1:
             return None
-        return at_min[0][2]
+        return at_min[0][2], at_min[0][1]
     if not empties:
         return None
     min_depth = min(item[0] for item in empties)
@@ -302,7 +305,13 @@ def _json_count_from_stats(acc: dict[str, list[int]]) -> int | None:
     at_min = [item for item in empties if item[0] == min_depth]
     if len(at_min) != 1:
         return None
-    return 0
+    return 0, at_min[0][1]
+
+
+def _json_count_from_stats(acc: dict[str, list[int]]) -> int | None:
+    """Unique shallowest array-of-object, else unique empty wrapper 0, else None."""
+    found = _json_unique_from_stats(acc)
+    return None if found is None else found[0]
 
 
 def _json_collect_array_stats(data: Any, path: str = "") -> dict[str, list[int]]:
@@ -359,8 +368,10 @@ def _count_json_records_dom(text: str) -> int | None:
     return _json_count_from_stats(_json_collect_array_stats(data))
 
 
-def _count_json_records_stax(source: Any, parse: Any) -> int | None:
-    """ijson.parse walk. One object at a time; empty array shells stay O(depth)."""
+def _json_stax_unique(
+    source: Any, parse: Any
+) -> tuple[int, str | None] | None:
+    """ijson.parse walk. Unique ``(n, path)``, else unmeasured."""
     stack: list[tuple[str, list[int], str]] = []
     acc: dict[str, list[int]] = {}
     for prefix, event, _value in parse(source):
@@ -391,7 +402,13 @@ def _count_json_records_stax(source: Any, parse: Any) -> int | None:
                 stack[-1][1][1] += 1
     if stack:
         return None
-    return _json_count_from_stats(acc)
+    return _json_unique_from_stats(acc)
+
+
+def _count_json_records_stax(source: Any, parse: Any) -> int | None:
+    """ijson.parse walk. One object at a time; empty array shells stay O(depth)."""
+    found = _json_stax_unique(source, parse)
+    return None if found is None else found[0]
 
 
 def _json_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
@@ -439,7 +456,9 @@ def count_json_records(content: bytes | str | Path) -> int | None:
     counted from disk; bytes (object-store GET) stream from a buffer already
     in RAM. Local gzip JSON streams; object-store GET gzip streams through
     a caller-owned ``GzipFile``. The ImportError ``json.loads`` fallback
-    does not slurp a gzip path (stays unmeasured).
+    does not slurp a gzip path (stays unmeasured). Gate-8 cell checksum
+    reuses this uniqueness via ``iter_json_dicts`` (second ijson pass at
+    the discovered path; one-shot GET is spooled).
     """
     try:
         import ijson
@@ -457,6 +476,122 @@ def count_json_records(content: bytes | str | Path) -> int | None:
     except Exception:
         return None
     finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def _json_items_prefix(path: str) -> str:
+    """ijson.items prefix for objects inside the COUNT array path.
+
+    Root array path ``""`` → ``item``. Wrapped ``records`` → ``records.item``.
+    Nested ``[[{...}]]`` COUNT path ``item`` → ``item.item``.
+    """
+    return "item" if not path else f"{path}.item"
+
+
+def _json_iter_dicts_at_path(source: Any, items: Any, path: str) -> Any:
+    """Second ijson pass: emit objects at the unique COUNT path."""
+    from services.dest_precount import UnmeasuredArtifact
+
+    for rec in items(source, _json_items_prefix(path)):
+        if not isinstance(rec, dict):
+            raise UnmeasuredArtifact("json_array_non_object")
+        yield rec
+
+
+def _json_iter_dicts_at_dom_path(data: Any, target: str, cur: str = "") -> Any:
+    """DOM emit of objects COUNT would attribute to ``target``. Same path algebra."""
+    if isinstance(data, list):
+        if cur == target:
+            for item in data:
+                if isinstance(item, dict):
+                    yield item
+            return
+        child = "item" if not cur else f"{cur}.item"
+        for item in data:
+            yield from _json_iter_dicts_at_dom_path(item, target, child)
+        return
+    if isinstance(data, dict):
+        for key, value in data.items():
+            child = str(key) if not cur else f"{cur}.{key}"
+            yield from _json_iter_dicts_at_dom_path(value, target, child)
+
+
+def _iter_json_dicts_dom(text: str) -> Any:
+    """ImportError fallback when ijson is absent. Same unique-path as COUNT."""
+    from services.dest_precount import UnmeasuredArtifact
+
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise UnmeasuredArtifact("json_unparseable") from exc
+    found = _json_unique_from_stats(_json_collect_array_stats(data))
+    if found is None:
+        raise UnmeasuredArtifact("json_unmeasured")
+    n, path = found
+    if n == 0 or path is None:
+        return
+    yielded = 0
+    for rec in _json_iter_dicts_at_dom_path(data, path):
+        yielded += 1
+        yield rec
+    if yielded != n:
+        raise UnmeasuredArtifact("json_checksum_count_mismatch")
+
+
+def iter_json_dicts(content: bytes | str | Path) -> Any:
+    """Same unique-path population as ``count_json_records``, as dicts for Gate-8.
+
+    Pass 1 is the COUNT ijson unique-path walk. Pass 2 emits objects at
+    that path. A one-shot GET is spooled once, then both passes read the
+    spool — never a prefix digest, never ingest ``extract_json_records``
+    (preferred-wrapper ranking / lone-object-as-one). Ambiguous siblings,
+    document objects, scalar arrays, and malformed raise
+    ``UnmeasuredArtifact``. Empty well-formed yields nothing.
+    """
+    from services.dest_precount import UnmeasuredArtifact, rewindable_byte_source
+
+    try:
+        import ijson
+    except ImportError:
+        text = _json_count_as_text(content)
+        if text is None:
+            raise UnmeasuredArtifact("json_unreadable")
+        yield from _iter_json_dicts_dom(text)
+        return
+    closer = None
+    spool_closer = None
+    try:
+        source, closer = _json_count_open(content)
+        rewindable, spool_closer = rewindable_byte_source(source)
+        found = _json_stax_unique(rewindable, ijson.parse)
+        if found is None:
+            raise UnmeasuredArtifact("json_unmeasured")
+        n, path = found
+        if n == 0 or path is None:
+            return
+        rewindable.seek(0)
+        yielded = 0
+        for rec in _json_iter_dicts_at_path(rewindable, ijson.items, path):
+            yielded += 1
+            yield rec
+        if yielded != n:
+            raise UnmeasuredArtifact("json_checksum_count_mismatch")
+    except UnmeasuredArtifact:
+        raise
+    except (OSError, UnicodeEncodeError, TypeError) as exc:
+        raise UnmeasuredArtifact("json_unreadable") from exc
+    except Exception as exc:
+        raise UnmeasuredArtifact("json_unparseable") from exc
+    finally:
+        if spool_closer is not None:
+            try:
+                spool_closer()
+            except Exception:
+                pass
         if closer is not None:
             try:
                 closer()
