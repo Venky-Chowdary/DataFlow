@@ -138,6 +138,10 @@ class PipelineSchedule:
     source_schema: dict[str, str] = field(default_factory=dict)
     source_schema_fingerprint: str = ""
     source_schema_observed_at: str = ""
+    #: Live source primary-key columns observed with the type map. PK-only
+    #: identity changes keep the same col→type map, so a type-only baseline
+    #: cannot see them — Confluent NONE / Airbyte hard-break.
+    source_primary_key: list[str] = field(default_factory=list)
     # Retry policy applied on run failure.
     max_retries: int = 0
     retry_backoff_seconds: int = 60
@@ -200,6 +204,18 @@ class PipelineSchedule:
                     bool((data.get("contract_id") or "").strip()),
                 )
             ),
+            source_schema={
+                str(k): str(v)
+                for k, v in (data.get("source_schema") or {}).items()
+                if not isinstance(v, (dict, list))
+            },
+            source_schema_fingerprint=str(data.get("source_schema_fingerprint") or ""),
+            source_schema_observed_at=str(data.get("source_schema_observed_at") or ""),
+            source_primary_key=[
+                str(p).strip()
+                for p in (data.get("source_primary_key") or [])
+                if str(p).strip()
+            ],
             max_retries=max(0, int(data.get("max_retries", 0) or 0)),
             retry_backoff_seconds=max(0, int(data.get("retry_backoff_seconds", 60) or 0)),
             notify_on_failure=bool(data.get("notify_on_failure", True)),

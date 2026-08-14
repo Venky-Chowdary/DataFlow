@@ -282,6 +282,11 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
     from services.source_schema_memory import evaluate_source_drift
 
     previous = dict(getattr(sched, "source_schema", None) or {})
+    previous_pk = [
+        str(p).strip()
+        for p in (getattr(sched, "source_primary_key", None) or [])
+        if str(p).strip()
+    ]
     try:
         from src.transfer.endpoint_intelligence import introspect_endpoint
 
@@ -293,9 +298,19 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
             exc,
         )
         return
-    current = dict(info.get("schema") or {})
+    current = {
+        str(k): str(v)
+        for k, v in dict(info.get("schema") or {}).items()
+        if not isinstance(v, (dict, list))
+    }
     if not current:
         return
+    current_pk = [
+        str(p).strip()
+        for p in (info.get("primary_key_columns") or [])
+        if str(p).strip()
+    ]
+    cursor = str(getattr(sched, "cursor_column", "") or "").strip()
 
     verdict = evaluate_source_drift(
         previous_schema=previous,
@@ -304,18 +319,32 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
         mappings=list(getattr(request, "mappings", None) or []),
         schema_policy=str(getattr(sched, "schema_policy", "") or "manual_review"),
         dest_db=str(getattr(request.destination, "format", "") or ""),
+        previous_primary_key=previous_pk,
+        current_primary_key=current_pk,
+        cursor_fields=[cursor] if cursor else None,
     )
     if verdict.blocks:
         raise ValueError(
             f"{verdict.summary} Review the mapping and re-approve, or set "
             "schema_policy to propagate the change deliberately."
         )
-    _remember_source_schema(sched, current, verdict.fingerprint)
+    _remember_source_schema(
+        sched, current, verdict.fingerprint, primary_key=current_pk
+    )
 
 
-def _remember_source_schema(sched: Any, schema: dict[str, str], fingerprint: str) -> None:
+def _remember_source_schema(
+    sched: Any,
+    schema: dict[str, str],
+    fingerprint: str,
+    *,
+    primary_key: list[str] | None = None,
+) -> None:
     """Record the shape this run read, so the next one has something to compare."""
-    if not fingerprint or fingerprint == getattr(sched, "source_schema_fingerprint", ""):
+    pk = [str(p).strip() for p in (primary_key or []) if str(p).strip()]
+    same_fp = fingerprint == getattr(sched, "source_schema_fingerprint", "")
+    same_pk = pk == list(getattr(sched, "source_primary_key", None) or [])
+    if not fingerprint or (same_fp and same_pk):
         return
     try:
         from services.schedule_store import update_schedule
@@ -326,6 +355,7 @@ def _remember_source_schema(sched: Any, schema: dict[str, str], fingerprint: str
                 "source_schema": dict(schema),
                 "source_schema_fingerprint": fingerprint,
                 "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+                "source_primary_key": pk,
             },
         )
     except Exception as exc:

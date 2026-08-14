@@ -513,15 +513,22 @@ async def explain_preflight(body: ExplainRequest):
 class SchemaDriftRequest(BaseModel):
     old_schema: dict[str, Any] = Field(default_factory=dict)
     new_schema: dict[str, Any] = Field(default_factory=dict)
+    dest_db: str = ""
+    schema_policy: str = "manual_review"
 
 
 @router.post("/schema-drift")
 async def classify_schema_drift(body: SchemaDriftRequest):
-    """Classify schema evolution as additive vs breaking (approve/reject UX)."""
-    from services.schema_drift import classify_schema_change
+    """Classify schema evolution and stamp compatibility + pause/propagate/review."""
+    from services.schema_drift import classify_schema_evolution_report
 
     try:
-        return classify_schema_change(body.old_schema, body.new_schema)
+        return classify_schema_evolution_report(
+            body.old_schema,
+            body.new_schema,
+            dest_db=body.dest_db or "",
+            schema_policy=body.schema_policy or "manual_review",
+        )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 

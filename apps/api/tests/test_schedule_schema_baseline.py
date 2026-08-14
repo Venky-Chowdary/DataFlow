@@ -63,7 +63,7 @@ def _guard(monkeypatch, sched, introspected: dict[str, Any] | None, recorded: li
     monkeypatch.setattr(
         runner,
         "_remember_source_schema",
-        lambda s, schema, fp: recorded.append((schema, fp)),
+        lambda s, schema, fp, **_k: recorded.append((schema, fp)),
     )
     runner._guard_source_schema_drift(sched, _Request())
 

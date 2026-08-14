@@ -718,3 +718,55 @@ def test_classify_flat_schema_dicts():
     )
     assert report["severity"] == "additive"
     assert any(c["kind"] == "widen_type" for c in report["additive"])
+
+
+def test_compatibility_lattice_matches_confluent_roles_for_sql():
+    from services.schema_drift import (
+        COMPAT_BACKWARD,
+        COMPAT_FORWARD,
+        COMPAT_FULL,
+        COMPAT_IDENTICAL,
+        COMPAT_NONE,
+        classify_schema_evolution_report,
+        compatibility_of,
+        resolve_schema_evolution,
+    )
+
+    identical = classify_schema_change({"id": "INTEGER"}, {"id": "INT"})
+    assert identical["severity"] == "none"
+    assert compatibility_of(identical) == COMPAT_IDENTICAL
+
+    widened = classify_schema_change(
+        {"id": "INT", "name": "VARCHAR(50)"},
+        {"id": "INT", "name": "VARCHAR(200)"},
+    )
+    assert compatibility_of(widened) == COMPAT_FORWARD
+
+    dropped = classify_schema_change({"id": "INT", "legacy": "VARCHAR"}, {"id": "INT"})
+    assert compatibility_of(dropped) == COMPAT_BACKWARD
+
+    both = classify_schema_change(
+        {"id": "INT", "legacy": "VARCHAR"},
+        {"id": "INT", "region": "VARCHAR"},
+    )
+    # rename heuristic may pair legacy→region; either backward (rename) or full (drop+add)
+    assert compatibility_of(both) in {COMPAT_FULL, COMPAT_BACKWARD}
+
+    narrowed = classify_schema_change(
+        {"amount": "DECIMAL(12,2)"},
+        {"amount": "DECIMAL(6,2)"},
+    )
+    assert compatibility_of(narrowed) == COMPAT_NONE
+
+    evo = resolve_schema_evolution(narrowed, schema_policy="propagate_columns")
+    assert evo["should_pause"] is True
+    assert evo["compatibility"] == COMPAT_NONE
+
+    report = classify_schema_evolution_report(
+        {"id": "INTEGER", "name": "VARCHAR"},
+        {"id": "INTEGER", "name": "VARCHAR", "region": "VARCHAR"},
+        schema_policy="propagate_columns",
+    )
+    assert report["compatibility"] == COMPAT_FORWARD
+    assert report["schema_evolution"]["should_propagate"] is True
+    assert report["summary"]

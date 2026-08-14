@@ -8,6 +8,8 @@ import {
   buildConversionClassHonesty,
   buildReferentialIntegrityHonesty,
   buildValidateHonestyControls,
+  schemaDriftAllowsAcknowledge,
+  schemaDriftRequiresRemap,
 } from "./validateHonestyControls.ts";
 import type { PreflightResult } from "./types.ts";
 
@@ -133,5 +135,52 @@ describe("validateHonestyControls", () => {
     } as unknown as PreflightResult);
     assert.equal(missing.decisionArtifact.present, false);
     assert.match(missing.decisionArtifact.headline, /missing/i);
+  });
+
+  it("never lets Acknowledge green a hard-breaking schema change", () => {
+    assert.equal(
+      schemaDriftAllowsAcknowledge({
+        remediation_kind: "acknowledge_schema_drift",
+        ack_required: true,
+        schema_evolution: {
+          action: "pause",
+          should_pause: true,
+          compatibility: "none",
+          hard_breaking: [{ kind: "narrow_type", column: "amount" }],
+        },
+      }),
+      false,
+    );
+    assert.equal(
+      schemaDriftRequiresRemap({
+        schema_evolution: {
+          action: "pause",
+          should_pause: true,
+          compatibility: "none",
+          hard_breaking: [{ kind: "type_change" }],
+        },
+      }),
+      true,
+    );
+    assert.equal(
+      schemaDriftAllowsAcknowledge({
+        remediation_kind: "acknowledge_schema_drift",
+        ack_required: true,
+        schema_evolution: {
+          action: "review",
+          should_pause: false,
+          compatibility: "forward",
+          hard_breaking: [],
+        },
+      }),
+      true,
+    );
+    assert.equal(
+      schemaDriftAllowsAcknowledge({
+        remediation_kind: "review_mappings",
+        schema_evolution: { should_pause: true, compatibility: "none" },
+      }),
+      false,
+    );
   });
 });

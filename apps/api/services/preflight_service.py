@@ -1824,7 +1824,8 @@ def run_file_preflight(
                     "target_changed": drift.get("target_changed"),
                     "schema_evolution": evolution,
                     "rule_id": "schema_drift.breaking",
-                    "remediation_kind": "approve_schema_drift",
+                    "remediation_kind": "review_mappings",
+                    "ack_required": False,
                 },
             }
             out["gates"] = [*out["gates"], drift_gate]

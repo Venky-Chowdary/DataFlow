@@ -128,3 +128,30 @@ def test_mark_run_updates_next(temp_store):
     assert updated.last_job_id == "job-123"
     assert updated.run_count == 1
     assert updated.next_run_at is not None
+
+
+def test_source_schema_baseline_survives_reload(temp_store):
+    """The drift baseline is the feature. from_dict used to drop it on every load."""
+    sched = store.create_schedule({
+        "name": "Nightly",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+    })
+    updated = store.update_schedule(sched.id, {
+        "source_schema": {"id": "BIGINT", "currency": "VARCHAR(3)"},
+        "source_schema_fingerprint": "fp-1",
+        "source_schema_observed_at": "2026-08-14T00:00:00+00:00",
+        "source_primary_key": ["id"],
+    })
+    assert updated is not None
+    assert updated.source_schema["currency"] == "VARCHAR(3)"
+    assert updated.source_schema_fingerprint == "fp-1"
+    assert updated.source_primary_key == ["id"]
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded is not None
+    assert reloaded.source_schema == {"id": "BIGINT", "currency": "VARCHAR(3)"}
+    assert reloaded.source_schema_fingerprint == "fp-1"
+    assert reloaded.source_primary_key == ["id"]

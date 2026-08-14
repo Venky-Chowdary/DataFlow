@@ -32,7 +32,7 @@ import {
   remapToTypeForMismatch,
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
-import { buildValidateHonestyControls } from "../../lib/validateHonestyControls";
+import { buildValidateHonestyControls, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
@@ -3002,6 +3002,11 @@ export function ValidateDashboard({
                   {item.why && !b.id.includes("dry_run") && (
                     <span className="df2-vd-blocker-why">{item.why}</span>
                   )}
+                  {schemaDriftCompatibilityHeadline(b.details) && (
+                    <p className="df2-vd-blocker-fix-note">
+                      {schemaDriftCompatibilityHeadline(b.details)}
+                    </p>
+                  )}
                   {(
                     b.details?.compliance_ack_required === true
                     || /pii\/compliance|compliance review/i.test(b.message)
@@ -3028,17 +3033,7 @@ export function ValidateDashboard({
                       )}
                     </div>
                   )}
-                  {(
-                    (
-                      b.details?.remediation_kind === "acknowledge_schema_drift"
-                      || (
-                        b.details?.ack_required === true
-                        && b.details?.remediation_kind !== "acknowledge_fk_risk"
-                        && b.id !== "constraint_fk"
-                      )
-                      || /schema change detected|schema drift/i.test(b.message)
-                    )
-                  ) && onAcknowledgeSchemaDrift && (
+                  {schemaDriftAllowsAcknowledge(b.details) && onAcknowledgeSchemaDrift && (
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
@@ -3059,6 +3054,20 @@ export function ValidateDashboard({
                           Open Map to include columns
                         </Button>
                       )}
+                    </div>
+                  )}
+                  {schemaDriftRequiresRemap(b.details) && onReviewMappings && (
+                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        leadingIcon={<DtIcon name="layers" size={14} />}
+                        onClick={() => onReviewMappings()}
+                        disabled={running}
+                        title="Hard-breaking schema change — remap or re-sign the contract. Acknowledge cannot green this gate."
+                      >
+                        Open Map to fix breaking change
+                      </Button>
                     </div>
                   )}
                   {(

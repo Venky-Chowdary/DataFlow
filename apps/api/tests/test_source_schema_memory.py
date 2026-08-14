@@ -161,3 +161,46 @@ def test_mapped_columns_are_lower_cased_and_omissions_dropped():
 def test_breaking_change_blocks_under_every_policy(policy: str):
     """A type change on a read column is never something to auto-apply."""
     assert _verdict({**BASE, "currency": "INTEGER"}, policy=policy).verdict == BLOCK
+
+
+def test_integer_alias_is_not_a_type_change():
+    """INTEGER vs INT is the same logical type — string equality would false-alarm."""
+    previous = {**BASE, "id": "INTEGER"}
+    verdict = evaluate_source_drift(
+        previous_schema=previous,
+        current_schema={**previous, "id": "INT"},
+        mappings=MAPPINGS,
+        dest_db="postgresql",
+    )
+    assert verdict.verdict == CLEAR
+    assert verdict.compatibility == "identical"
+
+
+def test_mapped_drop_under_propagate_is_review_not_block():
+    """Fivetran net-additive: dest keeps history; unattended propagate may continue."""
+    current = {k: v for k, v in BASE.items() if k != "currency"}
+    verdict = _verdict(current, policy="propagate_columns")
+    assert verdict.verdict == REVIEW
+    assert verdict.compatibility in {"backward", "full"}
+
+
+def test_primary_key_change_blocks_even_without_a_column_key():
+    """PK identity is the stream. The classified row has old/new keys, not column=."""
+    previous = {
+        "columns": {"id": "INTEGER", "sku": "VARCHAR", "email": "VARCHAR"},
+        "primary_key": ["id"],
+    }
+    current = {
+        "columns": {"id": "INTEGER", "sku": "VARCHAR", "email": "VARCHAR"},
+        "primary_key": ["sku"],
+    }
+    mappings = [{"source": c, "target": c} for c in ("id", "sku", "email")]
+    verdict = evaluate_source_drift(
+        previous_schema=previous,
+        current_schema=current,
+        mappings=mappings,
+        dest_db="postgresql",
+    )
+    assert verdict.verdict == BLOCK
+    assert verdict.compatibility == "none"
+    assert "primary key" in verdict.summary.lower()

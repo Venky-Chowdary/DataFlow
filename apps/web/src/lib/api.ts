@@ -3438,9 +3438,21 @@ export async function fetchUsageSummary(days = 30): Promise<{
 
 export interface SchemaDriftReport {
   severity: string;
-  additive: { kind: string; column?: string; to_type?: string }[];
-  breaking: { kind: string; column?: string; to?: string; to_type?: string }[];
+  additive: { kind: string; column?: string; to_type?: string; new_type?: string }[];
+  breaking: { kind: string; column?: string; to?: string; to_type?: string; new_type?: string }[];
   summary?: string;
+  compatibility?: string;
+  compatibility_note?: string;
+  hard_breaking?: { kind: string; column?: string; to?: string }[];
+  soft_net_additive?: { kind: string; column?: string; to?: string }[];
+  schema_evolution?: {
+    action?: string;
+    should_pause?: boolean;
+    compatibility?: string;
+    compatibility_note?: string;
+    hard_breaking?: { kind: string; column?: string }[];
+    soft_net_additive?: { kind: string; column?: string }[];
+  };
 }
 
 export async function classifySchemaDrift(
