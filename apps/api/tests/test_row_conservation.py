@@ -191,6 +191,15 @@ def test_count_artifact_rows_csv_jsonl_json_independent_of_writer(tmp_path: Path
     json_path = tmp_path / "export.json"
     json_path.write_text('[{"id":1},{"id":2},{"id":3}]', encoding="utf-8")
     assert count_artifact_rows(json_path, fmt="json") == 3
+    wrap = tmp_path / "wrap.json"
+    wrap.write_text('{"records":[{"id":1},{"id":2}]}', encoding="utf-8")
+    assert count_artifact_rows(wrap, fmt="json") == 2
+    empty_json = tmp_path / "empty.json"
+    empty_json.write_text("[]", encoding="utf-8")
+    assert count_artifact_rows(empty_json, fmt="json") == 0
+    scalar_json = tmp_path / "scalars.json"
+    scalar_json.write_text("[1,2,3]", encoding="utf-8")
+    assert count_artifact_rows(scalar_json, fmt="json") is None
 
     import gzip
 

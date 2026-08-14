@@ -33,6 +33,11 @@ XML dest population is the unique repeating record-path
 never a whole-document-as-one fallback. Ambiguous sibling collections
 stay unmeasured. Empty ``<records/>`` is 0. Missing parser is
 unmeasured, not dest=0. Local XML is counted from the path; gzip XML
+still decompresses first. JSON dest population is the unique
+array-of-object (``count_json_records`` ijson StAX), never
+``json.loads`` of the whole export, never ingest single-object-as-one
+or preferred-wrapper ranking. Empty ``[]`` is 0. Scalar arrays stay
+unmeasured, not dest=N. Local JSON is counted from the path; gzip JSON
 still decompresses first.
 
 Lakehouse and object-store destinations already have dest-*after* read-back
@@ -1740,16 +1745,6 @@ def _count_jsonl_bytes(content: bytes) -> int | None:
     return count
 
 
-def _count_json_bytes(content: bytes) -> int | None:
-    try:
-        payload = json.loads(content.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        return None
-    if isinstance(payload, list):
-        return len(payload)
-    return None
-
-
 def _count_parquet_bytes(content: bytes) -> int | None:
     import io
 
@@ -1863,7 +1858,10 @@ def _count_artifact_kind(kind: str, content: bytes) -> int | None:
         if kind == "jsonl":
             return _count_jsonl_bytes(content)
         if kind == "json":
-            return _count_json_bytes(content)
+            from services.json_tabular import count_json_records
+
+            n = count_json_records(content)
+            return None if n is None else int(n)
         if kind == "excel":
             return _count_excel_bytes(content)
         if kind == "avro":
@@ -1916,7 +1914,9 @@ def count_artifact_rows(
     unparseable content stay ``None`` — conservation remains unmeasured.
     Empty but well-formed artifacts are measured zero. Excel counts rows
     that carry values, not the worksheet used range. XML counts the unique
-    repeating record-path from disk (StAX), not ingest ``max_rows``.
+    repeating record-path from disk (StAX), not ingest ``max_rows``. JSON
+    counts the unique array-of-object from disk (ijson StAX), not
+    ``json.loads`` of the whole export.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -1935,6 +1935,11 @@ def count_artifact_rows(
         from services.file_parser import count_xml_records
 
         n = count_xml_records(artifact)
+        return None if n is None else int(n)
+    if kind == "json" and not artifact.name.lower().endswith(".gz"):
+        from services.json_tabular import count_json_records
+
+        n = count_json_records(artifact)
         return None if n is None else int(n)
     content = _read_artifact_bytes(artifact)
     if content is None:

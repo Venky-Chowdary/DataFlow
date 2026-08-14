@@ -10,7 +10,9 @@ unless ``records_path`` selects one (Airbyte-class trap).
 
 from __future__ import annotations
 
+import io
 import json
+from pathlib import Path
 from typing import Any, Iterator
 
 
@@ -261,3 +263,197 @@ def iter_json_record_dicts(
     records = load_json_records(_read_all())
     for i in range(0, len(records), chunk_size):
         yield records[i : i + chunk_size]
+
+
+def _json_path_depth(path: str) -> int:
+    if not path:
+        return 0
+    return path.count(".") + 1
+
+
+def _json_count_from_stats(acc: dict[str, list[int]]) -> int | None:
+    """Unique shallowest array-of-object, else unique empty wrapper 0, else None.
+
+    A collection is an array of objects (maps ≥ 1, no scalars, no nested
+    arrays). Nested inner lists lose to the outer path. Sibling collections
+    at the same depth stay unmeasured — never guess ``data`` over ``items``.
+    Ingest preferred-wrapper ranking and single-object-as-one-row are not
+    this COUNT. Scalar arrays are unmeasured, not dest=N.
+    """
+    objects: list[tuple[int, str, int]] = []
+    empties: list[tuple[int, str]] = []
+    for path, (map_n, scalar_n, arr_n) in acc.items():
+        depth = _json_path_depth(path)
+        if map_n >= 1 and scalar_n == 0 and arr_n == 0:
+            objects.append((depth, path, map_n))
+        elif map_n == 0 and scalar_n == 0 and arr_n == 0:
+            empties.append((depth, path))
+    if objects:
+        min_depth = min(item[0] for item in objects)
+        at_min = [item for item in objects if item[0] == min_depth]
+        if len(at_min) != 1:
+            return None
+        return at_min[0][2]
+    if not empties:
+        return None
+    min_depth = min(item[0] for item in empties)
+    if min_depth > 1:
+        return None
+    at_min = [item for item in empties if item[0] == min_depth]
+    if len(at_min) != 1:
+        return None
+    return 0
+
+
+def _json_collect_array_stats(data: Any, path: str = "") -> dict[str, list[int]]:
+    """DOM fallback: same path stats ijson.parse would accumulate."""
+    acc: dict[str, list[int]] = {}
+    if isinstance(data, list):
+        map_n = scalar_n = arr_n = 0
+        for item in data:
+            if isinstance(item, dict):
+                map_n += 1
+            elif isinstance(item, list):
+                arr_n += 1
+            else:
+                scalar_n += 1
+        bucket = acc.setdefault(path, [0, 0, 0])
+        bucket[0] += map_n
+        bucket[1] += scalar_n
+        bucket[2] += arr_n
+        child = "item" if not path else f"{path}.item"
+        for item in data:
+            if isinstance(item, dict):
+                nested = _json_collect_array_stats(item, child)
+                for key, counts in nested.items():
+                    dest = acc.setdefault(key, [0, 0, 0])
+                    dest[0] += counts[0]
+                    dest[1] += counts[1]
+                    dest[2] += counts[2]
+            elif isinstance(item, list):
+                nested = _json_collect_array_stats(item, child)
+                for key, counts in nested.items():
+                    dest = acc.setdefault(key, [0, 0, 0])
+                    dest[0] += counts[0]
+                    dest[1] += counts[1]
+                    dest[2] += counts[2]
+        return acc
+    if isinstance(data, dict):
+        for key, value in data.items():
+            child = str(key) if not path else f"{path}.{key}"
+            nested = _json_collect_array_stats(value, child)
+            for nested_key, counts in nested.items():
+                dest = acc.setdefault(nested_key, [0, 0, 0])
+                dest[0] += counts[0]
+                dest[1] += counts[1]
+                dest[2] += counts[2]
+        return acc
+    return acc
+
+
+def _count_json_records_dom(text: str) -> int | None:
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return _json_count_from_stats(_json_collect_array_stats(data))
+
+
+def _count_json_records_stax(source: Any, parse: Any) -> int | None:
+    """ijson.parse walk. One object at a time; empty array shells stay O(depth)."""
+    stack: list[tuple[str, list[int], str]] = []
+    acc: dict[str, list[int]] = {}
+    for prefix, event, _value in parse(source):
+        if event == "start_array":
+            if stack and stack[-1][0] == "array":
+                stack[-1][1][2] += 1
+            stack.append(("array", [0, 0, 0], str(prefix or "")))
+        elif event == "end_array":
+            if not stack:
+                return None
+            kind, counts, path = stack.pop()
+            if kind != "array":
+                return None
+            bucket = acc.setdefault(path, [0, 0, 0])
+            bucket[0] += counts[0]
+            bucket[1] += counts[1]
+            bucket[2] += counts[2]
+        elif event == "start_map":
+            if stack and stack[-1][0] == "array":
+                stack[-1][1][0] += 1
+            stack.append(("map", [0, 0, 0], str(prefix or "")))
+        elif event == "end_map":
+            if not stack:
+                return None
+            stack.pop()
+        elif event in {"string", "number", "boolean", "null"}:
+            if stack and stack[-1][0] == "array":
+                stack[-1][1][1] += 1
+    if stack:
+        return None
+    return _json_count_from_stats(acc)
+
+
+def _json_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
+    if isinstance(content, Path):
+        handle = content.open("rb")
+        return handle, handle.close
+    if isinstance(content, bytes):
+        return io.BytesIO(content), None
+    if isinstance(content, str):
+        return io.BytesIO(content.encode("utf-8")), None
+    raise TypeError("JSON COUNT expects bytes, str, or Path")
+
+
+def _json_count_as_text(content: bytes | str | Path) -> str | None:
+    try:
+        if isinstance(content, Path):
+            return content.read_text(encoding="utf-8")
+        if isinstance(content, bytes):
+            return content.decode("utf-8")
+        if isinstance(content, str):
+            return content
+    except (OSError, UnicodeDecodeError):
+        return None
+    return None
+
+
+def count_json_records(content: bytes | str | Path) -> int | None:
+    """Dest-engine record COUNT of tabular JSON. Never ingest fallbacks.
+
+    Population is the unique array-of-object the ingest parser already
+    discovers — streamed, not ``json.loads`` of the whole export. Empty
+    ``[]`` / ``{"records":[]}`` is 0. One object in that array is 1.
+    Sibling collections at the same depth stay unmeasured — never rank
+    ``data`` over ``items``. A document object is unmeasured, not dest=1
+    (ingest ``extract_json_records`` treats a lone object as one row; this
+    COUNT does not). An array of scalars is unmeasured, not dest=N.
+    Malformed / missing parser stay unmeasured, not dest=0.
+
+    Walk is ``ijson.parse`` (O(record) not O(document)). A stream error is
+    unmeasured; do not then ``json.loads`` the same poison file. ``json.loads``
+    remains the ImportError fallback when ijson is absent. Path inputs are
+    counted from disk; bytes (object-store GET) stream from a buffer already
+    in RAM.
+    """
+    try:
+        import ijson
+    except ImportError:
+        text = _json_count_as_text(content)
+        if text is None:
+            return None
+        return _count_json_records_dom(text)
+    closer = None
+    try:
+        source, closer = _json_count_open(content)
+        return _count_json_records_stax(source, ijson.parse)
+    except (OSError, UnicodeEncodeError, TypeError):
+        return None
+    except Exception:
+        return None
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass

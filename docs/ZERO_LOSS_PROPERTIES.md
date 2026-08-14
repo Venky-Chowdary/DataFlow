@@ -649,7 +649,9 @@ rowcount is not that proof.
    dest-before 0 (insert-only overwrite identity).
 9. File/object export: `count_artifact_rows` re-opens the written file
    and COUNTs records (`csv_profiler.count_csv_rows` for CSV/TSV; stream
-   JSONL; JSON array length; Parquet footer `num_rows`; Excel
+   JSONL; JSON unique array-of-object via `count_json_records` ijson StAX,
+   never `json.loads` of the whole export, never ingest
+   single-object-as-one, never preferred-wrapper ranking; Parquet footer `num_rows`; Excel
    `count_excel_rows` value-bearing rows, never openpyxl `max_row`;
    streamed Avro records; ORC footer `nrows`; XML unique repeating
    record-path via `count_xml_records` StAX, never `parse_xml` ingest
@@ -909,7 +911,7 @@ rowcount is not that proof.
     `parse_xml` ingest `max_rows` still refuse (`test_xml_over_max_rows_fail_closed`).
     `elem.clear()` drops text; empty Element shells stay O(n) under a
     wide parent — lxml O(depth) unlink is a future enhancement of this
-    kernel, not a second COUNT.     Cardinality ≠ Gate-8. Frontend not
+    kernel, not a second COUNT. Cardinality ≠ Gate-8. Frontend not
     run this slice (no UI change).
 
   L1 keyed cardinality (this host, after 2026-08-14 slice):
