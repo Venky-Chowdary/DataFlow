@@ -1011,7 +1011,9 @@ TypeScript does not recompute dest.
   Driver `rowcount` is not this proof. Already-active dest keys in the
   snapshot are not reactivates. `RETURNING` / `OUTPUT` is a future
   enhancement of this kernel. Stream `extract_mirror_payload` carries
-  top-level census; SCD2 `active_checksum` is not `_deleted`.
+  top-level census; SCD2 `active_checksum` is not `_deleted`. Dest-before
+  tombstone ∩ snapshot (revive counted when upsert materializes first)
+  is a future enhancement of this kernel, not a second path.
 * Oracle / SQL Server dest COUNT + leftover MERGE listing — algorithm in
   `dest_precount` dest-engine `COUNT(*)` / `SELECT pk` (never
   `sys.partitions` / `sys.dm_db_partition_stats.row_count` / Oracle
