@@ -3,12 +3,23 @@
 ## What changed
 
 * Vite no longer forces `inlineDynamicImports` — route and vendor chunks are separate hashed files.
-* App screens (Transfer, Jobs, …) load via `React.lazy` + `Suspense`.
-* Transfer Studio helpers/constants moved to `apps/web/src/pages/transfer/*` so `TransferPage.tsx` can keep shrinking.
+* **Overview is eager.** It is the signed-in home screen and must not depend on a
+  separate `DashboardPage-*.js` fetch. A cached `index.html` after deploy used to
+  404 that chunk and show “Overview failed to load”.
+* Other app screens load via `lazyNamed` in `apps/web/src/lib/lazyPage.ts`.
+  A stale hashed chunk reloads the shell **once** (session guard). The error
+  boundary never prints the Vite asset URL.
+* Transfer Studio helpers/constants live in `apps/web/src/pages/transfer/*`.
 
 ## Deploy note
 
-Hashed chunk names invalidate caches. After a production deploy, operators should hard-refresh once if an old shell HTML still requests deleted chunk names. Prefer CDN/`Cache-Control` on `index.html` that is short-lived (HTML) vs immutable (hashed assets).
+Hashed `/assets/*` filenames are immutable. `index.html` (and the SPA fallback)
+must be `Cache-Control: no-cache` so a new deploy cannot leave operators on
+deleted chunk names. nginx configs in `deploy/` set that split.
+
+If a leftover tab still holds a pre-fix shell, the first stale-chunk error
+reloads automatically. A second failure (true network outage) shows a Reload
+empty state — not a red stack dump.
 
 ## Chunk budgets
 
