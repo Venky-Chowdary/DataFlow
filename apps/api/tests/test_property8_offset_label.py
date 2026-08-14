@@ -2,7 +2,7 @@
 
 PostgreSQL TIMESTAMPTZ stores UTC and drops the INSERT offset. EXTRACT(TIMEZONE)
 under SET TIME ZONE UTC is 0 even when the client sent +05:30. That is dest-engine
-proof, not Python tzinfo. Instant (epoch 1709271000) may still land.
+proof, not Python tzinfo. Instant (epoch of 12:00+05:30) may still land.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from src.transfer.models import EndpointConfig, TransferRequest
 
 IST = timezone(timedelta(hours=5, minutes=30))
 INSTANT = datetime(2024, 3, 1, 12, 0, 0, tzinfo=IST)
-EPOCH = 1709271000
+EPOCH = int(INSTANT.timestamp())  # 2024-03-01 06:30:00 UTC
 
 
 def _run(req: TransferRequest):
@@ -72,7 +72,7 @@ def _mysql_creds() -> dict:
 
 @pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not listening")
 def test_pg_timestamptz_drops_originating_offset_under_utc_session():
-    """INSERT +05:30; dest EXTRACT(TIMEZONE) under UTC is 0; epoch is 1709271000."""
+    """INSERT +05:30; dest EXTRACT(TIMEZONE) under UTC is 0; epoch matches the instant."""
     import psycopg2
 
     pg = _pg_creds()

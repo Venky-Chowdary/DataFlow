@@ -13,7 +13,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
-| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py -q` (61 passed on this host: collation 11 + instant 38 + JSON polarity 12; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant (`UNIX_TIMESTAMP` 1709271000 under `+05:30`). JSON polarity: engine `col::text` so JSON `"1"` stays STRING and `1` stays INTEGER; `2**53+1` digits survive; SQL NULL ≠ JSON null | Offset-label (`DATETIMEOFFSET`); encoding round-trip; decimal rounding; UCA 0900 vs 1400; Oracle/SQL Server live COLLATE; generic_sql SA `collation=` |
+| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py -q` (80 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label: PG `EXTRACT(TIMEZONE)` under UTC is 0 after `INSERT +05:30` (label not stored); `DATETIMEOFFSET` bind keeps `+05:30`; dest TIMESTAMPTZ is `unsupported` not `carried` | Encoding round-trip; decimal rounding; UCA 0900 vs 1400; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); generic_sql SA `collation=` |
 | 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py -q` (40 passed on this host: identity 14 + live execute_tracked 2 + certificate 24; SQLite always + live PG 16 → MariaDB 10.11) | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Writer `records_processed` cannot hide a dest shortfall (DMS MISSING_TARGET class). Append uses dest delta. Empty incremental pass is a measured zero. | Upsert/CDC keyed conservation; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
@@ -511,11 +511,9 @@ Includes:
 
 ### NOT claimed / remaining for PROVEN (instant slice)
 
-* Offset-label preservation (`DATETIMEOFFSET` / `TIMESTAMP WITH TIME ZONE`
-  originating offset) — policy names it; this slice proves the instant only
 * Oracle `TIMESTAMP WITH TIME ZONE` live (generic_sql already renders via
   `TO_CHAR`; not this matrix)
-* SQL Server `DATETIMEOFFSET` live
+* SQL Server `DATETIMEOFFSET` live `DATEPART(TZOFFSET)` certify
 * MySQL `TIMESTAMP` year-2038 range is quarantined (unit-proven), not a
   live 2038 row in this run
 * Exactly-once / 100% of all routes — not claimed
@@ -630,6 +628,58 @@ digest is writer-ack still exposes dest COUNT(*) when dest was re-read.
 * dest-only sinks (pgvector, Milvus) and file/object exports — no SQL
   read-back by design
 * Multi-table job rollup (this slice is per transfer / per table)
+* Exactly-once / 100% of all routes — not claimed
+
+## Property 8 — PARTIAL (2026-08-14, originating offset-label)
+
+**Claim:** Instant and offset-label are independent. PostgreSQL
+`TIMESTAMPTZ` stores UTC and discards the INSERT offset. SQL Server
+`DATETIMEOFFSET` stores `+05:30`. We never claim the first did the second's
+job. Bind keeps the originating offset only when the dest engine physically
+stores it. Certification is dest-engine (`EXTRACT(TIMEZONE)` under
+`TimeZone=UTC` is 0 — the label is gone) plus the fidelity aspect
+`carried` / `unsupported` / `skipped`.
+
+**Why this is the unique product:** AWS DMS documents that PostgreSQL
+normalizes `TIMESTAMP WITH TIME ZONE` to UTC and does not retain the
+offset literal. AWS SCT still maps `DATETIMEOFFSET` → `TIMESTAMP WITH
+TIME ZONE`. Npgsql will not round-trip a non-zero `DateTimeOffset`.
+Python `astimezone(UTC)` before bind does the same to a dest that *could*
+store the label. DataFlow classifies physical storage, extracts minutes
+east of UTC *before* UTC normalize, binds `DATETIMEOFFSET` with `+05:30`,
+and refuses to say `carried` for TIMESTAMPTZ. No companion offset column
+is invented.
+
+**Algorithm (canonical, one place):** `apps/api/services/offset_label.py`
+
+1. `stores_originating_offset(engine, type)` — SQL-standard `WITH TIME
+   ZONE` without an engine is not claimed (Oracle stores, PostgreSQL does
+   not).
+2. `extract_offset_label` from the cell before `astimezone(UTC)`. `Z` is
+   0 minutes, a stored UTC label, not "no label".
+3. Bind: dest that stores the label gets the original offset back on the
+   instant; dest that does not stays UTC-normalized.
+4. Fidelity aspect: source TIMESTAMPTZ → `skipped` (never had a label);
+   `DATETIMEOFFSET` → PG TIMESTAMPTZ → `unsupported`;
+   `DATETIMEOFFSET` → `DATETIMEOFFSET` → `carried`.
+
+**Measured (this host, PostgreSQL 16 + MariaDB 10.11):**
+```
+80 passed in 4.37s  (Property 8 combined, including this slice)
+  Live PG: INSERT 2024-03-01 12:00:00+05:30; SET TIME ZONE UTC;
+    EXTRACT(TIMEZONE)=0; ts::text has +00 not +05:30; epoch matches
+    the instant.
+  Live PG TIMESTAMPTZ → MariaDB TIMESTAMP: offset_label status skipped
+    (source never stored a label); not claimed carried.
+  Unit: DATETIMEOFFSET bind keeps +05:30; PG TIMESTAMPTZ bind is UTC;
+    SCT mapping DATETIMEOFFSET → PG WITH TIME ZONE is unsupported.
+```
+
+### NOT claimed / remaining for PROVEN (offset-label slice)
+
+* SQL Server live `DATEPART(TZOFFSET, col)` certify
+* Oracle live `EXTRACT(TIMEZONE_HOUR/MINUTE)` certify
+* Snowflake `TIMESTAMP_TZ` live
 * Exactly-once / 100% of all routes — not claimed
 
 
