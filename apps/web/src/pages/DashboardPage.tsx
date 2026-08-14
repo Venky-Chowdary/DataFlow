@@ -259,11 +259,11 @@ export function DashboardPage({
         />
         <section className="df2-overview-v3-kpis" aria-label="Key metrics">
           <MetricGlassTile
-            label="Dest COUNT(*)"
+            label="Conserved dest rows"
             value={destMeasuredJobs ? totalRecords.toLocaleString() : "—"}
             sub={
               destMeasuredJobs
-                ? `${destMeasuredJobs} of ${completed.length} completed jobs dest-measured`
+                ? `${destMeasuredJobs} of ${completed.length} completed jobs dest-measured · append uses dest Δ, not dest after`
                 : completed.length
                   ? "Writer ack is not dest proof — no dest COUNT(*) yet"
                   : "No transfers yet"
@@ -310,9 +310,9 @@ export function DashboardPage({
             <header className="df2-overview-v3-card-head">
               <div>
                 <h2 className="df2-overview-v3-card-title">Throughput</h2>
-                <p className="df2-overview-v3-card-sub">Dest COUNT(*) per day · unmeasured jobs omitted</p>
+                <p className="df2-overview-v3-card-sub">Conserved dest rows per day · append dest Δ, not dest after · unmeasured omitted</p>
               </div>
-              <span className="df2-overview-v3-card-badge">{totalRecords.toLocaleString()} dest rows</span>
+              <span className="df2-overview-v3-card-badge">{totalRecords.toLocaleString()} conserved</span>
             </header>
             <div className="df2-overview-v3-card-body df2-overview-v3-chart-body">
               {hasThroughput ? (

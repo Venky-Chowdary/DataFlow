@@ -187,7 +187,8 @@ export function isGate8PreWriteSimulation(report: Gate8Reconciliation): boolean 
 }
 
 /** True when Gate-8 closed on dest-before delta, not comparable whole-table hashes. */
-export function isGate8AppendDelta(report: Gate8Reconciliation): boolean {
+export function isGate8AppendDelta(report: Gate8Reconciliation | null | undefined): boolean {
+  if (!report) return false;
   const scope = String(report.checksum_scope || "").toLowerCase();
   if (scope === "whole_table_not_comparable") return true;
   const coverage = String(report.coverage || report.assurance_level || "").toLowerCase();
@@ -207,7 +208,8 @@ export function isGate8AppendDelta(report: Gate8Reconciliation): boolean {
 }
 
 /** True when dest was re-read WHERE pk IN (written keys) — batch proof, not whole-table. */
-export function isGate8KeyedBatch(report: Gate8Reconciliation): boolean {
+export function isGate8KeyedBatch(report: Gate8Reconciliation | null | undefined): boolean {
+  if (!report) return false;
   return String(report.checksum_scope || "").toLowerCase() === "written_batch_keys";
 }
 

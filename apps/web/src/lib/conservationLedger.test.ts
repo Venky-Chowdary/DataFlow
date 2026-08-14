@@ -431,7 +431,7 @@ describe("mirror active population is dest headline, not physical COUNT(*)", () 
 
 describe("keyed ledger shows events vs keys, never closes on event count", () => {
   it("surfaces 10 events and 3 keys from the engine census", () => {
-    const cells = ledgerIdentityCells({
+    const keyedPayload = {
       ...overwriteLedger,
       conservation_kind: "keyed",
       dest_delta: 0,
@@ -444,12 +444,35 @@ describe("keyed ledger shows events vs keys, never closes on event count", () =>
       dest_preexisting: 3,
       events_read: 10,
       writer_ack: 10_000,
-    });
+    };
+    const cells = ledgerIdentityCells(keyedPayload);
     assert.equal(cells.find((c) => c.label === "Events")?.value, "10");
     assert.equal(cells.find((c) => c.label === "Keys")?.value, "3");
     assert.equal(cells.find((c) => c.label === "Dest Δ")?.value, "0");
     assert.equal(cells.find((c) => c.label === "Dest before")?.value, "3");
     assert.equal(cells.find((c) => c.label === "Dest after")?.value, "3");
+    const h = destHeadline({ status: "completed", records_processed: 10, row_accounting: keyedPayload });
+    assert.equal(h.value, "0");
+    assert.equal(h.label, "Dest Δ this run");
+    assert.equal(destMetricCompact(h), "0 dest Δ");
+    assert.equal(destProvenCount({
+      status: "completed",
+      records_processed: 10,
+      row_accounting: {
+        ...overwriteLedger,
+        conservation_kind: "keyed",
+        dest_delta: 1,
+        dest_count_before: 30,
+        dest_count: 31,
+        inserts: 1,
+        updates: 2,
+        deletes: 0,
+        unique_batch_keys: 3,
+        dest_preexisting: 30,
+        events_read: 10,
+        writer_ack: 10,
+      },
+    }), 1);
   });
 });
 
@@ -531,7 +554,7 @@ describe("append dest headline is dest Δ, not dest after", () => {
     assert.equal(h.label, "Appended this run");
     assert.equal(h.tone, "warn");
     assert.equal(destMetricCompact(h), "200 appended");
-    assert.equal(destProvenCount(job), 300);
+    assert.equal(destProvenCount(job), 200);
     assert.match(conservationCompleteCopy(job), /200 appended this run/);
     assert.match(conservationCompleteCopy(job), /100 → 300/);
     assert.doesNotMatch(conservationCompleteCopy(job), /300 at destination/);

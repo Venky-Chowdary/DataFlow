@@ -11,7 +11,7 @@ import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
 import type { RepairMapping } from "../../lib/api";
-import { Gate8ProofCard, classifyGate8Status, type Gate8Reconciliation } from "./Gate8ProofCard";
+import { Gate8ProofCard, classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
 import { conservationCompleteCopy, destHeadline, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
@@ -247,8 +247,24 @@ export function TransferResultDashboard({
       });
     }
   }
-  if (checksum) {
+  if (isGate8AppendDelta(result.reconciliation as Gate8Reconciliation | undefined)) {
+    const id = gate8AppendIdentity(result.reconciliation as Gate8Reconciliation);
+    const before = id.destBefore != null ? id.destBefore.toLocaleString() : "—";
+    const after = id.destAfter.toLocaleString();
+    metaChips.push({
+      label: "Dest Δ",
+      value: `${before} → ${after}`,
+      tone: "warn",
+      title: "Append dest COUNT(*) growth this run. Whole-table checksums are not comparable.",
+    });
+  } else if (checksum && !isGate8KeyedBatch(result.reconciliation as Gate8Reconciliation | undefined)) {
     metaChips.push({ label: "Checksum", value: checksum.slice(0, 12), title: checksum });
+  } else if (isGate8KeyedBatch(result.reconciliation as Gate8Reconciliation | undefined) && checksum) {
+    metaChips.push({
+      label: "Batch checksum",
+      value: checksum.slice(0, 12),
+      title: "Written-key digest — extra dest rows outside this batch are not in the proof.",
+    });
   }
   if (issueFindings > 0) {
     metaChips.push({
@@ -712,7 +728,11 @@ export function TransferResultDashboard({
                   <div>
                     <dt>Match</dt>
                     <dd>
-                      {gate8.fullPass
+                      {isGate8AppendDelta(result.reconciliation as Gate8Reconciliation | undefined)
+                        ? "Not comparable — dest-before delta, not whole-table fingerprints"
+                        : isGate8KeyedBatch(result.reconciliation as Gate8Reconciliation | undefined)
+                          ? "Batch keys only — extra dest rows outside proof"
+                        : gate8.fullPass
                         && result.reconciliation?.source_checksum
                         && result.reconciliation?.target_checksum
                         && result.reconciliation.source_checksum === result.reconciliation.target_checksum

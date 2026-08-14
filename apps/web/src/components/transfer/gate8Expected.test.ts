@@ -253,6 +253,8 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
       message: "Append delta verified (200 row(s) appended: 100 → 300). Whole-table digests are not comparable.",
     };
     assert.equal(isGate8AppendDelta(report), true);
+    assert.equal(isGate8AppendDelta(undefined), false);
+    assert.equal(isGate8KeyedBatch(undefined), false);
     const view = classifyGate8Status(report);
     assert.equal(view.label, "Append delta");
     assert.equal(view.tone, "warn");

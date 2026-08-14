@@ -48,6 +48,7 @@ export function ConservationLedgerCard({
   const isVector = ledger?.conservation_kind === "vector" || ledger?.rows_written_source === "identity_readback";
   const isScd2 = ledger?.conservation_kind === "scd2" || ledger?.rows_written_source === "current_readback";
   const isAppend = ledger?.conservation_kind === "append_delta";
+  const isKeyed = ledger?.conservation_kind === "keyed";
   const leftover =
     isMirror && ledger?.dest_count != null && ledger.active_count != null
       ? Math.max(ledger.dest_count - ledger.active_count, 0)
@@ -61,12 +62,14 @@ export function ConservationLedgerCard({
       ? { label: "Open Validate", onClick: onOpenValidate }
       : null;
 
-  const unit = isMirror ? "ACTIVE" : isJob && dest.value === "—" ? "STREAMS" : isArtifact ? "RECORDS" : isVector ? "IDENTITIES" : isScd2 ? "CURRENT" : isAppend ? "DEST Δ" : "COUNT(*)";
+  const unit = isMirror ? "ACTIVE" : isJob && dest.value === "—" ? "STREAMS" : isArtifact ? "RECORDS" : isVector ? "IDENTITIES" : isScd2 ? "CURRENT" : isAppend || isKeyed ? "DEST Δ" : "COUNT(*)";
   const nextTitle = unbalanced
     ? "Ledger unbalanced"
     : measured
       ? isAppend
         ? "Append delta balanced"
+        : isKeyed
+          ? "Keyed dest Δ balanced"
         : "Ledger balanced"
       : "Dest unmeasured";
   const nextBody = unbalanced
@@ -82,6 +85,8 @@ export function ConservationLedgerCard({
             ? "Rows read do not equal dest-engine COUNT(*) WHERE is_current plus hold-outs and skips."
             : isAppend
               ? "This run's dest COUNT(*) growth does not match rows read minus hold-outs. Pre-existing dest rows are not this batch."
+            : isKeyed
+              ? "This run's dest COUNT(*) growth (inserts − deletes) does not match the keyed census. Dest after is not this batch."
             : ledger && (ledger.missing_keys || ledger.extra_keys)
               ? "COUNT(*) balanced or not, dest-engine keyset found MISSING_TARGET or EXTRA_TARGET keys. COUNT(*) can net missing+extra to a false balance."
               : "Rows read do not equal dest COUNT(*) plus hold-outs and skips."
@@ -102,12 +107,14 @@ export function ConservationLedgerCard({
               ? "Every source row is current at destination, quarantined, or skipped. Physical history COUNT(*) grows on every attribute change."
               : isAppend
                 ? "This run's dest growth matches rows read. Pre-existing dest rows remain. Whole-table checksums are not comparable — overwrite to replace, or add a PK and upsert."
+              : isKeyed
+                ? "This run's dest growth is inserts minus deletes. Pre-existing dest keys remain. Event count is not conservation."
               : "Every source row is at destination, quarantined, or skipped."
       : "Do not treat writer events as rows at destination.";
 
   return (
     <section
-      className={`df2-conservation-ledger ${toneClass(tone)} ${isMirror ? "is-mirror" : ""} ${isAppend ? "is-append" : ""} ${compact ? "is-compact" : ""} ${className}`.trim()}
+      className={`df2-conservation-ledger ${toneClass(tone)} ${isMirror ? "is-mirror" : ""} ${isAppend || isKeyed ? "is-append" : ""} ${compact ? "is-compact" : ""} ${className}`.trim()}
       aria-label={
         isJob
           ? "Job stream conservation"
@@ -121,6 +128,8 @@ export function ConservationLedgerCard({
                   ? "SCD2 current-row population conservation"
                   : isAppend
                     ? "Append destination delta conservation"
+                  : isKeyed
+                    ? "Keyed destination delta conservation"
                   : "Destination population conservation"
       }
     >
@@ -144,6 +153,8 @@ export function ConservationLedgerCard({
                         ? "Current destination population"
                         : isAppend
                           ? "Append destination delta"
+                        : isKeyed
+                          ? "Keyed destination delta"
                         : "Destination population"}
             </h3>
             <span className="df2-conservation-ledger-kind">
@@ -166,6 +177,8 @@ export function ConservationLedgerCard({
                       ? "Dest-engine COUNT(*) WHERE is_current. Physical history COUNT(*) and writer version-upsert acknowledgement are diagnostic only."
                       : isAppend
                         ? "Dest COUNT(*) growth this run (after − before). Pre-existing dest rows remain. Writer acknowledgement is diagnostic only. Whole-table checksums are not comparable."
+                      : isKeyed
+                        ? "Dest COUNT(*) growth this run (inserts − deletes). Pre-existing dest keys remain. Writer event count is diagnostic only."
                       : "Independent dest-engine read-back. Writer acknowledgement is diagnostic only."
               : isMirror
                 ? "Active dest population was not captured. Writer ack is not COUNT(*) WHERE NOT _deleted."
@@ -182,7 +195,7 @@ export function ConservationLedgerCard({
         </div>
       </div>
 
-      <div className="df2-conservation-ledger-compare" aria-label={isMirror ? "Active dest versus writer acknowledgement" : isArtifact ? "Artifact records versus writer acknowledgement" : isVector ? "Identities versus writer acknowledgement" : isScd2 ? "Current rows versus writer acknowledgement" : isAppend ? "Append dest delta versus writer acknowledgement" : "Dest COUNT versus writer acknowledgement"}>
+      <div className="df2-conservation-ledger-compare" aria-label={isMirror ? "Active dest versus writer acknowledgement" : isArtifact ? "Artifact records versus writer acknowledgement" : isVector ? "Identities versus writer acknowledgement" : isScd2 ? "Current rows versus writer acknowledgement" : isAppend || isKeyed ? "Dest delta versus writer acknowledgement" : "Dest COUNT versus writer acknowledgement"}>
         <article className={measured ? "is-dest" : "is-muted"}>
           <span>{dest.label}</span>
           <strong title={dest.title}>{dest.value}</strong>

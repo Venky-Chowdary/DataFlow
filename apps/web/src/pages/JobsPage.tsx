@@ -874,7 +874,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
 
                     <div className="df2-jobs-v3-summary-metrics" role="group" aria-label="Job metrics">
                       <article
-                        className={`is-metric-dest${destMetric.measured ? "" : " is-unmeasured"}${destMetric.tone === "danger" ? " is-danger" : ""}`}
+                        className={`is-metric-dest${destMetric.measured ? "" : " is-unmeasured"}${destMetric.tone === "danger" ? " is-danger" : destMetric.tone === "warn" ? " is-warn" : ""}`}
                         title={destMetric.title}
                       >
                         <strong>{destMetric.value}</strong>

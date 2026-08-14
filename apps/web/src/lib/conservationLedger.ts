@@ -167,6 +167,10 @@ function isAppendLedger(ledger: ConservationLedger | null | undefined): boolean 
   return Boolean(ledger && ledger.conservation_kind === "append_delta");
 }
 
+function isKeyedLedger(ledger: ConservationLedger | null | undefined): boolean {
+  return Boolean(ledger && ledger.conservation_kind === "keyed");
+}
+
 /** Engine dest Δ for Full Append — never recomputed from dest after − before. */
 function appendDeltaValue(ledger: ConservationLedger): number | null {
   if (ledger.dest_delta != null) return ledger.dest_delta;
@@ -268,8 +272,8 @@ export function writerAckDisagrees(source: unknown): boolean {
   const ledger = resolveLedger(source);
   if (!ledger) return false;
   if (ledger.writer_ack_delta != null) return ledger.writer_ack_delta !== 0;
-  if (isAppendLedger(ledger)) {
-    const identity = appendDeltaValue(ledger);
+  if (isAppendLedger(ledger) || isKeyedLedger(ledger)) {
+    const identity = isAppendLedger(ledger) ? appendDeltaValue(ledger) : ledger.dest_delta;
     if (ledger.writer_ack == null || identity == null) return false;
     return ledger.writer_ack !== identity;
   }
@@ -386,6 +390,15 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
         };
       }
     }
+    if (isKeyedLedger(ledger) && ledger.dest_delta != null) {
+      return {
+        value: Number(ledger.dest_delta).toLocaleString(),
+        label: running ? "Dest Δ so far" : "Dest Δ this run",
+        title: ledger.note || "Keyed dest COUNT(*) growth (inserts − deletes). Dest after is not this-run conservation.",
+        measured: true,
+        tone: unbalanced ? "danger" : "warn",
+      };
+    }
     return {
       value: Number(ledger.dest_count).toLocaleString(),
       label: running ? "Dest so far" : "At destination",
@@ -443,6 +456,9 @@ export function destMetricCompact(metric: RowMetric): string {
   if (metric.label.toLowerCase().includes("identit")) return `${metric.value} identities`;
   if (metric.label.toLowerCase().includes("current")) return `${metric.value} current`;
   if (metric.label.toLowerCase().includes("append")) return `${metric.value} appended`;
+  if (metric.label.includes("Δ") || metric.label.toLowerCase().includes("delta")) {
+    return `${metric.value} dest Δ`;
+  }
   return `${metric.value} at dest`;
 }
 
@@ -468,6 +484,13 @@ export function destProvenCount(source: LedgerCarrier | null | undefined): numbe
     if (ledger.dest_count != null) return ledger.dest_count;
     return null;
   }
+  if (ledger.conservation_kind === "append_delta") {
+    return appendDeltaValue(ledger);
+  }
+  if (ledger.conservation_kind === "keyed") {
+    // Dest after is not this-run conservation when dest already held rows.
+    return ledger.dest_delta;
+  }
   if (ledger.dest_count == null) return null;
   return ledger.dest_count;
 }
@@ -486,6 +509,7 @@ export function conservationCompleteCopy(
   const vector = isVectorLedger(ledger);
   const scd2 = isScd2Ledger(ledger);
   const append = isAppendLedger(ledger);
+  const keyed = isKeyedLedger(ledger);
   if (opts?.quarantine) {
     if (dest.measured) {
       return mirror
@@ -500,6 +524,8 @@ export function conservationCompleteCopy(
                 ? `${dest.value} current at dest; some rows held out or coerced to NULL`
                 : append
                   ? `${dest.value} appended this run; some rows held out or coerced to NULL`
+                : keyed
+                  ? `${dest.value} dest Δ this run; some rows held out or coerced to NULL`
                 : `${dest.value} at destination; some rows held out or coerced to NULL`;
     }
     return `${writer.value} writer-acked (dest COUNT unmeasured); some rows held out or coerced to NULL`;
@@ -517,6 +543,14 @@ export function conservationCompleteCopy(
         return `${dest.value} appended this run (dest ${Number(before).toLocaleString()} → ${Number(after).toLocaleString()})`;
       }
       return `${dest.value} appended this run`;
+    }
+    if (keyed) {
+      const before = ledger?.dest_count_before;
+      const after = ledger?.dest_count;
+      if (before != null && after != null) {
+        return `${dest.value} dest Δ this run (dest ${Number(before).toLocaleString()} → ${Number(after).toLocaleString()})`;
+      }
+      return `${dest.value} dest Δ this run`;
     }
     return `${dest.value} at destination`;
   }

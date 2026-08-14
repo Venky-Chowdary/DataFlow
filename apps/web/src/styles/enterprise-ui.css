@@ -8722,6 +8722,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: #fef2f2;
 }
 
+.df2-jobs-v3-summary-metrics article.is-metric-dest.is-warn {
+  border-left-color: #d97706;
+  background: #fffbeb;
+}
+
 .df2-jobs-v3-summary-metrics article.is-metric-writer.is-warn {
   border-left-color: #d97706;
   background: #fffbeb;
@@ -11694,6 +11699,25 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-page-jobs .df2-jobs-v3-summary-metrics article span {
   font-size: 9.5px;
   letter-spacing: 0.02em;
+}
+
+@media (max-width: 720px) {
+  .df2-page-jobs .df2-jobs-v3-summary-metrics {
+    flex-wrap: wrap;
+    overflow-x: visible;
+  }
+
+  .df2-page-jobs .df2-jobs-v3-summary-metrics article {
+    flex: 1 1 calc(50% - 5px);
+    max-width: none;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 560px) {
+  .df2-page-jobs .df2-jobs-v3-summary-metrics article {
+    flex: 1 1 100%;
+  }
 }
 
 .df2-page-jobs .df2-trust-score {
