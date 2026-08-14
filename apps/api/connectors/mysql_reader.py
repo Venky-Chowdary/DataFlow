@@ -23,11 +23,53 @@ if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services import reflection_cache
+from services.timezone_policy import (
+    is_mysql_timestamp_data_type,
+    mysql_timestamp_instant_wire,
+)
 from services.value_serializer import cell_to_string
 
 
-def _cell(value: Any) -> str:
+def _cell(value: Any, *, instant: bool = False) -> str:
+    if instant:
+        value = mysql_timestamp_instant_wire(value)
     return cell_to_string(value, preserve_sql_null=True)
+
+
+def _timestamp_instant_columns(cur, table: str) -> frozenset[str]:
+    """Columns whose DATA_TYPE is TIMESTAMP (UTC instant), not DATETIME."""
+    cur.execute(
+        "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+        (table,),
+    )
+    return frozenset(
+        str(name)
+        for name, data_type in cur.fetchall()
+        if is_mysql_timestamp_data_type(str(data_type or ""))
+    )
+
+
+def _instant_set(cur, table: str, *, identity: str = "") -> frozenset[str]:
+    if identity:
+        return reflection_cache.get_or_load_by_identity(
+            identity,
+            "",
+            table,
+            "timestamp_instant_columns",
+            lambda: _timestamp_instant_columns(cur, table),
+        )
+    return _timestamp_instant_columns(cur, table)
+
+
+def _wire_rows(fetched, headers: list[str], instant_cols: frozenset[str]) -> list[list[str]]:
+    return [
+        [
+            _cell(v, instant=headers[i] in instant_cols) if i < len(headers) else _cell(v)
+            for i, v in enumerate(row)
+        ]
+        for row in fetched
+    ]
 
 
 def _primary_key_columns(cur, table: str) -> list[str] | None:
@@ -118,18 +160,19 @@ def read_table_batch(
             else:
                 cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
                 total = int(cur.fetchone()[0])
+            identity = reflection_cache.dsn_identity(
+                driver="mysql",
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                connection_string=connection_string,
+            )
             order_by = _order_by_clause(
                 cur,
                 safe_table,
                 columns,
-                identity=reflection_cache.dsn_identity(
-                    driver="mysql",
-                    host=host,
-                    port=port,
-                    database=database,
-                    username=username,
-                    connection_string=connection_string,
-                ),
+                identity=identity,
             )
             if columns:
                 col_list = quote_column_list(
@@ -142,7 +185,8 @@ def read_table_batch(
             cur.execute(query, (limit, offset))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
-            rows = [[_cell(v) for v in row] for row in fetched]
+            instant_cols = _instant_set(cur, safe_table, identity=identity)
+            rows = _wire_rows(fetched, headers, instant_cols)
             return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         if close_conn:
@@ -224,7 +268,18 @@ def read_table_cursor_batch(
                 cur.execute(query, (limit,))
             fetched = cur.fetchall()
             headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
-            rows = [[_cell(v) for v in row] for row in fetched]
+            identity = reflection_cache.dsn_identity(
+                driver="mysql",
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                connection_string=connection_string,
+            )
+            instant_cols = _instant_set(
+                cur, require_safe_identifier(table, preserve_case=True), identity=identity
+            )
+            rows = _wire_rows(fetched, headers, instant_cols)
             # Keyset pages are not a cardinality bound — page length must never
             # trip stream early-stop (fetch_offset >= total_rows).
             return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)

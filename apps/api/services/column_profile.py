@@ -350,8 +350,9 @@ def _prepare_profile_session(family: str, conn: Any) -> None:
     if family != "mysql":
         return
     try:
-        with conn.cursor() as cur:
-            cur.execute("SET time_zone = '+00:00'")
+        from services.timezone_policy import pin_mysql_session_utc
+
+        pin_mysql_session_utc(conn)
     except Exception as exc:  # noqa: BLE001 — a pin failure declines later if types mis-render
         logger.debug("mysql profile session time_zone pin skipped: %s", exc)
 

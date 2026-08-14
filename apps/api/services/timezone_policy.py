@@ -305,3 +305,83 @@ def mysql_timestamp_out_of_range(value: Any) -> bool:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
     return parsed < MYSQL_TIMESTAMP_MIN or parsed > MYSQL_TIMESTAMP_MAX
+
+
+# ---------------------------------------------------------------------------
+# Session-independent instant (AWS DMS class)
+# ---------------------------------------------------------------------------
+# MySQL TIMESTAMP is stored as UTC and converted with session time_zone on
+# both read and write. AWS DMS documents ``initstmt=SET time_zone='+00:00'``
+# plus ``serverTimezone`` and still gets DST wrong (GMT vs BST, Sydney,
+# Calcutta): checksums of copied digits stay green while the instant moved.
+# The algorithm here is one pin used by every MySQL connection (source read
+# and dest write), plus a wire that carries polarity so dest TIMESTAMPTZ
+# does not refuse a naive UTC datetime as wall-clock.
+#
+# DATETIME is wall-clock and must never go through the instant wire.
+# PostgreSQL TIMESTAMP WITHOUT TIME ZONE is also wall-clock — pinning MySQL
+# UTC must not be used as an excuse to UTC-shift those digits.
+
+MYSQL_SESSION_UTC: Final[str] = "+00:00"
+MYSQL_UTC_PIN_SQL: Final[str] = "SET SESSION time_zone = '+00:00'"
+
+
+def pin_mysql_session_utc(conn: Any) -> None:
+    """Pin a MySQL/MariaDB session so TIMESTAMP conversion is identity.
+
+    After this, a TIMESTAMP cell's civil digits *are* the UTC instant.
+    ``UNIX_TIMESTAMP(col)`` is then independent of whatever zone a later
+    operator session happens to use — that is the proof, not the display.
+    """
+    sql = MYSQL_UTC_PIN_SQL
+    cursor_factory = getattr(conn, "cursor", None)
+    if callable(cursor_factory):
+        cur = conn.cursor()
+        try:
+            cur.execute(sql)
+        finally:
+            closer = getattr(cur, "close", None)
+            if closer is not None:
+                closer()
+        return
+    execute = getattr(conn, "execute", None)
+    if callable(execute):
+        conn.execute(sql)
+        return
+    raise TypeError("pin_mysql_session_utc requires a DBAPI connection")
+
+
+def mysql_timestamp_instant_wire(value: Any) -> Any:
+    """Attach UTC to a cell read from a UTC-pinned MySQL ``TIMESTAMP``.
+
+    pymysql returns TIMESTAMP as a naive datetime after session conversion.
+    With ``time_zone=+00:00`` those digits are UTC, but ``isoformat()``
+    without an offset looks like wall-clock. Destination ``TIMESTAMPTZ``
+    then refuses the naive value (or invents UTC). Attaching UTC preserves
+    the instant without shifting it.
+
+    Do not call this for ``DATETIME`` — that carrier is zoneless wall-clock.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    if isinstance(value, str):
+        from connectors.sql_temporal import input_has_timezone, parse_sql_datetime
+
+        text = value.strip()
+        if not text:
+            return value
+        if input_has_timezone(text):
+            return value
+        parsed = parse_sql_datetime(text, wall_clock=True)
+        if parsed is not None:
+            return parsed.replace(tzinfo=timezone.utc)
+    return value
+
+
+def is_mysql_timestamp_data_type(data_type: str) -> bool:
+    """True for information_schema ``DATA_TYPE = timestamp`` (not datetime)."""
+    return (data_type or "").strip().lower() == "timestamp"

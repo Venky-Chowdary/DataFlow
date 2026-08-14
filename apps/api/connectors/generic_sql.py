@@ -593,6 +593,11 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
         from services.engine_pool import pool_settings
 
         engine = create_engine(url, pool_pre_ping=True, **pool_settings())
+        from sqlalchemy import event
+
+        from services.dest_dialect_facts import _normalize_dest_db
+
+        driver = str(getattr(url, "drivername", "")).lower()
         # SQL Server: refuse silent VARCHAR truncation at the session level.
         if (
             db_type in {
@@ -607,15 +612,27 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
                 "azure_synapse_dedicated",
                 "azure_synapse_serverless",
             }
-            or "mssql" in str(getattr(url, "drivername", "")).lower()
+            or "mssql" in driver
         ):
-            from sqlalchemy import event
-
             from connectors.write_resilience import apply_mssql_session_guards
 
             @event.listens_for(engine, "connect")
             def _mssql_fail_closed_session(dbapi_conn, _connection_record):  # noqa: ANN001
                 apply_mssql_session_guards(dbapi_conn)
+
+        # MySQL TIMESTAMP is converted with session time_zone on read and write.
+        # Pin every pooled connection (source and dest) so the wire is the UTC
+        # instant — the AWS DMS failure is inheriting the server zone.
+        if (
+            _normalize_dest_db(db_type) == "mysql"
+            or "mysql" in driver
+            or "mariadb" in driver
+        ):
+            from services.timezone_policy import pin_mysql_session_utc
+
+            @event.listens_for(engine, "connect")
+            def _mysql_utc_session(dbapi_conn, _connection_record):  # noqa: ANN001
+                pin_mysql_session_utc(dbapi_conn)
 
         return engine
     except (NoSuchModuleError, ImportError) as exc:
@@ -1690,6 +1707,8 @@ def _to_sa_value(
         # SA timezone=True (from physical TIMESTAMP WITH TIME ZONE) must win over
         # a collapsed Map logical of "datetime" — otherwise coerce_sql_temporal
         # strips Z to naive DATETIME and the TZ guard refuses the value.
+        from services.dest_dialect_facts import _normalize_dest_db
+
         sa_tz = bool(getattr(sa_type, "timezone", False))
         coerce_ddl = ddl_type
         if sa_tz and str(ddl_type).upper() in {
@@ -1699,7 +1718,16 @@ def _to_sa_value(
             "SMALLDATETIME",
         }:
             coerce_ddl = "TIMESTAMPTZ"
-        coerced = coerce_sql_temporal(value, coerce_ddl)
+        elif (
+            type(sa_type).__name__.upper() == "TIMESTAMP"
+            and _normalize_dest_db(eng) == "mysql"
+        ):
+            # Collapsed Map logical "datetime" must not strip a MySQL TIMESTAMP
+            # instant into DATETIME wall-clock digits.
+            coerce_ddl = "TIMESTAMP"
+        coerced = coerce_sql_temporal(
+            value, coerce_ddl, engine=str(db_type or dialect_name or "")
+        )
         base = str(coerce_ddl).upper()
 
         def _ensure_utc(dt: datetime) -> datetime:
@@ -2693,6 +2721,31 @@ def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
     return out
 
 
+def _is_mysql_timestamp_sa(col: Any) -> bool:
+    """True for a reflected MySQL TIMESTAMP (instant), not DATETIME (wall-clock)."""
+    col_type = getattr(col, "type", None)
+    if col_type is None:
+        return False
+    return type(col_type).__name__.upper() == "TIMESTAMP"
+
+
+def _serialize_source_cell(value: Any, col: Any, dialect: str) -> str:
+    """Transfer-wire spelling. MySQL TIMESTAMP keeps UTC polarity; DATETIME does not."""
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.timezone_policy import mysql_timestamp_instant_wire
+
+    if _normalize_dest_db(dialect) == "mysql" and _is_mysql_timestamp_sa(col):
+        value = mysql_timestamp_instant_wire(value)
+    return cell_to_string(value, preserve_sql_null=True)
+
+
+def _serialize_source_row(row: Any, cols: list[Any], dialect: str) -> list[str]:
+    return [
+        _serialize_source_cell(value, col, dialect)
+        for value, col in zip(row, cols)
+    ]
+
+
 def _read_table_raw(
     conn: Any,
     table: str,
@@ -2864,10 +2917,8 @@ def read_table_batch(
 
                 fetched = conn.execute(stmt).fetchall()
                 headers = [c.name for c in selected_cols]
-                rows = [
-                    [cell_to_string(value, preserve_sql_null=True) for value in row]
-                    for row in fetched
-                ]
+                dialect = _dialect_key(cfg)
+                rows = [_serialize_source_row(row, selected_cols, dialect) for row in fetched]
 
                 if known_total_rows is not None:
                     total = known_total_rows
@@ -2979,10 +3030,8 @@ def read_table_cursor_batch(
 
             fetched = conn.execute(stmt).fetchall()
             headers = [c.name for c in selected_cols]
-            rows = [
-                [cell_to_string(value, preserve_sql_null=True) for value in row]
-                for row in fetched
-            ]
+            dialect = _dialect_key(cfg)
+            rows = [_serialize_source_row(row, selected_cols, dialect) for row in fetched]
 
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:

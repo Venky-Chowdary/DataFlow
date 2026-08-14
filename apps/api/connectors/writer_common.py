@@ -1225,6 +1225,7 @@ def map_rows_for_fingerprint(
                 rejected_details,
                 policy,
                 dialect_label=(dest_kind or "destination").strip() or "destination",
+                dest_db=(dest_kind or "").strip(),
                 mappings=list(mappings or []) or None,
             )
     return mapped, rejected_details
@@ -4045,7 +4046,12 @@ def apply_write_quarantine_matrix(
             mapped_rows, target_cols, target_types, rejected_details, policy
         )
         mapped_rows = quarantine_unfit_temporals(
-            mapped_rows, target_cols, target_types, rejected_details, policy
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_specialty_types(
             mapped_rows, target_cols, target_types, rejected_details, policy
