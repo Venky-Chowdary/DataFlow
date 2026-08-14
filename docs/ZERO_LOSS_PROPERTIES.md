@@ -13,7 +13,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
-| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py -q` (11 passed on this host: unit + live PG 16 ↔ MariaDB 10.11) | Collation equality class (case/accent) carried as dest-native CS (`utf8mb4_bin`) so PG UNIQUE `Alpha`+`alpha` both land on MariaDB; CI source UNIQUE is `unsupported` on PG (uniqueness would widen) and dest accepts the pair the source forbade | Timezone instant vs offset; encoding round-trip; decimal rounding; JSON number vs string; UCA 0900 vs 1400; Oracle/SQL Server live COLLATE; generic_sql SA `collation=` |
+| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py -q` (49 passed on this host: collation 11 + instant/policy/session 38; unit + live PG 16 ↔ MariaDB 10.11) | Collation equality class carried as dest-native CS (`utf8mb4_bin`); CI→PG UNIQUE is `unsupported`. Session-independent instant: MySQL `TIMESTAMP` pinned UTC on source *and* dest; `UNIX_TIMESTAMP` / `EXTRACT(EPOCH)` under dest `+05:30` still 1709271000; `DATETIME` / PG `TIMESTAMP` stay wall-clock | Offset-label preservation (`DATETIMEOFFSET`); encoding round-trip; decimal rounding; JSON number vs string; UCA 0900 vs 1400; Oracle/SQL Server live COLLATE; generic_sql SA `collation=` |
 | 9 | Every row is accounted for | UNPROVEN | — | — | — |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
@@ -438,14 +438,86 @@ Includes:
     COLLATE prepended before NOT NULL (MySQL grammar).
 ```
 
-### NOT claimed / remaining for PROVEN
+### NOT claimed / remaining for PROVEN (collation slice)
 
-* Timezone instant vs offset-label (policy module exists; not this slice)
 * Encoding round-trip / charset capacity beyond utf8mb3→utf8mb4 promote
 * Decimal rounding, JSON number-vs-string, float binary
 * UCA 0900 vs 1400 linguistic equality
 * Oracle / SQL Server live COLLATE certify (planner covers SQL Server BIN/CI_AS)
 * generic_sql SQLAlchemy `collation=` (native PG/MySQL writers emit suffixes)
+* Exactly-once / 100% of all routes — not claimed
+
+---
+
+## Property 8 — PARTIAL (2026-08-14, session-independent instant)
+
+### Defect (competitor class)
+
+MySQL `TIMESTAMP` is stored UTC and converted with session `time_zone` on
+both read and write. AWS DMS documents `initstmt=SET time_zone='+00:00'`
+plus `serverTimezone` and still gets DST / offset wrong (GMT vs BST,
+Australia/Sydney, Asia/Calcutta). A source session at `+05:30` returns IST
+wall-clock digits; a dest writer that stores those digits as UTC silently
+shifts the instant by 5.5 hours. Checksums of the copied digits stay green.
+Airbyte/Fivetran treat bare `TIMESTAMP` as wall-clock everywhere, so a
+MySQL instant becomes a PostgreSQL `TIMESTAMP WITHOUT TIME ZONE` with no
+polarity marker — dest `TIMESTAMPTZ` then refuses naive digits or invents
+UTC.
+
+### Algorithm
+
+1. **One pin, every connection.** `pin_mysql_session_utc` / `MYSQL_UTC_PIN_SQL`
+   is the only `SET SESSION time_zone = '+00:00'`. Native reader/writer
+   (`apply_mysql_session_guards`), generic_sql pooled `connect` event, and
+   column-profile sessions all call it. After the pin, TIMESTAMP civil
+   digits *are* the UTC instant.
+2. **Instant wire, not naive ISO.** A UTC-pinned TIMESTAMP cell is attached
+   `+00:00` before `cell_to_string`. `DATETIME` is not. Dest `TIMESTAMPTZ`
+   therefore sees an instant, not wall-clock digits it would refuse or invent.
+3. **Physical carrier wins.** generic_sql bind: a reflected MySQL `TIMESTAMP`
+   wins over a collapsed Map logical of `datetime` (same rule as
+   `timezone=True` already winning for `TIMESTAMPTZ`). Offset wire → naive UTC
+   bind under the pinned session.
+4. **Wall-clock is not shifted.** PostgreSQL `TIMESTAMP WITHOUT TIME ZONE` and
+   MySQL `DATETIME` keep civil digits. Policy `utc_invent` stays a named
+   contract, never a silent conversion.
+5. **Proof is epoch, not display.** After load, dest session is set to
+   `+05:30` / `Asia/Kolkata`. `UNIX_TIMESTAMP(col)` / `EXTRACT(EPOCH FROM col)`
+   must equal the source instant. Displayed wall clock may change; the
+   instant must not.
+
+### Proof output (this host)
+
+```
+cd apps/api && python -m pytest tests/test_timezone_instant_carry.py \
+       tests/test_timezone_policy_pg_mysql.py \
+       tests/test_mysql_strict_sql_mode.py \
+       tests/test_property8_timezone_instant.py -q
+38 passed in 1.79s
+
+Includes:
+  Live PG 16 TIMESTAMPTZ 2024-03-01 12:00:00+05:30 → MariaDB TIMESTAMP(6);
+    dest session +05:30; UNIX_TIMESTAMP = 1709271000; display 12:00:00 IST;
+    companion DATETIME/PG TIMESTAMP wall column stays 12:00:00 digits.
+  Live MariaDB TIMESTAMP written under source session +05:30 (stored UTC
+    06:30) → PG TIMESTAMPTZ; dest TIME ZONE Asia/Kolkata;
+    EXTRACT(EPOCH) = 1709271000; DATETIME wall column stays hour=12.
+  Live generic_sql MySQL pool: SELECT @@SESSION.time_zone = +00:00.
+  Unit: pin helper; instant wire attaches UTC without shifting 06:30;
+    DATETIME is not stamped Z; generic_sql TIMESTAMP(+05:30)→06:30 naive UTC;
+    collapsed datetime logical still uses physical TIMESTAMP; PG TIMESTAMP
+    is not UTC-shifted.
+```
+
+### NOT claimed / remaining for PROVEN (instant slice)
+
+* Offset-label preservation (`DATETIMEOFFSET` / `TIMESTAMP WITH TIME ZONE`
+  originating offset) — policy names it; this slice proves the instant only
+* Oracle `TIMESTAMP WITH TIME ZONE` live (generic_sql already renders via
+  `TO_CHAR`; not this matrix)
+* SQL Server `DATETIMEOFFSET` live
+* MySQL `TIMESTAMP` year-2038 range is quarantined (unit-proven), not a
+  live 2038 row in this run
 * Exactly-once / 100% of all routes — not claimed
 
 
