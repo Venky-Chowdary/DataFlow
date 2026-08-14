@@ -1202,6 +1202,8 @@ export interface ScheduleRun {
   coerced_null_rows: number;
   error: string;
   retry_scheduled?: boolean;
+  /** Independent dest COUNT(*) ledger copied from the completed job. */
+  row_accounting?: import("./conservationLedger").ConservationLedger | null;
 }
 
 export interface ScheduleHistory {

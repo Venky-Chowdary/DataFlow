@@ -25,11 +25,23 @@ def test_slim_job_for_list_whitelist_drops_heavy_payload():
             "phase": "writing",
             "huge": "x" * 1000,
         },
+        "row_accounting": {
+            "dest_count": 4,
+            "writer_ack": 1000,
+            "balanced": True,
+            "conservation_kind": "overwrite",
+            "rows_written_source": "gate8_dest_readback",
+            "note": "Dest COUNT(*) closes the identity.",
+        },
+        "trust_score": 91,
     }
     slim = slim_job_for_list(job)
     assert slim["_id"] == "abc"
     assert slim["status"] == "completed"
     assert slim["rejected_rows"] == 3
+    assert slim["row_accounting"]["dest_count"] == 4
+    assert slim["row_accounting"]["writer_ack"] == 1000
+    assert slim["trust_score"] == 91
     assert "rejected_details" not in slim
     assert "logs" not in slim
     assert "mapping_proof" not in slim

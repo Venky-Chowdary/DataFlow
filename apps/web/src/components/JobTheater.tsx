@@ -21,7 +21,7 @@ import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
-import { destHeadline, writerAckDisagrees, writerHeadline } from "../lib/conservationLedger";
+import { destHeadline, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
@@ -270,8 +270,8 @@ export function JobTheater({
           const quarantine = update.status === "completed_with_quarantine";
           append(
             quarantine
-              ? `Job completed with quarantine — ${processed.toLocaleString()} rows landed; some rows held out or coerced to NULL`
-              : `Job completed — ${processed.toLocaleString()} rows transferred`,
+              ? `Job completed with quarantine — ${conservationCompleteCopy(update, { quarantine: true })}`
+              : `Job completed — ${conservationCompleteCopy(update)}`,
           );
           onComplete?.(update);
         }
@@ -1311,7 +1311,7 @@ export function JobTheaterView({
             <div key={stream.name} className="df2-theater-v3-stream">
               <strong>{stream.name}</strong>
               <span>{stream.status || "—"}</span>
-              <span>{(stream.records_processed ?? 0).toLocaleString()} rows</span>
+              <span>{(stream.records_processed ?? 0).toLocaleString()} events</span>
               {stream.cdc_lag_seconds != null && (
                 <span>{Number(stream.cdc_lag_seconds).toFixed(1)}s lag</span>
               )}
@@ -1555,7 +1555,7 @@ export function JobTheaterView({
           <DtIcon name="check" size={18} />
           <div>
             <strong>Success</strong>
-            <p>{job.message || `${processed.toLocaleString()} rows transferred successfully`}</p>
+            <p>{conservationCompleteCopy(job)}</p>
             {droppedRows === 0 && coercedNullRows === 0 && (
               <p className="df2-theater-v3-alert-note">
                 No write-time quarantine — every sampled cell fit after Validate remediations
@@ -1571,11 +1571,7 @@ export function JobTheaterView({
           <DtIcon name="alert" size={18} />
           <div>
             <strong>Completed with quarantine — not full fidelity</strong>
-            <p>
-              {processed.toLocaleString()} rows landed
-              {droppedRows > 0 ? `, ${droppedRows.toLocaleString()} held out in quarantine` : ""}
-              {coercedNullRows > 0 ? `, ${coercedNullRows.toLocaleString()} value(s) coerced to NULL` : ""}. Review the details below.
-            </p>
+            <p>{conservationCompleteCopy(job, { quarantine: true })} Review the details below.</p>
           </div>
         </div>
       )}

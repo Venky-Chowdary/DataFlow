@@ -643,6 +643,15 @@
   color: var(--df-text-muted, #64748b);
 }
 
+.df2-job-row-rows.is-dest {
+  color: var(--df-brand-strong, #115e59);
+  font-weight: 650;
+}
+
+.df2-job-row-rows.is-writer {
+  color: var(--df-text-muted, #64748b);
+}
+
 /* Detail-pane job rename — single control surface */
 .df2-job-name-editor {
   display: flex;
@@ -8414,9 +8423,72 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   opacity: 0.75;
 }
 
-.df2-conservation-ledger h3 {
-  margin: 0;
-  font-size: 0.95rem;
+.df2-conservation-ledger-title {
+  min-width: 0;
+}
+
+.df2-conservation-ledger-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.65rem;
+}
+
+.df2-conservation-ledger-kind {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.12rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--df-brand, #0d9488) 28%, transparent);
+  background: var(--df-brand-muted, #f0fdfa);
+  color: var(--df-brand-strong, #115e59);
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+}
+
+.df2-conservation-ledger-compare {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.45rem;
+}
+
+.df2-conservation-ledger-compare article {
+  display: flex;
+  flex-direction: column;
+  gap: 0.12rem;
+  padding: 0.5rem 0.65rem;
+  border-radius: 10px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  background: #fff;
+}
+
+.df2-conservation-ledger-compare article span {
+  font-size: 0.68rem;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-muted, #64748b);
+}
+
+.df2-conservation-ledger-compare article strong {
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+}
+
+.df2-conservation-ledger-compare article.is-dest {
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 35%, transparent);
+  background: var(--df-brand-muted, #f0fdfa);
+}
+
+.df2-conservation-ledger-compare article.is-warn {
+  border-color: color-mix(in srgb, var(--df-warn, #b45309) 40%, transparent);
+  background: color-mix(in srgb, var(--df-warn, #b45309) 8%, white);
+}
+
+.df2-conservation-ledger-compare article.is-muted strong {
+  color: var(--df-text-muted, #64748b);
 }
 
 .df2-conservation-ledger-head p {

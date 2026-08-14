@@ -240,3 +240,48 @@ export function destProvenCount(source: LedgerCarrier | null | undefined): numbe
   if (!isDestMeasured(ledger) || ledger?.dest_count == null) return null;
   return ledger.dest_count;
 }
+
+/** Operator-facing complete copy — dest COUNT when measured, never “rows transferred”. */
+export function conservationCompleteCopy(
+  source: LedgerCarrier | null | undefined,
+  opts?: { quarantine?: boolean },
+): string {
+  const dest = destHeadline(source);
+  const writer = writerHeadline(source);
+  if (opts?.quarantine) {
+    return dest.measured
+      ? `${dest.value} at destination; some rows held out or coerced to NULL`
+      : `${writer.value} writer-acked (dest COUNT unmeasured); some rows held out or coerced to NULL`;
+  }
+  return dest.measured
+    ? `${dest.value} at destination`
+    : `${writer.value} writer-acked — dest COUNT unmeasured`;
+}
+
+export type LedgerIdentityCell = { label: string; value: string };
+
+/** Display-only identity cells from engine fields — not a second algorithm. */
+export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[] {
+  if (ledger.conservation_kind === "keyed") {
+    return [
+      { label: "Inserts", value: fmt(ledger.inserts) },
+      { label: "Updates", value: fmt(ledger.updates) },
+      { label: "Deletes", value: fmt(ledger.deletes) },
+      { label: "Dest Δ", value: fmt(ledger.dest_delta) },
+    ];
+  }
+  if (ledger.conservation_kind === "append_delta") {
+    return [
+      { label: "Read", value: fmt(ledger.rows_read) },
+      { label: "Dest after", value: fmt(ledger.dest_count) },
+      { label: "Dest before", value: fmt(ledger.dest_count_before) },
+      { label: "Dest Δ", value: fmt(ledger.dest_delta) },
+    ];
+  }
+  return [
+    { label: "Read", value: fmt(ledger.rows_read) },
+    { label: "Dest COUNT(*)", value: fmt(ledger.dest_count) },
+    { label: "Held out", value: fmt(ledger.rows_quarantined) },
+    { label: "Skipped", value: fmt(ledger.rows_skipped) },
+  ];
+}

@@ -758,7 +758,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                             {(() => {
                               const rows = formatJobRowMetric(job);
                               return (
-                                <span title={rows.title}>
+                                <span
+                                  className={`df2-job-row-rows ${rows.measured ? "is-dest" : "is-writer"}`}
+                                  title={rows.title}
+                                >
                                   {rows.value} {rows.measured ? "at dest" : rows.label.toLowerCase()}
                                 </span>
                               );
@@ -2027,7 +2030,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <tr>
                 <th>Stream</th>
                 <th>Status</th>
-                <th>Records</th>
+                <th>Events written</th>
                 <th>Lag</th>
                 <th>Watermark</th>
               </tr>

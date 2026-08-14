@@ -47,6 +47,10 @@ _LIST_KEEP_KEYS = frozenset({
     "created_by",
     "retry_of",
     "cdc_lag_seconds",
+    # Independent dest COUNT(*) ledger — small dict, required so Overview /
+    # Jobs list never fall dest population back to records_processed.
+    "row_accounting",
+    "trust_score",
 })
 
 

@@ -9,6 +9,8 @@ import {
   formatJobRowMetric,
   isDestMeasured,
   ledgerEquation,
+  ledgerIdentityCells,
+  conservationCompleteCopy,
   readConservationLedger,
   writerAckDisagrees,
   writerHeadline,
@@ -152,5 +154,35 @@ describe("ledgerEquation is display-only", () => {
     const eq = ledgerEquation(overwriteLedger);
     assert.match(eq, /read 4/);
     assert.match(eq, /dest 4/);
+  });
+});
+
+describe("conservationCompleteCopy", () => {
+  it("names dest COUNT, not writer ack, on success", () => {
+    const copy = conservationCompleteCopy({
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: overwriteLedger,
+    });
+    assert.match(copy, /4 at destination/);
+    assert.doesNotMatch(copy, /10,000/);
+    assert.doesNotMatch(copy, /transferred/);
+  });
+
+  it("refuses to say transferred when dest is unmeasured", () => {
+    const copy = conservationCompleteCopy({
+      status: "completed",
+      records_processed: 10_000,
+    });
+    assert.match(copy, /unmeasured/);
+    assert.doesNotMatch(copy, /transferred/);
+  });
+});
+
+describe("ledgerIdentityCells", () => {
+  it("shows dest COUNT as its own cell, not writer ack", () => {
+    const cells = ledgerIdentityCells(overwriteLedger);
+    const dest = cells.find((c) => c.label.includes("Dest"));
+    assert.equal(dest?.value, "4");
   });
 });

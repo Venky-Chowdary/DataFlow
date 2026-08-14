@@ -336,6 +336,7 @@ def _remember_source_schema(sched: Any, schema: dict[str, str], fingerprint: str
 def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job_doc: dict | None) -> dict:
     doc = job_doc or {}
     finished = datetime.now(timezone.utc)
+    ledger = doc.get("row_accounting") if isinstance(doc.get("row_accounting"), dict) else {}
     return {
         "job_id": job_id,
         "status": status,
@@ -347,6 +348,7 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "rejected_rows": int(doc.get("rejected_rows", 0) or 0),
         "coerced_null_rows": int(doc.get("coerced_null_rows", 0) or 0),
         "error": (doc.get("error") or "")[:500],
+        "row_accounting": dict(ledger),
     }
 
 

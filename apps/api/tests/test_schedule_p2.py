@@ -349,6 +349,31 @@ def test_finalize_run_success_records_and_notifies(temp_store, monkeypatch):
     assert notified["status"] == "completed"
 
 
+def test_run_entry_copies_dest_count_ledger_not_only_writer_ack():
+    started = datetime.now(timezone.utc)
+    entry = runner._run_entry(
+        "job-ledger",
+        "completed",
+        0,
+        started,
+        {
+            "records_processed": 10_000,
+            "rejected_rows": 0,
+            "coerced_null_rows": 0,
+            "row_accounting": {
+                "dest_count": 4,
+                "writer_ack": 10_000,
+                "balanced": True,
+                "conservation_kind": "overwrite",
+                "rows_written_source": "gate8_dest_readback",
+            },
+        },
+    )
+    assert entry["records_transferred"] == 10_000
+    assert entry["row_accounting"]["dest_count"] == 4
+    assert entry["row_accounting"]["writer_ack"] == 10_000
+
+
 def test_missing_connector_records_failed_history(temp_store, monkeypatch):
     sched = _make(store)
     before = sched.run_count

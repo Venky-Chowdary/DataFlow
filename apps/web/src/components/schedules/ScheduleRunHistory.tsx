@@ -6,6 +6,7 @@ import { acceptScheduleSourceSchema, fetchScheduleHistory } from "../../lib/api"
 import { Button } from "../ui/Button";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import type { ScheduleRun } from "../../lib/types";
+import { formatJobRowMetric } from "../../lib/conservationLedger";
 
 interface ScheduleRunHistoryProps {
   scheduleId: string;
@@ -101,7 +102,7 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
           <span role="columnheader">Status</span>
           <span role="columnheader">Started</span>
           <span role="columnheader">Duration</span>
-          <span role="columnheader">Rows</span>
+              <span role="columnheader">At dest</span>
           <span role="columnheader">Rejected</span>
           <span role="columnheader">Coerced NULL</span>
           <span role="columnheader">Job</span>
@@ -109,6 +110,12 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
         {runs.map((run, i) => {
           const rejected = run.rejected_rows ?? 0;
           const coerced = run.coerced_null_rows ?? 0;
+          const rows = formatJobRowMetric({
+            status: run.status,
+            records_processed: run.records_transferred,
+            records_transferred: run.records_transferred,
+            row_accounting: run.row_accounting,
+          });
           return (
             <div className={`df2-sched-history-row${run.retry_scheduled ? " is-retry" : ""}`} role="row" key={`${run.job_id}-${run.attempt}-${i}`}>
               <span role="cell" data-label="Status">
@@ -122,7 +129,7 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
               </span>
               <span role="cell" data-label="Started">{formatWhen(run.started_at)}</span>
               <span role="cell" data-label="Duration">{formatDuration(run.duration_seconds)}</span>
-              <span role="cell" data-label="Rows">{(run.records_transferred ?? 0).toLocaleString()}</span>
+              <span role="cell" data-label={rows.label} title={rows.title}>{rows.value}</span>
               <span role="cell" data-label="Rejected" className={rejected > 0 ? "df2-sched-num-warn" : ""}>{rejected.toLocaleString()}</span>
               <span role="cell" data-label="Coerced NULL" className={coerced > 0 ? "df2-sched-num-warn" : ""}>{coerced.toLocaleString()}</span>
               <span role="cell" data-label="Job" className="df2-sched-job-cell">

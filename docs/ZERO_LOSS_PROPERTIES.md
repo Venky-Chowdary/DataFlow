@@ -643,9 +643,10 @@ rowcount is not that proof.
 **Operator UI (same identity, display-only):** Terminal jobs stamp
 `row_accounting` next to trust (`attach_conservation_to_updates`). Studio
 sync `TransferResult.row_accounting` is stamped in `execute_tracked`.
-Map / Validate / Theater / Jobs / Overview never fall dest COUNT back to
-`records_processed`. Writer ack is labeled diagnostic; dest unmeasured
-renders "—" not a forged destination total.
+The Jobs **list** whitelist keeps that ledger so Overview / Jobs rows /
+connection sync history never fall dest COUNT back to `records_processed`.
+Schedule run history copies the same dict. Writer ack is labeled
+diagnostic; dest unmeasured renders "—" not a forged destination total.
 
 ### NOT claimed / remaining for PROVEN (conservation slice)
 
