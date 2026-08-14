@@ -28,7 +28,7 @@ def test_hold_outs_exclude_coerced_null_rows_that_landed():
     assert hold_outs(rejected_rows=0, coerced_null_rows=3) == 0
 
 
-def test_writer_ack_phase_is_not_a_dest_count():
+def test_writer_ack_phase_without_dest_digest_is_not_a_dest_count():
     count, source = dest_count_from_recon(
         {
             "target_rows": 10_000,
@@ -40,6 +40,26 @@ def test_writer_ack_phase_is_not_a_dest_count():
     )
     assert count is None
     assert source == DEST_UNMEASURED
+
+
+def test_writer_ack_source_digest_still_exposes_independent_dest_count():
+    """Streaming Gate-8: source digest is writer ack; dest COUNT(*) is dest."""
+    count, source = dest_count_from_recon(
+        {
+            "passed": True,
+            "phase": "post_write_writer_ack",
+            "coverage": "writer_ack",
+            "assurance_level": "writer_ack",
+            "source_rows": 4,
+            "target_rows": 4,
+            "target_checksum": "abc123",
+            "source_checksum": "abc123",
+            "source_checksum_provenance": "writer_ack",
+            "message": "Row fidelity verified — source and target checksums match (4 rows)",
+        }
+    )
+    assert count == 4
+    assert source == DEST_READBACK
 
 
 def test_skipped_readback_stuffs_writer_ack_and_is_refused():

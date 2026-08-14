@@ -51,15 +51,12 @@ from services.sync_cursor import is_append_sync, is_overwrite_sync
 DEST_READBACK = "gate8_dest_readback"
 DEST_UNMEASURED = "unmeasured"
 DEST_EMPTY_PASS = "empty_pass"
-WRITER_ACK = "writer_ack"
 
 KIND_OVERWRITE = "overwrite"
 KIND_APPEND_DELTA = "append_delta"
 KIND_KEYED = "keyed"
 KIND_EMPTY_PASS = "empty_pass"
 KIND_UNMEASURED = "unmeasured"
-
-_WRITER_ACK_PHASE_MARKERS = ("writer_ack",)
 
 
 def hold_outs(rejected_rows: int, coerced_null_rows: int) -> int:
@@ -99,28 +96,37 @@ def _first_present_int(*values: Any, default: int = 0) -> int:
 def dest_count_from_recon(recon: Mapping[str, Any] | None) -> tuple[int | None, str]:
     """Independent dest population, or unmeasured.
 
-    ``target_rows`` is dest COUNT(*) only when Gate-8 actually read the
-    destination. File/object exports and writer-ack phases stuff the writer's
-    acknowledgement into the same field — using that would circularly
-    balance a short write against itself.
+    Checksum *claim* and dest *cardinality* are different axes. Streaming
+    passes often stamp ``source_checksum_provenance=writer_ack``, so Gate-8
+    refuses ``full_checksum`` — correctly, because the source digest is the
+    writer's own account. The dest engine was still re-read: ``target_rows``
+    and ``target_checksum`` are dest COUNT(*) / dest digest. Using writer-ack
+    *phase* to discard that count would refuse every SQLite/PG overwrite
+    this host can prove.
+
+    ``target_rows`` is dest COUNT(*) when dest produced a digest or an
+    explicit dest row-count phase. File/object exports and "verified by
+    writer" with no dest digest stuff the writer's acknowledgement into the
+    same field — using that would circularly balance a short write.
     """
     report = dict(recon or {})
-    msg = str(report.get("message") or "")
+    msg = str(report.get("message") or "").lower()
     if report.get("skipped_readback") is True:
         return None, DEST_UNMEASURED
     if is_unproven_export(report, msg):
         return None, DEST_UNMEASURED
-    phase = str(report.get("phase") or "").lower()
-    coverage = str(report.get("coverage") or "").lower()
-    assurance = str(report.get("assurance_level") or "").lower()
-    if coverage == WRITER_ACK or assurance == WRITER_ACK:
-        return None, DEST_UNMEASURED
-    if any(marker in phase for marker in _WRITER_ACK_PHASE_MARKERS):
-        return None, DEST_UNMEASURED
     raw = report.get("target_rows")
     if not isinstance(raw, int) or raw < 0:
         return None, DEST_UNMEASURED
-    return raw, DEST_READBACK
+    dest_digest = str(report.get("target_checksum") or "").strip()
+    if dest_digest:
+        return raw, DEST_READBACK
+    phase = str(report.get("phase") or "").lower()
+    coverage = str(report.get("coverage") or "").lower()
+    if coverage == "row_count" or "row_count" in phase or "row count" in msg:
+        return raw, DEST_READBACK
+    # No dest digest and no dest row-count phase: target_rows is writer ack.
+    return None, DEST_UNMEASURED
 
 
 def conservation_kind(
