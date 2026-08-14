@@ -3447,7 +3447,7 @@ def test_snowflake_dest_count_is_engine_count_not_information_schema(
 
     engine = _patch_warehouse(monkeypatch, _ScriptedWarehouseEngine(count=2, rows=[(1,), (2,)]))
     cfg = {"host": "h", "schema": "PUBLIC"}
-    assert destination_row_count("snowflake", cfg, schema="PUBLIC", table_name="ORDERS") == 4
+    assert destination_row_count("snowflake", cfg, schema="PUBLIC", table_name="ORDERS") == 2
     assert any("COUNT(*)" in sql.upper() for sql in engine.sql)
     listed = destination_key_list(
         "snowflake", cfg, schema="PUBLIC", table_name="ORDERS", key_columns=["id"]

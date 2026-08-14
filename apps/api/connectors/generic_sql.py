@@ -2657,7 +2657,8 @@ def delete_by_primary_keys(
         with engine.connect() as conn:
             result = conn.execute(sa.text(stmt), params)
             conn.commit()
-            return result.rowcount or 0
+            n = result.rowcount
+            return len(keys) if n is None or int(n) < 0 else int(n)
     except Exception as exc:
         from connectors.table_manager import DestinationDeleteError
 
