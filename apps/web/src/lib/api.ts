@@ -3276,6 +3276,19 @@ export async function runFidelityProof(): Promise<FidelityProofResult> {
   return res.json();
 }
 
+export async function runScheduleParallelCheck(
+  scheduleId: string,
+): Promise<{ passed?: boolean; message?: string; campaign?: PipelineSchedule["fidelity_campaign"] }> {
+  const res = await apiFetch(`${API_BASE}/fidelity/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schedule_id: scheduleId }),
+    timeoutMs: 120_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Parallel-run check failed"));
+  return res.json();
+}
+
 export async function runBenchmark(rows = 100_000): Promise<BenchmarkReport> {
   const res = await apiFetch(`${API_BASE}/workspace/benchmark`, {
     method: "POST",

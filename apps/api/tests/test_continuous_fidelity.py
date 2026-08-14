@@ -19,9 +19,17 @@ from services.continuous_fidelity import (
     ASSURANCE_ENGINE_PROFILE,
     ASSURANCE_NO_COLUMNS,
     ASSURANCE_UNSUPPORTED,
+    DEFAULT_REQUIRED_CONSECUTIVE,
     FidelityReport,
+    VERDICT_CUTOVER_READY,
+    VERDICT_DIVERGING,
+    VERDICT_IN_PROGRESS,
+    VERDICT_UNPROVEN,
     _digest_report,
     _pairs_and_types,
+    evaluate_campaign,
+    population_comparable,
+    record_check,
     run_fidelity_check,
 )
 from src.transfer.models import EndpointConfig
@@ -103,6 +111,81 @@ def test_pairs_and_types_honours_omit_and_type_override():
 def test_column_types_alone_define_an_identity_mapping():
     pairs, types = _pairs_and_types([], {"id": "bigint", "name": "text"})
     assert sorted(pairs) == [("id", "id"), ("name", "name")]
+
+
+def _cycle(*, passed: bool, level: str = ASSURANCE_ENGINE_PROFILE, cols=None) -> dict:
+    return {
+        "passed": passed,
+        "assurance_level": level,
+        "divergent_columns": list(cols or []),
+        "message": "ok" if passed else "diverged",
+    }
+
+
+def test_campaign_unproven_without_engine_cycles():
+    state = evaluate_campaign([])
+    assert state["verdict"] == VERDICT_UNPROVEN
+    assert state["consecutive_passes"] == 0
+    skipped = evaluate_campaign([_cycle(passed=False, level=ASSURANCE_UNSUPPORTED)])
+    assert skipped["verdict"] == VERDICT_UNPROVEN
+
+
+def test_campaign_skips_probe_timeouts_and_counts_trailing_passes():
+    """A timeout is not a dirty cycle — same lesson as source-schema memory."""
+    history = [
+        _cycle(passed=True),
+        _cycle(passed=False, level=ASSURANCE_NO_COLUMNS),
+        _cycle(passed=True),
+    ]
+    state = evaluate_campaign(history, required_consecutive=3)
+    assert state["verdict"] == VERDICT_IN_PROGRESS
+    assert state["consecutive_passes"] == 2
+
+
+def test_campaign_divergence_resets_the_window():
+    history = [
+        _cycle(passed=True),
+        _cycle(passed=True),
+        _cycle(passed=False, cols=["amount"]),
+    ]
+    state = evaluate_campaign(history, required_consecutive=3)
+    assert state["verdict"] == VERDICT_DIVERGING
+    assert state["consecutive_passes"] == 0
+    assert "amount" in state["next_action"]
+
+
+def test_campaign_cutover_ready_is_n_consecutive_not_one_green():
+    history = [_cycle(passed=True)] * DEFAULT_REQUIRED_CONSECUTIVE
+    state = evaluate_campaign(history)
+    assert state["verdict"] == VERDICT_CUTOVER_READY
+    assert "not cell fidelity" in state["next_action"]
+    assert "migration_proven" not in state["next_action"] or "not" in state["note"]
+
+
+def test_record_check_appends_and_is_tamper_evident():
+    report = FidelityReport(
+        run_id="fid_c", checked_at="2026-01-01T00:00:00Z", passed=True,
+        assurance_level=ASSURANCE_ENGINE_PROFILE, cross_engine=False,
+        source={"engine": "postgresql", "schema": "public", "table": "a"},
+        destination={"engine": "postgresql", "schema": "public", "table": "b"},
+        source_rows=10, target_rows=10, row_balance_passed=True, columns_compared=3,
+        divergent_columns=[], divergences=[], compared_statistics=["null_count"],
+        not_compared=[], message="ok",
+    )
+    campaign = record_check(None, report, required_consecutive=3)
+    assert campaign["verdict"] == VERDICT_IN_PROGRESS
+    assert campaign["consecutive_passes"] == 1
+    assert campaign["history"][0]["report_digest"].startswith("sha256:")
+    again = record_check(campaign, report)
+    again = record_check(again, report)
+    assert again["verdict"] == VERDICT_CUTOVER_READY
+
+
+def test_append_sync_is_not_a_same_population_dual_run():
+    assert population_comparable("full_refresh_overwrite") is True
+    assert population_comparable("full_refresh_append") is False
+    assert population_comparable("incremental_deduped") is False
+    assert population_comparable("scd2") is False
 
 
 def test_unsupported_engine_declines_without_connecting():

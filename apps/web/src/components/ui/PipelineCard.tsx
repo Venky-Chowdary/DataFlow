@@ -2,7 +2,7 @@ import { ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule } from "../../lib/types";
-import { breakerBadgeClass, breakerWarnLabel } from "../../lib/contractBreakerUi";
+import { breakerBadgeClass, breakerWarnLabel, campaignBadgeClass, campaignWarnLabel } from "../../lib/contractBreakerUi";
 import { formatSyncModeLabel } from "../../lib/transferConstants";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import { Button } from "./Button";
@@ -77,6 +77,7 @@ export function PipelineCard({
   const routeLabel = `${source?.name ?? "Source"} → ${dest?.name ?? "Destination"}`;
   const tableLabel = `${sched.source_table} → ${sched.dest_table}`;
   const breakerText = breakerWarnLabel(breakerState);
+  const campaignText = campaignWarnLabel(sched.fidelity_campaign?.verdict);
   const freshnessText =
     freshnessLagSeconds != null && Number.isFinite(freshnessLagSeconds)
       ? `Lag ${freshnessLagSeconds.toFixed(0)}s`
@@ -135,6 +136,13 @@ export function PipelineCard({
           {breakerText ? (
             <span className={`df2-badge ${breakerBadgeClass(breakerState)}`} title="Data contract circuit breaker">
               {breakerText}
+            </span>
+          ) : campaignText ? (
+            <span
+              className={`df2-badge ${campaignBadgeClass(sched.fidelity_campaign?.verdict)}`}
+              title={sched.fidelity_campaign?.next_action || "Parallel-run campaign"}
+            >
+              {campaignText}
             </span>
           ) : freshnessText ? (
             <span
@@ -210,6 +218,14 @@ export function PipelineCard({
           {breakerText && (
             <span className={`df2-badge ${breakerBadgeClass(breakerState)}`} title="Data contract circuit breaker">
               {breakerText}
+            </span>
+          )}
+          {!breakerText && campaignText && (
+            <span
+              className={`df2-badge ${campaignBadgeClass(sched.fidelity_campaign?.verdict)}`}
+              title={sched.fidelity_campaign?.next_action || "Parallel-run campaign"}
+            >
+              {campaignText}
             </span>
           )}
           {sched.last_status && (

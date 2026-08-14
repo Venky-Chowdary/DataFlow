@@ -8,6 +8,8 @@ import {
   breakerBlocksRuns,
   breakerLabel,
   breakerWarnLabel,
+  campaignLabel,
+  campaignWarnLabel,
 } from "./contractBreakerUi.js";
 
 describe("contractBreakerUi", () => {
@@ -27,5 +29,12 @@ describe("contractBreakerUi", () => {
   it("warn label only for blocking states", () => {
     assert.equal(breakerWarnLabel("closed"), "");
     assert.equal(breakerWarnLabel("open"), "Breaker open");
+  });
+
+  it("Dual Run list signal only warns when diverging", () => {
+    assert.equal(campaignWarnLabel("cutover_ready"), "");
+    assert.equal(campaignWarnLabel("in_progress"), "");
+    assert.equal(campaignWarnLabel("diverging"), "Parallel run diverging");
+    assert.equal(campaignLabel("cutover_ready"), "Parallel run ready");
   });
 });

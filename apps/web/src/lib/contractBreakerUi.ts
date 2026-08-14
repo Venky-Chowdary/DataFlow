@@ -23,3 +23,26 @@ export function breakerBlocksRuns(state: string | null | undefined): boolean {
 export function breakerWarnLabel(state: string | null | undefined): string {
   return breakerBlocksRuns(state) ? breakerLabel(state) : "";
 }
+
+/** Dual Run campaign — engine-stamped verdict, display only. */
+export function campaignBadgeClass(verdict: string | null | undefined): string {
+  const v = (verdict || "").trim().toLowerCase();
+  if (v === "cutover_ready") return "df2-badge-live";
+  if (v === "diverging") return "df2-badge-warn";
+  if (v === "in_progress") return "df2-badge-muted";
+  return "df2-badge-muted";
+}
+
+export function campaignLabel(verdict: string | null | undefined): string {
+  const v = (verdict || "").trim().toLowerCase();
+  if (v === "cutover_ready") return "Parallel run ready";
+  if (v === "diverging") return "Parallel run diverging";
+  if (v === "in_progress") return "Parallel run in progress";
+  if (v === "unproven") return "Parallel run unproven";
+  return "";
+}
+
+/** List-row: only diverging so healthy/in-progress does not hide last-run status. */
+export function campaignWarnLabel(verdict: string | null | undefined): string {
+  return (verdict || "").trim().toLowerCase() === "diverging" ? campaignLabel(verdict) : "";
+}

@@ -155,3 +155,28 @@ def test_source_schema_baseline_survives_reload(temp_store):
     assert reloaded.source_schema == {"id": "BIGINT", "currency": "VARCHAR(3)"}
     assert reloaded.source_schema_fingerprint == "fp-1"
     assert reloaded.source_primary_key == ["id"]
+
+
+def test_fidelity_campaign_survives_reload(temp_store):
+    sched = store.create_schedule({
+        "name": "Nightly",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+    })
+    campaign = {
+        "verdict": "in_progress",
+        "consecutive_passes": 2,
+        "required_consecutive": 3,
+        "history": [{"passed": True, "assurance_level": "engine_column_profile"}],
+        "next_action": "2 of 3 consecutive clean cycles — keep the parallel run going.",
+    }
+    updated = store.update_schedule(sched.id, {"fidelity_campaign": campaign})
+    assert updated is not None
+    assert updated.fidelity_campaign["consecutive_passes"] == 2
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded is not None
+    assert reloaded.fidelity_campaign["verdict"] == "in_progress"
+    assert reloaded.fidelity_campaign["history"][0]["passed"] is True

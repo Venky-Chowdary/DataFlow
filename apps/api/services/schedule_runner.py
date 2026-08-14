@@ -492,6 +492,49 @@ def _job_doc(job_id: str) -> dict | None:
         return None
 
 
+def _observe_parallel_run(sched: Any) -> None:
+    """Record one Dual Run cycle after a successful overwrite load.
+
+    Never fails the transfer. Append/incremental dests are not the same
+    population as the source — auto-running would false-diverge every night
+    (the Full Append dest-Δ lesson). On-demand checks still run via the API.
+    """
+    from services.continuous_fidelity import (
+        population_comparable,
+        run_and_record_campaign,
+    )
+
+    if not population_comparable(getattr(sched, "sync_mode", None)):
+        return
+    src = _resolve_connector(sched.source_connector_id)
+    dst = _resolve_connector(sched.dest_connector_id)
+    if not src or not dst:
+        return
+    try:
+        request = build_schedule_request(sched, src, dst)
+        from services.continuous_fidelity import run_and_record_campaign
+
+        _report, campaign = run_and_record_campaign(
+            dict(getattr(sched, "fidelity_campaign", None) or {}),
+            source=request.source,
+            destination=request.destination,
+            mappings=list(getattr(request, "mappings", None) or []),
+            workspace_id=str(getattr(sched, "workspace_id", "") or ""),
+        )
+        from services.schedule_store import update_schedule
+
+        update_schedule(
+            str(getattr(sched, "id", "")),
+            {"fidelity_campaign": campaign},
+        )
+    except Exception as exc:
+        logger.info(
+            "Schedule %s parallel-run observation skipped: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+
+
 def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
@@ -544,6 +587,8 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     mark_schedule_run(
         schedule_id, job_id, status=status, run_entry=entry, cursor_value=cursor_value
     )
+    if _is_success(status):
+        _observe_parallel_run(sched)
     _notify_schedule(sched, job_id, status, job_doc)
 
 

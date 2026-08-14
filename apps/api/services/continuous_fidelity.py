@@ -3,15 +3,14 @@
 The industry's own best practice for a mainframe or ERP cutover is *parallel
 running*: keep the old system and the new one live side by side and reconcile
 them continuously for months, so a divergence is caught while both systems can
-still be compared rather than after the old one is gone. Teams do this by
-hand-writing SQL; nobody sells it as a product.
+still be compared rather than after the old one is gone. Google Dual Run
+makes that a product for mainframes. Teams otherwise hand-write SQL;
+Airbyte/Fivetran do not sell it.
 
-This module is that product's engine. Given a source and a destination — two
-tables that may sit in different databases, moved by us or by someone else — it
-proves, or disproves, that each column still carries the same population, and
-names every divergence by column. It is not tied to a transfer: it reads both
-sides as they are right now, which is exactly what a parallel-run reconciliation
-needs.
+This module is that product's engine. ``run_fidelity_check`` is one cycle.
+``evaluate_campaign`` / ``record_check`` are Dual Run over consecutive cycles:
+cutover-ready is N engine-profile passes in a row, never one green dashboard,
+and never migration_proven (column profiles are not per-cell Gate-8).
 
 It is built on ``services.column_profile`` (the same engine-side, any-scale
 aggregate parity the reconcile ladder uses) rather than a parallel comparison
@@ -358,3 +357,174 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+# ---------------------------------------------------------------------------
+# Dual Run campaign — consecutive clean cycles, not a one-shot check.
+#
+# Google Dual Run / mainframe parallel-run: cutover is N consecutive windows
+# of agreement, not one green dashboard. Airbyte/Fivetran have no equivalent
+# product primitive. One ``run_fidelity_check`` is a sample; this is the
+# campaign those checks feed.
+#
+# Honesty: engine column profiles (count, null rate, numeric min/max/sum) are
+# not per-cell Gate-8. ``cutover_ready`` never means migration_proven.
+# ---------------------------------------------------------------------------
+
+VERDICT_UNPROVEN = "unproven"
+VERDICT_DIVERGING = "diverging"
+VERDICT_IN_PROGRESS = "in_progress"
+VERDICT_CUTOVER_READY = "cutover_ready"
+
+DEFAULT_REQUIRED_CONSECUTIVE = 3
+CAMPAIGN_HISTORY_KEEP = 50
+
+#: Overwrite (and only overwrite) replaces dest with the source population, so
+#: Dual Run row-balance is meaningful. Append / incremental / SCD2 dests keep
+#: history — auto-running after those loads would false-diverge every cycle.
+SAME_POPULATION_SYNC_MODES = frozenset({
+    "full_refresh_overwrite",
+    "overwrite",
+})
+
+_CAMPAIGN_NOTE = (
+    "Column-profile parallel run (count, null rate, numeric min/max/sum) — "
+    "not per-cell Gate-8. cutover_ready is N consecutive engine cycles of "
+    "agreement, not migration_proven."
+)
+
+
+def population_comparable(sync_mode: str | None) -> bool:
+    """True when dest after this sync mode should match the source population."""
+    return (sync_mode or "").strip().lower() in SAME_POPULATION_SYNC_MODES
+
+
+def compact_check(report: FidelityReport) -> dict[str, Any]:
+    """Durable Dual Run cycle — digest-bearing, small enough to keep on a schedule."""
+    payload = report.to_dict()
+    return {
+        "run_id": payload.get("run_id"),
+        "checked_at": payload.get("checked_at"),
+        "passed": bool(payload.get("passed")),
+        "assurance_level": payload.get("assurance_level") or "",
+        "report_digest": payload.get("report_digest") or "",
+        "source_rows": payload.get("source_rows"),
+        "target_rows": payload.get("target_rows"),
+        "row_balance_passed": bool(payload.get("row_balance_passed")),
+        "columns_compared": int(payload.get("columns_compared") or 0),
+        "divergent_columns": list(payload.get("divergent_columns") or [])[:20],
+        "message": payload.get("message") or "",
+        "cross_engine": bool(payload.get("cross_engine")),
+    }
+
+
+def evaluate_campaign(
+    history: list[dict[str, Any]] | None,
+    *,
+    required_consecutive: int = DEFAULT_REQUIRED_CONSECUTIVE,
+) -> dict[str, Any]:
+    """Google Dual Run exit criterion over a sequence of fidelity checks.
+
+    Unsupported / unavailable probes are skipped — a timeout is not evidence
+    of divergence (the same lesson as source-schema memory). Only
+    ``engine_column_profile`` cycles count. A failed profile resets the
+    consecutive window.
+    """
+    required = max(1, int(required_consecutive or DEFAULT_REQUIRED_CONSECUTIVE))
+    records = [e for e in (history or []) if isinstance(e, dict)]
+    consecutive = 0
+    last_material: dict[str, Any] | None = None
+    for entry in reversed(records):
+        if str(entry.get("assurance_level") or "") != ASSURANCE_ENGINE_PROFILE:
+            continue
+        if last_material is None:
+            last_material = entry
+        if not entry.get("passed"):
+            break
+        consecutive += 1
+
+    if last_material is None:
+        verdict = VERDICT_UNPROVEN
+        next_action = "Run a parallel-run check against the live source and destination."
+    elif not last_material.get("passed"):
+        verdict = VERDICT_DIVERGING
+        cols = last_material.get("divergent_columns") or []
+        named = ", ".join(str(c) for c in cols[:4]) if cols else last_material.get("message") or "divergence"
+        next_action = f"Review named column divergences ({named})."
+        consecutive = 0
+    elif consecutive >= required:
+        verdict = VERDICT_CUTOVER_READY
+        next_action = (
+            f"{consecutive} consecutive clean cycles — review Gate-8 / conservation "
+            "before decommissioning the source; profile parity is not cell fidelity."
+        )
+    else:
+        verdict = VERDICT_IN_PROGRESS
+        next_action = (
+            f"{consecutive} of {required} consecutive clean cycles — keep the "
+            "parallel run going."
+        )
+
+    return {
+        "verdict": verdict,
+        "consecutive_passes": consecutive,
+        "required_consecutive": required,
+        "last_check": last_material,
+        "next_action": next_action,
+        "note": _CAMPAIGN_NOTE,
+        "cycles_observed": sum(
+            1
+            for e in records
+            if str(e.get("assurance_level") or "") == ASSURANCE_ENGINE_PROFILE
+        ),
+    }
+
+
+def record_check(
+    campaign: dict[str, Any] | None,
+    report: FidelityReport,
+    *,
+    required_consecutive: int | None = None,
+) -> dict[str, Any]:
+    """Append one cycle and recompute the Dual Run verdict."""
+    current = dict(campaign or {})
+    required = int(
+        required_consecutive
+        if required_consecutive is not None
+        else current.get("required_consecutive")
+        or DEFAULT_REQUIRED_CONSECUTIVE
+    )
+    history = [
+        e for e in list(current.get("history") or []) if isinstance(e, dict)
+    ]
+    history.append(compact_check(report))
+    history = history[-CAMPAIGN_HISTORY_KEEP:]
+    state = evaluate_campaign(history, required_consecutive=required)
+    return {
+        **state,
+        "history": history,
+        "updated_at": _now_iso(),
+    }
+
+
+def run_and_record_campaign(
+    campaign: dict[str, Any] | None,
+    *,
+    source: "EndpointConfig",
+    destination: "EndpointConfig",
+    mappings: list[dict] | None = None,
+    column_types: dict[str, str] | None = None,
+    workspace_id: str = "",
+    required_consecutive: int | None = None,
+) -> tuple[FidelityReport, dict[str, Any]]:
+    """One Dual Run cycle plus the updated campaign — shared by schedule and API."""
+    report = run_fidelity_check(
+        source=source,
+        destination=destination,
+        mappings=mappings,
+        column_types=column_types,
+        workspace_id=workspace_id,
+    )
+    return report, record_check(
+        campaign, report, required_consecutive=required_consecutive
+    )

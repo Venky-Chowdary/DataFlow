@@ -1196,7 +1196,20 @@ export interface PipelineSchedule {
   require_signed_contract?: boolean;
   /** Present on GET /schedules/{id}; omitted from list summaries. */
   mappings?: { source: string; target: string; confidence?: number; transform?: string | null }[];
-  mapping_count?: number;
+  /** Dual Run campaign (consecutive parallel-run cycles). Display-only. */
+  fidelity_campaign?: {
+    verdict?: string;
+    consecutive_passes?: number;
+    required_consecutive?: number;
+    next_action?: string;
+    note?: string;
+    last_check?: {
+      passed?: boolean;
+      message?: string;
+      divergent_columns?: string[];
+      assurance_level?: string;
+    } | null;
+  };
 }
 
 /** A single persisted run attempt from GET /schedules/{id}/history. */

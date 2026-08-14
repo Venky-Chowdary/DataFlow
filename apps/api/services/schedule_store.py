@@ -142,6 +142,9 @@ class PipelineSchedule:
     #: identity changes keep the same col→type map, so a type-only baseline
     #: cannot see them — Confluent NONE / Airbyte hard-break.
     source_primary_key: list[str] = field(default_factory=list)
+    #: Dual Run campaign: consecutive parallel-run cycles on this route.
+    #: ``evaluate_campaign`` is the kernel; this is durable memory for it.
+    fidelity_campaign: dict[str, Any] = field(default_factory=dict)
     # Retry policy applied on run failure.
     max_retries: int = 0
     retry_backoff_seconds: int = 60
@@ -216,6 +219,9 @@ class PipelineSchedule:
                 for p in (data.get("source_primary_key") or [])
                 if str(p).strip()
             ],
+            fidelity_campaign=dict(data.get("fidelity_campaign") or {})
+            if isinstance(data.get("fidelity_campaign"), dict)
+            else {},
             max_retries=max(0, int(data.get("max_retries", 0) or 0)),
             retry_backoff_seconds=max(0, int(data.get("retry_backoff_seconds", 60) or 0)),
             notify_on_failure=bool(data.get("notify_on_failure", True)),
