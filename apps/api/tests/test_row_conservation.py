@@ -3162,6 +3162,69 @@ def test_object_store_parquet_gate8_checksum_is_value_walk_not_json_empty(
     )
 
 
+def test_object_store_excel_gate8_checksum_is_value_rows_not_used_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Excel GET checksum is value-bearing rows, not used-range and not JSON []."""
+    openpyxl = pytest.importorskip("openpyxl")
+    from services.dest_precount import checksum_object_store
+    from services.reconciliation import read_target_sample
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["id", "v"])
+    ws.append(["1", "a"])
+    ws.append(["2", "b"])
+    for r in range(5, 22):
+        ws.cell(row=r, column=1).number_format = "0.00"
+    buf = io.BytesIO()
+    wb.save(buf)
+    content = buf.getvalue()
+    _patch_object_store_payloads(monkeypatch, [("exports/dump.xlsx", content)])
+    cfg = {"database": "df-count"}
+    assert destination_row_count("s3", cfg, schema="", table_name="exports/dump.xlsx") == 2
+    n, digest = checksum_object_store("s3", cfg, table_name="exports/dump.xlsx")
+    assert n == 2
+    assert digest
+    rows = read_target_sample(
+        "s3",
+        cfg,
+        schema="",
+        table_name="exports/dump.xlsx",
+        columns=["id", "v"],
+        limit=50,
+    )
+    assert len(rows) == 2
+    assert {r["id"] for r in rows} == {"1", "2"}
+    assert ws.max_row > 3
+    _patch_object_store_payloads(monkeypatch, [("exports/dump.xlsx", b"not-xlsx")])
+    assert checksum_object_store("s3", cfg, table_name="exports/dump.xlsx") == (-1, "")
+
+
+def test_object_store_orc_gate8_checksum_is_value_walk_not_json_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ORC GET checksum is cell values. Footer ``nrows`` stays COUNT."""
+    pytest.importorskip("pyarrow.orc")
+    from services.dest_precount import checksum_object_store
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="orc",
+    )
+    _patch_object_store_payloads(monkeypatch, [("exports/data.orc", content)])
+    cfg = {"database": "b"}
+    assert destination_row_count("s3", cfg, schema="", table_name="exports/data.orc") == 2
+    n, digest = checksum_object_store("s3", cfg, table_name="exports/data.orc")
+    assert n == 2
+    assert digest
+    _patch_object_store_payloads(monkeypatch, [("exports/data.orc", b"not-orc")])
+    assert checksum_object_store("s3", cfg, table_name="exports/data.orc") == (-1, "")
+
+
 def test_object_store_poison_jsonl_gate8_does_not_checksum_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

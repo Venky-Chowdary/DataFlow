@@ -58,9 +58,10 @@ GET still materializes one object (byte-image parsers). Gate-8 cell
 checksum of those same GET streams is ``checksum_object_store`` — never
 ``json.loads`` fallback empty (gzip CSV / Parquet as UTF-8 JSON garbage
 was dest=0). JSON root array, JSONL objects, CSV RFC 4180 dicts, and
-Parquet/Avro value walks feed ``canonical_checksum_from_iter``. Wrapped
-JSON, XML, Excel, and ORC cell walks stay unmeasured this kernel (COUNT
-still measures cardinality). Empty well-formed is ``(0, "")``. Dest sample
+Parquet/Avro/ORC/Excel value walks feed ``canonical_checksum_from_iter``.
+Wrapped JSON and XML cell walks stay unmeasured this kernel (COUNT
+still measures cardinality; one-shot unique-path cannot hash cells
+without buffering every element). Empty well-formed is ``(0, "")``. Dest sample
 of those GET streams is ``sample_object_store`` / ``sample_artifact_records``
 — never JSON-fallback ``[]`` (that greens a lost write). SFTP dest COUNT
 and Gate-8 checksum walk the same artifact machine via ``open_sftp_binary``
@@ -268,8 +269,9 @@ class UnmeasuredArtifact(Exception):
     """Dest population cannot be checksummed. Never hash a prefix or JSON ``[]``.
 
     Gate-8 ``json.loads`` fallback empty is dest=0 — the same hole COUNT
-    already refuses. Poison JSONL, ambiguous JSON, XML unique-path, and
-    byte-image kinds without a value walk stay unmeasured.
+    already refuses. Poison JSONL, ambiguous JSON, and XML unique-path
+    (cell dicts would buffer every element before uniqueness is known)
+    stay unmeasured.
     """
 
 
@@ -1672,6 +1674,37 @@ def _iter_parquet_records(body: bytes) -> Any:
             yield rec
 
 
+def _iter_orc_records(body: bytes) -> Any:
+    """Cell values of one ORC object. Footer ``nrows`` is COUNT, not this."""
+    try:
+        from pyarrow import orc
+    except ImportError as exc:
+        raise UnmeasuredArtifact("orc_checksum_needs_pyarrow") from exc
+    try:
+        table = orc.ORCFile(io.BytesIO(body)).read()
+    except Exception as exc:
+        raise UnmeasuredArtifact("orc_unparseable") from exc
+    for batch in table.to_batches():
+        for rec in batch.to_pylist():
+            if not isinstance(rec, dict):
+                raise UnmeasuredArtifact("orc_non_record")
+            yield rec
+
+
+def _iter_excel_records(body: bytes) -> Any:
+    """Value-bearing Excel dicts. Used-range / ``max_row`` is not dest."""
+    try:
+        from services.excel_parser import iter_excel_dicts
+    except ImportError as exc:
+        raise UnmeasuredArtifact("excel_checksum_needs_parser") from exc
+    try:
+        yield from iter_excel_dicts(body)
+    except UnmeasuredArtifact:
+        raise
+    except Exception as exc:
+        raise UnmeasuredArtifact("excel_unparseable") from exc
+
+
 def _iter_avro_records(body: bytes) -> Any:
     """Cell values of one Avro object. Same ``fastavro.reader`` as COUNT."""
     try:
@@ -1708,12 +1741,18 @@ def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
 
 
 def _iter_byte_image_kind(kind: str, body: bytes, *, name: str) -> Any:
-    """Parquet/Avro value walk of one materialized object. Never JSON ``[]``."""
+    """Parquet/Avro/ORC/Excel value walk of one materialized object. Never JSON ``[]``."""
     if kind == "parquet":
         yield from _iter_parquet_records(body)
         return
     if kind == "avro":
         yield from _iter_avro_records(body)
+        return
+    if kind == "orc":
+        yield from _iter_orc_records(body)
+        return
+    if kind == "excel":
+        yield from _iter_excel_records(body)
         return
     raise UnmeasuredArtifact(f"{kind}_checksum_unmeasured:{name}")
 
@@ -1727,8 +1766,11 @@ def _iter_artifact_records(
     """Dest-engine records of an object-store GET. Same gzip machine as COUNT.
 
     CSV/JSON/JSONL (including gzip) walk ``source`` forward-only.
-    Parquet/Avro still materialize one object. Excel/ORC/XML and wrapped
-    JSON raise ``UnmeasuredArtifact`` — never ``json.loads`` fallback empty.
+    Parquet/Avro/ORC/Excel still materialize one object (byte-image /
+    workbook parsers). XML and wrapped JSON raise ``UnmeasuredArtifact``
+    — never ``json.loads`` fallback empty. XML unique-path COUNT stays
+    cardinality; cell dicts on a one-shot GET would buffer every element
+    before uniqueness is known (same truncated-DISTINCT lesson).
     """
     label = str(name or "")
     compressed = label.lower().endswith(".gz")
