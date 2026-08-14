@@ -26,6 +26,7 @@ from services.encoding_capacity import plan_encoding_carry
 from services.identity_carry import plan_identity_carry
 from services.offset_label import plan_offset_label_carry
 from services.physical_placement_ddl import plan_physical_placement, verify_placement
+from services.unicode_form import plan_unicode_form_carry
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ REQUIRED_ASPECTS: tuple[str, ...] = (
     "offset_label",
     "encoding",
     "decimal",
+    "unicode_form",
     "charset",
     "index",
     "partitioning",
@@ -962,6 +964,24 @@ def plan_create_new_fidelity(
     for decision in decimal_plan:
         report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
 
+    dest_collations = {
+        d.dest_column: d.dest_collation
+        for d in collation_plan.decisions
+        if d.dest_collation
+    }
+    unicode_plan = plan_unicode_form_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        dest_collation_for_column=dest_collations.get,
+        unique_or_pk=keyed_cols,
+    )
+    for decision in unicode_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
     # --- CARRY: physical placement (partitioning / tablespace / clustering) ---
     placement = plan_physical_placement(
         source_storage=catalog.physical_storage,
@@ -988,6 +1008,7 @@ def plan_create_new_fidelity(
         skip_offset_label=bool(offset_plan),
         skip_encoding=bool(encoding_plan),
         skip_decimal=bool(decimal_plan),
+        skip_unicode_form=bool(unicode_plan),
         skip_charset=charset_emitted,
     )
 
@@ -2534,6 +2555,7 @@ def _emit_unsupported_catalog(
     skip_offset_label: bool = False,
     skip_encoding: bool = False,
     skip_decimal: bool = False,
+    skip_unicode_form: bool = False,
     skip_charset: bool = False,
 ) -> None:
     if catalog.foreign_keys:
@@ -2674,6 +2696,13 @@ def _emit_unsupported_catalog(
             False,
             "Exact decimal identity could not be planned for this destination.",
             "No decimal/float columns on the source catalog.",
+        )
+    if not skip_unicode_form:
+        _aspect_list(
+            "unicode_form",
+            False,
+            "Unicode form / UCA canonical class could not be planned for this destination.",
+            "No character columns on the source catalog.",
         )
     if not skip_charset:
         if catalog.charsets:

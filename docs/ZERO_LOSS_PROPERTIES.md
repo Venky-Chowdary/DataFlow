@@ -13,7 +13,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
-| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py -q` (116 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal: dest `NUMERIC(10,2)` / MariaDB `DECIMAL(10,2)` STRICT store `1.23` for `INSERT 1.225` (unscaled integer does not land); `2**53+1` digits survive dest `CAST AS CHAR` | UCA 0900 vs 1400; NFC/NFD; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
+| 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py tests/test_unicode_form_carry.py tests/test_property8_unicode_form.py -q` | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal unscaled integer; unicode form: PG TEXT / MariaDB `general_ci`/`bin` UNIQUE BOTH_LAND for NFC vs NFD; MariaDB `unicode_ci` SECOND_REJECT; bind does not NFC | UCA 0900 vs 1400 live MySQL 8; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
 | 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py -q` (40 passed on this host: identity 14 + live execute_tracked 2 + certificate 24; SQLite always + live PG 16 → MariaDB 10.11) | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Writer `records_processed` cannot hide a dest shortfall (DMS MISSING_TARGET class). Append uses dest delta. Empty incremental pass is a measured zero. | Upsert/CDC keyed conservation; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
@@ -732,7 +732,6 @@ into utf8mb3 raises and the write matrix quarantines.
 
 * Oracle live CESU-8 (`UTF8`) → PG `convert_to` certify
 * GB18030 / Shift-JIS live
-* NFC vs NFD uniqueness (UAX #15) — classified, not normalized silently
 * SQL Server VARCHAR code-page matrix beyond cp1252 default
 * Exactly-once / 100% of all routes — not claimed
 
@@ -795,5 +794,73 @@ is a different axis.
 * SQL Server `MONEY` / `DECIMAL` live
 * Banker's rounding (ROUND_HALF_EVEN) vs commercial ROUND_HALF_UP as an
   operator-selectable policy — dest engines here round ties away from zero
+* Exactly-once / 100% of all routes — not claimed
+
+## Property 8 — PARTIAL (2026-08-14, unicode form / UCA canonical class)
+
+**Claim:** Unicode form identity is NFC vs NFD (UAX #15) plus UCA version,
+not CS/CI polarity. `café` (U+00E9, UTF-8 `C3A9`) and `café` (e + U+0301,
+UTF-8 `CC81`) are different stored keys under PostgreSQL TEXT, MariaDB
+`utf8mb4_bin`, and MariaDB `utf8mb4_general_ci`. MariaDB
+`utf8mb4_unicode_ci` (UCA 4.0) UNIQUE rejects the second (NFC=NFD and
+`ß`=`ss`). MySQL documents incomplete combining-mark support on
+`unicode_ci`, so we never claim MySQL `unicode_ci` equals MariaDB
+`unicode_ci` — protocol `mysql` is not dest-engine proof. UCA 4.0 / 5.2 /
+9.0 / 14.0 are different weight tables; `utf8mb4_unicode_ci` is not
+`utf8mb4_0900_ai_ci`. Bind does not NFC. `normalize_unicode` on Map is an
+explicit NFKC transform, not this path.
+
+**Why this is the unique product:** AWS DMS copies bytes into the dest
+default collation; checksums of *accepted* rows stay green while UNIQUE
+silently drops the NFD twin (MISSING_TARGET). Competitors paste a
+collation *name* when the dest happens to know it. CS/CI carry already
+emits `utf8mb4_bin` for PostgreSQL UNIQUE — that preserves form on
+create-new. The hole CS/CI cannot see is **CI → CI**: `general_ci` keeps
+NFC≠NFD as keys; `unicode_ci` collapses them. DataFlow classifies weight
+table (codepoint / general / UCA) and version, marks identity→UCA
+`unsupported`, and certifies HEX + UNIQUE second-insert from the dest
+engine.
+
+**Algorithm (canonical, one place):** `apps/api/services/unicode_form.py`
+
+1. `classify_form` — NFC / NFD / identity / mixed via
+   `unicodedata.normalize`. The cell is not rewritten.
+2. `classify_uca` — codepoint (`_bin` / PG default), `general_ci` (not
+   UCA, no expansions), UCA 4.0/5.2/9.0/14.0. Canonical equivalence of
+   `unicode_ci` is True only when the engine is MariaDB; MySQL 4.0 stays
+   unknown.
+3. Fidelity aspect `unicode_form`: source codepoint/general → dest UCA →
+   `unsupported`; same UCA version on the same engine → `carried`; 0900 vs
+   1400 → `unsupported`; MySQL 4.0 vs MariaDB 4.0 → `unsupported`. No
+   companion composed-form column.
+4. Certify from dest-engine HEX (`C3A9` vs `CC81`) and UNIQUE BOTH_LAND /
+   SECOND_REJECT. PostgreSQL `normalize(col, NFC)` — `NFC` is a keyword,
+   never an identifier.
+
+Collation CS/CI, encoding capacity, and this aspect are independent.
+`collation_carry.EqualityClass` is not patched with a UCA version field.
+
+**Measured (this host, PostgreSQL 16 + MariaDB 10.11):**
+```
+(pending live pytest on this revision — counts filled after the proof run)
+  Live PG TEXT PK: NFC + NFD both land; HEX C3A9 vs CC81;
+    normalize(col, NFC) true only for the NFC row.
+  Live MariaDB UNIQUE: bin / general_ci BOTH_LAND (NFC/NFD and ß/ss);
+    unicode_ci SECOND_REJECT; unicode_520_ci SECOND_REJECT when present.
+    No utf8mb4_0900_ai_ci / uca1400 on this MariaDB — not claimed.
+  Live PG TEXT both forms → MariaDB create-new: dest collation *_bin;
+    both HEX spellings land; unicode_form aspect carried.
+  Unit: general_ci → unicode_ci unsupported; unicode_ci ≠ unicode_520;
+    0900 ≠ 1400; mysql unicode_ci ≠ mariadb unicode_ci; PG → mysql bin
+    carried; empty MySQL collation is unknown (5.7 general vs 8.0 0900).
+```
+
+### NOT claimed / remaining for PROVEN (unicode-form slice)
+
+* UCA 0900 vs 1400 live on MySQL 8 (`utf8mb4_0900_ai_ci` /
+  `utf8mb4_uca1400_*`) — this MariaDB has neither
+* Oracle linguistic vs BINARY live HEX
+* SQL Server Windows vs `_UTF8` collations live NFC/NFD UNIQUE
+* ICU versioned collations on PostgreSQL (`und-x-icu`)
 * Exactly-once / 100% of all routes — not claimed
 
