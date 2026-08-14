@@ -249,9 +249,14 @@ def _pg_probe_physical_lattice(
     schema: str,
     table_name: str,
 ) -> tuple[str, ...]:
-    """SELECT 1=0 of ``_deleted``. Failure must not abort the write txn."""
-    from services.mirror_engine import SOFT_DELETE_COLUMN
+    """Catalog lookup of ``_deleted``. Failure must not abort the write txn.
 
+    A bare ``SELECT col WHERE FALSE`` that does not raise is not proof — unit
+    mocks succeed on any SELECT. The catalog must *name* the column.
+    """
+    from services.mirror_engine import SOFT_DELETE_COLUMN, lattice_column_names
+
+    del sql_mod
     sp = "df_lat_probe"
     try:
         cursor.execute(f"SAVEPOINT {sp}")
@@ -259,15 +264,17 @@ def _pg_probe_physical_lattice(
         sp = ""
     try:
         cursor.execute(
-            sql_mod.SQL("SELECT {} FROM {}.{} WHERE FALSE").format(
-                sql_mod.Identifier(SOFT_DELETE_COLUMN),
-                sql_mod.Identifier(schema),
-                sql_mod.Identifier(table_name),
-            )
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = %s AND table_name = %s "
+            "AND LOWER(CAST(column_name AS VARCHAR)) = %s",
+            (schema, table_name, SOFT_DELETE_COLUMN.casefold()),
         )
+        row = cursor.fetchone()
         if sp:
             cursor.execute(f"RELEASE SAVEPOINT {sp}")
-        return (SOFT_DELETE_COLUMN,)
+        if not row:
+            return ()
+        return lattice_column_names([row[0]])
     except Exception:
         if sp:
             try:
