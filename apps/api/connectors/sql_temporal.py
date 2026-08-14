@@ -291,7 +291,13 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
                 "Provide an offset/Z, or map to TIMESTAMP_NTZ / DATETIME."
             )
         parsed = parse_sql_datetime(value, aware_utc=True)
-        return parsed if parsed is not None else value
+        if parsed is None:
+            return value
+        from services.offset_label import restore_offset_after_utc
+
+        return restore_offset_after_utc(
+            value, parsed, engine=engine, dest_type=source_type
+        )
     if base in {
         "DATETIME",
         "DATETIME64",
@@ -440,14 +446,17 @@ def logical_to_temporal_ddl(logical: str) -> str | None:
         return "DATE"
     if t in {"time"}:
         return "TIME"
-    # Preserve TZ polarity: aware carriers keep UTC tzinfo on bind.
+    # Offset-storing carriers keep the originating label; instant-only
+    # TIMESTAMPTZ stays UTC. Folding DATETIMEOFFSET into TIMESTAMPTZ here
+    # is how a SQL Server dest received +00:00.
+    if t in {"datetimeoffset"}:
+        return "DATETIMEOFFSET"
     if t in {
         "timestamptz",
         "timestamp_tz",
         "timestamp_ltz",
         "timestamp with time zone",
         "timestamp with local time zone",
-        "datetimeoffset",
     }:
         return "TIMESTAMPTZ"
     if t in {

@@ -187,29 +187,34 @@ def resolve_timezone_policy(
         return None
 
     if src in aware and tgt in aware:
-        both_labelled = src == "tz" and tgt == "tz"
-        rewrite = {src, tgt} == {"tz", "ltz"}
+        from services.offset_label import stores_originating_offset
         from services.type_system import _SINGLE_AWARE_TIMESTAMP_DIALECTS
 
+        src_label = stores_originating_offset("", source_type)
+        dst_label = stores_originating_offset(db, target_type)
+        label = src_label and dst_label
+        rewrite = {src, tgt} == {"tz", "ltz"}
         spelling_only = rewrite and db in _SINGLE_AWARE_TIMESTAMP_DIALECTS
         return TimezoneTransferPolicy(
             policy=(
-                POLICY_OFFSET_PRESERVED if both_labelled else POLICY_NATIVE_INSTANT
+                POLICY_OFFSET_PRESERVED if label else POLICY_NATIVE_INSTANT
             ),
             instant_preserved=True,
-            offset_label_preserved=both_labelled,
+            offset_label_preserved=label,
             requires_contract=rewrite and not spelling_only,
             destination_reads_as=(
-                "offset-pinned instant" if both_labelled else "UTC-normalized instant"
+                "offset-pinned instant" if label else "UTC-normalized instant"
             ),
             range_limit=_range_limit(target_type, db),
             note=(
                 "Both carriers store an instant. "
                 + (
                     "The originating offset label is preserved."
-                    if both_labelled
-                    else "The originating offset label is not stored by either side "
-                    "(PostgreSQL TIMESTAMPTZ and MySQL TIMESTAMP both keep UTC only)."
+                    if label
+                    else "The originating offset label is not stored by the "
+                    "destination (PostgreSQL TIMESTAMPTZ / MySQL TIMESTAMP "
+                    "keep UTC only — SQL-standard WITH TIME ZONE is not "
+                    "DATETIMEOFFSET)."
                 )
             ),
             remediation=(

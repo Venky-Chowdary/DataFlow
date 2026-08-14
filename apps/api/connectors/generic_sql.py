@@ -1733,11 +1733,6 @@ def _to_sa_value(
         )
         base = str(coerce_ddl).upper()
 
-        def _ensure_utc(dt: datetime) -> datetime:
-            if dt.tzinfo is None:
-                return dt.replace(tzinfo=timezone.utc)
-            return dt.astimezone(timezone.utc)
-
         if base == "DATE":
             if isinstance(coerced, datetime):
                 return coerced.date()
@@ -1766,7 +1761,8 @@ def _to_sa_value(
         # DATETIME2 (SQL Server) / QuestDB / Oracle TIMESTAMP / ClickHouse DateTime
         # are naive wall clocks. Never invent tzinfo=UTC on naive values — that
         # silently shifts polarity for every generic_sql destination.
-        # TIMESTAMPTZ / DATETIMEOFFSET carriers must keep aware UTC (refuse naive).
+        # Instant-only dests bind UTC. Offset-storing dests (DATETIMEOFFSET)
+        # keep the originating label — UTC-normalizing here is the DMS hole.
         raw_lower = f"{logical or ''} {coerce_ddl or ''} {ddl_type or ''}".lower()
         is_tz_aware = sa_tz or (
             "timestamptz" in raw_lower
@@ -1776,13 +1772,20 @@ def _to_sa_value(
             or "with local time zone" in raw_lower
         )
         if is_tz_aware:
+            from services.offset_label import bind_aware_datetime
+
             if isinstance(coerced, datetime):
                 if coerced.tzinfo is None:
                     raise ValueError(
                         f"generic SQL {ddl_type} refused naive datetime — provide "
                         "offset/Z (refuse silent UTC invent)"
                     )
-                return _ensure_utc(coerced)
+                return bind_aware_datetime(
+                    coerced,
+                    engine=str(db_type or dialect_name or ""),
+                    dest_type=str(coerce_ddl or ddl_type or ""),
+                    original=value,
+                )
             if isinstance(coerced, date) and not isinstance(coerced, datetime):
                 raise ValueError(
                     f"generic SQL {ddl_type} refused date-only value — provide "

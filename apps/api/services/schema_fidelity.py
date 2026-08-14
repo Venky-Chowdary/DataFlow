@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterable
 
 from services.collation_carry import destination_column_collations, plan_collation_carry
 from services.identity_carry import plan_identity_carry
+from services.offset_label import plan_offset_label_carry
 from services.physical_placement_ddl import plan_physical_placement, verify_placement
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,7 @@ REQUIRED_ASPECTS: tuple[str, ...] = (
     "identity_sequence",
     "generated",
     "collation",
+    "offset_label",
     "charset",
     "index",
     "partitioning",
@@ -917,6 +919,17 @@ def plan_create_new_fidelity(
                 list(prefixes) + list(suffixes.get(decision.dest_column) or [])
             )
 
+    offset_plan = plan_offset_label_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+    )
+    for decision in offset_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
     # --- CARRY: physical placement (partitioning / tablespace / clustering) ---
     placement = plan_physical_placement(
         source_storage=catalog.physical_storage,
@@ -940,6 +953,7 @@ def plan_create_new_fidelity(
         skip_index=index_handled,
         skip_identity=bool(identity_plan.decisions),
         skip_collation=bool(collation_plan.decisions),
+        skip_offset_label=bool(offset_plan),
         skip_charset=charset_emitted,
     )
 
@@ -2483,6 +2497,7 @@ def _emit_unsupported_catalog(
     skip_index: bool = False,
     skip_identity: bool = False,
     skip_collation: bool = False,
+    skip_offset_label: bool = False,
     skip_charset: bool = False,
 ) -> None:
     if catalog.foreign_keys:
@@ -2602,6 +2617,13 @@ def _emit_unsupported_catalog(
             bool(catalog.collations),
             "Collation equality could not be planned for this destination.",
             "No per-column collations on source catalog.",
+        )
+    if not skip_offset_label:
+        _aspect_list(
+            "offset_label",
+            False,
+            "Originating offset label could not be planned for this destination.",
+            "No aware-temporal columns on the source catalog.",
         )
     if not skip_charset:
         if catalog.charsets:

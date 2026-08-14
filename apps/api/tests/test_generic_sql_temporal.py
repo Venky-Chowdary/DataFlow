@@ -13,6 +13,7 @@ def test_logical_to_temporal_ddl():
     assert logical_to_temporal_ddl("datetime") == "DATETIME"
     assert logical_to_temporal_ddl("timestamp") == "DATETIME"
     assert logical_to_temporal_ddl("timestamptz") == "TIMESTAMPTZ"
+    assert logical_to_temporal_ddl("datetimeoffset") == "DATETIMEOFFSET"
     assert logical_to_temporal_ddl("timestamp_ntz") == "DATETIME"
     assert logical_to_temporal_ddl("date") == "DATE"
     assert logical_to_temporal_ddl("time") == "TIME"
