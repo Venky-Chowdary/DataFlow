@@ -879,6 +879,26 @@ async def get_job_quarantine(job_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Workspace access denied")
 
     details = merge_job_quarantine(job)
+    from services.quarantine_dlq import (
+        evaluate_replay_closure,
+        job_quarantine_closure,
+    )
+
+    stored_closure = job_quarantine_closure(job)
+    closure = evaluate_replay_closure(details, last_replay=(stored_closure or {}).get("last_replay"))
+    if stored_closure:
+        closure = {
+            **stored_closure,
+            "open_count": closure["open_count"],
+            "promoted_count": closure["promoted_count"],
+            "failed_count": closure["failed_count"],
+            "durable_count": closure["durable_count"],
+            "verdict": closure["verdict"],
+            "next_action": closure["next_action"],
+            "note": closure["note"],
+            "migration_proven": False,
+        }
+    open_n = int(closure.get("open_count") or 0)
     row_ids = {d.get("row") for d in details if isinstance(d, dict) and d.get("row") is not None}
     rejected_rows = int(
         job.get("rejected_details_total")
@@ -934,11 +954,22 @@ async def get_job_quarantine(job_id: str, request: Request):
         "job_id": job_id,
         "rejected_rows": rejected_rows,
         "issue_count": len(details),
+        "open_count": open_n,
         "source": source,
         "quarantine": details,
         "dest_dlq": dest_dlq,
         "quarantine_durable": quarantine_durable,
         "quarantine_dlq_error": quarantine_dlq_error,
+        "quarantine_closure": {
+            "verdict": closure.get("verdict"),
+            "open_count": open_n,
+            "promoted_count": int(closure.get("promoted_count") or 0),
+            "failed_count": int(closure.get("failed_count") or 0),
+            "durable_count": int(closure.get("durable_count") or 0),
+            "next_action": closure.get("next_action") or "",
+            "note": closure.get("note") or "",
+            "migration_proven": False,
+        },
     }
 
 
@@ -1174,19 +1205,46 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
 
     stored_details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
-    details = body.rows if body.rows else list(stored_details)
+    from services.quarantine_from_preflight import merge_job_quarantine
+    from services.quarantine_dlq import (
+        compact_replay_closure,
+        job_quarantine_closure,
+        open_quarantine_details,
+        quarantine_sample_incomplete,
+        record_replay,
+        replay_row_identity,
+        VERDICT_CLOSED,
+    )
+
+    hydrated = merge_job_quarantine(job)
+    durable = hydrated or list(stored_details)
+    incomplete = quarantine_sample_incomplete(job, durable)
+    if incomplete:
+        raise HTTPException(status_code=400, detail=incomplete)
+
+    promoted_ids = {
+        replay_row_identity(d)
+        for d in durable
+        if str(d.get("retry_status") or "").lower() == "promoted"
+    }
+    if body.rows:
+        details = [
+            d for d in body.rows
+            if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
+        ]
+    else:
+        details = open_quarantine_details(durable)
     if not details:
-        raise HTTPException(status_code=400, detail="No quarantine rows to replay")
-    rejected_rows = int(job.get("rejected_rows") or job.get("destination_summary", {}).get("rejected_rows") or 0)
-    if rejected_rows > 0 and len(details) < rejected_rows:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Quarantine sample is incomplete ({len(details)} of {rejected_rows} rejects). "
-                "Export the destination DLQ / full findings, or re-run so all rejects are persisted — "
-                "partial replay would leave remaining rejects behind."
+                "Quarantine ledger is closed — remediations already Gate-8 promoted. "
+                "Replay would only re-upsert already-landed keys."
+                if promoted_ids or str((job_quarantine_closure(job) or {}).get("verdict") or "") == VERDICT_CLOSED
+                else "No quarantine rows to replay"
             ),
         )
+    prior_closure = job_quarantine_closure(job) or {}
 
     records, columns = _quarantine_details_to_records(details, body.transform_overrides)
     if not records:
@@ -1332,20 +1390,46 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             status = "failed"
         else:
             status = "completed"
+
+        recorded = record_replay(
+            durable,
+            attempted=details,
+            child_rejected=list(dest_summary.get("rejected_details") or []),
+            gate8_passed=bool(recon.get("passed")),
+            child_job_id=child_job_id,
+            rows_written=int(rows_written or 0),
+            rejected=rejected,
+            prior=prior_closure,
+        )
+        compact = compact_replay_closure(recorded)
+        stamped_findings = list(recorded.get("findings") or [])
+        landed_ids = set(recorded.get("promoted_identities") or [])
+
         promote_meta: dict[str, Any] = {}
-        if rejected == 0 and recon.get("passed", True):
+        if recon.get("passed") and landed_ids:
             try:
                 from services.dest_quarantine import mark_dlq_promoted
 
                 qids = [
                     str(d.get("_df_qid") or "")
                     for d in details
-                    if isinstance(d, dict) and d.get("_df_qid")
+                    if isinstance(d, dict)
+                    and d.get("_df_qid")
+                    and replay_row_identity(d) in landed_ids
                 ]
-                # Prefer qids; when absent, stamp all open DLQ rows for this parent job.
-                promote_meta = mark_dlq_promoted(
-                    dest, qids=qids, job_id=job_id
-                )
+                # Full close without qids: stamp every open dest DLQ row for this job.
+                # Partial close without qids: refuse dest stamp rather than mark poison pills.
+                failed_ids = set(recorded.get("failed_identities") or [])
+                if qids:
+                    promote_meta = mark_dlq_promoted(dest, qids=qids, job_id=job_id)
+                elif not failed_ids:
+                    promote_meta = mark_dlq_promoted(dest, qids=[], job_id=job_id)
+                else:
+                    promote_meta = {
+                        "updated": 0,
+                        "skipped": True,
+                        "reason": "partial promote needs _df_qid on each finding",
+                    }
             except Exception as exc:
                 promote_meta = {"error": str(exc)[:300]}
         phase = "completed" if status != "failed" else "failed"
@@ -1367,6 +1451,19 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             ddl_log=ddl_log,
             error=recon.get("message") if status == "failed" else None,
         )
+        parent_ds = dict(job.get("destination_summary") or {})
+        parent_ds["quarantine_closure"] = compact
+        parent_status = str(job.get("status") or "completed_with_quarantine")
+        try:
+            mongo.update_job_status(
+                job_id,
+                parent_status,
+                quarantine_closure=compact,
+                rejected_details=stamped_findings[:2000],
+                destination_summary=parent_ds,
+            )
+        except Exception as exc:
+            logger.warning("parent quarantine_closure persist failed: %s", exc, exc_info=exc)
         try:
             from services.audit_log import append_audit_event
             from services.quarantine_dlq import append_dlq_event
@@ -1381,6 +1478,25 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                     "rejected": rejected,
                     "status": status,
                     "gate8_passed": bool(recon.get("passed")),
+                    "verdict": compact.get("verdict"),
+                    "open_count": compact.get("open_count"),
+                },
+            )
+            append_dlq_event(
+                job_id=job_id,
+                action="replay_closure",
+                rows=int(compact.get("promoted_count") or 0),
+                child_job_id=child_job_id,
+                workspace_id=str(job.get("workspace_id") or ""),
+                details={
+                    "verdict": compact.get("verdict"),
+                    "open_count": compact.get("open_count"),
+                    "promoted_count": compact.get("promoted_count"),
+                    "failed_count": compact.get("failed_count"),
+                    "gate8_passed": bool(recon.get("passed")),
+                    "promoted_identities": list(recorded.get("promoted_identities") or []),
+                    "failed_identities": list(recorded.get("failed_identities") or []),
+                    "migration_proven": False,
                 },
             )
             actor = getattr(getattr(request, "state", None), "user", None)
@@ -1398,6 +1514,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                     "status": status,
                     "gate8_passed": bool(recon.get("passed")),
                     "gate8_phase": recon.get("phase"),
+                    "verdict": compact.get("verdict"),
+                    "open_count": compact.get("open_count"),
                 },
             )
         except Exception as exc:
@@ -1413,6 +1531,16 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             "destination_summary": dest_summary,
             "dest_dlq_promoted": promote_meta,
             "reconciliation": recon,
+            "quarantine_closure": {
+                "verdict": compact.get("verdict"),
+                "open_count": compact.get("open_count"),
+                "promoted_count": compact.get("promoted_count"),
+                "failed_count": compact.get("failed_count"),
+                "durable_count": compact.get("durable_count"),
+                "next_action": compact.get("next_action") or "",
+                "note": compact.get("note") or "",
+                "migration_proven": False,
+            },
         }
     except HTTPException:
         mongo.update_job_status(child_job_id, "failed", phase="failed", message="Quarantine replay failed")

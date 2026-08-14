@@ -2864,6 +2864,7 @@ export interface QuarantineInfo {
   job_id: string;
   rejected_rows: number;
   issue_count?: number;
+  open_count?: number;
   /** write = load-time rejects; preflight = Validate/Run integrity findings */
   source?: "write" | "preflight" | "none" | string;
   quarantine: {
@@ -2877,6 +2878,7 @@ export interface QuarantineInfo {
     chars?: string[];
     suggested_transform?: string;
     _df_qid?: string;
+    retry_status?: string;
   }[];
   /** Destination-side DLQ table (`{table}_df_quarantine`) when written. */
   dest_dlq?: {
@@ -2896,6 +2898,17 @@ export interface QuarantineInfo {
    */
   quarantine_durable?: boolean | null;
   quarantine_dlq_error?: string | null;
+  /** Dual Run sibling: remediations until open_count hits zero. closed ≠ migration_proven. */
+  quarantine_closure?: {
+    verdict?: string;
+    open_count?: number;
+    promoted_count?: number;
+    failed_count?: number;
+    durable_count?: number;
+    next_action?: string;
+    note?: string;
+    migration_proven?: boolean;
+  };
 }
 
 export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
@@ -3018,6 +3031,7 @@ export interface QuarantineReplayResult {
     source_rows?: number;
     target_rows?: number;
   };
+  quarantine_closure?: QuarantineInfo["quarantine_closure"];
 }
 
 export async function replayJobQuarantine(

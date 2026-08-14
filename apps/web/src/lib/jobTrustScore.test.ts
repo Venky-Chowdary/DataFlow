@@ -181,4 +181,22 @@ describe("computeJobTrustScore", () => {
     assert.equal(append.next_action.code, "append_delta");
     assert.doesNotMatch(append.next_action.label, /investigate/i);
   });
+
+  it("closed quarantine ledger does not keep Review quarantine as next action", () => {
+    const t = computeJobTrustScore({
+      status: "completed_with_quarantine",
+      records_processed: 100,
+      rejected_rows: 40,
+      quarantine_closure: { verdict: "closed", open_count: 0, promoted_count: 40 },
+      reconciliation: {
+        passed: true,
+        assurance_level: "full_checksum",
+        source_checksum: "a",
+        target_checksum: "a",
+      },
+    });
+    const q = t.factors.find((f) => f.id === "quarantine");
+    assert.equal(q?.score, 100);
+    assert.equal(t.next_action.code, "quarantine_closed");
+  });
 });

@@ -38,6 +38,11 @@ type TrustJobInput = {
   source_ha_role?: string | null;
   trust?: JobTrustScore | null;
   trust_score?: number | null;
+  quarantine_closure?: {
+    verdict?: string | null;
+    open_count?: number | null;
+    promoted_count?: number | null;
+  } | null;
 };
 function num(value: unknown, fallback = 0): number {
   const n = Number(value);
@@ -76,8 +81,19 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
 
   const status = String(job?.status || "").toLowerCase();
   const processed = num(job?.records_processed);
-  let rejected = num(job?.rejected_rows);
-  if (rejected <= 0) rejected = num(job?.destination_summary?.rejected_rows);
+  const historicalRejected = (() => {
+    let r = num(job?.rejected_rows);
+    if (r <= 0) r = num(job?.destination_summary?.rejected_rows);
+    return r;
+  })();
+  const closure = (job?.quarantine_closure && typeof job.quarantine_closure === "object"
+    ? job.quarantine_closure
+    : (job?.destination_summary?.quarantine_closure as TrustJobInput["quarantine_closure"])) || null;
+  const closureVerdict = String(closure?.verdict || "");
+  let rejected = historicalRejected;
+  if (closure && closure.open_count != null && Number.isFinite(Number(closure.open_count))) {
+    rejected = num(closure.open_count);
+  }
   let coerced = num(job?.coerced_null_rows);
   if (coerced <= 0) coerced = num(job?.destination_summary?.coerced_null_rows);
   const recon = (job?.reconciliation || null) as Record<string, unknown> | null;
@@ -112,15 +128,21 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
   }
   factors.push({ id: "completeness", label: "Completeness", score: outcome, weight: 0.25, note: outcomeNote });
 
-  const denom = Math.max(processed, rejected, 1);
+  const denom = Math.max(processed, rejected, historicalRejected, 1);
   const rejectRate = Math.min(1, rejected / denom);
   const quarantineScore = rejected <= 0 ? 100 : Math.max(0, 100 - rejectRate * 400);
+  const quarantineNote =
+    rejected <= 0 && closureVerdict === "closed"
+      ? `${historicalRejected.toLocaleString()} original hold-out(s) remediations landed (child Gate-8) — not a rewrite of the parent checksum.`
+      : rejected <= 0
+        ? "No quarantined rows."
+        : `${rejected.toLocaleString()} open quarantined (${(rejectRate * 100).toFixed(1)}% of processed).`;
   factors.push({
     id: "quarantine",
     label: "Quarantine",
     score: quarantineScore,
     weight: 0.25,
-    note: rejected <= 0 ? "No quarantined rows." : `${rejected.toLocaleString()} quarantined (${(rejectRate * 100).toFixed(1)}% of processed).`,
+    note: quarantineNote,
   });
 
   const coerceRate = Math.min(1, coerced / Math.max(processed, 1));
@@ -320,8 +342,14 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     next_action = { code: "resume", label: "Fix failure then Resume", detail: "Use the failure hint and event log before retrying." };
   } else if (present.length) {
     const weakest = present.reduce((a, b) => ((a.score as number) <= (b.score as number) ? a : b));
-    if (weakest.id === "quarantine" || (rejected > 0 && (weakest.score as number) < 90)) {
-      next_action = { code: "quarantine", label: "Review quarantine", detail: "Replay or export rejected rows — nothing was silently dropped." };
+    if ((weakest.id === "quarantine" || weakest.id === "completeness") && closureVerdict === "closed" && rejected <= 0) {
+      next_action = {
+        code: "quarantine_closed",
+        label: "Quarantine ledger closed",
+        detail: "Remediations landed with child Gate-8. Parent checksum is historical — not migration_proven.",
+      };
+    } else if (weakest.id === "quarantine" || (rejected > 0 && (weakest.score as number) < 90)) {
+      next_action = { code: "quarantine", label: "Review quarantine", detail: "Replay or export remaining open rows — nothing was silently dropped." };
     } else if (weakest.id === "reconcile") {
       next_action = recon?.passed === true && isAppendDeltaProof(recon)
         ? {

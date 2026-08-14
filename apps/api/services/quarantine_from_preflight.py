@@ -257,8 +257,20 @@ def merge_job_quarantine(
             or len(dlq_rows) > len(details)
             or (total_hint > 0 and len(details) < total_hint)
         ):
-            return dlq_rows
+            details = dlq_rows
+
+    if not details:
+        details = quarantine_rows_from_preflight(job.get("preflight"))
 
     if details:
-        return details
-    return quarantine_rows_from_preflight(job.get("preflight"))
+        try:
+            from services.quarantine_dlq import apply_replay_overlay, job_quarantine_closure
+
+            return apply_replay_overlay(
+                details,
+                job_id=job_id,
+                closure=job_quarantine_closure(job),
+            )
+        except Exception:
+            return details
+    return []

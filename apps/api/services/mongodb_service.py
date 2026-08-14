@@ -469,6 +469,7 @@ class MongoDBService:
                     "cdc_lag_seconds": 1,
                     "cdc_lease_conflict": 1,
                     "destination_summary": 1,
+                    "quarantine_closure": 1,
                     "reconcile": 1,
                     "event_log": 1,
                     "message": 1,

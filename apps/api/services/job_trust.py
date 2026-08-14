@@ -169,14 +169,44 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _quarantine_closure(job: dict[str, Any]) -> dict[str, Any] | None:
+    raw = job.get("quarantine_closure")
+    if isinstance(raw, dict) and raw:
+        return raw
+    dest = job.get("destination_summary")
+    if isinstance(dest, dict):
+        stored = dest.get("quarantine_closure")
+        if isinstance(stored, dict) and stored:
+            return stored
+    return None
+
+
+def open_quarantine_count(job: dict[str, Any] | None) -> float:
+    """Hold-outs still in the replay set.
+
+    Historical ``rejected_rows`` is the original transfer's census — after
+    Promote/Replay the operator signal is *open* count. Using the historical
+    figure forever is the Airbyte DLQ lie this product refuses.
+    """
+    j = job if isinstance(job, dict) else {}
+    closure = _quarantine_closure(j)
+    if isinstance(closure, dict) and closure.get("open_count") is not None:
+        return _num(closure.get("open_count"), 0)
+    rejected = _num(j.get("rejected_rows"), 0)
+    if rejected <= 0:
+        rejected = _num((j.get("destination_summary") or {}).get("rejected_rows"), 0)
+    return rejected
+
+
 def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
     """Compute a 0–100 trust score from persisted job fields."""
     j = job if isinstance(job, dict) else {}
     status = str(j.get("status") or "").strip().lower()
     processed = _num(j.get("records_processed"), 0)
-    rejected = _num(j.get("rejected_rows"), 0)
-    if rejected <= 0:
-        rejected = _num((j.get("destination_summary") or {}).get("rejected_rows"), 0)
+    historical_rejected = _num(j.get("rejected_rows"), 0)
+    if historical_rejected <= 0:
+        historical_rejected = _num((j.get("destination_summary") or {}).get("rejected_rows"), 0)
+    rejected = open_quarantine_count(j)
     coerced = _num(j.get("coerced_null_rows"), 0)
     if coerced <= 0:
         coerced = _num((j.get("destination_summary") or {}).get("coerced_null_rows"), 0)
@@ -222,15 +252,23 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         "note": outcome_note,
     })
 
-    # Quarantine / violation rate
-    denom = max(processed, rejected, 1)
+    # Quarantine / violation rate — open hold-outs, not historical rejects.
+    denom = max(processed, rejected, historical_rejected, 1)
     reject_rate = min(1.0, rejected / denom)
     quarantine_score = max(0.0, 100.0 - reject_rate * 400.0)
-    if rejected <= 0:
+    closure = _quarantine_closure(j)
+    verdict = str((closure or {}).get("verdict") or "")
+    if rejected <= 0 and verdict == "closed":
+        quarantine_score = 100.0
+        q_note = (
+            f"{int(historical_rejected):,} original hold-out(s) remediations landed "
+            "(child Gate-8) — not a rewrite of the parent checksum."
+        )
+    elif rejected <= 0:
         quarantine_score = 100.0
         q_note = "No quarantined rows."
     else:
-        q_note = f"{int(rejected):,} quarantined ({reject_rate * 100:.1f}% of processed)."
+        q_note = f"{int(rejected):,} open quarantined ({reject_rate * 100:.1f}% of processed)."
     factors.append({
         "id": "quarantine",
         "label": "Quarantine",
@@ -389,6 +427,7 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         cursor_gap=cursor_gap,
         rejected=rejected,
         recon=recon if recon else None,
+        quarantine_verdict=verdict,
     )
 
     return {
@@ -435,6 +474,7 @@ def _next_action(
     cursor_gap: bool,
     rejected: float,
     recon: dict[str, Any] | None = None,
+    quarantine_verdict: str = "",
 ) -> dict[str, str]:
     if cursor_gap:
         return {
@@ -459,11 +499,21 @@ def _next_action(
         return {"code": "inspect", "label": "Inspect job", "detail": "Open Job Theater for evidence."}
     weakest = min(present, key=lambda f: float(f["score"]))
     wid = weakest["id"]
+    if quarantine_verdict == "closed" and rejected <= 0:
+        if wid in {"quarantine", "completeness"}:
+            return {
+                "code": "quarantine_closed",
+                "label": "Quarantine ledger closed",
+                "detail": (
+                    "Remediations landed with child Gate-8. Parent checksum is "
+                    "historical — not migration_proven."
+                ),
+            }
     if wid == "quarantine" or rejected > 0 and float(weakest["score"]) < 90:
         return {
             "code": "quarantine",
             "label": "Review quarantine",
-            "detail": "Replay or export rejected rows — nothing was silently dropped.",
+            "detail": "Replay or export remaining open rows — nothing was silently dropped.",
         }
     if wid == "reconcile":
         if recon and recon.get("passed") is True and is_append_delta_proof(recon):

@@ -188,6 +188,32 @@ def test_quarantine_lowers_score() -> None:
     assert trust["next_action"]["code"] == "quarantine"
 
 
+def test_closed_quarantine_ledger_does_not_keep_review_cta() -> None:
+    trust = compute_job_trust({
+        "status": "completed_with_quarantine",
+        "records_processed": 100,
+        "rejected_rows": 40,
+        "quarantine_closure": {
+            "verdict": "closed",
+            "open_count": 0,
+            "promoted_count": 40,
+            "durable_count": 40,
+            "migration_proven": False,
+        },
+        "reconciliation": {
+            "passed": True,
+            "assurance_level": "full_checksum",
+            "source_checksum": "a",
+            "target_checksum": "a",
+        },
+    })
+    q = next(f for f in trust["factors"] if f["id"] == "quarantine")
+    assert q["score"] == 100
+    assert "remediation" in q["note"].lower() or "landed" in q["note"].lower()
+    assert trust["next_action"]["code"] == "quarantine_closed"
+    assert "migration_proven" not in trust["next_action"]["label"].lower()
+
+
 def test_reconcile_fail_next_action() -> None:
     trust = compute_job_trust({
         "status": "failed",
