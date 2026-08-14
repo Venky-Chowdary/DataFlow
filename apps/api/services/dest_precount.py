@@ -57,9 +57,12 @@ Avro is a sequential object-container (header + blocks), not a footer
 format — local and GET gzip Avro stream through ``GzipFile`` like JSONL.
 Object-store GET of CSV/JSON/JSONL/XML/Avro streams the HTTP body
 (gzip through ``GzipFile(fileobj=StreamingBody)``).
-COUNT does not ``Body.read()`` the object, does not hold every part in
-RAM, and does not ``gzip.decompress`` a second copy. Excel/Parquet/ORC
-GET gzip uses the same ``GzipFile`` + spool kernel. Gate-8 cell
+Uncompressed Parquet/ORC dest COUNT Range-GETs the footer (Hadoop
+``FSDataInputStream`` / Spark footer read) — never a spool of the
+object. Gzip Parquet/ORC/Excel stay ``GzipFile`` + spool (codec is
+not splittable). COUNT does not ``Body.read()`` the object, does not
+hold every part in RAM, and does not ``gzip.decompress`` a second copy.
+Gate-8 checksum still walks data pages via sequential GET. Gate-8 cell
 checksum of those same GET streams is ``checksum_object_store`` — never
 ``json.loads`` fallback empty (gzip CSV / Parquet as UTF-8 JSON garbage
 was dest=0). JSON root array, JSONL objects, CSV RFC 4180 dicts, streamed
@@ -1718,6 +1721,79 @@ def _object_store_list_keys(
     return list(object_store_read_keys(base, listed))
 
 
+def _object_store_footer_kind(obj_key: str) -> str | None:
+    """Uncompressed Parquet/ORC — Range-GET the footer. Gzip is not this path."""
+    name = str(obj_key or "")
+    if name.lower().endswith(".gz"):
+        return None
+    kind = _infer_artifact_format(Path(name), None)
+    if kind in {"parquet", "orc"}:
+        return kind
+    return None
+
+
+def _count_object_store_key(
+    store: str, cfg: dict[str, Any], bucket: str, obj_key: str
+) -> int | None:
+    """COUNT of one listed key. Missing is 0. Unparseable is unmeasured.
+
+    Uncompressed Parquet/ORC prefer ``open_object_store_seekable`` (footer
+    Range GET). HEAD/Range setup failure falls back to sequential GET +
+    spool — still correct. Gzip / Excel / CSV / JSON / Avro stay sequential.
+    Gate-8 checksum never calls this.
+    """
+    from services.object_streaming import (
+        open_object_store_binary,
+        open_object_store_seekable,
+    )
+
+    footer_kind = _object_store_footer_kind(obj_key)
+    if footer_kind is not None:
+        opened = open_object_store_seekable(store, cfg, bucket, str(obj_key))
+        if opened is False:
+            return 0
+        if opened is not None:
+            stream, closer = opened
+            try:
+                if footer_kind == "parquet":
+                    return _count_parquet_handle(stream)
+                return _count_orc_handle(stream)
+            except Exception as exc:
+                logger.info(
+                    "object-store Range footer COUNT failed for %s/%s: %s",
+                    bucket,
+                    obj_key,
+                    exc,
+                )
+                return None
+            finally:
+                if closer is not None:
+                    try:
+                        closer()
+                    except Exception:
+                        pass
+        # Range unavailable — sequential spool is still dest-engine COUNT.
+    opened = open_object_store_binary(store, cfg, bucket, str(obj_key))
+    if opened is False:
+        return 0
+    if opened is None:
+        return None
+    stream, closer = opened
+    try:
+        return _count_artifact_stream(stream, name=str(obj_key))
+    except Exception as exc:
+        logger.info(
+            "object-store dest COUNT failed for %s/%s: %s", bucket, obj_key, exc
+        )
+        return None
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
 def _object_store_row_count(
     db_type: str, cfg: dict[str, Any], *, table_name: str
 ) -> int | None:
@@ -1725,12 +1801,11 @@ def _object_store_row_count(
 
     Same format machine as local ``count_artifact_rows``. One key is
     opened, counted, and closed before the next — never a list of GET
-    bodies. A truncated or unparseable part is unmeasured — never
-    JSON-fallback empty, never the sum of a prefix. Writer PUT rowcount
-    is not this proof.
+    bodies. Uncompressed Parquet/ORC Range-GET the footer; gzip and
+    sequential kinds walk ``open_object_store_binary``. A truncated or
+    unparseable part is unmeasured — never JSON-fallback empty, never
+    the sum of a prefix. Writer PUT rowcount is not this proof.
     """
-    from services.object_streaming import open_object_store_binary
-
     bucket = str(cfg.get("database") or "").strip()
     key = str(table_name or "").strip()
     if not bucket or not key:
@@ -1743,25 +1818,7 @@ def _object_store_row_count(
         return 0
     total = 0
     for obj_key in keys:
-        opened = open_object_store_binary(kind, cfg, bucket, str(obj_key))
-        if opened is False:
-            continue
-        if opened is None:
-            return None
-        stream, closer = opened
-        try:
-            n = _count_artifact_stream(stream, name=str(obj_key))
-        except Exception as exc:
-            logger.info(
-                "object-store dest COUNT failed for %s/%s: %s", bucket, obj_key, exc
-            )
-            n = None
-        finally:
-            if closer is not None:
-                try:
-                    closer()
-                except Exception:
-                    pass
+        n = _count_object_store_key(kind, cfg, bucket, str(obj_key))
         if n is None:
             logger.info(
                 "object-store dest COUNT unmeasured for %s/%s", bucket, obj_key
@@ -2578,9 +2635,10 @@ def _count_artifact_stream(
     ``GzipFile(fileobj=StreamingBody)``, never ``Body.read()`` of the object
     and never ``gzip.decompress`` of a second copy. CSV encoding sniff is
     prefix-then-rest (no ``seek(0)``). Excel/Parquet/ORC gzip stream-decompress
-    into one rewindable image (footer / workbook). Unparseable /
-    unsupported / missing parser stay unmeasured — never JSON-fallback
-    empty (that is dest=0).
+    into one rewindable image (footer / workbook). Uncompressed object-store
+    Parquet/ORC COUNT uses ``open_object_store_seekable`` before this
+    helper. Unparseable / unsupported / missing parser stay unmeasured —
+    never JSON-fallback empty (that is dest=0).
     """
     try:
         kind, handle, gz_close = _artifact_stream_open(source, name=name, fmt=fmt)
@@ -2638,7 +2696,8 @@ def count_artifact_rows(
     Uncompressed Parquet/ORC still read the footer from the path.
     Object-store GET of CSV/JSON/JSONL/XML/Avro streams the HTTP body through
     ``GzipFile`` when gzip; Excel/Parquet/ORC GET gzip uses the same
-    ``GzipFile`` + spool kernel.
+    ``GzipFile`` + spool kernel. Uncompressed object-store Parquet/ORC
+    Range-GET the footer instead of spooling the object.
     """
     raw = str(path or "").strip()
     if not raw:

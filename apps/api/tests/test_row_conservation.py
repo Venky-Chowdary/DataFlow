@@ -2873,6 +2873,30 @@ def _patch_object_store_payloads(
         _open,
     )
 
+    def _open_seekable(_kind: str, _cfg: dict, _bucket: str, key: str):
+        if key not in bodies:
+            return False
+        lower = key.lower()
+        if lower.endswith(".gz"):
+            return None
+        if not (lower.endswith(".parquet") or lower.endswith(".orc")):
+            return None
+        payload = bodies[key]
+        from services.object_streaming import RangeGetSource
+
+        def _fetch(start: int, length: int, data=payload) -> bytes:
+            if length < 0:
+                raise AssertionError("Range GET length must be sized")
+            return data[start : start + length]
+
+        src = RangeGetSource(len(payload), _fetch)
+        return src, src.close
+
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_seekable",
+        _open_seekable,
+    )
+
 
 def test_object_store_parquet_count_is_footer_not_json_fallback_zero(
     monkeypatch: pytest.MonkeyPatch,
@@ -3663,6 +3687,14 @@ def test_object_store_gzip_footer_formats_spool_not_decompress_slurp(
             lambda *_a, listed=listed, **_k: listed,
         )
 
+        def _no_range(*_a, **_k):
+            raise AssertionError("gzip footer COUNT must not Range-GET a non-splittable codec")
+
+        monkeypatch.setattr(
+            "services.object_streaming.open_object_store_seekable",
+            _no_range,
+        )
+
         def _open(_kind: str, _cfg: dict, _bucket: str, obj_key: str, payload=body):
             buf = _NoSlurpGet(payload)
             return buf, buf.close
@@ -3690,6 +3722,309 @@ def test_object_store_gzip_footer_formats_spool_not_decompress_slurp(
         -1,
         "",
     )
+
+
+def test_range_get_source_unsized_read_is_remainder_not_object_from_zero() -> None:
+    """Hadoop seek+read: unsized read after SEEK_END remainder is the tail."""
+    from services.object_streaming import RangeGetSource
+
+    payload = b"HEAD" + (b"x" * 100) + b"TAIL"
+    fetched: list[tuple[int, int]] = []
+
+    def _fetch(start: int, length: int) -> bytes:
+        fetched.append((start, length))
+        if length < 0:
+            raise AssertionError("Range GET must be sized")
+        return payload[start : start + length]
+
+    src = RangeGetSource(len(payload), _fetch)
+    src.seek(-4, io.SEEK_END)
+    assert src.read() == b"TAIL"
+    assert fetched == [(len(payload) - 4, 4)]
+    src.seek(0)
+    assert src.read(4) == b"HEAD"
+    assert fetched[-1] == (0, 4)
+
+
+def test_object_store_parquet_orc_count_range_gets_footer_not_full_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Uncompressed object-store Parquet/ORC COUNT is footer Range GET, not a spool.
+
+    Spark/Hadoop FSDataInputStream seeks the tail. Athena/DMS close S3 on
+    PUT or catalog stats. Gzip Parquet stays spool (codec is not splittable).
+    Gate-8 checksum still needs data pages and must not use this opener.
+    """
+    pytest.importorskip("pyarrow.parquet")
+    pytest.importorskip("pyarrow.orc")
+    import pyarrow as pa
+    import pyarrow.orc as orc
+    import pyarrow.parquet as pq
+    from services.dest_precount import checksum_object_store
+    from services.object_streaming import RangeGetSource
+
+    n_rows = 8000
+    table = pa.table(
+        {
+            "id": pa.array(range(n_rows), type=pa.int64()),
+            "pad": pa.array(["z" * 128] * n_rows),
+        }
+    )
+    parquet_buf = io.BytesIO()
+    pq.write_table(table, parquet_buf, compression="none", use_dictionary=False)
+    parquet = parquet_buf.getvalue()
+    orc_buf = io.BytesIO()
+    orc.write_table(table, orc_buf)
+    orc_bytes = orc_buf.getvalue()
+    assert len(parquet) > 32 * 1024
+    assert len(orc_bytes) > 8 * 1024
+
+    def _install(key: str, payload: bytes) -> list[tuple[int, int]]:
+        fetched: list[tuple[int, int]] = []
+
+        def _fetch(start: int, length: int, data=payload) -> bytes:
+            fetched.append((start, length))
+            if length < 0:
+                raise AssertionError("Range GET must be sized")
+            if length > len(data):
+                raise AssertionError("Range GET must not request the whole object as one unsized read")
+            return data[start : start + length]
+
+        def _open_seekable(_kind: str, _cfg: dict, _bucket: str, obj_key: str):
+            if obj_key != key:
+                return False
+            src = RangeGetSource(len(payload), _fetch)
+            return src, src.close
+
+        def _no_slurp_get(*_a, **_k):
+            raise AssertionError("uncompressed parquet/orc COUNT must not sequential-GET spool")
+
+        monkeypatch.setattr(
+            "services.dest_precount._object_store_list_keys",
+            lambda *_a, **_k: [key],
+        )
+        monkeypatch.setattr(
+            "services.object_streaming.open_object_store_seekable",
+            _open_seekable,
+        )
+        monkeypatch.setattr(
+            "services.object_streaming.open_object_store_binary",
+            _no_slurp_get,
+        )
+        return fetched
+
+    cfg = {"database": "df-count"}
+    parquet_fetched = _install("exports/wide.parquet", parquet)
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/wide.parquet")
+        == n_rows
+    )
+    parquet_bytes = sum(length for _start, length in parquet_fetched)
+    assert parquet_fetched
+    assert parquet_bytes < len(parquet) // 4
+    assert parquet_bytes < len(parquet)
+
+    orc_fetched = _install("exports/wide.orc", orc_bytes)
+    assert (
+        destination_row_count("s3", cfg, schema="", table_name="exports/wide.orc")
+        == n_rows
+    )
+    orc_got = sum(length for _start, length in orc_fetched)
+    assert orc_fetched
+    assert orc_got < len(orc_bytes) // 2
+    assert orc_got < len(orc_bytes)
+
+    # Gate-8 still walks cells via sequential GET — Range opener is COUNT-only.
+    _patch_object_store_payloads(monkeypatch, [("exports/wide.parquet", parquet)])
+    n, digest = checksum_object_store("s3", cfg, table_name="exports/wide.parquet")
+    assert n == n_rows
+    assert digest
+
+
+def test_object_store_parquet_count_falls_back_to_get_when_range_unknowable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """IAM that allows GET but not HEAD still counts via sequential spool."""
+    pytest.importorskip("pyarrow.parquet")
+    from services.format_converter import convert_rows
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="parquet",
+    )
+    monkeypatch.setattr(
+        "services.dest_precount._object_store_list_keys",
+        lambda *_a, **_k: ["exports/data.parquet"],
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_seekable",
+        lambda *_a, **_k: None,
+    )
+
+    def _open(_kind: str, _cfg: dict, _bucket: str, key: str):
+        if key != "exports/data.parquet":
+            return False
+        buf = io.BytesIO(content)
+        return buf, buf.close
+
+    monkeypatch.setattr("services.object_streaming.open_object_store_binary", _open)
+    assert (
+        destination_row_count(
+            "s3", {"database": "df-count"}, schema="", table_name="exports/data.parquet"
+        )
+        == 2
+    )
+
+
+def test_object_store_parquet_missing_head_is_zero_without_get(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Listed then gone: Range HEAD 404 is dest=0, not a sequential slurp."""
+    monkeypatch.setattr(
+        "services.dest_precount._object_store_list_keys",
+        lambda *_a, **_k: ["exports/data.parquet"],
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_seekable",
+        lambda *_a, **_k: False,
+    )
+
+    def _no_get(*_a, **_k):
+        raise AssertionError("missing object must not sequential GET")
+
+    monkeypatch.setattr("services.object_streaming.open_object_store_binary", _no_get)
+    assert (
+        destination_row_count(
+            "s3", {"database": "df-count"}, schema="", table_name="exports/data.parquet"
+        )
+        == 0
+    )
+
+
+def test_open_object_store_seekable_s3_gcs_adls_range_contracts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3 Range header, GCS inclusive end, ADLS offset+length — never unsized GET."""
+    from types import SimpleNamespace
+
+    from services.object_streaming import open_object_store_seekable
+
+    payload = b"PAR1" + (b"n" * 200) + b"PAR1"
+
+    class _S3:
+        def head_object(self, Bucket: str, Key: str) -> dict:
+            return {"ContentLength": len(payload)}
+
+        def get_object(self, Bucket: str, Key: str, Range: str | None = None) -> dict:
+            if not Range or not Range.startswith("bytes="):
+                raise AssertionError("S3 footer COUNT must send Range")
+            start_s, end_s = Range.split("=", 1)[1].split("-")
+            start, end = int(start_s), int(end_s)
+            assert end >= start
+            return {"Body": io.BytesIO(payload[start : end + 1])}
+
+    monkeypatch.setattr(
+        "connectors.aws_common.boto3_client", lambda *_a, **_k: _S3()
+    )
+    opened = open_object_store_seekable("s3", {}, "bucket", "k.parquet")
+    assert opened not in {False, None}
+    src, closer = opened
+    src.seek(0)
+    assert src.read(4) == b"PAR1"
+    src.seek(-4, io.SEEK_END)
+    assert src.read(4) == b"PAR1"
+    closer()
+
+    class _GcsBlob:
+        size = len(payload)
+
+        def download_as_bytes(
+            self,
+            start: int | None = None,
+            end: int | None = None,
+            checksum: str | None = "auto",
+        ) -> bytes:
+            if start is None or end is None:
+                raise AssertionError("GCS footer COUNT must pass inclusive start/end")
+            if checksum is not None:
+                raise AssertionError("GCS Range GET must skip whole-object MD5")
+            return payload[start : end + 1]
+
+        def reload(self) -> None:
+            return None
+
+    class _GcsBucket:
+        def get_blob(self, _key: str) -> _GcsBlob:
+            return _GcsBlob()
+
+        def blob(self, _key: str) -> _GcsBlob:
+            return _GcsBlob()
+
+    class _Gcs:
+        def bucket(self, _name: str) -> _GcsBucket:
+            return _GcsBucket()
+
+    monkeypatch.setattr("connectors.gcs_common.gcs_client", lambda _cfg: _Gcs())
+    opened = open_object_store_seekable("gcs", {}, "bucket", "k.parquet")
+    assert opened not in {False, None}
+    src, closer = opened
+    src.seek(-4, io.SEEK_END)
+    assert src.read() == b"PAR1"
+    closer()
+
+    class _AdlsDownloader:
+        def __init__(self, data: bytes) -> None:
+            self._data = data
+
+        def readall(self) -> bytes:
+            return self._data
+
+    class _AdlsBlob:
+        def get_blob_properties(self) -> SimpleNamespace:
+            return SimpleNamespace(size=len(payload))
+
+        def download_blob(self, offset: int | None = None, length: int | None = None):
+            if offset is None or length is None:
+                raise AssertionError("ADLS footer COUNT must pass offset+length")
+            return _AdlsDownloader(payload[offset : offset + length])
+
+    class _Adls:
+        def get_blob_client(self, _container: str, _key: str) -> _AdlsBlob:
+            return _AdlsBlob()
+
+    monkeypatch.setattr(
+        "connectors.adls_common.blob_service_client", lambda _cfg: _Adls()
+    )
+    opened = open_object_store_seekable("adls", {}, "container", "k.parquet")
+    assert opened not in {False, None}
+    src, closer = opened
+    src.seek(0)
+    assert src.read(4) == b"PAR1"
+    src.seek(-4, io.SEEK_END)
+    assert src.read(8) == b"PAR1"
+    closer()
+
+
+def test_open_object_store_seekable_s3_missing_is_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    botocore = pytest.importorskip("botocore.exceptions")
+    from services.object_streaming import open_object_store_seekable
+
+    class _S3:
+        def head_object(self, Bucket: str, Key: str) -> dict:
+            raise botocore.ClientError(
+                {
+                    "Error": {"Code": "404", "Message": "Not Found"},
+                    "ResponseMetadata": {"HTTPStatusCode": 404},
+                },
+                "HeadObject",
+            )
+
+    monkeypatch.setattr(
+        "connectors.aws_common.boto3_client", lambda *_a, **_k: _S3()
+    )
+    assert open_object_store_seekable("s3", {}, "bucket", "missing.parquet") is False
 
 
 def test_object_store_poison_jsonl_gate8_does_not_checksum_prefix(

@@ -239,17 +239,253 @@ class _ChunkReader(io.RawIOBase):
         return take
 
 
+class RangeGetSource(io.RawIOBase):
+    """Hadoop ``FSDataInputStream`` analogue: seek + sized Range GET.
+
+    ``read(n)`` fetches ``[pos, pos+n)``. Unsized ``read()`` fetches the
+    remainder ``[pos, size)`` — never a second copy of the object from
+    byte 0. Parquet/ORC footer COUNT issues a handful of small ranges
+    (magic, tail length, footer). Gzip Parquet/ORC is not this path
+    (Hadoop GzipCodec is not splittable). Gate-8 checksum still needs
+    data pages and stays on sequential GET.
+    """
+
+    def __init__(self, size: int, fetch: Callable[[int, int], bytes]) -> None:
+        super().__init__()
+        if int(size) < 0:
+            raise ValueError("object size must be >= 0")
+        self._size = int(size)
+        self._pos = 0
+        self._fetch = fetch
+
+    def seekable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
+
+    def writable(self) -> bool:
+        return False
+
+    def tell(self) -> int:
+        return self._pos
+
+    def seek(self, offset: int, whence: int = io.SEEK_SET) -> int:
+        if whence == io.SEEK_SET:
+            pos = int(offset)
+        elif whence == io.SEEK_CUR:
+            pos = self._pos + int(offset)
+        elif whence == io.SEEK_END:
+            pos = self._size + int(offset)
+        else:
+            raise ValueError("invalid whence")
+        if pos < 0:
+            raise OSError(22, "negative seek position")
+        self._pos = pos
+        return self._pos
+
+    def read(self, size: int | None = -1) -> bytes:
+        if self.closed:
+            raise ValueError("read of closed RangeGetSource")
+        if self._pos >= self._size:
+            return b""
+        if size is None or int(size) < 0:
+            length = self._size - self._pos
+        else:
+            length = int(size)
+        if length <= 0:
+            return b""
+        if self._pos + length > self._size:
+            length = self._size - self._pos
+        data = self._fetch(self._pos, length)
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("Range GET must return bytes")
+        chunk = bytes(data[:length])
+        self._pos += len(chunk)
+        return chunk
+
+    def readinto(self, b: Any) -> int:
+        mv = memoryview(b)
+        chunk = self.read(len(mv))
+        n = len(chunk)
+        if n:
+            mv[:n] = chunk
+        return n
+
+
+def _object_missing_from_client_error(exc: BaseException) -> bool:
+    response = getattr(exc, "response", None) or {}
+    code = str((response.get("Error") or {}).get("Code") or "")
+    http = str((response.get("ResponseMetadata") or {}).get("HTTPStatusCode") or "")
+    if code in {"404", "NoSuchKey", "NotFound"} or http == "404":
+        return True
+    name = type(exc).__name__
+    msg = str(exc).lower()
+    return (
+        "NotFound" in name
+        or "NoSuchKey" in name
+        or "ResourceNotFound" in name
+        or "404" in str(exc)
+        or "no such key" in msg
+        or "not found" in msg
+        or "blobnotfound" in msg
+    )
+
+
+def object_store_content_length(
+    kind: str, cfg: dict[str, Any], bucket: str, key: str
+) -> int | bool | None:
+    """HEAD size in bytes. ``False`` if missing, ``None`` if unknowable.
+
+    Same clients as sequential GET / version tokens. Missing HEAD
+    permission is unknowable so COUNT can fall back to a sequential GET.
+    """
+    try:
+        if kind == "s3":
+            from botocore.exceptions import ClientError
+            from connectors.aws_common import boto3_client
+
+            try:
+                head = boto3_client("s3", cfg).head_object(Bucket=bucket, Key=key)
+            except ClientError as exc:
+                if _object_missing_from_client_error(exc):
+                    return False
+                raise
+            size = head.get("ContentLength")
+            if size is None:
+                return None
+            return int(size)
+        if kind == "gcs":
+            from connectors.gcs_common import gcs_client
+
+            blob = gcs_client(cfg).bucket(bucket).get_blob(key)
+            if blob is None:
+                return False
+            size = getattr(blob, "size", None)
+            if size is None:
+                blob.reload()
+                size = getattr(blob, "size", None)
+            if size is None:
+                return None
+            return int(size)
+        if kind == "adls":
+            from connectors.adls_common import blob_service_client
+
+            try:
+                props = (
+                    blob_service_client(cfg)
+                    .get_blob_client(bucket, key)
+                    .get_blob_properties()
+                )
+            except Exception as exc:
+                if _object_missing_from_client_error(exc):
+                    return False
+                raise
+            size = getattr(props, "size", None)
+            if size is None:
+                return None
+            return int(size)
+    except Exception as exc:
+        _logger.info(
+            "object-store HEAD failed for dest COUNT (%s/%s): %s",
+            bucket,
+            key,
+            exc,
+        )
+        return None
+    return None
+
+
+def range_get_object_bytes(
+    kind: str, cfg: dict[str, Any], bucket: str, key: str, start: int, length: int
+) -> bytes:
+    """Sized Range GET ``[start, start+length)``. Never unsized Body.read() of the object."""
+    if int(length) <= 0:
+        return b""
+    start = int(start)
+    length = int(length)
+    end = start + length - 1
+    if kind == "s3":
+        from connectors.aws_common import boto3_client
+
+        body = boto3_client("s3", cfg).get_object(
+            Bucket=bucket, Key=key, Range=f"bytes={start}-{end}"
+        )["Body"]
+        closer = getattr(body, "close", None)
+        try:
+            return bytes(body.read())
+        finally:
+            if callable(closer):
+                closer()
+    if kind == "gcs":
+        from connectors.gcs_common import gcs_client
+
+        # ``end`` is the last byte (inclusive), same as HTTP Range / S3.
+        # Range bytes are not the object MD5 — skip checksum of the whole blob.
+        return bytes(
+            gcs_client(cfg)
+            .bucket(bucket)
+            .blob(key)
+            .download_as_bytes(start=start, end=end, checksum=None)
+        )
+    if kind == "adls":
+        from connectors.adls_common import blob_service_client
+
+        downloader = (
+            blob_service_client(cfg)
+            .get_blob_client(bucket, key)
+            .download_blob(offset=start, length=length)
+        )
+        reader = getattr(downloader, "readall", None)
+        if callable(reader):
+            return bytes(reader())
+        return bytes(downloader.read())
+    raise OSError(f"Range GET is not implemented for store {kind!r}")
+
+
+def open_object_store_seekable(
+    kind: str, cfg: dict[str, Any], bucket: str, key: str
+) -> tuple[Any, Any] | bool | None:
+    """Seekable Range GET view. ``False`` if missing, ``None`` if unknowable.
+
+    Uncompressed Parquet/ORC dest COUNT uses this instead of spooling the
+    GET. Sequential ``open_object_store_binary`` stays the path for
+    CSV/JSON/Avro/gzip/Excel and for Gate-8 checksum (data pages). HEAD
+    or Range setup failure is unknowable so COUNT can fall back to a
+    sequential GET — still correct, more RAM.
+    """
+    size = object_store_content_length(kind, cfg, bucket, key)
+    if size is False or size is None:
+        return size
+    try:
+
+        def _fetch(start: int, length: int) -> bytes:
+            return range_get_object_bytes(kind, cfg, bucket, key, start, length)
+
+        source = RangeGetSource(int(size), _fetch)
+        return source, source.close
+    except Exception as exc:
+        _logger.info(
+            "object-store Range GET setup failed for dest COUNT (%s/%s): %s",
+            bucket,
+            key,
+            exc,
+        )
+        return None
+
+
 def open_object_store_binary(
     kind: str, cfg: dict[str, Any], bucket: str, key: str
 ) -> tuple[Any, Any] | bool | None:
-    """Readable GET body + closer. ``False`` if missing, ``None`` if unknowable.
+    """Readable sequential GET body + closer. ``False`` if missing, ``None`` if unknowable.
 
     Does not ``Body.read()`` / ``download_as_bytes()`` / ``readall()`` the
-    object.     Dest COUNT of CSV/JSON/JSONL/XML (including gzip) walks this
-    stream. Gate-8 cell checksum of those same kinds walks the same
-    handle. Excel/Avro/Parquet/ORC still materialize one object inside
-    COUNT / checksum — those parsers need a byte image. Spill downloaders stay the
-    ingest path (disk), not dest COUNT.
+    object. Dest COUNT of CSV/JSON/JSONL/XML/Avro (including gzip) walks
+    this stream. Gate-8 cell checksum of those same kinds walks the same
+    handle. Gzip Excel/Parquet/ORC still spool one decompressed image
+    (codec is not splittable). Uncompressed Parquet/ORC dest COUNT uses
+    ``open_object_store_seekable`` (footer Range GET) instead of this
+    path. Spill downloaders stay the ingest path (disk), not dest COUNT.
     """
     try:
         if kind == "s3":
