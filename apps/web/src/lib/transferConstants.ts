@@ -83,7 +83,7 @@ export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
   { id: "incremental_deduped", label: "Incremental deduped", detail: "Cursor + primary key upserts when the table already has keys you may update." },
   { id: "cdc", label: "CDC", detail: "Log-based changes with cursor + key; at-least-once upsert until proven otherwise." },
   { id: "scd2", label: "SCD Type 2", detail: "Versioned history with valid-from / valid-to; requires primary key." },
-  { id: "mirror", label: "Mirror", detail: "Keep destination in sync with soft-deletes for missing keys; requires primary key." },
+  { id: "mirror", label: "Mirror", detail: "Soft-delete dest keys missing from the source (_deleted). Physical COUNT(*) stays; active population is COUNT(*) WHERE NOT _deleted. Requires primary key." },
 ];
 
 export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: string }[] = [
@@ -178,6 +178,26 @@ export function availableSyncModes(opts: {
 export const SYNC_MODE_META: Record<string, { label: string; detail: string }> = Object.fromEntries(
   SYNC_MODES.map((m) => [m.id, { label: m.label, detail: m.detail }]),
 );
+SYNC_MODE_META.full_refresh_mirror = SYNC_MODE_META.mirror;
+
+/** Operator-facing sync mode — engine aliases like full_refresh_mirror stay Mirror. */
+export function formatSyncModeLabel(mode?: string | null): string {
+  const raw = String(mode || "").trim();
+  if (!raw) return "—";
+  return SYNC_MODE_META[raw]?.label ?? raw.replace(/_/g, " ");
+}
+
+export function formatSchemaPolicyLabel(policy?: string | null): string {
+  const raw = String(policy || "").trim();
+  if (!raw) return "—";
+  return SCHEMA_POLICIES.find((p) => p.id === raw)?.label ?? raw.replace(/_/g, " ");
+}
+
+export function formatValidationModeLabel(mode?: string | null): string {
+  const raw = String(mode || "").trim();
+  if (!raw) return "—";
+  return VALIDATION_MODES.find((v) => v.id === raw)?.label ?? raw.replace(/_/g, " ");
+}
 
 export const DATE_LOCALES: { id: DateLocaleId; label: string; detail: string }[] = [
   { id: "", label: "Auto", detail: "Infer day/month order from source sample; fail closed if ambiguous." },

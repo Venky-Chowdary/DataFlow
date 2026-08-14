@@ -8386,6 +8386,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: var(--df-surface-muted, #f8fafc);
 }
 
+.df2-conservation-ledger.is-mirror.is-ok {
+  border-color: color-mix(in srgb, var(--df-brand-strong, #115e59) 38%, transparent);
+  background: color-mix(in srgb, var(--df-brand-strong, #115e59) 5%, white);
+}
+
+.df2-conservation-ledger.is-mirror .df2-conservation-ledger-count {
+  min-width: 72px;
+}
+
 .df2-conservation-ledger-head {
   display: flex;
   gap: 0.85rem;

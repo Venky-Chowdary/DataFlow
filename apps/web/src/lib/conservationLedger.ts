@@ -28,6 +28,9 @@ export type ConservationLedger = {
   dest_delta: number | null;
   unique_batch_keys: number | null;
   dest_preexisting: number | null;
+  active_count: number | null;
+  inferred_deletes: number | null;
+  reactivated: number | null;
 };
 
 export type LedgerCarrier = {
@@ -84,14 +87,20 @@ export function readConservationLedger(
     dest_delta: num(raw.dest_delta),
     unique_batch_keys: num(raw.unique_batch_keys),
     dest_preexisting: num(raw.dest_preexisting),
+    active_count: num(raw.active_count),
+    inferred_deletes: num(raw.inferred_deletes),
+    reactivated: num(raw.reactivated),
   };
 }
 
 export function isDestMeasured(ledger: ConservationLedger | null | undefined): boolean {
   if (!ledger) return false;
-  if (ledger.dest_count == null) return false;
   if (UNMEASURED_KINDS.has(ledger.conservation_kind)) return false;
   if (UNMEASURED_SOURCES.has(ledger.rows_written_source)) return false;
+  if (ledger.conservation_kind === "mirror") {
+    return ledger.active_count != null;
+  }
+  if (ledger.dest_count == null) return false;
   return true;
 }
 
@@ -103,6 +112,8 @@ export function conservationKindLabel(kind: string | null | undefined): string {
       return "Append · dest delta";
     case "keyed":
       return "Keyed · inserts − deletes";
+    case "mirror":
+      return "Mirror · active population";
     case "empty_pass":
       return "Empty pass · measured zero";
     case "unmeasured":
@@ -122,6 +133,9 @@ export function ledgerEquation(ledger: ConservationLedger): string {
   const kind = ledger.conservation_kind;
   if (kind === "keyed") {
     return `dest Δ ${fmt(ledger.dest_delta)} = inserts ${fmt(ledger.inserts)} − deletes ${fmt(ledger.deletes)}`;
+  }
+  if (kind === "mirror") {
+    return `read ${fmt(ledger.rows_read)} = active ${fmt(ledger.active_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
   }
   if (kind === "append_delta") {
     return `dest Δ ${fmt(ledger.dest_delta)} = COUNT(*) after ${fmt(ledger.dest_count)} − before ${fmt(ledger.dest_count_before)}`;
@@ -174,6 +188,16 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
   const ledger = readConservationLedger(source);
   const running = isRunningStatus(source?.status);
   if (isDestMeasured(ledger) && ledger) {
+    if (ledger.conservation_kind === "mirror") {
+      const unbalanced = ledger.balanced === false;
+      return {
+        value: Number(ledger.active_count).toLocaleString(),
+        label: running ? "Active so far" : "Active at dest",
+        title: ledger.note || "Dest-engine COUNT(*) WHERE NOT _deleted. Physical COUNT(*) does not drop.",
+        measured: true,
+        tone: unbalanced ? "danger" : "ok",
+      };
+    }
     const unbalanced = ledger.balanced === false;
     return {
       value: Number(ledger.dest_count).toLocaleString(),
@@ -223,7 +247,13 @@ export function writerHeadline(source: LedgerCarrier | null | undefined): RowMet
   };
 }
 
-/** Compact Jobs list / Overview cell. Dest COUNT when measured; else honest writer label. */
+/** Compact Jobs list / Overview / search caption. Never falls dest back to writer ack. */
+export function destMetricCompact(metric: RowMetric): string {
+  if (!metric.measured) return `${metric.value} ${metric.label.toLowerCase()}`;
+  if (metric.label.toLowerCase().includes("active")) return `${metric.value} active`;
+  return `${metric.value} at dest`;
+}
+
 export function formatJobRowMetric(source: LedgerCarrier | null | undefined): RowMetric {
   const dest = destHeadline(source);
   if (dest.measured) return dest;
@@ -237,7 +267,11 @@ export function formatJobRowMetric(source: LedgerCarrier | null | undefined): Ro
 
 export function destProvenCount(source: LedgerCarrier | null | undefined): number | null {
   const ledger = readConservationLedger(source);
-  if (!isDestMeasured(ledger) || ledger?.dest_count == null) return null;
+  if (!isDestMeasured(ledger) || !ledger) return null;
+  if (ledger.conservation_kind === "mirror") {
+    return ledger.active_count;
+  }
+  if (ledger.dest_count == null) return null;
   return ledger.dest_count;
 }
 
@@ -248,14 +282,20 @@ export function conservationCompleteCopy(
 ): string {
   const dest = destHeadline(source);
   const writer = writerHeadline(source);
+  const ledger = readConservationLedger(source);
+  const mirror = ledger?.conservation_kind === "mirror";
   if (opts?.quarantine) {
-    return dest.measured
-      ? `${dest.value} at destination; some rows held out or coerced to NULL`
-      : `${writer.value} writer-acked (dest COUNT unmeasured); some rows held out or coerced to NULL`;
+    if (dest.measured) {
+      return mirror
+        ? `${dest.value} active at destination; some rows held out or coerced to NULL`
+        : `${dest.value} at destination; some rows held out or coerced to NULL`;
+    }
+    return `${writer.value} writer-acked (dest COUNT unmeasured); some rows held out or coerced to NULL`;
   }
-  return dest.measured
-    ? `${dest.value} at destination`
-    : `${writer.value} writer-acked — dest COUNT unmeasured`;
+  if (dest.measured) {
+    return mirror ? `${dest.value} active at destination` : `${dest.value} at destination`;
+  }
+  return `${writer.value} writer-acked — dest COUNT unmeasured`;
 }
 
 export type LedgerIdentityCell = { label: string; value: string };
@@ -268,6 +308,14 @@ export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityC
       { label: "Updates", value: fmt(ledger.updates) },
       { label: "Deletes", value: fmt(ledger.deletes) },
       { label: "Dest Δ", value: fmt(ledger.dest_delta) },
+    ];
+  }
+  if (ledger.conservation_kind === "mirror") {
+    return [
+      { label: "Active", value: fmt(ledger.active_count) },
+      { label: "Inferred deletes", value: fmt(ledger.inferred_deletes) },
+      { label: "Reactivated", value: fmt(ledger.reactivated) },
+      { label: "Physical COUNT(*)", value: fmt(ledger.dest_count) },
     ];
   }
   if (ledger.conservation_kind === "append_delta") {

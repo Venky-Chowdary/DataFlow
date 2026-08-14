@@ -340,7 +340,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                   {syncMode === "scd2"
                     ? "Required for SCD2 versioning — identifies which business key to expire and reopen."
                     : syncMode === "mirror"
-                      ? "Required for mirror sync — identifies rows to soft-delete when missing from source."
+                      ? "Required for mirror sync — dest keys missing from the source are flagged _deleted. Physical COUNT(*) stays; active population is COUNT(*) WHERE NOT _deleted."
                       : "Enables dedupe / upsert into the destination."}
                 </span>
               </div>

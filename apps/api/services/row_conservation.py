@@ -38,8 +38,18 @@ How dest_population is chosen:
   tombstone for a key dest does not hold is a no-op — COUNT does not
   move). Writer ``records_processed`` still counts updates; it never
   closes the identity. Without a dest-engine census the ledger stays
-  unproven. Soft-delete mirrors (``_deleted`` flag, COUNT stays) are a
-  different identity and are not this ledger.
+  unproven.
+* **mirror (inferred deletes)** — Fivetran-style ``_deleted`` flag:
+  physical ``COUNT(*)`` does **not** drop. The identity is the dest-engine
+  **active** population:
+
+      reader == COUNT(*) WHERE NOT _deleted + hold_outs + skipped
+
+  ``target_rows`` from Gate-8 on this path is that active count, not the
+  physical table size. Using it as dest COUNT(*) would hide leftover
+  dest keys (the Fivetran ``_fivetran_deleted`` hole). Physical COUNT
+  and this-run inferred deletes are diagnostic when the mirror census
+  measured them.
 
 Writer ack is a diagnostic third number. It never closes the identity.
 A mismatch against dest COUNT is the DMS hole, reported as a note, not as
@@ -68,6 +78,8 @@ KIND_APPEND_DELTA = "append_delta"
 KIND_KEYED = "keyed"
 KIND_EMPTY_PASS = "empty_pass"
 KIND_UNMEASURED = "unmeasured"
+KIND_MIRROR = "mirror"
+DEST_ACTIVE_READBACK = "gate8_dest_active_readback"
 
 
 @dataclass(frozen=True)
@@ -549,7 +561,13 @@ def conservation_kind(
     Upsert/CDC into an *empty* destination is insert-only, so overwrite
     cardinality applies. Into a non-empty destination, COUNT(*) cannot
     prove which keys were applied.
+
+    Mirror is not overwrite and not keyed hard-delete: physical COUNT(*)
+    stays while dest-engine ``COUNT(*) WHERE NOT _deleted`` is the
+    population identity.
     """
+    if _is_mirror_sync(sync_mode):
+        return KIND_MIRROR
     if is_overwrite_sync(sync_mode):
         return KIND_OVERWRITE
     if is_append_sync(sync_mode):
@@ -557,6 +575,34 @@ def conservation_kind(
     if dest_count_before == 0:
         return KIND_OVERWRITE
     return KIND_KEYED
+
+
+def _is_mirror_sync(mode: str | None) -> bool:
+    from services.sync_cursor import normalize_sync_mode
+
+    return normalize_sync_mode(mode or "", default="") == "mirror"
+
+
+def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Nested ``destination_summary.mirror`` or stream-path top-level active census."""
+    data = dict(dest or {})
+    nested = data.get("mirror")
+    if isinstance(nested, dict) and (
+        nested.get("mode") == "mirror"
+        or nested.get("active_rows") is not None
+        or nested.get("soft_deleted") is not None
+    ):
+        return dict(nested)
+    if data.get("active_rows") is not None and (
+        data.get("active_checksum") or data.get("soft_delete_column")
+    ):
+        return {
+            "active_rows": data.get("active_rows"),
+            "active_checksum": data.get("active_checksum"),
+            "soft_delete_column": data.get("soft_delete_column") or "_deleted",
+            "mode": "mirror",
+        }
+    return {}
 
 
 @dataclass(frozen=True)
@@ -584,6 +630,9 @@ class ConservationLedger:
     dest_delta: int | None = None
     unique_batch_keys: int | None = None
     dest_preexisting: int | None = None
+    active_count: int | None = None
+    inferred_deletes: int | None = None
+    reactivated: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -608,6 +657,9 @@ class ConservationLedger:
             "dest_delta": self.dest_delta,
             "unique_batch_keys": self.unique_batch_keys,
             "dest_preexisting": self.dest_preexisting,
+            "active_count": self.active_count,
+            "inferred_deletes": self.inferred_deletes,
+            "reactivated": self.reactivated,
         }
 
 
@@ -766,6 +818,111 @@ def _account_keyed(
     )
 
 
+def _account_mirror(
+    *,
+    read: int,
+    dest_count: int | None,
+    dest_count_source: str,
+    dest_count_before: int | None,
+    quarantined: int,
+    skipped: int,
+    coerced: int,
+    ack: int | None,
+    mirror: Mapping[str, Any] | None,
+) -> ConservationLedger:
+    """Close active dest population, not physical COUNT(*) (which does not drop)."""
+    payload = dict(mirror or {})
+    active = _as_optional_int(payload.get("active_rows"))
+    inferred = _as_optional_int(payload.get("soft_deleted"))
+    reactivated = _as_optional_int(payload.get("reactivated"))
+    scanned = _as_optional_int(payload.get("rows_scanned"))
+    stuffed_active = (
+        dest_count is not None
+        and active is not None
+        and dest_count == active
+        and dest_count_source == DEST_READBACK
+    )
+    physical = scanned
+    if physical is None and dest_count is not None and not stuffed_active:
+        physical = dest_count
+
+    base = dict(
+        rows_read=read,
+        rows_quarantined=quarantined,
+        rows_skipped=skipped,
+        rows_coerced_null=coerced,
+        writer_ack=ack,
+        dest_count=physical,
+        dest_count_before=dest_count_before,
+        rows_read_source="gate8_source_count",
+        conservation_kind=KIND_MIRROR,
+        active_count=active,
+        inferred_deletes=inferred,
+        reactivated=reactivated,
+        deletes=inferred,
+    )
+    if active is None:
+        return ConservationLedger(
+            **base,
+            rows_written=None,
+            unaccounted=None,
+            balanced=False,
+            rows_written_source=DEST_UNMEASURED,
+            note=(
+                "Mirror inferred-delete identity is unproven: dest-engine "
+                "COUNT(*) WHERE NOT _deleted was not captured. Physical "
+                "COUNT(*) does not drop on soft-delete (Fivetran "
+                "_fivetran_deleted). Writer ack is not active population."
+            ),
+            writer_ack_delta=None,
+        )
+
+    unaccounted = read - (int(active) + quarantined + skipped)
+    ack_delta = (int(active) - ack) if ack is not None else None
+    leftover = None
+    if physical is not None:
+        leftover = max(int(physical) - int(active), 0)
+    if unaccounted == 0:
+        note = (
+            f"Mirror active population closed: dest-engine COUNT(*) WHERE NOT "
+            f"_deleted = {active} equals rows read minus hold-outs and skips. "
+            "Physical COUNT(*) does not drop — leftover dest keys stay as "
+            f"soft-deletes"
+            + (f" ({leftover} leftover row(s))" if leftover else "")
+            + "."
+        )
+        if inferred:
+            note += f" This run inferred {inferred} delete(s)."
+        if reactivated:
+            note += f" Reactivated {reactivated} previously deleted key(s)."
+    elif unaccounted > 0:
+        note = (
+            f"{unaccounted} source row(s) are not in dest-engine active "
+            "population (COUNT(*) WHERE NOT _deleted), quarantined, or skipped."
+        )
+    else:
+        note = (
+            f"{abs(unaccounted)} more active dest row(s) than were read. "
+            "Reactivated keys or a dest-engine active census that includes "
+            "rows this snapshot did not send."
+        )
+    if ack_delta:
+        sign = "more" if ack_delta > 0 else "fewer"
+        note += (
+            f" Writer acknowledged {ack:,}; active dest population is "
+            f"{active:,} ({abs(ack_delta):,} {sign} than the writer claimed)."
+        )
+    return ConservationLedger(
+        **base,
+        rows_written=int(active),
+        unaccounted=unaccounted,
+        balanced=unaccounted == 0,
+        rows_written_source=DEST_ACTIVE_READBACK,
+        note=note,
+        writer_ack_delta=ack_delta,
+    )
+
+
 def account_population(
     *,
     rows_read: int | None,
@@ -778,6 +935,7 @@ def account_population(
     writer_ack: int | None,
     sync_mode: str | None,
     census: KeyCensus | None = None,
+    mirror: Mapping[str, Any] | None = None,
 ) -> ConservationLedger:
     """Close ``reader == dest_population + hold_outs + skipped`` or say why not."""
     quarantined = hold_outs(rejected_rows, coerced_null_rows)
@@ -810,6 +968,22 @@ def account_population(
         )
 
     read = int(rows_read)
+    if kind == KIND_MIRROR:
+        # Empty-pass must not fire: leftover dest keys stay as _deleted, so a
+        # zero-read snapshot is still a dest-engine active census, not a
+        # measured-zero overwrite.
+        return _account_mirror(
+            read=read,
+            dest_count=dest_count,
+            dest_count_source=dest_count_source,
+            dest_count_before=dest_count_before,
+            quarantined=quarantined,
+            skipped=skipped,
+            coerced=coerced,
+            ack=ack,
+            mirror=mirror,
+        )
+
     if (
         read == 0
         and quarantined == 0
@@ -956,6 +1130,9 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     if ack_raw is None:
         ack_raw = dest.get("rows")
     census = KeyCensus.from_mapping(dest.get(CENSUS_KEY) or recon.get(CENSUS_KEY))
+    mirror = extract_mirror_payload(dest)
+    if not mirror:
+        mirror = extract_mirror_payload(recon)
     return account_population(
         rows_read=_as_optional_int(recon.get("source_rows")),
         dest_count=dest_count,
@@ -977,6 +1154,7 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
         writer_ack=_as_optional_int(ack_raw),
         sync_mode=str(job.get("sync_mode") or dest.get("sync_mode") or ""),
         census=census,
+        mirror=mirror or None,
     )
 
 

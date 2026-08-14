@@ -14,7 +14,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py tests/test_unicode_form_carry.py tests/test_property8_unicode_form.py -q` (137 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16 + unicode-form 21; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal unscaled integer; unicode form: PG TEXT / MariaDB `general_ci`/`bin` UNIQUE BOTH_LAND for NFC vs NFD; MariaDB `unicode_ci` SECOND_REJECT; dest HEX `C3A9` vs `CC81`; bind does not NFC | UCA 0900 vs 1400 live MySQL 8; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
-| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py -q` (63 passed in 3.94s on this host: polarity 5 + identity 28 + live execute_tracked 6 + certificate 24; SQLite always + live PG 16 → MariaDB 10.11). Adjacent: `tests/test_silent_loss_wave98.py tests/test_cdc_transfer.py` → 98 passed, 1 skipped Mongo | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Keyed upsert: dest-engine census closes `dest_delta == inserts - deletes`. Conservative tombstone polarity (`is_active` / `deleted_by` are not deletes). Dest-held tombstones are hard-DELETEd so COUNT can drop; a tombstone of a missing key is a no-op, not an insert. MySQL DELETE commits (PyMySQL `autocommit` is a method). Writer ack cannot hide a dest shortfall. | Duplicate CDC events per key; inferred deletes (source row absent, dest leftover); soft-delete mirror `COUNT(*) WHERE NOT _deleted`; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
+| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py -q` | Overwrite: `reader == dest COUNT(*) + hold_outs + skipped`. Keyed upsert: dest-engine census closes `dest_delta == inserts - deletes`. Mirror: dest-engine `COUNT(*) WHERE NOT _deleted` (physical COUNT stays). Conservative tombstone polarity. Writer ack cannot hide a dest shortfall. | Duplicate CDC events per key; inferred deletes on upsert/CDC without tombstone or mirror mode; stream-path this-run `soft_deleted` census; Oracle/SQL Server live COUNT; dest-only / file-export sinks; multi-table job rollup |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
 | 12 | Adversarial and chaos testing | UNPROVEN | — | — | — |
@@ -580,7 +580,9 @@ Combined Property 8 collation + instant + JSON polarity:
 **Claim:** Every source row is on the destination, quarantined, or
 intentionally skipped. Overwrite uses dest `COUNT(*)`. Keyed upsert uses
 a dest-engine key census: `dest_delta == inserts - deletes`. Updates do
-not change cardinality. Writer `records_processed` is diagnostic only.
+not change cardinality. Mirror (Fivetran-style `_deleted`) uses dest-engine
+`COUNT(*) WHERE NOT _deleted` — physical `COUNT(*)` does not drop.
+Writer `records_processed` is diagnostic only.
 Hard-delete tombstones that dest actually holds drop `COUNT(*)`; a
 tombstone for a key dest does not hold is a no-op, never an insert.
 
@@ -647,12 +649,16 @@ The Jobs **list** whitelist keeps that ledger so Overview / Jobs rows /
 connection sync history never fall dest COUNT back to `records_processed`.
 Schedule run history copies the same dict. Writer ack is labeled
 diagnostic; dest unmeasured renders "—" not a forged destination total.
+Mirror jobs headline **Active at dest** (not physical COUNT, not writer
+ack). Gate-8 `target_rows` on this path is the active census; stuffing it
+as dest COUNT(*) would hide leftover dest keys (the Fivetran
+`_fivetran_deleted` hole).
 
 ### NOT claimed / remaining for PROVEN (conservation slice)
 
 * Duplicate CDC events per key (event conservation vs key conservation)
-* Inferred deletes: source row gone, dest leftover, no tombstone in the batch
-* Soft-delete mirror active-population (`COUNT(*) WHERE NOT _deleted`)
+* Inferred deletes on **upsert/CDC** without a tombstone and **not** mirror mode
+* Stream-path this-run `soft_deleted` / `reactivated` census (module-size freeze on `stream.py`)
 * Oracle / SQL Server live dest COUNT certify
 * dest-only sinks (pgvector, Milvus) and file/object exports — no SQL
   read-back by design

@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
   destHeadline,
   destProvenCount,
+  destMetricCompact,
   formatJobRowMetric,
   isDestMeasured,
   ledgerEquation,
@@ -38,6 +39,9 @@ const overwriteLedger = {
   dest_delta: null,
   unique_batch_keys: null,
   dest_preexisting: null,
+  active_count: null,
+  inferred_deletes: null,
+  reactivated: null,
 };
 
 describe("readConservationLedger", () => {
@@ -184,5 +188,64 @@ describe("ledgerIdentityCells", () => {
     const cells = ledgerIdentityCells(overwriteLedger);
     const dest = cells.find((c) => c.label.includes("Dest"));
     assert.equal(dest?.value, "4");
+  });
+});
+
+const mirrorLedger = {
+  ...overwriteLedger,
+  rows_read: 3,
+  rows_written: 3,
+  writer_ack: 10_000,
+  dest_count: 4,
+  dest_count_before: 3,
+  unaccounted: 0,
+  balanced: true,
+  rows_written_source: "gate8_dest_active_readback",
+  conservation_kind: "mirror",
+  note: "Mirror active population closed. Physical COUNT(*) does not drop.",
+  writer_ack_delta: -9997,
+  active_count: 3,
+  inferred_deletes: 1,
+  reactivated: 0,
+  deletes: 1,
+};
+
+describe("mirror active population is dest headline, not physical COUNT(*)", () => {
+  it("shows active 3 when physical is 4 and writer claimed 10,000", () => {
+    const job = {
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: mirrorLedger,
+    };
+    const h = destHeadline(job);
+    assert.equal(h.value, "3");
+    assert.equal(h.measured, true);
+    assert.equal(h.label, "Active at dest");
+    assert.equal(destProvenCount(job), 3);
+    assert.equal(formatJobRowMetric(job).value, "3");
+    assert.equal(destMetricCompact(destHeadline(job)), "3 active");
+    const copy = conservationCompleteCopy(job);
+    assert.match(copy, /3 active at destination/);
+    assert.doesNotMatch(copy, /10,000/);
+    const cells = ledgerIdentityCells(mirrorLedger);
+    assert.equal(cells.find((c) => c.label === "Active")?.value, "3");
+    assert.equal(cells.find((c) => c.label === "Physical COUNT(*)")?.value, "4");
+    assert.equal(cells.find((c) => c.label === "Inferred deletes")?.value, "1");
+    assert.match(ledgerEquation(mirrorLedger), /active 3/);
+  });
+
+  it("treats stream-path active census as measured even when physical COUNT is unknown", () => {
+    const h = destHeadline({
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: {
+        ...mirrorLedger,
+        dest_count: null,
+        inferred_deletes: null,
+        reactivated: null,
+      },
+    });
+    assert.equal(h.value, "3");
+    assert.equal(h.measured, true);
   });
 });

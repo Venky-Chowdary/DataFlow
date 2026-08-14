@@ -93,3 +93,12 @@ def test_file_to_sqlite_mirror_soft_deletes_and_reactivates(tmp_path: Path) -> N
     assert {r[1] for r in active} == {"Bob2", "Charlie2", "Dave"}
     assert len(deleted) == 1
     assert str(deleted[0][0]) == "1"
+
+    ledger = result2.row_accounting or {}
+    assert ledger.get("conservation_kind") == "mirror", ledger
+    assert ledger.get("balanced") is True, ledger
+    assert ledger.get("active_count") == 3, ledger
+    assert ledger.get("rows_written") == 3, ledger
+    assert ledger.get("dest_count") == 4, ledger
+    assert ledger.get("inferred_deletes") == 1, ledger
+    assert ledger.get("rows_written_source") == "gate8_dest_active_readback", ledger

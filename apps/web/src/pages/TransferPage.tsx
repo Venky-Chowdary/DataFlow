@@ -6110,7 +6110,7 @@ export function TransferPage({
                 const dest = destHeadline(result);
                 return (
                   <span title={dest.title}>
-                    <strong>{dest.measured ? "At dest" : dest.label}</strong> {dest.value}
+                    <strong>{dest.label}</strong> {dest.value}
                   </span>
                 );
               })()}

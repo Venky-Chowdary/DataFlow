@@ -326,7 +326,12 @@ export function DestinationAdvancedDrawer({
               <p>Change delivery is <strong>at-least-once upsert</strong>. Exactly-once and at-most-once are not claimed.</p>
             )}
             {syncMode === "mirror" && (
-              <p>Missing source keys are soft-deleted on the destination (not hard-deleted).</p>
+              <p>
+                Missing source keys are <strong>soft-deleted</strong> on the destination
+                (<code>_deleted</code>), not hard-deleted. Physical <code>COUNT(*)</code> stays;
+                the conservation identity is dest-engine <code>COUNT(*) WHERE NOT _deleted</code>.
+                Writer acknowledgement is not active population.
+              </p>
             )}
           </aside>
         )}
@@ -913,7 +918,7 @@ export function DestinationAdvancedDrawer({
           <p className="df2-label-hint" style={{ margin: "12px 0 0" }}>
             {syncMode === "scd2"
               ? "SCD Type 2 requires a primary key on each stream to version rows (valid-from / valid-to)."
-              : "Mirror sync requires a primary key on each stream to detect and soft-delete rows missing from the source."}
+              : "Mirror sync requires a primary key on each stream. Dest keys missing from the source are flagged _deleted; physical COUNT(*) does not drop."}
             {streamNeedsReview ? " Select a primary key above before running." : ""}
           </p>
         )}

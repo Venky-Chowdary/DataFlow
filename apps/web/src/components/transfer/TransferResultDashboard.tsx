@@ -14,7 +14,7 @@ import type { RepairMapping } from "../../lib/api";
 import { Gate8ProofCard, classifyGate8Status, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
-import { destHeadline, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
+import { conservationCompleteCopy, destHeadline, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
 import { MappingProofDrawer, type MappingProof } from "../MappingProofDrawer";
@@ -195,18 +195,16 @@ export function TransferResultDashboard({
     : hasIntegrityLoss
       ? "Data transferred — not full fidelity"
       : "Data transferred";
-  const destPhrase = destMetric.measured
-    ? `${destMetric.value} rows at destination`
-    : `${writerMetric.value} writer-acked (dest COUNT unmeasured)`;
+  const destPhrase = conservationCompleteCopy(result, { quarantine: hasIntegrityLoss });
   const subtitle = !result.success
     ? "Review failure details and bad-data findings below, then fix on Validate or Map."
     : hasIntegrityLoss
-      ? `${destPhrase}; some rows were held out in quarantine or values coerced to NULL`
+      ? destPhrase
       : destMetric.measured && gate8.fullPass
         ? `${destPhrase} and reconciled`
         : destMetric.measured
           ? `${destPhrase} — Gate-8 ${gate8.label.toLowerCase()}`
-          : `${writerMetric.value} records written — writer acknowledged; independent dest COUNT(*) still pending`;
+          : `${writerMetric.value} writer-acked — independent dest COUNT(*) still pending`;
 
   const metaChips: Array<{ label: string; value: string; tone?: "warn" | "ok"; title?: string }> = [];
   if (ds?.load_method) {

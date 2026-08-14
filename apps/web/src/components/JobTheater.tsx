@@ -21,7 +21,7 @@ import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
-import { destHeadline, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
+import { destHeadline, destMetricCompact, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
@@ -864,7 +864,7 @@ export function JobTheaterView({
         <div className="df2-theater-v3-bar-legend">
           <span title={isComplete || isQuarantine ? destMetric.title : writerMetric.title}>
             {isComplete || isQuarantine
-              ? `${destMetric.value} ${destMetric.measured ? "at dest" : destMetric.label.toLowerCase()}`
+              ? destMetricCompact(destMetric)
               : `${processed.toLocaleString()} written so far`}
           </span>
           {total > 0 && <span>{total.toLocaleString()} total</span>}

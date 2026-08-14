@@ -102,7 +102,7 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
           <span role="columnheader">Status</span>
           <span role="columnheader">Started</span>
           <span role="columnheader">Duration</span>
-              <span role="columnheader">At dest</span>
+              <span role="columnheader">Dest</span>
           <span role="columnheader">Rejected</span>
           <span role="columnheader">Coerced NULL</span>
           <span role="columnheader">Job</span>

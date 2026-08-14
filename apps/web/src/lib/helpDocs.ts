@@ -873,7 +873,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "**Incremental deduped** — cursor + primary-key upserts",
           "**CDC** — log-based changes (when the source supports it)",
           "**SCD Type 2** — versioned history (primary key required)",
-          "**Mirror** — soft-delete rows missing from source (primary key required)",
+          "**Mirror** — soft-delete dest keys missing from source (`_deleted`; physical COUNT(*) stays; primary key required)",
         ],
         tip: "Failed cells quarantine without silently dropping the rest of the batch — same engine as ad-hoc Transfer Studio runs.",
       },

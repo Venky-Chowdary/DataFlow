@@ -2,7 +2,7 @@ import { DtIcon } from "../DtIcon";
 import { detectTypeRisks, type TypeRisk } from "../../lib/schemaIntelligence";
 import type { EditableMapping } from "../../lib/mapping";
 import type { EnhancedAnalysis, PreflightResult, TransferResult } from "../../lib/types";
-import { destHeadline } from "../../lib/conservationLedger";
+import { conservationCompleteCopy } from "../../lib/conservationLedger";
 
 interface TransferStudioInspectorProps {
   step: number;
@@ -16,10 +16,7 @@ interface TransferStudioInspectorProps {
 }
 
 function resultDestLabel(result: TransferResult): string {
-  const dest = destHeadline(result);
-  return dest.measured
-    ? `${dest.value} at destination`
-    : `${dest.value} dest unmeasured`;
+  return conservationCompleteCopy(result);
 }
 
 const STEP_GUIDES: Record<number, { title: string; body: string }> = {

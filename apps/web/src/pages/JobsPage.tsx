@@ -26,7 +26,12 @@ import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
-import { destHeadline, formatJobRowMetric, writerAckDisagrees, writerHeadline } from "../lib/conservationLedger";
+import { destHeadline, formatJobRowMetric, writerAckDisagrees, writerHeadline, destMetricCompact } from "../lib/conservationLedger";
+import {
+  formatSchemaPolicyLabel,
+  formatSyncModeLabel,
+  formatValidationModeLabel,
+} from "../lib/transferConstants";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
@@ -122,11 +127,6 @@ function formatJobDuration(startedAt?: string, completedAt?: string): string | n
   if (m < 60) return `${m}m ${s % 60}s`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
-}
-
-function formatSyncModeLabel(mode?: string): string {
-  if (!mode) return "—";
-  return mode.replace(/_/g, " ");
 }
 
 interface JobsPageProps {
@@ -762,7 +762,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   className={`df2-job-row-rows ${rows.measured ? "is-dest" : "is-writer"}`}
                                   title={rows.title}
                                 >
-                                  {rows.value} {rows.measured ? "at dest" : rows.label.toLowerCase()}
+                                  {destMetricCompact(rows)}
                                 </span>
                               );
                             })()}
@@ -1815,13 +1815,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             {(liveJob.schema_policy || liveJob.transfer_request?.schema_policy) && (
               <div>
                 <dt>Schema policy</dt>
-                <dd>{formatSyncModeLabel(liveJob.schema_policy || liveJob.transfer_request?.schema_policy)}</dd>
+                <dd>{formatSchemaPolicyLabel(liveJob.schema_policy || liveJob.transfer_request?.schema_policy)}</dd>
               </div>
             )}
             {(liveJob.validation_mode || liveJob.transfer_request?.validation_mode) && (
               <div>
                 <dt>Validation</dt>
-                <dd>{formatSyncModeLabel(liveJob.validation_mode || liveJob.transfer_request?.validation_mode)}</dd>
+                <dd>{formatValidationModeLabel(liveJob.validation_mode || liveJob.transfer_request?.validation_mode)}</dd>
               </div>
             )}
             {liveJob.watermark && (

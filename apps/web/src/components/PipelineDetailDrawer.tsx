@@ -13,6 +13,7 @@ import {
 } from "../lib/contractBreakerUi";
 import { computeJobTrustScore } from "../lib/jobTrustScore";
 import { destHeadline } from "../lib/conservationLedger";
+import { formatSyncModeLabel } from "../lib/transferConstants";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 
@@ -43,17 +44,6 @@ const INTERVAL_LABEL: Record<string, string> = {
   hourly: "Every hour",
   daily: "Daily",
   weekly: "Weekly",
-};
-
-const SYNC_MODE_LABEL: Record<string, string> = {
-  full_refresh_overwrite: "Full overwrite",
-  full_refresh_append: "Full append",
-  incremental: "Incremental",
-  incremental_append: "Incremental append",
-  incremental_deduped: "Incremental deduped",
-  cdc: "CDC",
-  scd2: "SCD Type 2",
-  mirror: "Mirror",
 };
 
 function formatWhen(iso: string | null | undefined): string {
@@ -161,7 +151,7 @@ export function PipelineDetailDrawer({
   const cadenceDetail = sched.cron
     ? `Wall clock in ${sched.timezone || "UTC"}`
     : "Rolling interval from last run — use Cron for a fixed daily time";
-  const syncLabel = SYNC_MODE_LABEL[sched.sync_mode] ?? sched.sync_mode;
+  const syncLabel = formatSyncModeLabel(sched.sync_mode);
   const rejected = Number(lastJob?.rejected_rows ?? 0);
   const coerced = Number(lastJob?.coerced_null_rows ?? 0);
   const lastTrust = lastJob ? computeJobTrustScore(lastJob) : null;

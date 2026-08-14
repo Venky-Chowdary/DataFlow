@@ -11,14 +11,17 @@ from __future__ import annotations
 from pathlib import Path
 
 from services.row_conservation import (
+    DEST_ACTIVE_READBACK,
     DEST_READBACK,
     DEST_UNMEASURED,
     KIND_APPEND_DELTA,
     KIND_EMPTY_PASS,
     KIND_KEYED,
+    KIND_MIRROR,
     KIND_OVERWRITE,
     account_job,
     account_population,
+    conservation_kind,
     dest_count_from_recon,
     hold_outs,
 )
@@ -673,3 +676,99 @@ def test_ledger_from_transfer_result_does_not_close_on_writer_ack():
     assert ledger["writer_ack"] == 10_000
     assert ledger["rows_written"] != ledger["writer_ack"]
     assert ledger["balanced"] is True
+
+
+def test_mirror_kind_is_not_overwrite_even_on_empty_dest():
+    assert conservation_kind("full_refresh_mirror", dest_count_before=0) == KIND_MIRROR
+    assert conservation_kind("mirror", dest_count_before=3) == KIND_MIRROR
+
+
+def test_mirror_closes_on_active_population_not_physical_or_writer_ack():
+    """Gate-8 stuffs target_rows with COUNT(*) WHERE NOT _deleted.
+
+    Physical COUNT(*) stays (Fivetran _fivetran_deleted hole). Writer ack
+    of 10,000 must not close the identity or hide leftover dest keys.
+    """
+    ledger = account_job(
+        {
+            "sync_mode": "full_refresh_mirror",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 3,
+                "target_rows": 3,
+                "target_checksum": "active-digest",
+                "source_checksum": "source-digest",
+                "phase": "post_write_verified",
+                "coverage": "full",
+            },
+            "destination_summary": {
+                "mirror": {
+                    "mode": "mirror",
+                    "active_rows": 3,
+                    "soft_deleted": 1,
+                    "reactivated": 0,
+                    "rows_scanned": 4,
+                    "soft_delete_column": "_deleted",
+                }
+            },
+        }
+    ).to_dict()
+    assert ledger["conservation_kind"] == KIND_MIRROR
+    assert ledger["balanced"] is True
+    assert ledger["active_count"] == 3
+    assert ledger["rows_written"] == 3
+    assert ledger["dest_count"] == 4
+    assert ledger["inferred_deletes"] == 1
+    assert ledger["reactivated"] == 0
+    assert ledger["writer_ack"] == 10_000
+    assert ledger["writer_ack_delta"] != 0
+    assert ledger["rows_written_source"] == DEST_ACTIVE_READBACK
+    assert ledger["unaccounted"] == 0
+
+
+def test_mirror_stream_path_closes_on_top_level_active_rows():
+    """Stream path stamps active_rows at dest_summary top-level; no rows_scanned."""
+    ledger = account_job(
+        {
+            "sync_mode": "mirror",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 3,
+                "target_rows": 3,
+                "target_checksum": "active-digest",
+            },
+            "destination_summary": {
+                "active_rows": 3,
+                "active_checksum": "active-digest",
+                "soft_delete_column": "_deleted",
+            },
+        }
+    ).to_dict()
+    assert ledger["conservation_kind"] == KIND_MIRROR
+    assert ledger["balanced"] is True
+    assert ledger["active_count"] == 3
+    assert ledger["rows_written"] == 3
+    assert ledger["dest_count"] is None
+    assert ledger["inferred_deletes"] is None
+    assert ledger["writer_ack"] == 10_000
+    assert ledger["rows_written_source"] == DEST_ACTIVE_READBACK
+
+
+def test_mirror_without_active_census_is_unmeasured():
+    ledger = account_job(
+        {
+            "sync_mode": "mirror",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 3,
+                "target_rows": 3,
+                "target_checksum": "stuffed",
+            },
+            "destination_summary": {},
+        }
+    ).to_dict()
+    assert ledger["conservation_kind"] == KIND_MIRROR
+    assert ledger["balanced"] is False
+    assert ledger["rows_written"] is None
+    assert ledger["rows_written_source"] == DEST_UNMEASURED
+    assert ledger["active_count"] is None

@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "../../lib/types";
-import { formatJobRowMetric } from "../../lib/conservationLedger";
+import { formatJobRowMetric, destMetricCompact } from "../../lib/conservationLedger";
 
 export interface SearchNavigateTarget {
   screen: Screen;
@@ -180,7 +180,7 @@ export function WorkspaceSearch({
           id: `job-${j._id}`,
           kind: "job",
           label: `${srcName || j.source_type || "Source"} → ${j.destination_collection || j.destination_database || "dest"}`,
-          meta: `${j.status} · ${rows.value} ${rows.measured ? "at dest" : rows.label.toLowerCase()}`,
+          meta: `${j.status} · ${destMetricCompact(rows)}`,
           screen: "jobs",
           jobId: j._id,
         });
