@@ -1509,6 +1509,17 @@ def write_mapped_rows(
                     fetchall=psycopg2_fetchall(cursor),
                 )
                 from services.schema_fidelity import (
+                    certify_collation_on_destination,
+                )
+
+                certify_collation_on_destination(
+                    fidelity_plan,
+                    dialect="postgresql",
+                    schema=schema,
+                    table=table_name,
+                    fetchall=psycopg2_fetchall(cursor),
+                )
+                from services.schema_fidelity import (
                     certify_structure_on_destination,
                 )
 

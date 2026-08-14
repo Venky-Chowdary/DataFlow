@@ -728,6 +728,7 @@ def _introspect_table_schema_rich(
         "identity_columns": [],
         "generated_columns": [],
         "collations": {},
+        "charsets": {},
         "physical_storage": None,
         "check_constraints_meta": None,
         "indexes_meta": None,
@@ -752,6 +753,14 @@ def _introspect_table_schema_rich(
         ):
             if msg not in warnings:
                 warnings.append(msg)
+        charsets: dict[str, str] = {}
+        for col in payload.get("columns") or []:
+            if not isinstance(col, dict):
+                continue
+            name = str(col.get("name") or "").strip()
+            cs = str(col.get("charset") or "").strip()
+            if name and cs:
+                charsets[name] = cs
         return {
             "primary_key_columns": list(payload.get("primary_key_columns") or []),
             "unique_keys": list(payload.get("unique_keys") or []),
@@ -759,6 +768,7 @@ def _introspect_table_schema_rich(
             "identity_columns": list(identity_columns or []),
             "generated_columns": list(generated_columns or []),
             "collations": dict(collations or {}),
+            "charsets": charsets,
             "foreign_keys": list(payload.get("foreign_keys") or []),
             "check_constraints": list(payload.get("check_constraints") or []),
             # None when the dialect/probe never measured placement — the
