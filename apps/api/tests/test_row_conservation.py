@@ -5549,6 +5549,187 @@ def _fake_iceberg_inspect_catalog(file_paths: list[str], *, delete_rows: int = 0
     return _Catalog()
 
 
+def _fake_iceberg_inspect_mor(
+    data_paths: list[str],
+    delete_rows: list[dict],
+    *,
+    sequences: dict[str, int] | None = None,
+    schema_fields: list[dict] | None = None,
+):
+    """Inspect fake with delete file_path/content so catalog MoR can apply."""
+
+    class _Col:
+        def __init__(self, values: list) -> None:
+            self._values = values
+
+        def to_pylist(self) -> list:
+            return list(self._values)
+
+    class _Deletes:
+        num_rows = len(delete_rows)
+
+        def column(self, name: str) -> _Col:
+            if name == "file_path":
+                return _Col([r["file_path"] for r in delete_rows])
+            if name == "content":
+                return _Col([r.get("content") for r in delete_rows])
+            if name == "file_format":
+                return _Col([r.get("file_format", "PARQUET") for r in delete_rows])
+            if name == "equality_ids":
+                return _Col([r.get("equality_ids") for r in delete_rows])
+            raise KeyError(name)
+
+    class _DataFiles:
+        num_rows = len(data_paths)
+
+        def column(self, name: str) -> _Col:
+            assert name == "file_path"
+            return _Col(data_paths)
+
+    class _Entries:
+        num_rows = len(sequences or {})
+
+        def column(self, name: str) -> _Col:
+            paths = list((sequences or {}).keys())
+            if name == "sequence_number":
+                return _Col([(sequences or {}).get(p) for p in paths])
+            if name == "data_file":
+                return _Col([{"file_path": p} for p in paths])
+            raise KeyError(name)
+
+    class _Field:
+        def __init__(self, fid: int, name: str) -> None:
+            self.field_id = fid
+            self.name = name
+
+    class _Schema:
+        fields = [
+            _Field(int(f["id"]), str(f["name"]))
+            for f in (schema_fields or [{"id": 1, "name": "id"}])
+        ]
+
+    class _Inspect:
+        def delete_files(self) -> _Deletes:
+            return _Deletes()
+
+        def data_files(self) -> _DataFiles:
+            return _DataFiles()
+
+        def entries(self) -> _Entries:
+            if sequences is None:
+                raise AttributeError("entries")
+            return _Entries()
+
+    class _Table:
+        inspect = _Inspect()
+
+        def schema(self) -> _Schema:
+            return _Schema()
+
+    class _Catalog:
+        def load_table(self, _ident: object) -> _Table:
+            return _Table()
+
+    return _Catalog()
+
+
+def test_iceberg_catalog_mor_position_delete_when_inspect_has_file_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Catalog inspect with readable position-delete parquet is dest − unique pos."""
+    from services.dest_precount import destination_key_list, destination_row_count
+
+    data_path = tmp_path / "part-0.parquet"
+    del_path = tmp_path / "pos-deletes.parquet"
+    _write_iceberg_delete_parquet(
+        data_path, {"id": ["1", "2", "3"], "v": ["a", "b", "c"]}
+    )
+    _write_iceberg_delete_parquet(
+        del_path,
+        {"file_path": [str(data_path), str(data_path)], "pos": [1, 1]},
+    )
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_mor(
+            [str(data_path)],
+            [{"file_path": str(del_path), "content": 1, "file_format": "PARQUET"}],
+        ),
+    )
+    cfg = _iceberg_sql_cfg(str(tmp_path), f"sqlite:///{tmp_path / 'catalog.db'}")
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="orders"
+    ) == 2
+    listed = destination_key_list(
+        "iceberg", cfg, schema="default", table_name="orders", key_columns=["id"]
+    )
+    assert listed is not None
+    assert {str(t[0]) for t in listed} == {"1", "3"}
+
+
+def test_iceberg_catalog_mor_equality_without_sequence_is_unmeasured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from services.dest_precount import destination_row_count
+
+    data_path = tmp_path / "part-0.parquet"
+    del_path = tmp_path / "eq-deletes.parquet"
+    _write_iceberg_delete_parquet(
+        data_path, {"id": ["1", "99"], "v": ["a", "ghost"]}
+    )
+    _write_iceberg_delete_parquet(del_path, {"id": ["99"]})
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_mor(
+            [str(data_path)],
+            [
+                {
+                    "file_path": str(del_path),
+                    "content": 2,
+                    "equality_ids": [1],
+                    "file_format": "PARQUET",
+                }
+            ],
+        ),
+    )
+    cfg = _iceberg_sql_cfg(str(tmp_path), f"sqlite:///{tmp_path / 'catalog.db'}")
+    assert (
+        destination_row_count("iceberg", cfg, schema="default", table_name="orders")
+        is None
+    )
+
+
+def test_iceberg_catalog_mor_equality_with_entries_sequence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from services.dest_precount import destination_row_count
+
+    data_path = tmp_path / "part-0.parquet"
+    del_path = tmp_path / "eq-deletes.parquet"
+    _write_iceberg_delete_parquet(
+        data_path, {"id": ["1", "2", "3", "99"], "v": ["a", "b", "c", "ghost"]}
+    )
+    _write_iceberg_delete_parquet(del_path, {"id": ["99"]})
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_mor(
+            [str(data_path)],
+            [
+                {
+                    "file_path": str(del_path),
+                    "content": 2,
+                    "equality_ids": [1],
+                    "file_format": "PARQUET",
+                }
+            ],
+            sequences={str(data_path): 1, str(del_path): 2},
+        ),
+    )
+    cfg = _iceberg_sql_cfg(str(tmp_path), f"sqlite:///{tmp_path / 'catalog.db'}")
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="orders"
+    ) == 3
+
+
 def test_iceberg_catalog_object_store_count_is_range_footer_not_scan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

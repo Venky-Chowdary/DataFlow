@@ -582,3 +582,70 @@ def _read_equality_rows(
             raise IcebergMorUnmeasured("equality delete row is not a struct")
         out.append(tuple(rec.get(col) for col in columns))
     return tuple(out)
+
+
+def inspect_delete_refs(delete_table: Any) -> list[dict[str, Any]] | None:
+    """Parse pyiceberg ``inspect.delete_files()`` into filesystem MoR refs.
+
+    ``None`` means the inspect table cannot be applied honestly (no
+    ``file_path`` column — the catalog fake that only stamps
+    ``num_rows``). Empty list means no delete files.
+    """
+    n = int(getattr(delete_table, "num_rows", 0) or 0)
+    if n == 0:
+        return []
+    paths = _inspect_pylist(delete_table, "file_path")
+    if paths is None:
+        return None
+    contents = _inspect_pylist(delete_table, "content")
+    formats = _inspect_pylist(delete_table, "file_format")
+    eq_ids = _inspect_pylist(delete_table, "equality_ids")
+    refs: list[dict[str, Any]] = []
+    for i, path in enumerate(paths):
+        raw = str(path or "").strip()
+        if not raw:
+            return None
+        ref: dict[str, Any] = {"path": raw, "file_path": raw}
+        if contents is not None and i < len(contents) and contents[i] is not None:
+            ref["content"] = contents[i]
+        if formats is not None and i < len(formats) and formats[i] is not None:
+            ref["file-format"] = formats[i]
+        if eq_ids is not None and i < len(eq_ids) and eq_ids[i] is not None:
+            ref["equality-ids"] = list(eq_ids[i])
+        refs.append(ref)
+    return refs
+
+
+def inspect_sequence_by_path(entries_table: Any) -> dict[str, int]:
+    """``inspect.entries()`` sequence_number keyed by data_file.file_path."""
+    out: dict[str, int] = {}
+    if entries_table is None:
+        return out
+    seqs = _inspect_pylist(entries_table, "sequence_number")
+    files = _inspect_pylist(entries_table, "data_file")
+    if seqs is None or files is None:
+        return out
+    for seq, data_file in zip(seqs, files):
+        path = ""
+        if isinstance(data_file, dict):
+            path = str(data_file.get("file_path") or "").strip()
+        elif data_file is not None:
+            path = str(getattr(data_file, "file_path", "") or "").strip()
+        if not path or seq is None:
+            continue
+        try:
+            out[path] = int(seq)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _inspect_pylist(table: Any, column: str) -> list[Any] | None:
+    getter = getattr(table, "column", None)
+    if not callable(getter):
+        return None
+    try:
+        col = getter(column)
+        return list(col.to_pylist())
+    except Exception:
+        return None
