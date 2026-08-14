@@ -63,8 +63,8 @@
    No square card shadows. One equal white surface. No inner frame.
    ═══════════════════════════════════════════════════════════ */
 
-/* Document / theater pages sit on the slate canvas so white cards read as
-   one enterprise system. Immersive Studio + Pilot stay a locked white viewport. */
+/* One continuous canvas — never a white inner sheet that reads as a cut.
+   Immersive Studio + Pilot stay a locked white viewport. */
 .df2-app .df2-content,
 .df2-app .df2-content-inner,
 .df2-app .df2-content-inner > .df2-screen-panel {
@@ -79,7 +79,8 @@
 }
 
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
-  padding: 0 !important;
+  padding: 16px 20px 24px !important;
+  background: var(--df-bg-canvas, #f3f5f7) !important;
 }
 
 .df2-app .df2-content-inner > .df2-screen-panel {
@@ -322,9 +323,9 @@
   display: none !important;
 }
 
-/* Reclaim the vertical space the header used to occupy — content sits up top. */
+/* Content starts at the toolbar — no title and no KPI strip. */
 .df2-app .df2-page-untitled.df2-page-fluid:not(.df2-page-fit) {
-  padding-top: 14px;
+  padding: 0 0 8px;
 }
 
 /* Slim action bar (only when a page supplies actions — no title beside them) */
@@ -631,9 +632,13 @@
   }
 
   .df2-app .df2-page-untitled.df2-page-fluid:not(.df2-page-fit) {
-    padding-left: 12px;
-    padding-right: 12px;
-    padding-top: 12px;
+    padding-left: 0;
+    padding-right: 0;
+    padding-top: 0;
+  }
+
+  .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
+    padding: 12px 14px 18px !important;
   }
 
   .df2-app .df2-context-bar {
@@ -857,7 +862,15 @@
 .df2-app .df2-page-workspace {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
+  background: transparent;
+}
+
+/* Top status/KPI strips are gone — reclaim laptop height */
+.df2-app .df2-context-bar,
+.df2-app .df2-page-metrics-row,
+.df2-app .df2-overview-v3-kpis {
+  display: none !important;
 }
 
 .df2-app .df2-toolbar {

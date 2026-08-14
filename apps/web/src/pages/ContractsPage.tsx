@@ -3,7 +3,6 @@ import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { PageToolbar } from "../components/ui/PageToolbar";
@@ -212,15 +211,6 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
       description="Signed schema agreements that gate transfers and detect drift. Sign / deprecate are workspace lifecycle status flips — not cryptographic signatures or an MDM catalog."
     >
       <PageFrame className="df2-contracts-workspace">
-        <PageContextBar
-          ariaLabel="Contract summary"
-          stats={[
-            { label: "Contracts", value: contracts.length, icon: "shield" },
-            { label: "Signed", value: signed, icon: "check", tone: "ok" },
-            { label: "Draft", value: drafts, icon: "layers", tone: drafts ? "warn" : "muted" },
-            { label: "Broken", value: broken, icon: "alert", tone: broken ? "danger" : "muted" },
-          ]}
-        />
         <div className="df2-alert df2-alert-info" role="note">
           <DtIcon name="info" size={18} />
           <div>

@@ -9460,18 +9460,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 /* ═══════════════════════════════════════════════════════════
-   FLUSH PAGE SURFACE — one equal white page, no inner frame/gap
-   No wrapper shadow. No per-card square shadows.
+   FLUSH PAGE SURFACE — one canvas, no white inner frame/cut
+   Cards sit on the canvas. Studio + Pilot stay locked white.
    ═══════════════════════════════════════════════════════════ */
 
 .df2-app .df2-content {
-  background: #fff;
+  background: var(--df-bg-canvas, #f3f5f7);
 }
 
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
-  /* Keep a paint gutter so card borders are not clipped under laptop zoom */
-  padding: 4px 12px 12px !important;
-  background: #fff;
+  padding: 16px 20px 24px !important;
+  background: var(--df-bg-canvas, #f3f5f7);
   box-sizing: border-box;
 }
 

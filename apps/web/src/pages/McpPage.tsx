@@ -5,7 +5,6 @@ import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { FilterBar } from "../components/ui/FilterBar";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
@@ -131,24 +130,6 @@ export function McpPage() {
         </PageFrame>
       ) : (
         <PageFrame className="df2-mcp-workspace df2-stack">
-          <PageContextBar
-            ariaLabel="MCP summary"
-            stats={[
-              {
-                label: "Endpoint",
-                value: online ? "Online" : "Offline",
-                icon: "zap",
-                tone: online ? "ok" : "danger",
-              },
-              { label: "Calls ok", value: okCount, icon: "check", tone: "ok" },
-              {
-                label: "Errors",
-                value: errCount,
-                icon: "alert",
-                tone: errCount ? "danger" : "muted",
-              },
-            ]}
-          />
           <section className="df2-mcp-endpoint-card" aria-label="MCP endpoint">
             <div className="df2-mcp-endpoint-copy">
               <div className="df2-mcp-endpoint-head">

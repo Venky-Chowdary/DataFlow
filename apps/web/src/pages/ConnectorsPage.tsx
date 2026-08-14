@@ -8,7 +8,6 @@ import { Button } from "../components/ui/Button";
 import { ConnectorCard } from "../components/ui/ConnectorCard";
 import { FilterBar } from "../components/ui/FilterBar";
 import { FilterTabs } from "../components/ui/FilterTabs";
-import { PageContextBar } from "../components/ui/PageContextBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { PageToolbar } from "../components/ui/PageToolbar";
@@ -249,20 +248,6 @@ export function ConnectorsPage({
       description="Saved connections and the transfer-ready catalog."
     >
       <PageFrame className="df2-connectors-page">
-        <PageContextBar
-          ariaLabel="Connector summary"
-          stats={[
-            { label: "Connections", value: connectors.length, icon: "connectors" },
-            { label: "Healthy", value: healthyCount, icon: "check", tone: "ok" },
-            {
-              label: "Need attention",
-              value: errorCount,
-              icon: "alert",
-              tone: errorCount ? "warn" : "muted",
-            },
-            { label: "Pipelines", value: schedules.length, icon: "activity" },
-          ]}
-        />
         <PageToolbar
           searchValue={tab === "connections" && connectors.length > 0 ? query : undefined}
           onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
