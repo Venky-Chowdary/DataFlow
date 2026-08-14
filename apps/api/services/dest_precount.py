@@ -54,7 +54,10 @@ close conservation. Missing table is 0. Catalog aliases quote as
 BigQuery / DuckDB / Databricks / Redshift use dest-engine ``COUNT(*)`` —
 never ``INFORMATION_SCHEMA`` / ``__TABLES__`` / ``SVV_TABLE_INFO.tbl_rows``
 (unvacuumed ghosts; Spectrum has no tbl_rows). Redshift is PG-wire, not
-PG-catalog (no ``to_regclass``). Composite
+PG-catalog (no ``to_regclass``). ClickHouse dest COUNT is
+``COUNT(*) FROM table FINAL`` (same helper the writer uses for
+ReplacingMergeTree) — never ``system.tables.total_rows``. ClickHouse
+leftover MERGE stays unapplied (mutations are async). Composite
 key hits use portable AND/OR equality, not row-value ``IN`` (Oracle 19c
 has no tuple IN). Incremental leftover MERGE stays a hard no-op.
 
@@ -472,6 +475,9 @@ def destination_row_count(
         if _object_store_kind(db_type) in {"s3", "gcs", "adls"}:
             return _object_store_row_count(db_type, cfg, table_name=table)
 
+        if db_type == "clickhouse":
+            return _clickhouse_row_count(cfg, schema=schema, table_name=table)
+
         from services.dialect_profiles import warehouse_sql_quote_dialect
 
         dialect = warehouse_sql_quote_dialect(db_type)
@@ -829,6 +835,14 @@ def _is_missing_warehouse_relation(exc: BaseException, dialect: str) -> bool:
         if "column" in combined and "does not exist" in combined:
             return False
         return ("relation" in combined or "schema" in combined) and "does not exist" in combined
+    if dialect == "clickhouse":
+        if "unknown_database" in combined or "code: 81" in combined:
+            return False
+        return (
+            "unknown_table" in combined
+            or "code: 60" in combined
+            or ("table" in combined and ("doesn't exist" in combined or "does not exist" in combined))
+        )
     args = getattr(orig, "args", ()) if orig is not None else ()
     if args and str(args[0]) in {"208", "42S02"}:
         return True
@@ -907,6 +921,38 @@ def _warehouse_sql_row_count(
         if _is_missing_warehouse_relation(exc, dialect):
             return 0
         logger.warning("Warehouse dest COUNT(*) failed: %s", exc)
+        return None
+
+
+def _clickhouse_row_count(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> int | None:
+    """Visible MergeTree population: ``COUNT(*) FROM table FINAL``.
+
+    ``system.tables.total_rows`` is parts metadata. ReplacingMergeTree
+    without FINAL overcounts at-least-once INSERT versions. This is dest
+    COUNT only — leftover MERGE stays unapplied (mutations are async).
+    """
+    import sqlalchemy as sa
+    from connectors.generic_sql import clickhouse_final_table_sql
+    from connectors.sql_identifiers import quote_table_ref
+
+    sch = str(schema or cfg.get("schema") or "").strip() or None
+    table_ref = clickhouse_final_table_sql(
+        quote_table_ref(table_name, sch, dialect="clickhouse")
+    )
+    try:
+        with _warehouse_sql_engine("clickhouse", cfg) as engine:
+            with engine.connect() as conn:
+                n = conn.execute(sa.text(f"SELECT COUNT(*) FROM {table_ref}")).scalar()  # nosec B608
+        return int(n or 0)
+    except Exception as exc:
+        if _is_missing_warehouse_relation(exc, "clickhouse"):
+            return 0
+        logger.warning("ClickHouse dest COUNT(*) FINAL failed: %s", exc)
         return None
 
 

@@ -3321,6 +3321,7 @@ class _ScriptedWarehouseEngine:
             or "TABLE_STORAGE" in upper
             or "SVV_TABLE_INFO" in upper
             or "STV_TBL_PERM" in upper
+            or "SYSTEM.TABLES" in upper
         ):
             raise AssertionError(f"warehouse COUNT must not use stats views: {sql}")
         if self._mentions_is_current(sql):
@@ -3562,6 +3563,63 @@ def test_redshift_permission_denied_is_unmeasured_not_empty(monkeypatch: pytest.
 def test_redshift_connect_failure_without_engine_is_unmeasured():
     """No reachable cluster: connect failure is unmeasured, not dest=0."""
     assert destination_row_count("redshift", {"host": "h"}, schema="public", table_name="T") is None
+
+
+def test_clickhouse_dest_count_uses_final_not_system_tables(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """ClickHouse dest COUNT is COUNT(*) FROM table FINAL, never total_rows.
+
+    ReplacingMergeTree without FINAL overcounts at-least-once INSERT versions.
+    Leftover MERGE stays unapplied — mutations are async and must not stamp
+    leftover_deleted before COUNT(*) FINAL can see the delete.
+    """
+    from sqlalchemy.exc import ProgrammingError
+
+    missing = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            error=ProgrammingError(
+                "SELECT",
+                {},
+                Exception("Code: 60. DB::Exception: Table default.gone doesn't exist. (UNKNOWN_TABLE)"),
+            ),
+        ),
+    )
+    assert destination_row_count("clickhouse", {"host": "h"}, schema="default", table_name="gone") == 0
+    assert any(" FINAL" in sql for sql in missing.sql)
+    assert any("COUNT(*)" in sql.upper() for sql in missing.sql)
+    assert all("system.tables" not in sql.lower() for sql in missing.sql)
+    assert all("total_rows" not in sql.lower() for sql in missing.sql)
+
+    engine = _patch_warehouse(monkeypatch, _ScriptedWarehouseEngine(count=3, rows=[(1,), (2,), (99,)]))
+    cfg = {"host": "h", "schema": "default"}
+    assert destination_row_count("clickhouse", cfg, schema="default", table_name="events") == 3
+    assert any("`default`.`events` FINAL" in sql for sql in engine.sql)
+    leftover = apply_inferred_leftover_deletes(
+        db_type="clickhouse",
+        cfg=cfg,
+        schema="default",
+        table_name="events",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=True,
+    )
+    assert leftover is None
+
+
+def test_clickhouse_unknown_database_is_unmeasured_not_empty(monkeypatch: pytest.MonkeyPatch):
+    _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            error=RuntimeError("Code: 81. DB::Exception: Database analytics doesn't exist. (UNKNOWN_DATABASE)"),
+        ),
+    )
+    assert destination_row_count("clickhouse", {"host": "h"}, schema="analytics", table_name="events") is None
+
+
+def test_clickhouse_connect_failure_without_engine_is_unmeasured():
+    assert destination_row_count("clickhouse", {"host": "h"}, schema="default", table_name="T") is None
 
 
 def test_snowflake_connect_failure_without_engine_is_unmeasured():

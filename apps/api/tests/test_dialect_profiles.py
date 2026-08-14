@@ -106,6 +106,7 @@ def test_warehouse_sql_quote_dialect_aliases_onto_exact_engines():
     assert warehouse_sql_quote_dialect("redshift") == "redshift"
     assert warehouse_sql_quote_dialect("amazon_redshift") == "redshift"
     assert warehouse_sql_quote_dialect("redshift_serverless") == "redshift"
+    assert warehouse_sql_quote_dialect("clickhouse") is None
     assert normalize_schema("azure_sql_database", "public") == "dbo"
     assert normalize_schema("amazon_rds_oracle", None, username="app") == "APP"
 
