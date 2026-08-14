@@ -167,6 +167,30 @@ def test_staging_inferred_deletes_count_transitions_not_already_active(tmp_path:
     assert rows == {"1": 0, "2": 1, "3": 0}
 
 
+def test_lattice_probe_uses_physical_table_not_mapped_write_table(
+    tmp_path: Path,
+) -> None:
+    """Mapped write Table is id,name; physical dest has _deleted after ALTER."""
+    import sqlalchemy as sa
+
+    from services.mirror_engine import lattice_columns_on_table
+
+    db = tmp_path / "lattice_probe.db"
+    engine = sa.create_engine(f"sqlite:///{db}")
+    with engine.connect() as conn:
+        conn.execute(sa.text("CREATE TABLE dst (id TEXT, name TEXT)"))
+        conn.execute(sa.text("ALTER TABLE dst ADD COLUMN _deleted INTEGER DEFAULT 0"))
+        conn.commit()
+        mapped = sa.Table(
+            "dst",
+            sa.MetaData(),
+            sa.Column("id", sa.Text),
+            sa.Column("name", sa.Text),
+        )
+        found = lattice_columns_on_table(conn, mapped)
+    assert found == ("_deleted",)
+
+
 def test_strip_lattice_from_upsert_drops_deleted_from_set_and_insert() -> None:
     from services.mirror_engine import strip_lattice_from_upsert
 
@@ -182,14 +206,18 @@ def test_strip_lattice_from_upsert_drops_deleted_from_set_and_insert() -> None:
 
 
 def test_upsert_without_unique_preserves_tombstone(tmp_path: Path) -> None:
-    """No unique index → portable UPDATE+INSERT, never delete+insert DEFAULT."""
+    """No unique index → portable UPDATE+INSERT, never delete+insert DEFAULT.
+
+    The write Table is Map columns only (id, name). Physical dest has
+    ``_deleted`` from the inferred-delete ALTER. Probe the physical table.
+    """
     import sqlalchemy as sa
 
     from connectors.generic_sql import _upsert_batch
 
     db = tmp_path / "lattice_fallback.db"
     engine = sa.create_engine(f"sqlite:///{db}")
-    with engine.begin() as conn:
+    with engine.connect() as conn:
         conn.execute(
             sa.text(
                 "CREATE TABLE dst (id TEXT, name TEXT, _deleted INTEGER DEFAULT 0)"
@@ -198,15 +226,22 @@ def test_upsert_without_unique_preserves_tombstone(tmp_path: Path) -> None:
         conn.execute(
             sa.text("INSERT INTO dst (id, name, _deleted) VALUES ('1', 'a', 1)")
         )
-        table = sa.Table("dst", sa.MetaData(), autoload_with=conn)
+        conn.commit()
+        mapped = sa.Table(
+            "dst",
+            sa.MetaData(),
+            sa.Column("id", sa.Text),
+            sa.Column("name", sa.Text),
+        )
         written = _upsert_batch(
             conn,
-            table,
-            [{"id": "1", "name": "b", "_deleted": 0}, {"id": "2", "name": "c"}],
+            mapped,
+            [{"id": "1", "name": "b"}, {"id": "2", "name": "c"}],
             ["id"],
-            ["id", "name", "_deleted"],
+            ["id", "name"],
             "sqlite",
         )
+        conn.commit()
         rows = {
             str(r[0]): (r[1], int(r[2]))
             for r in conn.execute(sa.text("SELECT id, name, _deleted FROM dst")).fetchall()
@@ -224,7 +259,7 @@ def test_native_upsert_does_not_set_lattice_when_unique_exists(tmp_path: Path) -
 
     db = tmp_path / "lattice_native.db"
     engine = sa.create_engine(f"sqlite:///{db}")
-    with engine.begin() as conn:
+    with engine.connect() as conn:
         conn.execute(
             sa.text(
                 "CREATE TABLE dst ("
@@ -234,6 +269,7 @@ def test_native_upsert_does_not_set_lattice_when_unique_exists(tmp_path: Path) -
         conn.execute(
             sa.text("INSERT INTO dst (id, name, _deleted) VALUES ('1', 'a', 1)")
         )
+        conn.commit()
         table = sa.Table("dst", sa.MetaData(), autoload_with=conn)
         _upsert_batch(
             conn,
@@ -243,6 +279,7 @@ def test_native_upsert_does_not_set_lattice_when_unique_exists(tmp_path: Path) -
             ["id", "name", "_deleted"],
             "sqlite",
         )
+        conn.commit()
         row = conn.execute(
             sa.text("SELECT name, _deleted FROM dst WHERE id = '1'")
         ).fetchone()

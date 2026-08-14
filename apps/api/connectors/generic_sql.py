@@ -3645,9 +3645,9 @@ def _upsert_batch(
             deduped[key] = row
         rows = list(deduped.values())
 
-    from services.mirror_engine import lattice_column_names, strip_lattice_from_upsert
+    from services.mirror_engine import lattice_columns_on_table, strip_lattice_from_upsert
 
-    lattice = lattice_column_names(table_obj.c)
+    lattice = lattice_columns_on_table(conn, table_obj)
     rows, update_cols, target_cols = strip_lattice_from_upsert(
         rows, update_cols, target_cols, lattice
     )

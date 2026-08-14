@@ -31,7 +31,7 @@ _KEY_SEP = "\x1f"
 
 
 def lattice_column_names(columns: Any) -> tuple[str, ...]:
-    """Dest-owned mirror lattice columns present on this table."""
+    """Dest-owned mirror lattice columns present on this table object."""
     folded = SOFT_DELETE_COLUMN.casefold()
     found: list[str] = []
     for raw in columns:
@@ -39,6 +39,62 @@ def lattice_column_names(columns: Any) -> tuple[str, ...]:
         if name and name.casefold() == folded:
             found.append(name)
     return tuple(found)
+
+
+def lattice_columns_on_table(conn: Any, table_obj: Any) -> tuple[str, ...]:
+    """Lattice columns on the *physical* dest table, not the mapped write Table.
+
+    ``_build_table_for_write`` builds a Table from Map target columns, so
+    ``table_obj.c`` does not include ``_deleted`` added by the inferred-delete
+    pass. Trusting that shape would keep delete+insert as the fallback and
+    INSERT DEFAULT would un-delete. Probe once per Table (cached on
+    ``table_obj.info``).
+    """
+    info = getattr(table_obj, "info", None)
+    if isinstance(info, dict) and "df_mirror_lattice" in info:
+        return tuple(info["df_mirror_lattice"])
+    found = lattice_column_names(getattr(table_obj, "c", []) or [])
+    if not found:
+        found = _probe_physical_lattice(conn, table_obj)
+    if isinstance(info, dict):
+        info["df_mirror_lattice"] = found
+    return found
+
+
+def _probe_physical_lattice(conn: Any, table_obj: Any) -> tuple[str, ...]:
+    """SELECT 1=0 of the lattice column. Failure must not abort the write txn."""
+    import sqlalchemy as sa
+    from connectors.writer_common import quote_sql_identifier
+
+    col_q = quote_sql_identifier(SOFT_DELETE_COLUMN)
+    parts: list[str] = []
+    schema = getattr(table_obj, "schema", None)
+    if schema:
+        parts.append(quote_sql_identifier(str(schema)))
+    name = getattr(table_obj, "name", None)
+    if not name:
+        return ()
+    parts.append(quote_sql_identifier(str(name)))
+    qualified = ".".join(parts)
+    nested = None
+    try:
+        nested = conn.begin_nested()
+    except Exception:
+        nested = None
+    try:
+        conn.execute(sa.text(f"SELECT {col_q} FROM {qualified} WHERE 1=0"))  # nosec B608
+        if nested is not None:
+            nested.commit()
+        return (SOFT_DELETE_COLUMN,)
+    except Exception:
+        if nested is not None:
+            try:
+                nested.rollback()
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "Exception suppressed: %s", exc, exc_info=exc
+                )
+        return ()
 
 
 def strip_lattice_from_upsert(

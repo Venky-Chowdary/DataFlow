@@ -360,10 +360,15 @@ def _sqlite_upsert_batch(
         return 0, empty_pk_skipped + skipped
 
     table_quoted = quote_sql_identifier(table_name)
-    cols_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
-    placeholders = ", ".join("?" for _ in target_cols)
+    lattice = _sqlite_physical_lattice(cur, table_name)
+    owned = {str(n).casefold() for n in lattice}
+    update_cols = [
+        c for c in target_cols if c not in conflict_cols and str(c).casefold() not in owned
+    ]
+    insert_cols = [c for c in target_cols if str(c).casefold() not in owned]
+    cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
+    placeholders = ", ".join("?" for _ in insert_cols)
     conflict_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
-    update_cols = [c for c in target_cols if c not in conflict_cols]
 
     if lsn_guarded and update_cols:
         where_sql = sqlite_lsn_update_guard_sql(table_name)
@@ -376,13 +381,26 @@ def _sqlite_upsert_batch(
             f"ON CONFLICT ({conflict_sql}) DO UPDATE SET {set_sql} WHERE {where_sql}"
         )
         try:
-            cur.executemany(insert_sql, rows)
+            cur.executemany(
+                insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows]
+            )
             return len(rows), empty_pk_skipped + skipped
         except Exception as exc:
-            # Missing UNIQUE on conflict cols — fall through to delete+insert.
-            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+            logger.debug("sqlite ON CONFLICT unavailable: %s", exc)
 
-    # delete+insert fallback (already deduped + LSN filtered).
+    if lattice:
+        written = _sqlite_update_insert_upsert(
+            cur,
+            table_quoted,
+            target_cols,
+            conflict_cols,
+            update_cols,
+            insert_cols,
+            rows,
+        )
+        return written, empty_pk_skipped + skipped
+
+    # delete+insert fallback when the dest has no dest-owned lattice columns.
     indices = [target_cols.index(c) for c in conflict_cols]
     deduped = {tuple(row[i] for i in indices): row for row in rows}
     rows = list(deduped.values())
@@ -394,11 +412,71 @@ def _sqlite_upsert_batch(
     delete_params = [v for key in deduped.keys() for v in key]
     cur.execute(delete_sql, delete_params)
 
-    insert_sql = f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"  # nosec B608
-    cur.executemany(insert_sql, rows)
-    # Dedup may drop duplicates within the batch — count those as skipped too.
+    insert_sql = (
+        f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"  # nosec B608
+    )
+    cur.executemany(insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows])
     dedup_skipped = original_count - len(rows) - skipped
     return len(rows), empty_pk_skipped + skipped + max(0, dedup_skipped)
+
+
+def _sqlite_physical_lattice(cur: Any, table_name: str) -> tuple[str, ...]:
+    from services.mirror_engine import lattice_column_names
+
+    cur.execute(f"PRAGMA table_info({quote_sql_identifier(table_name)})")  # nosec B608
+    return lattice_column_names([row[1] for row in cur.fetchall()])
+
+
+def _project_row(row: Any, target_cols: list[str], cols: list[str]) -> tuple[Any, ...]:
+    if isinstance(row, dict):
+        return tuple(row.get(c) for c in cols)
+    return tuple(row[target_cols.index(c)] for c in cols)
+
+
+def _sqlite_update_insert_upsert(
+    cur: Any,
+    table_quoted: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    update_cols: list[str],
+    insert_cols: list[str],
+    rows: list[Any],
+) -> int:
+    """sqlite3 spelling of ``merge_dialects.update_insert_upsert``. Never DELETE."""
+    keys = [_project_row(row, target_cols, conflict_cols) for row in rows]
+    existing: set[tuple[Any, ...]] = set()
+    pk_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
+    for i in range(0, len(keys), 400):
+        part = keys[i : i + 400]
+        ph = ", ".join("(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in part)
+        cur.execute(
+            f"SELECT {pk_sql} FROM {table_quoted} WHERE ({pk_sql}) IN ({ph})",  # nosec B608
+            [v for key in part for v in key],
+        )
+        existing.update(tuple(found) for found in cur.fetchall())
+    to_update: list[tuple[Any, ...]] = []
+    to_insert: list[tuple[Any, ...]] = []
+    for row, key in zip(rows, keys):
+        if key in existing:
+            if update_cols:
+                to_update.append(_project_row(row, target_cols, update_cols) + key)
+        else:
+            to_insert.append(_project_row(row, target_cols, insert_cols))
+    if to_update and update_cols:
+        set_sql = ", ".join(f"{quote_sql_identifier(c)}=?" for c in update_cols)
+        where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
+        cur.executemany(
+            f"UPDATE {table_quoted} SET {set_sql} WHERE {where_sql}",  # nosec B608
+            to_update,
+        )
+    if to_insert:
+        cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
+        ph = ", ".join("?" for _ in insert_cols)
+        cur.executemany(
+            f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({ph})",  # nosec B608
+            to_insert,
+        )
+    return len(rows)
 
 
 def write_mapped_rows(

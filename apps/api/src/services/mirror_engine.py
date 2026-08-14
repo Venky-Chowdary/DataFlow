@@ -12,6 +12,7 @@ from services.mirror_engine import (
     apply_inferred_deletes_via_staging,
     apply_inferred_soft_deletes,
     lattice_column_names,
+    lattice_columns_on_table,
     quote_sql_identifier,
     strip_lattice_from_upsert,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "apply_inferred_deletes_via_staging",
     "apply_inferred_soft_deletes",
     "lattice_column_names",
+    "lattice_columns_on_table",
     "quote_sql_identifier",
     "strip_lattice_from_upsert",
 ]
