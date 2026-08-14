@@ -99,6 +99,8 @@ _ALIASES: dict[str, str] = {
     "bq": "bigquery",
     "motherduck": "duckdb",
     "databricks_sql": "databricks",
+    "amazon_redshift": "redshift",
+    "redshift_serverless": "redshift",
     "amazon_s3": "s3",
     "azure_blob_storage": "adls",
     "azure_data_lake": "adls",
@@ -292,15 +294,17 @@ def warehouse_sql_quote_dialect(driver: str | None) -> str | None:
     """Exact dest-engine COUNT(*) family. Stats views never this path.
 
     SQL Server / Oracle (catalog SKUs alias). Snowflake, BigQuery, DuckDB,
-    and Databricks: ``SELECT COUNT(*)`` is exact; ``INFORMATION_SCHEMA`` /
-    ``__TABLES__.row_count`` / clustering stats never close.
+    Databricks, and Redshift: ``SELECT COUNT(*)`` is exact;
+    ``INFORMATION_SCHEMA`` / ``__TABLES__.row_count`` / clustering stats /
+    ``SVV_TABLE_INFO.tbl_rows`` never close. Redshift is PG-wire, not
+    PG-catalog — ``to_regclass`` is not this family.
     """
     key = dialect_profile(driver).driver
     if key in {"sqlserver", "mssql"}:
         return "sqlserver"
     if key == "oracle":
         return "oracle"
-    if key in {"snowflake", "bigquery", "duckdb", "databricks"}:
+    if key in {"snowflake", "bigquery", "duckdb", "databricks", "redshift"}:
         return key
     return None
 

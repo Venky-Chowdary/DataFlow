@@ -51,9 +51,10 @@ and leftover MERGE listing with dest-engine ``COUNT(*)`` / ``SELECT pk``.
 ``ALL_TABLES.num_rows`` are estimates or stale optimizer stats — they never
 close conservation. Missing table is 0. Catalog aliases quote as
 ``sqlserver`` / ``oracle`` (brackets vs folded double-quotes). Snowflake /
-BigQuery / DuckDB / Databricks use the same dest-engine ``COUNT(*)`` —
-never ``INFORMATION_SCHEMA`` / ``__TABLES__.row_count`` / clustering
-stats. Composite
+BigQuery / DuckDB / Databricks / Redshift use dest-engine ``COUNT(*)`` —
+never ``INFORMATION_SCHEMA`` / ``__TABLES__`` / ``SVV_TABLE_INFO.tbl_rows``
+(unvacuumed ghosts; Spectrum has no tbl_rows). Redshift is PG-wire, not
+PG-catalog (no ``to_regclass``). Composite
 key hits use portable AND/OR equality, not row-value ``IN`` (Oracle 19c
 has no tuple IN). Incremental leftover MERGE stays a hard no-op.
 
@@ -101,8 +102,9 @@ warehouse session (dest-engine ``COUNT(*)``, never partition stats).
 ``is_current`` is BIT / ``NUMBER(1)`` — the predicate is ``= 1``, not
 ``IS TRUE`` (T-SQL has no ``IS TRUE``; Oracle 19c has no BOOLEAN).
 Catalog SKUs alias onto ``sqlserver`` / ``oracle`` quoting. A missing
-``is_current`` column is unmeasured, never current=0. Snowflake /
-BigQuery SCD2 COUNT stay unmeasured.
+``is_current`` column is unmeasured, never current=0. Warehouse BOOLEAN
+engines (Snowflake / BigQuery / DuckDB / Databricks / Redshift) use
+``IS TRUE``.
 
 ``None`` means the count is unavailable (unsupported engine, missing table,
 unreachable destination, or an unreadable/unsupported artifact); callers
@@ -388,12 +390,12 @@ def destination_row_count(
                     return 0
                 return _count(conn, quote_table_ref(table, dialect="sqlite"))
 
-        if db_type in {"postgresql", "redshift"}:
+        if db_type == "postgresql":
             from connectors.postgresql_conn import get_connection
 
             conn = get_connection(
                 host=str(cfg.get("host") or ""),
-                port=int(cfg.get("port") or (5439 if db_type == "redshift" else 5432)),
+                port=int(cfg.get("port") or 5432),
                 database=str(cfg.get("database") or ""),
                 username=str(cfg.get("username") or ""),
                 password=str(cfg.get("password") or ""),
@@ -806,7 +808,8 @@ def _is_missing_warehouse_relation(exc: BaseException, dialect: str) -> bool:
     SQL Server 208 / 42S02 / Invalid object name. Oracle ORA-00942.
     Snowflake object-does-not-exist (not 250001 auth). BigQuery
     ``Not found: Table``. DuckDB catalog table-missing. Databricks
-    ``TABLE_OR_VIEW_NOT_FOUND``. Never stats-view absence.
+    ``TABLE_OR_VIEW_NOT_FOUND``. Redshift relation/schema missing, never
+    column-missing (SCD2 unmeasured). Never ``SVV_TABLE_INFO``.
     """
     text = str(exc).lower()
     orig = getattr(exc, "orig", None)
@@ -822,6 +825,10 @@ def _is_missing_warehouse_relation(exc: BaseException, dialect: str) -> bool:
         return "catalog error" in combined and "does not exist" in combined
     if dialect == "databricks":
         return "table_or_view_not_found" in combined or "table or view not found" in combined
+    if dialect == "redshift":
+        if "column" in combined and "does not exist" in combined:
+            return False
+        return ("relation" in combined or "schema" in combined) and "does not exist" in combined
     args = getattr(orig, "args", ()) if orig is not None else ()
     if args and str(args[0]) in {"208", "42S02"}:
         return True
@@ -836,7 +843,8 @@ def _is_missing_warehouse_column(exc: BaseException, dialect: str) -> bool:
 
     SQL Server 207 / 42S22 / Invalid column name. Oracle ORA-00904.
     Snowflake invalid identifier. BigQuery unrecognized name. DuckDB
-    missing column. Databricks unresolved column. Never current=0.
+    missing column. Databricks unresolved column. Redshift column-missing.
+    Never current=0.
     """
     text = str(exc).lower()
     orig = getattr(exc, "orig", None)
@@ -852,6 +860,8 @@ def _is_missing_warehouse_column(exc: BaseException, dialect: str) -> bool:
         return "referenced column" in combined or "does not have a column" in combined
     if dialect == "databricks":
         return "unresolved_column" in combined or "cannot be resolved" in combined
+    if dialect == "redshift":
+        return "column" in combined and "does not exist" in combined
     args = getattr(orig, "args", ()) if orig is not None else ()
     if args and str(args[0]) in {"207", "42S22"}:
         return True
@@ -2004,9 +2014,9 @@ def count_scd2_populations(
     ``None`` means current is unmeasurable (unsupported engine, missing
     ``is_current``, or unreachable dest). Missing table is measured zero
     on both axes. Oracle / SQL Server (and catalog SKUs) use the warehouse
-    dest-engine session; Snowflake / BigQuery / DuckDB / Databricks use
-    the same ``COUNT(*)`` machine (BOOLEAN ``IS TRUE``), never catalog
-    stats.
+    dest-engine session; Snowflake / BigQuery / DuckDB / Databricks /
+    Redshift use the same ``COUNT(*)`` machine (BOOLEAN ``IS TRUE``),
+    never catalog stats / ``to_regclass``.
     """
     table = (table_name or "").strip()
     if not table:
@@ -2015,7 +2025,7 @@ def count_scd2_populations(
     try:
         if kind == "sqlite":
             return _sqlite_scd2_populations(cfg, table_name=table)
-        if kind in {"postgresql", "redshift"}:
+        if kind == "postgresql":
             return _pg_scd2_populations(cfg, schema=schema, table_name=table)
         if kind in {"mysql", "mariadb"}:
             return _mysql_scd2_populations(cfg, table_name=table)

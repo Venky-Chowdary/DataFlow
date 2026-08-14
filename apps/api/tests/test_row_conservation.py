@@ -3319,6 +3319,8 @@ class _ScriptedWarehouseEngine:
             or "INFORMATION_SCHEMA" in upper
             or "__TABLES__" in upper
             or "TABLE_STORAGE" in upper
+            or "SVV_TABLE_INFO" in upper
+            or "STV_TBL_PERM" in upper
         ):
             raise AssertionError(f"warehouse COUNT must not use stats views: {sql}")
         if self._mentions_is_current(sql):
@@ -3500,6 +3502,68 @@ def test_databricks_missing_table_is_zero(monkeypatch: pytest.MonkeyPatch):
     assert any("`default`.`gone`" in sql for sql in engine.sql)
 
 
+def test_redshift_dest_count_is_engine_count_not_svv_table_info(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Redshift dest COUNT is SELECT COUNT(*), never SVV_TABLE_INFO.tbl_rows.
+
+    AWS tbl_rows includes unvacuumed delete ghosts and misses Spectrum
+    external tables. PG to_regclass is not a Redshift catalog.
+    """
+    from sqlalchemy.exc import ProgrammingError
+
+    def _pg_conn_forbidden(**kwargs: object) -> object:
+        raise AssertionError("redshift dest COUNT must not use postgresql_conn / to_regclass")
+
+    monkeypatch.setattr("connectors.postgresql_conn.get_connection", _pg_conn_forbidden)
+    missing = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            error=ProgrammingError(
+                "SELECT",
+                {},
+                Exception('relation "public.gone" does not exist'),
+            ),
+        ),
+    )
+    assert destination_row_count("redshift", {"host": "h"}, schema="public", table_name="gone") == 0
+    assert any('"public"."gone"' in sql for sql in missing.sql)
+    assert all("to_regclass" not in sql.lower() for sql in missing.sql)
+    assert all("SVV_TABLE_INFO" not in sql.upper() for sql in missing.sql)
+
+    engine = _patch_warehouse(monkeypatch, _ScriptedWarehouseEngine(count=3, rows=[(1,), (2,), (99,)]))
+    cfg = {"host": "h", "schema": "public"}
+    assert destination_row_count("amazon_redshift", cfg, schema="public", table_name="orders") == 3
+    listed = destination_key_list(
+        "redshift_serverless", cfg, schema="public", table_name="orders", key_columns=["id"]
+    )
+    assert listed == [(1,), (2,), (99,)]
+    census = destination_keyset_census(
+        "redshift",
+        cfg,
+        schema="public",
+        table_name="orders",
+        key_columns=["id"],
+        keys=[(1,), (2,)],
+    )
+    assert census is not None
+    assert census[EXTRA_KEYS_KEY] == 1
+    assert census[MISSING_KEYS_KEY] == 0
+
+
+def test_redshift_permission_denied_is_unmeasured_not_empty(monkeypatch: pytest.MonkeyPatch):
+    _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(error=RuntimeError('permission denied for relation "orders"')),
+    )
+    assert destination_row_count("redshift", {"host": "h"}, schema="public", table_name="orders") is None
+
+
+def test_redshift_connect_failure_without_engine_is_unmeasured():
+    """No reachable cluster: connect failure is unmeasured, not dest=0."""
+    assert destination_row_count("redshift", {"host": "h"}, schema="public", table_name="T") is None
+
+
 def test_snowflake_connect_failure_without_engine_is_unmeasured():
     """No scripted dest: missing snowflake-sqlalchemy / account is unmeasured, not dest=0."""
     assert destination_row_count("snowflake", {"host": "h"}, schema="PUBLIC", table_name="T") is None
@@ -3562,6 +3626,76 @@ def test_duckdb_overwrite_leftover_merge_deletes_extra_and_dest_count(tmp_path: 
     assert after["dest_count"] == 3
     assert after[EXTRA_KEYS_KEY] == 0
     assert after[MISSING_KEYS_KEY] == 0
+
+
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+def test_redshift_pg_wire_standin_leftover_merge_uses_count_star():
+    """PG-wire stand-in (not a live Redshift cluster): leftover MERGE + COUNT(*).
+
+    Real Redshift has no to_regclass; this proves the warehouse COUNT(*)
+    machine against a PG-wire engine. SVV_TABLE_INFO is never consulted.
+    Incremental leftover MERGE stays a hard no-op.
+    """
+    from connectors.generic_sql import get_sqlalchemy_engine
+    import sqlalchemy as sa
+
+    cfg = {**_pg_cfg(), "type": "redshift"}
+    table = "df_p9_redshift_leftover"
+    try:
+        engine = get_sqlalchemy_engine(cfg)
+    except Exception as exc:
+        pytest.skip(f"Redshift PG-wire engine unavailable: {exc}")
+    with engine.begin() as conn:
+        conn.execute(sa.text(f'DROP TABLE IF EXISTS "public"."{table}"'))
+        conn.execute(
+            sa.text(
+                f'CREATE TABLE "public"."{table}" (id INTEGER PRIMARY KEY, v VARCHAR)'
+            )
+        )
+        conn.execute(
+            sa.text(
+                f"INSERT INTO \"public\".\"{table}\" VALUES (1, 'a'), (2, 'b'), (3, 'c'), (99, 'ghost')"
+            )
+        )
+    try:
+        assert destination_row_count("redshift", cfg, schema="public", table_name=table) == 4
+        assert destination_row_count("redshift", cfg, schema="public", table_name="df_p9_redshift_gone") == 0
+        refused = apply_inferred_leftover_deletes(
+            db_type="redshift",
+            cfg=cfg,
+            schema="public",
+            table_name=table,
+            key_columns=["id"],
+            keys=[(1,), (2,), (3,)],
+            complete_snapshot=False,
+        )
+        assert refused is None
+        assert destination_row_count("redshift", cfg, schema="public", table_name=table) == 4
+        deleted = apply_inferred_leftover_deletes(
+            db_type="redshift",
+            cfg=cfg,
+            schema="public",
+            table_name=table,
+            key_columns=["id"],
+            keys=[(1,), (2,), (3,)],
+            complete_snapshot=True,
+        )
+        assert deleted == 1
+        after = destination_keyset_census(
+            "redshift",
+            cfg,
+            schema="public",
+            table_name=table,
+            key_columns=["id"],
+            keys=[(1,), (2,), (3,)],
+        )
+        assert after is not None
+        assert after["dest_count"] == 3
+        assert after[EXTRA_KEYS_KEY] == 0
+        assert after[MISSING_KEYS_KEY] == 0
+    finally:
+        with engine.begin() as conn:
+            conn.execute(sa.text(f'DROP TABLE IF EXISTS "public"."{table}"'))
 
 
 def test_oracle_composite_key_hits_use_and_or_not_tuple_in(monkeypatch: pytest.MonkeyPatch):
@@ -3653,7 +3787,7 @@ def test_amazon_rds_oracle_leftover_merge_routes_delete(monkeypatch: pytest.Monk
 
 @pytest.mark.parametrize(
     "engine",
-    ["snowflake", "bigquery", "databricks", "motherduck"],
+    ["snowflake", "bigquery", "databricks", "motherduck", "redshift", "amazon_redshift"],
 )
 def test_cloud_warehouse_leftover_merge_routes_delete(
     monkeypatch: pytest.MonkeyPatch, engine: str
@@ -4028,6 +4162,56 @@ def test_snowflake_scd2_missing_column_is_unmeasured(monkeypatch: pytest.MonkeyP
         ),
     )
     assert count_scd2_current("snowflake", {"host": "h"}, schema="PUBLIC", table_name="PLAIN") is None
+
+
+def test_redshift_scd2_current_is_true_not_svv_table_info(monkeypatch: pytest.MonkeyPatch):
+    """Redshift BOOLEAN is_current uses IS TRUE. Never SVV_TABLE_INFO / to_regclass."""
+    def _pg_conn_forbidden(**kwargs: object) -> object:
+        raise AssertionError("redshift SCD2 COUNT must not use postgresql_conn / to_regclass")
+
+    monkeypatch.setattr("connectors.postgresql_conn.get_connection", _pg_conn_forbidden)
+    engine = _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(count=3, count_current=2),
+    )
+    pop = count_scd2_populations(
+        "redshift", {"host": "h"}, schema="public", table_name="products"
+    )
+    assert pop is not None
+    assert pop[CURRENT_ROWS_KEY] == 2
+    assert pop[HISTORY_ROWS_KEY] == 3
+    current_sql = [sql for sql in engine.sql if "IS_CURRENT" in sql.upper().replace('"', "")]
+    assert current_sql
+    assert any("IS TRUE" in sql.upper() for sql in current_sql)
+    assert all("= 1" not in sql for sql in current_sql)
+    assert all("SVV_TABLE_INFO" not in sql.upper() for sql in engine.sql)
+    assert all("to_regclass" not in sql.lower() for sql in engine.sql)
+
+
+def test_redshift_scd2_missing_column_is_unmeasured(monkeypatch: pytest.MonkeyPatch):
+    from sqlalchemy.exc import ProgrammingError
+
+    _patch_warehouse(
+        monkeypatch,
+        _ScriptedWarehouseEngine(
+            count=4,
+            column_error=ProgrammingError(
+                "SELECT",
+                {},
+                Exception('column "is_current" of relation "plain" does not exist'),
+            ),
+        ),
+    )
+    assert count_scd2_current("redshift", {"host": "h"}, schema="public", table_name="plain") is None
+    skipped = stamp_scd2_census(
+        {"target_rows": 4},
+        {"host": "h"},
+        schema="public",
+        table_name="plain",
+        dest_engine="amazon_redshift",
+    )
+    assert skipped.get("dest_count_source") == "skipped_current_readback"
+    assert CURRENT_ROWS_KEY not in skipped
 
 
 def test_bigquery_scd2_connect_failure_is_unmeasured():
