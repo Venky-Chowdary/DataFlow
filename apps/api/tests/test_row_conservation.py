@@ -4823,6 +4823,126 @@ def test_iceberg_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: P
     assert census[MISSING_KEYS_KEY] == 1
 
 
+def test_iceberg_overwrite_merge_composite_pk_filesystem(tmp_path: Path):
+    """Filesystem leftover MERGE is AND/OR per column, never ``order_id,line_id``.
+
+    Dest {(1,1),(1,2),(9,9)} vs S {(1,1),(1,2)} → CoW-delete (9,9), dest COUNT=2.
+    Incremental complete_snapshot=False is a hard no-op. SQL leftover MERGE
+    already uses this identity; a concatenated Iceberg column name left
+    leftover composite rows in dest forever.
+    """
+    from connectors.iceberg_writer import write_mapped_rows
+
+    warehouse = tmp_path / "wh"
+    cfg = _iceberg_cfg(warehouse)
+    mappings = [
+        {"source": "order_id", "target": "order_id", "transform": "direct"},
+        {"source": "line_id", "target": "line_id", "transform": "direct"},
+        {"source": "qty", "target": "qty", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="lines",
+        headers=["order_id", "line_id", "qty"],
+        data_rows=[["1", "1", "a"], ["1", "2", "b"], ["9", "9", "ghost"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["order_id", "line_id"],
+    )
+    assert written.ok, written.error
+    listed = destination_key_list(
+        "iceberg",
+        cfg,
+        schema="",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+    )
+    assert listed is not None
+    assert len(listed) == 3
+    before = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[("1", "1"), ("1", "2")],
+    )
+    assert before is not None
+    assert before["dest_count"] == 3
+    assert before[EXTRA_KEYS_KEY] == 1
+    assert before[MISSING_KEYS_KEY] == 0
+
+    refused = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[("1", "1"), ("1", "2")],
+        complete_snapshot=False,
+    )
+    assert refused is None
+    assert destination_row_count("iceberg", cfg, schema="", table_name="lines") == 3
+
+    deleted = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[("1", "1"), ("1", "2")],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    after = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[("1", "1"), ("1", "2")],
+    )
+    assert after is not None
+    assert after["dest_count"] == 2
+    assert after[EXTRA_KEYS_KEY] == 0
+    assert after[MISSING_KEYS_KEY] == 0
+    remaining = destination_key_list(
+        "iceberg",
+        cfg,
+        schema="",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+    )
+    assert remaining is not None
+    assert {(str(a), str(b)) for a, b in remaining} == {("1", "1"), ("1", "2")}
+    assert destination_row_count("iceberg", cfg, schema="", table_name="lines") == 2
+
+
+def test_iceberg_composite_delete_arity_mismatch_fail_closed(tmp_path: Path):
+    """A 2-col leftover key without the CDC separator must not no-op as dest=3."""
+    from connectors.iceberg_writer import delete_by_primary_keys, write_mapped_rows
+
+    warehouse = tmp_path / "wh"
+    cfg = _iceberg_cfg(warehouse)
+    written = write_mapped_rows(
+        connection_string=str(warehouse),
+        table_name="lines",
+        headers=["order_id", "line_id", "qty"],
+        data_rows=[["1", "1", "a"], ["9", "9", "ghost"]],
+        mappings=[
+            {"source": "order_id", "target": "order_id", "transform": "direct"},
+            {"source": "line_id", "target": "line_id", "transform": "direct"},
+            {"source": "qty", "target": "qty", "transform": "direct"},
+        ],
+        write_mode="upsert",
+        conflict_columns=["order_id", "line_id"],
+    )
+    assert written.ok, written.error
+    with pytest.raises(ValueError, match="arity"):
+        delete_by_primary_keys(cfg, "lines", ["order_id", "line_id"], ["9,9"])
+    assert destination_row_count("iceberg", cfg, schema="", table_name="lines") == 2
+
+
 def test_iceberg_dest_count_is_file_footer_not_manifest_record_count(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -5367,6 +5487,127 @@ def test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_
     assert {str(row.get("id")) for row in remaining} == {"1", "2", "3"}
     assert destination_row_count(
         "iceberg", cfg, schema="default", table_name="orders"
+    ) == len(remaining)
+
+
+def test_iceberg_sql_catalog_leftover_merge_composite_pk(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """SqlCatalog leftover MERGE composite: dest {(1,1),(1,2),(9,9)} vs S.
+
+    Predicate is OR of AND equalities typed per field (string vs long).
+    Never ``In('order_id,line_id', ...)``. Never scan().to_arrow() for
+    leftover listing. Incremental remains a hard no-op.
+    """
+    from connectors.iceberg_writer import write_mapped_rows
+    from pyiceberg.table import DataScan
+    from services.dest_precount import _iceberg_snapshot_rows
+
+    warehouse, uri = _iceberg_sql_catalog(tmp_path)
+    cfg = {
+        "type": "iceberg",
+        "connection_string": uri,
+        "warehouse": warehouse,
+        "table": "lines",
+        "schema": "default",
+    }
+    mappings = [
+        {"source": "order_id", "target": "order_id", "transform": "direct"},
+        {"source": "line_id", "target": "line_id", "transform": "direct"},
+        {"source": "qty", "target": "qty", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=uri,
+        warehouse=warehouse,
+        table_name="default.lines",
+        headers=["order_id", "line_id", "qty"],
+        data_rows=[["1", "1", "a"], ["1", "2", "b"], ["9", "9", "ghost"]],
+        mappings=mappings,
+        column_types={
+            "order_id": "integer",
+            "line_id": "integer",
+            "qty": "string",
+        },
+        write_mode="append",
+        create_table=True,
+    )
+    assert written.ok, written.error
+
+    def _no_count(self):
+        raise AssertionError("Iceberg leftover MERGE must not scan().count()")
+
+    def _no_arrow(self):
+        raise AssertionError("Iceberg leftover MERGE must not to_arrow the table")
+
+    monkeypatch.setattr(DataScan, "count", _no_count)
+    monkeypatch.setattr(DataScan, "to_arrow", _no_arrow)
+    snapshot = _iceberg_snapshot_rows(
+        cfg, schema="default", table_name="lines", cols=("order_id", "line_id")
+    )
+    assert snapshot is not None
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="lines"
+    ) == len(snapshot)
+    before = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="default",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[("1", "1"), ("1", "2")],
+    )
+    assert before is not None
+    assert before["dest_count"] == 3
+    assert before[EXTRA_KEYS_KEY] == 1
+    assert before[MISSING_KEYS_KEY] == 0
+
+    refused = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="default",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[("1", "1"), ("1", "2")],
+        complete_snapshot=False,
+    )
+    assert refused is None
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="lines"
+    ) == 3
+
+    deleted = apply_inferred_leftover_deletes(
+        db_type="iceberg",
+        cfg=cfg,
+        schema="default",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[("1", "1"), ("1", "2")],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    after = destination_keyset_census(
+        "iceberg",
+        cfg,
+        schema="default",
+        table_name="lines",
+        key_columns=["order_id", "line_id"],
+        keys=[("1", "1"), ("1", "2")],
+    )
+    assert after is not None
+    assert after["dest_count"] == 2
+    assert after[EXTRA_KEYS_KEY] == 0
+    assert after[MISSING_KEYS_KEY] == 0
+    remaining = _iceberg_snapshot_rows(
+        cfg, schema="default", table_name="lines", cols=("order_id", "line_id")
+    )
+    assert remaining is not None
+    pairs = {
+        (str(row.get("order_id")), str(row.get("line_id"))) for row in remaining
+    }
+    assert pairs == {("1", "1"), ("1", "2")}
+    assert destination_row_count(
+        "iceberg", cfg, schema="default", table_name="lines"
     ) == len(remaining)
 
 

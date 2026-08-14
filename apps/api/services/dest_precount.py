@@ -1725,6 +1725,45 @@ def _parquet_column_names(pf: Any) -> set[str]:
     return {str(n) for n in names}
 
 
+def _resolve_projected_names(
+    available: set[str], wanted: Sequence[str]
+) -> list[tuple[str, str]] | None:
+    """Map requested PK names onto file schema names.
+
+    Composite leftover MERGE needs every PK part. A partial projection
+    (one of two columns, or a case-folded collision) is unmeasured —
+    not a truncated key list that looks like dest has no leftovers.
+    """
+    if not wanted:
+        return []
+    lower: dict[str, str] = {}
+    for name in available:
+        lower.setdefault(name.lower(), name)
+    mapping: list[tuple[str, str]] = []
+    used: set[str] = set()
+    for want in wanted:
+        actual: str | None = want if want in available else lower.get(want.lower())
+        if actual is None or actual in used:
+            return None
+        mapping.append((str(want), actual))
+        used.add(actual)
+    return mapping
+
+
+def _project_records(
+    records: list[dict[str, Any]], wanted: Sequence[str]
+) -> list[dict[str, Any]] | None:
+    out: list[dict[str, Any]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            return None
+        resolved = _resolve_projected_names({str(k) for k in rec}, wanted)
+        if resolved is None:
+            return None
+        out.append({want: rec.get(actual) for want, actual in resolved})
+    return out
+
+
 def _project_parquet_columns(source: Any, cols: Sequence[str]) -> list[dict[str, Any]] | None:
     """PK (or requested) columns of one Parquet image. Never the full table scan."""
     try:
@@ -1736,20 +1775,21 @@ def _project_parquet_columns(source: Any, cols: Sequence[str]) -> list[dict[str,
         return []
     try:
         pf = pq.ParquetFile(_seek_start(source))
-        available = [c for c in wanted if c in _parquet_column_names(pf)]
-        if not available:
+        resolved = _resolve_projected_names(_parquet_column_names(pf), wanted)
+        if resolved is None:
             return None
-        table = pf.read(columns=available)
+        table = pf.read(columns=[actual for _, actual in resolved])
     except UnmeasuredArtifact:
         return None
     except Exception as exc:
         logger.info("iceberg parquet PK projection failed: %s", exc)
         return None
+    pylist = table.to_pylist()
     out: list[dict[str, Any]] = []
-    for rec in table.to_pylist():
+    for rec in pylist:
         if not isinstance(rec, dict):
             return None
-        out.append({c: rec.get(c) for c in wanted})
+        out.append({want: rec.get(actual) for want, actual in resolved})
     return out
 
 
@@ -1764,20 +1804,21 @@ def _project_orc_columns(source: Any, cols: Sequence[str]) -> list[dict[str, Any
     try:
         reader = orc.ORCFile(_seek_start(source))
         names = set(str(n) for n in (getattr(reader.schema, "names", None) or ()))
-        available = [c for c in wanted if c in names]
-        if not available:
+        resolved = _resolve_projected_names(names, wanted)
+        if resolved is None:
             return None
-        table = reader.read(columns=available)
+        table = reader.read(columns=[actual for _, actual in resolved])
     except UnmeasuredArtifact:
         return None
     except Exception as exc:
         logger.info("iceberg ORC PK projection failed: %s", exc)
         return None
+    pylist = table.to_pylist()
     out: list[dict[str, Any]] = []
-    for rec in table.to_pylist():
+    for rec in pylist:
         if not isinstance(rec, dict):
             return None
-        out.append({c: rec.get(c) for c in wanted})
+        out.append({want: rec.get(actual) for want, actual in resolved})
     return out
 
 
@@ -1803,12 +1844,12 @@ def _project_iceberg_handle(
                     except Exception:
                         pass
         if kind in {"jsonl", "json"}:
-            out: list[dict[str, Any]] = []
+            records: list[dict[str, Any]] = []
             for rec in _iter_streaming_kind(kind, handle, name=name):
                 if not isinstance(rec, dict):
                     return None
-                out.append({c: rec.get(c) for c in wanted})
-            return out
+                records.append(rec)
+            return _project_records(records, wanted)
         logger.info("iceberg snapshot file format unprojected for keys: %s", name)
         return None
     except UnmeasuredArtifact as exc:
@@ -1998,6 +2039,25 @@ def _norm_dest_key(values: Sequence[Any]) -> tuple[str, ...] | None:
     return tuple(out)
 
 
+def _row_values_for_cols(
+    row: Mapping[str, Any], cols: Sequence[str]
+) -> tuple[Any, ...] | None:
+    """PK tuple from a projected row. Case-insensitive; incomplete identity is skip."""
+    lower: dict[str, Any] | None = None
+    parts: list[Any] = []
+    for col in cols:
+        if col in row:
+            val = row[col]
+        else:
+            if lower is None:
+                lower = {str(k).lower(): v for k, v in row.items()}
+            val = lower.get(col.lower())
+        if val is None:
+            return None
+        parts.append(val)
+    return tuple(parts)
+
+
 def _iceberg_key_list(
     cfg: dict[str, Any],
     *,
@@ -2020,8 +2080,8 @@ def _iceberg_key_list(
     for row in rows:
         if not isinstance(row, Mapping):
             continue
-        tup = tuple(row.get(c) for c in cols)
-        if len(tup) != width or any(v is None for v in tup):
+        tup = _row_values_for_cols(row, cols)
+        if tup is None or len(tup) != width:
             continue
         out.append(tup)
     return out
@@ -2041,9 +2101,14 @@ def _iceberg_key_hits(
     wanted = {norm for key in keys if (norm := _norm_dest_key(key)) is not None}
     seen: set[tuple[str, ...]] = set()
     for row in rows:
-        tup = _norm_dest_key(row.get(c) for c in cols)
-        if tup is not None and tup in wanted:
-            seen.add(tup)
+        if not isinstance(row, Mapping):
+            continue
+        tup = _row_values_for_cols(row, cols)
+        if tup is None:
+            continue
+        norm = _norm_dest_key(tup)
+        if norm is not None and norm in wanted:
+            seen.add(norm)
     return len(seen)
 
 

@@ -304,7 +304,7 @@ def delete_by_primary_keys(
         return _iceberg_delete(
             cfg,
             table_name,
-            pk_col if isinstance(pk_col, str) else ",".join(pk_cols),
+            pk_cols,
             list(keys),
             schema=schema,
             incoming_lsn=incoming_lsn,

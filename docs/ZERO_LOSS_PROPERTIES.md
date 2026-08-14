@@ -948,8 +948,9 @@ rowcount is not that proof.
     table = 0. Live sqlite SqlCatalog leftover: dest {1,2,3,99} vs
     S {1,2,3} deletes 99 → dest COUNT=3, extra=0; incremental
     `complete_snapshot=False` leaves dest 4. Filesystem leftover tests
-    still pass. Catalog PK projection is `scan().select(*names)`.
-    Catalog CoW delete uses parse-config `namespace + table_name`.
+    still pass. Catalog PK projection later dropped `scan().select` /
+    `to_arrow` (see next slice). Catalog CoW delete uses parse-config
+    `namespace + table_name`.
     Gate-8 Iceberg count is file footers, not `len` of the Arrow scan
     leftover MERGE holds for keys. SqlCatalog COUNT=2 with `DataScan.count`
     / `to_arrow` forbidden.

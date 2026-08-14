@@ -13,6 +13,7 @@ from pathlib import Path
 from services.create_new_risk_stamp import (
     apply_create_new_risk_stamps as _apply_create_new_risk_stamps,
 )
+from services.schematic_index import IDENTITY_KIND_LEAVES as _IDENTITY_KIND_LEAVES
 
 _model_cache = None
 
@@ -890,8 +891,7 @@ _DOMAIN_LEAVES = frozenset({
 })
 _GENERIC_LEAVES = _DOMAIN_LEAVES | _ENTITY_STOPWORDS
 # Same-entity ``id`` vs ``key`` is a false friend (CRM id ≠ warehouse surrogate).
-# Keep this set aligned with schematic_index.IDENTITY_KIND_LEAVES.
-_IDENTITY_KIND_LEAVES = frozenset({"id", "key", "pk", "code", "uuid", "guid", "oid"})
+# Identity-kind leaves live in schematic_index.IDENTITY_KIND_LEAVES (SSOT).
 # Typed measure subtypes that must appear on the destination. ``tax`` is not
 # ``total``; a generic amount bucket is not a proven tax/discount/salary column.
 _MEASURE_KIND_TOKENS = frozenset({

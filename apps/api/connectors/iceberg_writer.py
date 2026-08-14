@@ -20,7 +20,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from services.value_serializer import json_default
 
@@ -2483,23 +2483,142 @@ def _resolve_iceberg_table_dir(cfg: dict[str, Any], table_name: str, schema: str
     return table_dir
 
 
+def _iceberg_pk_columns(primary_key_column: str | Sequence[str]) -> list[str]:
+    from services.cdc_snapshot_window import _pk_columns
+
+    return _pk_columns(primary_key_column)
+
+
+def _iceberg_row_pk(row: dict[str, Any], pk_cols: Sequence[str]) -> str | None:
+    from services.cdc_snapshot_window import _pk_value
+
+    return _pk_value(row, pk_cols)
+
+
+def _iceberg_split_key(key: str, width: int) -> list[str]:
+    """Split a leftover/CDC address into PK parts. Arity mismatch is fail-closed.
+
+    Composite identity uses the CDC unit separator (same as SQL leftover
+    MERGE). A comma-joined ``9,9`` or a single leftover of a 2-col PK is
+    not a row identity — returning 0 here would look like an idempotent
+    miss and let leftover rows survive.
+    """
+    from services.cdc_snapshot_window import _PK_SEP
+
+    text = str(key)
+    if width <= 1:
+        return [text]
+    parts = text.split(_PK_SEP)
+    if len(parts) != width:
+        raise ValueError(
+            f"Iceberg composite delete key arity {len(parts)} != {width}"
+        )
+    return parts
+
+
+def _iceberg_typed_literal(tbl: Any, column: str, raw: Any) -> Any:
+    """Bind a leftover/CDC key part to the Iceberg field type.
+
+    Digit strings on a string PK must stay strings (LongLiteral cannot
+    convert into string). Integer/long fields take int. Decimal/date/
+    timestamp/uuid bind to the field type. Fail closed on a missing
+    field or a value that cannot convert — never guess.
+    """
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    from pyiceberg.types import (
+        BooleanType,
+        DateType,
+        DecimalType,
+        DoubleType,
+        FloatType,
+        IntegerType,
+        LongType,
+        TimestampType,
+        TimestamptzType,
+        UUIDType,
+    )
+
+    field = tbl.schema().find_field(column, case_sensitive=False)
+    ftype = getattr(field, "field_type", None)
+    if ftype is None:
+        raise ValueError(f"Iceberg delete: unknown field {column!r}")
+    text = str(raw)
+    try:
+        if isinstance(ftype, (IntegerType, LongType)):
+            return int(text)
+        if isinstance(ftype, BooleanType):
+            return text.strip().lower() in {"1", "true", "t", "yes"}
+        if isinstance(ftype, (DoubleType, FloatType)):
+            return float(text)
+        if isinstance(ftype, DecimalType):
+            return Decimal(text)
+        if isinstance(ftype, DateType):
+            return date.fromisoformat(text[:10])
+        if isinstance(ftype, (TimestampType, TimestamptzType)):
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if isinstance(ftype, UUIDType):
+            import uuid as _uuid
+
+            return _uuid.UUID(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Iceberg delete: {column!r} value {text!r} does not bind "
+            f"to {type(ftype).__name__}"
+        ) from exc
+    return text
+
+
+def _iceberg_delete_predicate(tbl: Any, pk_cols: list[str], work_keys: set[str]) -> Any:
+    """Dest-engine leftover/CDC delete predicate.
+
+    Single column: ``IN``. Composite: ``OR`` of ``AND`` equalities — the
+    same identity SQL leftover MERGE uses. A joined key whose arity does
+    not match the PK is fail-closed (never a concatenated column name).
+    """
+    from pyiceberg.expressions import And, EqualTo, In, Or
+
+    if not pk_cols or not work_keys:
+        raise ValueError("Iceberg delete requires PK columns and keys")
+    width = len(pk_cols)
+    if width == 1:
+        col = pk_cols[0]
+        return In(col, [_iceberg_typed_literal(tbl, col, k) for k in work_keys])
+    terms: list[Any] = []
+    for key in work_keys:
+        parts = _iceberg_split_key(key, width)
+        equals = [
+            EqualTo(pk_cols[i], _iceberg_typed_literal(tbl, pk_cols[i], parts[i]))
+            for i in range(width)
+        ]
+        terms.append(And(*equals))
+    if len(terms) == 1:
+        return terms[0]
+    return Or(*terms)
+
+
 def delete_by_primary_keys(
     cfg: dict[str, Any],
     table_name: str,
-    primary_key_column: str,
+    primary_key_column: str | Sequence[str],
     keys: list[str],
     schema: str | None = None,
     *,
     incoming_lsn: str | None = None,
     lsn_column: str = "_df_lsn",
 ) -> int:
-    """CDC delete with LSN guard for filesystem CoW and pyiceberg catalogs.
+    """CDC / leftover-MERGE delete with LSN guard (filesystem CoW and catalogs).
 
-    Stale deletes that would wipe a newer ``_df_lsn`` row are skipped
-    (at-least-once redelivery safety). Returns the number of rows removed.
+    ``primary_key_column`` is one column or an ordered composite. Composite
+    keys use the CDC unit separator (same as SQL leftover MERGE), never a
+    literal ``order_id,line_id`` column. Stale deletes that would wipe a
+    newer ``_df_lsn`` row are skipped (at-least-once redelivery). Returns
+    the number of keys requested for delete after the LSN filter.
     """
     if not keys:
         return 0
+    pk_cols = _iceberg_pk_columns(primary_key_column)
     key_set = {str(k) for k in keys}
     endpoint = {
         **cfg,
@@ -2514,7 +2633,7 @@ def delete_by_primary_keys(
     if write_path == "catalog":
         return _delete_pyiceberg(
             endpoint,
-            primary_key_column,
+            pk_cols,
             key_set,
             incoming_lsn=incoming_lsn,
             lsn_column=lsn_column,
@@ -2522,7 +2641,7 @@ def delete_by_primary_keys(
     return _delete_filesystem(
         cfg,
         table_name,
-        primary_key_column,
+        pk_cols,
         key_set,
         schema=schema,
         incoming_lsn=incoming_lsn,
@@ -2532,7 +2651,7 @@ def delete_by_primary_keys(
 
 def _filter_delete_keys_by_lsn(
     rows: list[dict[str, Any]],
-    primary_key_column: str,
+    pk_cols: Sequence[str],
     key_set: set[str],
     *,
     incoming_lsn: str | None,
@@ -2542,14 +2661,13 @@ def _filter_delete_keys_by_lsn(
 
     if not incoming_lsn:
         return set(key_set)
-    existing = {
-        str(r.get(primary_key_column)): r.get(lsn_column)
-        for r in rows
-        if str(r.get(primary_key_column)) in key_set
-    }
-    # Keys absent from table: treat as already deleted (idempotent).
-    for k in key_set:
-        existing.setdefault(k, None)
+    existing: dict[str, Any] = {}
+    for row in rows:
+        pk = _iceberg_row_pk(row, pk_cols)
+        if pk is not None and pk in key_set:
+            existing[pk] = row.get(lsn_column)
+    for key in key_set:
+        existing.setdefault(key, None)
     kept = filter_keys_for_lsn_delete(list(key_set), existing, incoming_lsn)
     return {str(k) for k in kept}
 
@@ -2557,7 +2675,7 @@ def _filter_delete_keys_by_lsn(
 def _delete_filesystem(
     cfg: dict[str, Any],
     table_name: str,
-    primary_key_column: str,
+    pk_cols: list[str],
     key_set: set[str],
     *,
     schema: str | None,
@@ -2576,19 +2694,27 @@ def _delete_filesystem(
         return 0
     schema_json = (current_meta.get("schemas") or [{}])[-1] or current_meta.get("schema") or {}
     columns = [str(f.get("name")) for f in (schema_json.get("fields") or []) if f.get("name")]
-    if primary_key_column not in columns:
-        columns = list(columns) + [primary_key_column]
+    for col in pk_cols:
+        if col not in columns:
+            columns.append(col)
     existing = _load_existing_rows(table_dir, columns, current_meta)
     work_keys = _filter_delete_keys_by_lsn(
         existing,
-        primary_key_column,
+        pk_cols,
         key_set,
         incoming_lsn=incoming_lsn,
         lsn_column=lsn_column,
     )
     if not work_keys:
         return 0
-    kept = [r for r in existing if str(r.get(primary_key_column)) not in work_keys]
+    width = len(pk_cols)
+    for key in work_keys:
+        _iceberg_split_key(key, width)
+    kept = [
+        row
+        for row in existing
+        if (_iceberg_row_pk(row, pk_cols) or "") not in work_keys
+    ]
     deleted = len(existing) - len(kept)
     write_types = _write_types_from_schema(schema_json, {})
     rel_path, n_written, checksum, _warnings = _write_data_file(
@@ -2637,7 +2763,7 @@ def _delete_filesystem(
 
 def _delete_pyiceberg(
     endpoint: dict[str, Any],
-    primary_key_column: str,
+    pk_cols: list[str],
     key_set: set[str],
     *,
     incoming_lsn: str | None,
@@ -2651,9 +2777,10 @@ def _delete_pyiceberg(
     tbl = catalog.load_table(identifier)
     work_keys = {str(k) for k in key_set}
     if incoming_lsn:
-        # CDC LSN guard needs pk + lsn only — leftover overwrite MERGE has no LSN
-        # and must not materialize scan().to_arrow() of the table.
-        scanned = tbl.scan().select(primary_key_column, lsn_column).to_arrow()
+        # CDC LSN guard projects pk (+ lsn) only. Overwrite leftover MERGE
+        # has no LSN and must not materialize scan().to_arrow() of the table.
+        select_cols = list(dict.fromkeys([*pk_cols, lsn_column]))
+        scanned = tbl.scan().select(*select_cols).to_arrow()
         rows: list[dict[str, Any]] = []
         for i in range(scanned.num_rows):
             rows.append(
@@ -2664,30 +2791,31 @@ def _delete_pyiceberg(
             )
         work_keys = _filter_delete_keys_by_lsn(
             rows,
-            primary_key_column,
+            pk_cols,
             work_keys,
             incoming_lsn=incoming_lsn,
             lsn_column=lsn_column,
         )
         work_keys = {
-            str(r.get(primary_key_column))
-            for r in rows
-            if str(r.get(primary_key_column)) in work_keys
+            pk
+            for row in rows
+            if (pk := _iceberg_row_pk(row, pk_cols)) is not None and pk in work_keys
         }
     if not work_keys:
         return 0
     try:
-        from pyiceberg.expressions import In
-        from pyiceberg.types import IntegerType, LongType, StringType
-
-        field = tbl.schema().find_field(primary_key_column, case_sensitive=False)
-        ftype = getattr(field, "field_type", None)
-        if isinstance(ftype, (IntegerType, LongType)):
-            literals: list[Any] = [int(str(k)) for k in work_keys]
-        else:
-            literals = [str(k) for k in work_keys]
-        tbl.delete(delete_filter=In(primary_key_column, literals))
+        tbl.delete(delete_filter=_iceberg_delete_predicate(tbl, pk_cols, work_keys))
     except Exception:
+        if len(pk_cols) != 1:
+            raise
+        from pyiceberg.types import StringType
+
+        field = tbl.schema().find_field(pk_cols[0], case_sensitive=False)
+        ftype = getattr(field, "field_type", None)
+        # Quoted-string IN is only valid for string PKs. A numeric In()
+        # failure falling through to strings would no-op leftover MERGE.
+        if not isinstance(ftype, StringType):
+            raise
         quoted = ", ".join("'" + str(k).replace("'", "''") + "'" for k in work_keys)
-        tbl.delete(delete_filter=f"{primary_key_column} IN ({quoted})")
+        tbl.delete(delete_filter=f"{pk_cols[0]} IN ({quoted})")
     return len(work_keys)
