@@ -60,7 +60,11 @@ checksum of those same GET streams is ``checksum_object_store`` — never
 was dest=0). JSON root array, JSONL objects, CSV RFC 4180 dicts, and
 Parquet/Avro value walks feed ``canonical_checksum_from_iter``. Wrapped
 JSON, XML, Excel, and ORC cell walks stay unmeasured this kernel (COUNT
-still measures cardinality). Empty well-formed is ``(0, "")``.
+still measures cardinality). Empty well-formed is ``(0, "")``. Dest sample
+of those GET streams is ``sample_object_store`` / ``sample_artifact_records``
+— never JSON-fallback ``[]`` (that greens a lost write). SFTP dest COUNT
+and Gate-8 checksum walk the same artifact machine via ``open_sftp_binary``
+(never ``fh.read()`` of the remote file). Missing SFTP object is 0.
 
 Lakehouse and object-store destinations already have dest-*after* read-back
 (Iceberg scan, S3/GCS/ADLS GET). Dest-*before* must use the same COUNT so
@@ -513,6 +517,9 @@ def destination_row_count(
 
         if _object_store_kind(db_type) in {"s3", "gcs", "adls"}:
             return _object_store_row_count(db_type, cfg, table_name=table)
+
+        if db_type == "sftp":
+            return _sftp_row_count(cfg, table_name=table)
 
         if db_type == "clickhouse":
             return _clickhouse_row_count(cfg, schema=schema, table_name=table)
@@ -1472,8 +1479,14 @@ def _iceberg_key_hits(
 
 
 def _object_store_kind(db_type: str) -> str:
-    """Catalog SKU → dest-engine family. ``amazon_s3`` counts as ``s3``."""
-    key = str(db_type or "").strip().lower()
+    """Catalog SKU → dest-engine family. ``amazon_s3`` / ``minio`` count as ``s3``."""
+    from services.dialect_profiles import normalize_driver
+
+    key = normalize_driver(db_type) or str(db_type or "").strip().lower()
+    if key in {"s3", "amazon_s3", "aws_s3", "minio", "s3_compatible"}:
+        return "s3"
+    if key in {"gcs", "google_cloud_storage"}:
+        return "gcs"
     if key in {
         "adls",
         "azure_blob_storage",
@@ -1481,10 +1494,6 @@ def _object_store_kind(db_type: str) -> str:
         "azure_data_lake_storage",
     }:
         return "adls"
-    if key in {"s3", "amazon_s3"}:
-        return "s3"
-    if key == "gcs":
-        return "gcs"
     return key
 
 
@@ -1574,8 +1583,39 @@ def _object_store_row_count(
     return total
 
 
+def _sftp_row_count(cfg: dict[str, Any], *, table_name: str) -> int | None:
+    """Dest-engine artifact COUNT of an SFTP GET stream. Missing file is 0.
+
+    Same format machine as object-store / local ``count_artifact_rows``.
+    Never ``fh.read()`` of the remote file. Writer PUT rowcount is not
+    this proof. Unparseable stays unmeasured.
+    """
+    from services.object_streaming import open_sftp_binary
+
+    merged = dict(cfg)
+    if table_name:
+        merged["table"] = table_name
+    opened = open_sftp_binary(merged)
+    if opened is False:
+        return 0
+    if opened is None:
+        return None
+    stream, closer = opened
+    name = str(table_name or merged.get("table") or merged.get("path") or "")
+    try:
+        return _count_artifact_stream(stream, name=name)
+    except Exception as exc:
+        logger.info("SFTP dest COUNT failed for %s: %s", name, exc)
+        return None
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
 def _skip_json_ws_bom(source: Any) -> bytes:
-    """Next significant JSON byte. UTF-8 BOM and whitespace are not content."""
     while True:
         b = source.read(1)
         if not b:
@@ -1727,6 +1767,154 @@ def _iter_artifact_records(
     yield from _iter_byte_image_kind(kind, bytes(raw), name=name)
 
 
+def _checksum_records(
+    records: Any,
+    *,
+    columns: list[str] | None = None,
+    limit: int = 0,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Hash a dest-engine record iterator. Empty ``(0, "")``. Unmeasured ``(-1, "")``."""
+    from services.reconciliation import canonical_checksum_from_iter
+
+    n = 0
+
+    def counted() -> Any:
+        nonlocal n
+        for rec in records:
+            n += 1
+            yield rec
+
+    try:
+        digest = canonical_checksum_from_iter(
+            counted(),
+            columns,
+            limit=limit,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
+    except UnmeasuredArtifact as exc:
+        logger.info("artifact Gate-8 checksum unmeasured: %s", exc)
+        return -1, ""
+    except Exception as exc:
+        logger.info("artifact Gate-8 checksum failed: %s", exc)
+        return -1, ""
+    if n == 0:
+        return 0, ""
+    return n, digest
+
+
+def checksum_artifact_stream(
+    source: Any,
+    *,
+    name: str,
+    columns: list[str] | None = None,
+    limit: int = 0,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Gate-8 cell checksum of one artifact stream. Never JSON-fallback empty."""
+    return _checksum_records(
+        _iter_artifact_records(source, name=name),
+        columns=columns,
+        limit=limit,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+    )
+
+
+def sample_artifact_records(
+    source: Any,
+    *,
+    name: str,
+    limit: int = 50,
+    sort_key: str = "",
+    keys: Any = None,
+    columns: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Bounded dest-engine sample of an artifact stream.
+
+    ``UnmeasuredArtifact`` propagates — never ``[]`` for gzip CSV / Parquet
+    as UTF-8 JSON garbage (that greens a lost write). Well-formed empty
+    is ``[]``.
+    """
+    wanted = {str(k) for k in keys} if keys else set()
+    lim = max(1, int(limit or 50))
+    projection = None if not columns or columns == ["*"] else list(columns)
+    out: list[dict[str, Any]] = []
+    for rec in _iter_artifact_records(source, name=name):
+        if wanted and sort_key and str(rec.get(sort_key)) not in wanted:
+            continue
+        if projection is not None:
+            rec = {k: rec.get(k) for k in projection}
+        out.append(rec)
+        if len(out) >= lim and not wanted:
+            break
+    return out[:lim]
+
+
+def sample_object_store(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    table_name: str,
+    limit: int = 50,
+    sort_key: str = "",
+    keys: Any = None,
+    columns: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Bounded dest sample of object-store GET streams. Never JSON-fallback empty.
+
+    Same keys and GET handles as dest COUNT / Gate-8 checksum. Unparseable
+    raises ``UnmeasuredArtifact`` (callers map that to sample-unavailable).
+    Missing listing is ``[]``.
+    """
+    from services.object_streaming import open_object_store_binary
+
+    bucket = str(cfg.get("database") or "").strip()
+    key = str(table_name or "").strip()
+    if not bucket or not key:
+        raise UnmeasuredArtifact("object_store_sample_missing_bucket_or_key")
+    kind = _object_store_kind(db_type)
+    listed = _object_store_list_keys(kind, cfg, bucket, key)
+    if listed is None:
+        raise UnmeasuredArtifact("object_store_list_unknowable")
+    if not listed:
+        return []
+    wanted = {str(k) for k in keys} if keys else set()
+    lim = max(1, int(limit or 50))
+    out: list[dict[str, Any]] = []
+    for obj_key in listed:
+        opened = open_object_store_binary(kind, cfg, bucket, str(obj_key))
+        if opened is False:
+            continue
+        if opened is None:
+            raise UnmeasuredArtifact("object_store_get_unknowable")
+        stream, closer = opened
+        try:
+            need = lim if wanted else max(1, lim - len(out))
+            out.extend(
+                sample_artifact_records(
+                    stream,
+                    name=str(obj_key),
+                    limit=need,
+                    sort_key=sort_key,
+                    keys=keys,
+                    columns=columns,
+                )
+            )
+            if len(out) >= lim and not wanted:
+                return out[:lim]
+        finally:
+            if closer is not None:
+                try:
+                    closer()
+                except Exception:
+                    pass
+    return out[:lim]
+
+
 def checksum_object_store(
     db_type: str,
     cfg: dict[str, Any],
@@ -1747,7 +1935,6 @@ def checksum_object_store(
     fidelity of the records we could walk. CDC stays at-least-once upsert.
     """
     from services.object_streaming import open_object_store_binary
-    from services.reconciliation import canonical_checksum_from_iter
 
     bucket = str(cfg.get("database") or "").strip()
     key = str(table_name or "").strip()
@@ -1760,10 +1947,7 @@ def checksum_object_store(
     if not keys:
         return 0, ""
 
-    n = 0
-
     def records() -> Any:
-        nonlocal n
         for obj_key in keys:
             opened = open_object_store_binary(kind, cfg, bucket, str(obj_key))
             if opened is False:
@@ -1772,9 +1956,7 @@ def checksum_object_store(
                 raise UnmeasuredArtifact("object_store_get_unknowable")
             stream, closer = opened
             try:
-                for rec in _iter_artifact_records(stream, name=str(obj_key)):
-                    n += 1
-                    yield rec
+                yield from _iter_artifact_records(stream, name=str(obj_key))
             finally:
                 if closer is not None:
                     try:
@@ -1782,23 +1964,13 @@ def checksum_object_store(
                     except Exception:
                         pass
 
-    try:
-        digest = canonical_checksum_from_iter(
-            records(),
-            columns,
-            limit=limit,
-            dest_db_type=dest_db_type,
-            dest_types=dest_types,
-        )
-    except UnmeasuredArtifact as exc:
-        logger.info("object-store Gate-8 checksum unmeasured: %s", exc)
-        return -1, ""
-    except Exception as exc:
-        logger.info("object-store Gate-8 checksum failed: %s", exc)
-        return -1, ""
-    if n == 0:
-        return 0, ""
-    return n, digest
+    return _checksum_records(
+        records(),
+        columns=columns,
+        limit=limit,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+    )
 
 
 def precount_table(db_type: str, cfg: dict[str, Any], table_name: str) -> int | None:

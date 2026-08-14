@@ -3181,6 +3181,133 @@ def test_object_store_poison_jsonl_gate8_does_not_checksum_prefix(
     )
 
 
+def test_object_store_sample_gzip_csv_is_not_json_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dest sample of gzip CSV GET is RFC 4180 rows, not JSON-fallback ``[]``."""
+    from services.format_converter import convert_rows
+    from services.reconciliation import TargetSampleUnavailable, read_target_sample
+
+    csv_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    compressed = gzip.compress(csv_body)
+    _patch_object_store_payloads(monkeypatch, [("exports/data.csv.gz", compressed)])
+    rows = read_target_sample(
+        "s3",
+        {"database": "b"},
+        schema="",
+        table_name="exports/data.csv.gz",
+        columns=["id", "v"],
+        limit=50,
+    )
+    assert len(rows) == 3
+    assert {r["id"] for r in rows} == {"1", "2", "3"}
+    _patch_object_store_payloads(monkeypatch, [("exports/data.json", b"not-json{")])
+    with pytest.raises(TargetSampleUnavailable):
+        read_target_sample(
+            "s3",
+            {"database": "b"},
+            schema="",
+            table_name="exports/data.json",
+            limit=50,
+        )
+    _patch_object_store_payloads(monkeypatch, [("exports/data.json", b"[]")])
+    assert (
+        read_target_sample(
+            "s3",
+            {"database": "b"},
+            schema="",
+            table_name="exports/data.json",
+            limit=50,
+        )
+        == []
+    )
+
+
+def test_sftp_dest_count_and_gate8_gzip_csv_not_json_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SFTP dest COUNT and Gate-8 walk the GET stream. Missing file is 0."""
+    from services.format_converter import convert_rows
+    from services.reconciliation import TargetSampleUnavailable, read_target_sample
+    from services.reconcile_sftp import verify_sftp_object
+
+    csv_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    compressed = gzip.compress(csv_body)
+
+    def _open(_cfg: dict):
+        buf = _NoSlurpGet(compressed)
+        return buf, buf.close
+
+    monkeypatch.setattr("services.object_streaming.open_sftp_binary", _open)
+    cfg = {"host": "ftp.example", "database": "/exports"}
+    assert (
+        destination_row_count("sftp", cfg, schema="", table_name="data.csv.gz") == 3
+    )
+    n, digest = verify_sftp_object(
+        host="ftp.example",
+        table_name="data.csv.gz",
+        database="/exports",
+    )
+    assert n == 3
+    assert digest
+    rows = read_target_sample(
+        "sftp",
+        cfg,
+        schema="",
+        table_name="data.csv.gz",
+        columns=["id", "v"],
+        limit=50,
+    )
+    assert len(rows) == 3
+
+    monkeypatch.setattr("services.object_streaming.open_sftp_binary", lambda _c: False)
+    assert destination_row_count("sftp", cfg, schema="", table_name="missing.csv") == 0
+    assert verify_sftp_object(host="ftp.example", table_name="missing.csv") == (0, "")
+    assert (
+        read_target_sample("sftp", cfg, schema="", table_name="missing.csv", limit=10)
+        == []
+    )
+
+    def _open_garbage(_cfg: dict):
+        buf = io.BytesIO(b"not-json{")
+        return buf, buf.close
+
+    monkeypatch.setattr("services.object_streaming.open_sftp_binary", _open_garbage)
+    assert (
+        destination_row_count("sftp", cfg, schema="", table_name="bad.json") is None
+    )
+    assert verify_sftp_object(
+        host="ftp.example", table_name="bad.json", database="/exports"
+    ) == (-1, "")
+    with pytest.raises(TargetSampleUnavailable):
+        read_target_sample(
+            "sftp", cfg, schema="", table_name="bad.json", limit=10
+        )
+
+
+def test_minio_sku_uses_s3_artifact_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catalog SKU ``minio`` is dest-engine s3 COUNT, not a second parser."""
+    _patch_object_store_payloads(
+        monkeypatch, [("exports/data.json", b'[{"id":1},{"id":2}]')]
+    )
+    cfg = {"database": "b"}
+    assert destination_row_count("minio", cfg, schema="", table_name="exports/data.json") == 2
+    assert (
+        destination_row_count("s3_compatible", cfg, schema="", table_name="exports/data.json")
+        == 2
+    )
+
+
 def test_chunk_reader_csv_count_is_one_object_not_concatenated() -> None:
     """ADLS ``chunks()`` is a file-like COUNT source, not ``b''.join(chunks)``."""
     from services.csv_profiler import count_csv_rows

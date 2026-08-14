@@ -303,6 +303,77 @@ def open_object_store_binary(
     return None
 
 
+def open_sftp_binary(cfg: dict[str, Any]) -> tuple[Any, Any] | bool | None:
+    """Readable SFTP file + closer. ``False`` if missing, ``None`` if unknowable.
+
+    Does not ``fh.read()`` the remote file. Dest COUNT, Gate-8 checksum,
+    and dest sample walk this handle under the same host-key pin the
+    write trusted. Auth / host-key failure is unknowable, not dest=0.
+    """
+    from connectors.sftp_common import (
+        connect_sftp,
+        host_key_settings,
+        parse_sftp_config,
+    )
+
+    try:
+        parsed = parse_sftp_config(
+            connection_string=str(cfg.get("connection_string") or ""),
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 22),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            database=str(cfg.get("database") or ""),
+            table=str(cfg.get("table") or cfg.get("path") or ""),
+            **host_key_settings(cfg),
+        )
+        if not parsed.host or not parsed.path:
+            return None
+        transport, sftp = connect_sftp(parsed)
+    except Exception as exc:
+        _logger.info("SFTP GET stream failed to connect: %s", exc)
+        return None
+    try:
+        handle = sftp.file(parsed.path, "rb")
+    except Exception as exc:
+        try:
+            sftp.close()
+        except Exception:
+            pass
+        try:
+            transport.close()
+        except Exception:
+            pass
+        name = type(exc).__name__
+        msg = str(exc).lower()
+        if (
+            "NoSuchFile" in name
+            or "FileNotFound" in name
+            or "enoent" in msg
+            or "no such file" in msg
+            or "not found" in msg
+        ):
+            return False
+        _logger.info("SFTP GET stream failed for %s: %s", parsed.path, exc)
+        return None
+
+    def _close() -> None:
+        try:
+            handle.close()
+        except Exception:
+            pass
+        try:
+            sftp.close()
+        except Exception:
+            pass
+        try:
+            transport.close()
+        except Exception:
+            pass
+
+    return handle, _close
+
+
 def download_s3_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
     from connectors.aws_common import boto3_client
 

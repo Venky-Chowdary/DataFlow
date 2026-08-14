@@ -1671,50 +1671,6 @@ def verify_bigquery_table(
         return -1, ""
 
 
-def _rows_from_object_bytes(
-    body: bytes, key: str, columns: list[str] | None = None
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Parse S3/GCS object payload (JSON, JSONL, CSV) into dict rows and headers."""
-    import csv
-    import io
-
-    text = body.decode("utf-8", errors="replace")
-    lower_key = (key or "").lower()
-
-    if lower_key.endswith(".csv"):
-        reader = csv.DictReader(io.StringIO(text))
-        rows = list(reader)
-        headers = reader.fieldnames or []
-        return rows, headers
-
-    if lower_key.endswith(".jsonl"):
-        rows: list[dict[str, Any]] = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parsed = json.loads(line)
-            if isinstance(parsed, dict):
-                rows.append(parsed)
-            else:
-                rows.append({"value": parsed})
-        headers = sorted(set(k for r in rows for k in r.keys())) if rows else []
-        return rows, headers or (columns or [])
-
-    # Default: JSON array or single JSON object.
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = []
-    if isinstance(data, list):
-        rows = [r for r in data if isinstance(r, dict)]
-        headers = sorted(set(k for r in rows for k in r.keys())) if rows else []
-        return rows, headers or (columns or [])
-    if isinstance(data, dict):
-        return [data], sorted(data.keys())
-    return [], columns or []
-
-
 def verify_s3_object(
     *,
     bucket: str,
@@ -4509,53 +4465,6 @@ class TargetSampleUnavailable(RuntimeError):
     empty list is what made a missing SELECT grant report delete proof as
     passed while the rows were still live.
     """
-
-
-def _object_store_target_sample(
-    *,
-    table_name: str,
-    list_keys: Callable[[str], list[str]],
-    fetch_bytes: Callable[[str], bytes],
-    cols: list[str],
-    limit: int,
-    sort_key: str,
-    keys: Iterable[Any] | None,
-) -> list[dict[str, Any]]:
-    """Gate-8 sample read shared by S3, GCS and ADLS destinations.
-
-    Object stores have no WHERE clause, so the sample is assembled by reading
-    the part objects (or the single legacy object) and filtering in memory.
-    Reading every part matters: a multi-chunk write keeps most rows outside the
-    base key, and sampling only the base key would compare against a fraction
-    of the data while reporting a clean Gate-8.
-    """
-    from connectors.object_store_common import (
-        normalize_object_base_key,
-        object_parts_prefix,
-        object_store_read_keys,
-    )
-
-    base = normalize_object_base_key(table_name)
-    listed = list_keys(object_parts_prefix(base))
-    read_keys = object_store_read_keys(base, listed)
-    lim = max(1, int(limit or 50))
-    wanted = {str(k) for k in keys} if keys else set()
-    projection = None if cols == ["*"] else cols
-
-    rows: list[dict[str, Any]] = []
-    for obj_key in read_keys:
-        part_rows, _headers = _rows_from_object_bytes(
-            fetch_bytes(obj_key), obj_key, projection
-        )
-        if wanted and sort_key:
-            # Key-targeted sample: keep only the rows Gate-8 asked about, but
-            # keep scanning parts because a key can live in any part.
-            rows.extend(r for r in part_rows if str(r.get(sort_key)) in wanted)
-        else:
-            rows.extend(part_rows)
-        if len(rows) >= lim and not wanted:
-            break
-    return rows[:lim]
 
 
 def read_target_sample(
