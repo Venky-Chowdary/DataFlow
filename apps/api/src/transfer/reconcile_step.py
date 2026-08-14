@@ -512,6 +512,16 @@ def _maybe_attach_verification_ladder(
     )
     raw_before = dest_summary.get(PRECOUNT_KEY)
     dest_before = int(raw_before) if isinstance(raw_before, int) else None
+    from services.row_conservation import (
+        CENSUS_KEY,
+        KIND_KEYED,
+        KeyCensus,
+        conservation_kind,
+    )
+
+    kind = conservation_kind(sync_mode, dest_count_before=dest_before)
+    census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
+    keyed = kind == KIND_KEYED
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -529,6 +539,8 @@ def _maybe_attach_verification_ladder(
         allow_extra_rows=allow_extra,
         checksum_scope=str(report.get("checksum_scope") or ""),
         target_rows_before=dest_before,
+        keyed_cardinality=keyed,
+        keyed_expected_delta=census.expected_delta if keyed and census else None,
         # maximum: always run L4/L5. strict/balanced: localize only on L3 fail.
         always_localize=str(validation_mode or "").lower() == "maximum",
     )

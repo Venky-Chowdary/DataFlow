@@ -349,6 +349,194 @@ def test_l1_append_uses_dest_before_delta():
     assert short.passed is False
 
 
+def test_l1_keyed_uses_inserts_minus_deletes_not_reader_count():
+    """Upsert dest-Δ is inserts − deletes. Append dest-Δ is the reader batch.
+
+    3 updates + 1 insert into dest that already held 3 → COUNT(*) 4.
+    Append identity would demand dest_delta == 4 and fail a correct write.
+    """
+    from services.verification_ladder import layer_l1_row_balance
+
+    ok = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=4,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=1,
+    )
+    assert ok.passed is True
+    assert ok.details["equation"] == "target - target_rows_before == inserts - deletes"
+    assert ok.details["dest_delta"] == 1
+    assert ok.details["expected_rows"] == 1
+
+    tombstone = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=3,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=0,
+    )
+    assert tombstone.passed is True
+
+    short = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=3,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=1,
+    )
+    assert short.passed is False
+
+
+def test_l1_keyed_without_census_does_not_veto():
+    from services.verification_ladder import layer_l1_row_balance
+
+    skipped = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=4,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=None,
+    )
+    assert skipped.passed is True
+    assert skipped.details.get("skipped") is True
+    assert skipped.population_proof is False
+
+
+def test_attach_ladder_does_not_keep_verified_message_on_l1_fail():
+    from services.verification_ladder import attach_ladder_to_reconcile_report
+
+    report = {
+        "passed": True,
+        "message": "Row fidelity verified — source and target checksums match (4 rows)",
+        "phase": "post_write_verified",
+        "coverage": "full_checksum",
+        "assurance_level": "full_checksum",
+        "checksum_match": True,
+        "source_checksum": "aaa",
+        "target_checksum": "aaa",
+        "migration_proven": False,
+    }
+    ladder = {
+        "passed": False,
+        "skipped": False,
+        "assurance_level": "failed",
+        "population_checksum_proof": False,
+        "layers": {
+            "L1": {
+                "passed": False,
+                "details": {
+                    "equation": "target - target_rows_before == inserts - deletes"
+                },
+            },
+            "L3": {"passed": True},
+        },
+        "localization_summary": "",
+    }
+    out = attach_ladder_to_reconcile_report(report, ladder)
+    assert out["passed"] is False
+    assert "verified" not in str(out.get("message") or "").lower()
+    assert "L1 cardinality failed" in str(out.get("message") or "")
+
+
+def test_l1_keyed_uses_inserts_minus_deletes_not_reader_count():
+    """Upsert dest-Δ is inserts − deletes. Append dest-Δ is the reader batch.
+
+    3 updates + 1 insert into dest that already held 3 → COUNT(*) 4.
+    Append identity would demand dest_delta == 4 and fail a correct write.
+    """
+    from services.verification_ladder import layer_l1_row_balance
+
+    ok = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=4,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=1,
+    )
+    assert ok.passed is True
+    assert ok.details["equation"] == "target - target_rows_before == inserts - deletes"
+    assert ok.details["dest_delta"] == 1
+    assert ok.details["expected_rows"] == 1
+
+    tombstone = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=3,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=0,
+    )
+    assert tombstone.passed is True
+
+    short = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=3,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=1,
+    )
+    assert short.passed is False
+
+
+def test_l1_keyed_without_census_does_not_veto():
+    from services.verification_ladder import layer_l1_row_balance
+
+    skipped = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=4,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=None,
+    )
+    assert skipped.passed is True
+    assert skipped.details.get("skipped") is True
+    assert skipped.population_proof is False
+
+
+def test_attach_ladder_does_not_keep_verified_message_on_l1_fail():
+    from services.verification_ladder import attach_ladder_to_reconcile_report
+
+    report = {
+        "passed": True,
+        "message": "Row fidelity verified — source and target checksums match (4 rows)",
+        "phase": "post_write_verified",
+        "coverage": "full_checksum",
+        "assurance_level": "full_checksum",
+        "checksum_match": True,
+        "source_checksum": "aaa",
+        "target_checksum": "aaa",
+        "migration_proven": False,
+    }
+    ladder = {
+        "passed": False,
+        "skipped": False,
+        "assurance_level": "failed",
+        "population_checksum_proof": False,
+        "layers": {
+            "L1": {
+                "passed": False,
+                "details": {
+                    "equation": "target - target_rows_before == inserts - deletes"
+                },
+            },
+            "L3": {"passed": True},
+        },
+        "localization_summary": "",
+    }
+    out = attach_ladder_to_reconcile_report(report, ladder)
+    assert out["passed"] is False
+    assert "verified" not in str(out.get("message") or "").lower()
+    assert "L1 cardinality failed" in str(out.get("message") or "")
+
+
 def test_ladder_does_not_fail_incomparable_append_hashes():
     """Whole-table hashes after Full Append are not L3 cell proof."""
     from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE

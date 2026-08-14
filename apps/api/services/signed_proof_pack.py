@@ -86,7 +86,16 @@ def _append_delta_scope(recon: dict[str, Any]) -> bool:
 
 def _ladder_fail_veto(ladder: dict[str, Any]) -> FidelityVeto:
     loc = str(ladder.get("localization_summary") or "").strip()
-    note = "Column-profile / verification ladder failed — migration not proven."
+    layers = ladder.get("layers") if isinstance(ladder.get("layers"), dict) else {}
+    l1 = layers.get("L1") if isinstance(layers.get("L1"), dict) else {}
+    if l1.get("passed") is False:
+        eq = str((l1.get("details") or {}).get("equation") or "L1 row balance")
+        note = (
+            f"L1 cardinality failed ({eq}). Matching cell checksums are not "
+            "dest COUNT(*) proof."
+        )
+    else:
+        note = "Column-profile / verification ladder failed — migration not proven."
     if loc:
         note = f"{note} {loc}"
     return FidelityVeto(
@@ -167,10 +176,20 @@ def apply_fidelity_veto(report: dict[str, Any]) -> dict[str, Any]:
         loc = ""
         ladder = out.get("verification_ladder") if isinstance(out.get("verification_ladder"), dict) else {}
         loc = str(ladder.get("localization_summary") or "").strip()
-        if loc:
-            base = str(out.get("message") or "").rstrip()
-            if loc not in base:
-                out["message"] = f"{base} — {loc}" if base else loc
+        base = str(out.get("message") or "").rstrip()
+        lowered = base.lower()
+        claims_verified = (
+            "row fidelity verified" in lowered
+            or "checksums match" in lowered
+            or "transfer verified" in lowered
+        )
+        if claims_verified or not base:
+            # Never leave a success sentence as the job error. That is the
+            # operator lie: checksums matched, L1 used the wrong identity,
+            # Failed still said "Row fidelity verified".
+            out["message"] = veto.note
+        elif loc and loc not in base:
+            out["message"] = f"{base} — {loc}"
     return out
 
 

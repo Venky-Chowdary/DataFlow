@@ -2,7 +2,8 @@
 
 Layers
 ------
-L1  Row-count balance (source − rejected − skipped == target)
+L1  Row-count balance — overwrite ``reader == dest``; append dest-Δ;
+    keyed upsert/CDC ``dest_delta == inserts - deletes``
 L2  Per-column aggregates (null count / min / max / sum)
 L3  Full-population order-independent checksum (Gate-8 core)
 L4  Typed per-column digests — localize mismatch to COLUMN
@@ -98,40 +99,75 @@ def layer_l1_row_balance(
     rows_skipped: int = 0,
     allow_extra_rows: bool = False,
     target_rows_before: int | None = None,
+    keyed_cardinality: bool = False,
+    keyed_expected_delta: int | None = None,
 ) -> LayerReport:
-    """L1 — accounting identity used by Gate-8 reconcile().
+    """L1 — the same three cardinality identities ``row_conservation`` closes.
 
     Overwrite: ``source - dropped - skipped == dest COUNT(*)``.
-    Append/upsert into a larger sink: dest-before delta is the identity
-    (``dest - dest_before == expected``). ``dest >= expected`` alone is not
-    proof — the table may already have held more rows than the batch.
+    Append: ``dest - dest_before == expected`` (Full Append dest-Δ —
+    ``dest >= expected`` is not proof; the table may already have held more).
+    Keyed upsert/CDC: ``dest - dest_before == inserts - deletes``. Updates
+    do not change COUNT(*). Applying the append identity to a snapshot
+    upsert fails a correct write (3 updates + 1 insert → dest Δ 1 vs
+    reader 4) while Gate-8 cells match — the operator sees Failed with
+    "Row fidelity verified". Without a dest-engine key census, keyed L1
+    is unmeasured: it must not veto matching L3 cells, and it must not
+    claim population proof.
     """
     dropped = max(max(int(rejected_rows or 0), 0) - max(int(coerced_null_rows or 0), 0), 0)
     skipped = max(int(rows_skipped or 0), 0)
-    expected = max(int(source_rows) - dropped - skipped, 0)
+    batch_expected = max(int(source_rows) - dropped - skipped, 0)
     target = int(target_rows)
+    details: dict[str, Any] = {
+        "source_rows": int(source_rows),
+        "target_rows": target,
+        "rejected_rows": int(rejected_rows or 0),
+        "coerced_null_rows": int(coerced_null_rows or 0),
+        "rows_skipped": skipped,
+        "dropped_rows": dropped,
+        "expected_rows": batch_expected,
+        "target_rows_before": target_rows_before,
+        "keyed_expected_delta": keyed_expected_delta,
+    }
+    if keyed_cardinality:
+        details["equation"] = "target - target_rows_before == inserts - deletes"
+        if keyed_expected_delta is None or target_rows_before is None:
+            details["skipped"] = True
+            details["reason"] = (
+                "keyed_census_unmeasured"
+                if keyed_expected_delta is None
+                else "dest_before_unmeasured"
+            )
+            return LayerReport(
+                layer="L1",
+                passed=True,
+                population_proof=False,
+                details=details,
+            )
+        delta = target - int(target_rows_before)
+        details["dest_delta"] = delta
+        details["expected_rows"] = int(keyed_expected_delta)
+        return LayerReport(
+            layer="L1",
+            passed=delta == int(keyed_expected_delta),
+            population_proof=False,
+            details=details,
+        )
     equation = "source - dropped - skipped == target"
     if allow_extra_rows and target_rows_before is not None:
         delta = target - int(target_rows_before)
-        ok = delta == expected
+        ok = delta == batch_expected
         equation = "target - target_rows_before == expected"
+        details["dest_delta"] = delta
     else:
-        ok = target == expected or (allow_extra_rows and target >= expected)
+        ok = target == batch_expected or (allow_extra_rows and target >= batch_expected)
+    details["equation"] = equation
     return LayerReport(
         layer="L1",
         passed=ok,
         population_proof=not allow_extra_rows,
-        details={
-            "source_rows": int(source_rows),
-            "target_rows": target,
-            "rejected_rows": int(rejected_rows or 0),
-            "coerced_null_rows": int(coerced_null_rows or 0),
-            "rows_skipped": skipped,
-            "dropped_rows": dropped,
-            "expected_rows": expected,
-            "target_rows_before": target_rows_before,
-            "equation": equation,
-        },
+        details=details,
     )
 
 
@@ -582,6 +618,8 @@ def run_five_layer_verification(
     always_localize: bool = False,
     checksum_scope: str = "",
     target_rows_before: int | None = None,
+    keyed_cardinality: bool = False,
+    keyed_expected_delta: int | None = None,
 ) -> dict[str, Any]:
     """Execute L1–L5 on two in-memory populations (SQL-loaded or buffered).
 
@@ -620,6 +658,8 @@ def run_five_layer_verification(
         rows_skipped=rows_skipped,
         allow_extra_rows=allow_extra_rows,
         target_rows_before=target_rows_before,
+        keyed_cardinality=keyed_cardinality,
+        keyed_expected_delta=keyed_expected_delta,
     )
 
     src_agg = compute_column_aggregates(source_rows, cols)
@@ -712,13 +752,17 @@ def run_five_layer_verification(
             details={"skipped": True, "reason": "pk_column_required"},
         ).to_dict()
 
-    # Required for green: L1 + L3. L2 is advisory when numeric coercion differs
-    # in text form but fingerprints match — still reported.
+    # Required for green: L1 + L3. Keyed L1 without a dest-engine census is
+    # unmeasured (passed, skipped) — it must not veto L3, and it must not
+    # mint population_checksum_proof.
+    l1_skipped = bool((l1.details or {}).get("skipped"))
     passed = bool(l1.passed and l3.passed)
     expected = int((l1.details or {}).get("expected_rows") or 0)
     extra_dest = bool(allow_extra_rows and tgt_n > expected)
     l3_skipped = bool((l3.details or {}).get("skipped"))
-    if incomparable and passed:
+    if l1_skipped:
+        assurance = "full_checksum" if l3.passed else "failed"
+    elif incomparable and passed:
         assurance = "row_count"
     else:
         assurance = "five_layer" if passed and "L4" in layers and layers["L4"].get("passed") else (
@@ -743,7 +787,12 @@ def run_five_layer_verification(
         # Population RI (FK/constraints) is still not claimed — only typed fidelity.
         "population_proof": False,
         "population_checksum_proof": bool(
-            l3.passed and l1.passed and not incomparable and not extra_dest and not l3_skipped
+            l3.passed
+            and l1.passed
+            and not incomparable
+            and not extra_dest
+            and not l3_skipped
+            and not l1_skipped
         ),
         "localization": localization,
         "localization_summary": summary,
