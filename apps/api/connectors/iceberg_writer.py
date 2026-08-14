@@ -2649,32 +2649,45 @@ def _delete_pyiceberg(
     catalog = load_catalog(endpoint)
     identifier = config["namespace"] + (config["table_name"],)
     tbl = catalog.load_table(identifier)
-    scanned = tbl.scan().to_arrow()
-    rows: list[dict[str, Any]] = []
-    for i in range(scanned.num_rows):
-        rows.append(
-            {name: scanned.column(name)[i].as_py() for name in scanned.column_names}
+    work_keys = {str(k) for k in key_set}
+    if incoming_lsn:
+        # CDC LSN guard needs pk + lsn only — leftover overwrite MERGE has no LSN
+        # and must not materialize scan().to_arrow() of the table.
+        scanned = tbl.scan().select(primary_key_column, lsn_column).to_arrow()
+        rows: list[dict[str, Any]] = []
+        for i in range(scanned.num_rows):
+            rows.append(
+                {
+                    name: scanned.column(name)[i].as_py()
+                    for name in scanned.column_names
+                }
+            )
+        work_keys = _filter_delete_keys_by_lsn(
+            rows,
+            primary_key_column,
+            work_keys,
+            incoming_lsn=incoming_lsn,
+            lsn_column=lsn_column,
         )
-    work_keys = _filter_delete_keys_by_lsn(
-        rows,
-        primary_key_column,
-        key_set,
-        incoming_lsn=incoming_lsn,
-        lsn_column=lsn_column,
-    )
+        work_keys = {
+            str(r.get(primary_key_column))
+            for r in rows
+            if str(r.get(primary_key_column)) in work_keys
+        }
     if not work_keys:
         return 0
-    kept = [r for r in rows if str(r.get(primary_key_column)) not in work_keys]
-    deleted = len(rows) - len(kept)
-    if deleted == 0:
-        return 0
-    if pa is None:
-        raise RuntimeError("pyarrow required for Iceberg CDC deletes")
-    arrays = []
-    for name in scanned.column_names:
-        field = scanned.schema.field(name)
-        cells = [r.get(name) for r in kept]
-        arrays.append(pa.array(cells, type=field.type))
-    remaining = pa.Table.from_arrays(arrays, schema=scanned.schema)
-    tbl.overwrite(remaining)
-    return deleted
+    try:
+        from pyiceberg.expressions import In
+        from pyiceberg.types import IntegerType, LongType, StringType
+
+        field = tbl.schema().find_field(primary_key_column, case_sensitive=False)
+        ftype = getattr(field, "field_type", None)
+        if isinstance(ftype, (IntegerType, LongType)):
+            literals: list[Any] = [int(str(k)) for k in work_keys]
+        else:
+            literals = [str(k) for k in work_keys]
+        tbl.delete(delete_filter=In(primary_key_column, literals))
+    except Exception:
+        quoted = ", ".join("'" + str(k).replace("'", "''") + "'" for k in work_keys)
+        tbl.delete(delete_filter=f"{primary_key_column} IN ({quoted})")
+    return len(work_keys)

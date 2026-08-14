@@ -4984,6 +4984,51 @@ def test_iceberg_sql_catalog_count_is_file_footer_not_scan_count(
     )
 
 
+def test_iceberg_sql_catalog_key_list_does_not_to_arrow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Leftover MERGE key census projects PK columns from snapshot files.
+
+    Dest COUNT already footers those files. scan().to_arrow() of the table
+    is not dest-engine listing — it would hide the same honesty hole COUNT closed.
+    """
+    warehouse, uri = _iceberg_sql_catalog(tmp_path)
+    from connectors.iceberg_writer import write_mapped_rows
+    from pyiceberg.table import DataScan
+    from services.dest_precount import destination_key_list
+
+    cfg = _iceberg_sql_cfg(warehouse, uri)
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+    ]
+    written = write_mapped_rows(
+        connection_string=uri,
+        warehouse=warehouse,
+        table_name="default.orders",
+        headers=["id", "v"],
+        data_rows=[["1", "a"], ["2", "b"]],
+        mappings=mappings,
+        write_mode="append",
+        create_table=True,
+    )
+    assert written.ok, written.error
+
+    def _no_count(self):
+        raise AssertionError("Iceberg dest key list must not scan().count()")
+
+    def _no_arrow(self):
+        raise AssertionError("Iceberg dest key list must not to_arrow the table")
+
+    monkeypatch.setattr(DataScan, "count", _no_count)
+    monkeypatch.setattr(DataScan, "to_arrow", _no_arrow)
+    listed = destination_key_list(
+        "iceberg", cfg, schema="default", table_name="orders", key_columns=["id"]
+    )
+    assert listed is not None
+    assert {str(t[0]) for t in listed} == {"1", "2"}
+
+
 def test_parse_object_store_uri_iceberg_schemes() -> None:
     """Iceberg file_path schemes alias onto the dest-engine GET families."""
     from services.object_streaming import parse_object_store_uri
@@ -5221,13 +5266,16 @@ def test_iceberg_catalog_object_store_count_is_range_footer_not_scan(
 
 def test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """SqlCatalog leftover MERGE: dest {1,2,3,99} vs S {1,2,3} → delete 99.
 
-    Dest COUNT is dest-engine file footers, never pyiceberg scan().count()
-    metadata. Incremental remains a hard no-op.
+    Dest COUNT is dest-engine file footers. Key list projects PK columns
+    from those files. Never pyiceberg scan().count() / to_arrow().
+    Incremental remains a hard no-op.
     """
     from connectors.iceberg_writer import write_mapped_rows
+    from pyiceberg.table import DataScan
     from services.dest_precount import _iceberg_snapshot_rows, destination_keyset_census
 
     warehouse, uri = _iceberg_sql_catalog(tmp_path)
@@ -5247,6 +5295,15 @@ def test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_
         create_table=True,
     )
     assert written.ok, written.error
+
+    def _no_count(self):
+        raise AssertionError("Iceberg leftover MERGE must not scan().count()")
+
+    def _no_arrow(self):
+        raise AssertionError("Iceberg leftover MERGE must not to_arrow the table")
+
+    monkeypatch.setattr(DataScan, "count", _no_count)
+    monkeypatch.setattr(DataScan, "to_arrow", _no_arrow)
     snapshot = _iceberg_snapshot_rows(
         cfg, schema="default", table_name="orders", cols=("id",)
     )

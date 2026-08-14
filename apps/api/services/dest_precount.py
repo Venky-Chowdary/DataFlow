@@ -128,8 +128,9 @@ population of current-snapshot data files (Parquet footer / JSONL
 stream), never metadata ``record-count`` / ``scan().count()`` /
 ``len(to_pylist())``. Catalog ``s3://`` / ``gs://`` / ``abfss://``
 data files Range-GET the footer through the object-store kernel;
-a snapshot file that 404s is unmeasured, not dest=0. Key list and leftover MERGE still read snapshot
-rows. ``row_conservation.apply_inferred_leftover_deletes``
+a snapshot file that 404s is unmeasured, not dest=0. Key list and leftover
+MERGE project PK columns from those same snapshot files — never
+``scan().to_arrow()`` of the table. ``row_conservation.apply_inferred_leftover_deletes``
 applies the anti-join only when the source census is complete overwrite
 (SQL and Iceberg CoW). Incremental CDC must not call that apply. Mirror
 already applies inferred soft-deletes on full re-sync. Iceberg MoR /
@@ -1443,7 +1444,8 @@ def _iceberg_row_count(
     is unmeasured, not dest=0. MoR / deletion vectors stay unmeasured — equality
     deletes and overlapping position deletes make ``data − deletes`` a
     lie (Iceberg #14864). Missing table is 0. Unreadable snapshot is
-    ``None``. Key list / leftover MERGE still materialize snapshot rows.
+    ``None``. Key list / leftover MERGE project PK columns from the same
+    snapshot files as COUNT. Never ``scan().to_arrow()``.
     """
     from connectors.iceberg_writer import resolve_iceberg_write_path
 
@@ -1486,8 +1488,6 @@ def _iceberg_data_warehouse(endpoint: dict[str, Any], parsed: dict[str, Any]) ->
 
 
 def _count_iceberg_data_file(path: Path) -> int | None:
-    """Dest-engine population of one snapshot data file. Never manifest record-count."""
-    return count_artifact_rows(path)
     """Dest-engine population of one snapshot data file. Never manifest record-count."""
     return count_artifact_rows(path)
 
@@ -1682,11 +1682,11 @@ def _iceberg_filesystem_file_count(
     return total
 
 
-def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
-    """Sql/REST catalog COUNT via live data-file footers. Never ``scan().count()``.
+def _iceberg_catalog_data_paths(endpoint: dict[str, Any]) -> list[str] | None:
+    """Current snapshot data-file URIs. ``None`` is unmeasured; ``[]`` is empty.
 
-    Local ``file:`` URIs footer from disk. ``s3://`` / ``gs://`` / ``abfss://``
-    use the object-store Range kernel. Missing remote files are unmeasured.
+    Same listing dest COUNT uses. MoR delete files → None. Missing table → [].
+    Never ``scan().to_arrow()`` / ``scan().count()``.
     """
     from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
 
@@ -1697,7 +1697,7 @@ def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
         tbl = catalog.load_table(identifier)
     except Exception as exc:
         if _iceberg_missing_table(exc):
-            return 0
+            return []
         raise
     try:
         inspect = tbl.inspect
@@ -1711,19 +1711,198 @@ def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
         return None
     n_files = int(getattr(data_files, "num_rows", 0) or 0)
     if n_files == 0:
-        return 0
+        return []
     try:
-        paths = [str(p) for p in data_files.column("file_path").to_pylist()]
+        return [str(p) for p in data_files.column("file_path").to_pylist()]
     except Exception as exc:
         logger.info("iceberg catalog file_path listing failed: %s", exc)
         return None
+
+
+def _parquet_column_names(pf: Any) -> set[str]:
+    schema = getattr(pf, "schema_arrow", None) or getattr(pf, "schema", None)
+    names = getattr(schema, "names", None) or ()
+    return {str(n) for n in names}
+
+
+def _project_parquet_columns(source: Any, cols: Sequence[str]) -> list[dict[str, Any]] | None:
+    """PK (or requested) columns of one Parquet image. Never the full table scan."""
+    try:
+        import pyarrow.parquet as pq
+    except ImportError:
+        return None
+    wanted = [str(c) for c in cols if str(c).strip()]
+    if not wanted:
+        return []
+    try:
+        pf = pq.ParquetFile(_seek_start(source))
+        available = [c for c in wanted if c in _parquet_column_names(pf)]
+        if not available:
+            return None
+        table = pf.read(columns=available)
+    except UnmeasuredArtifact:
+        return None
+    except Exception as exc:
+        logger.info("iceberg parquet PK projection failed: %s", exc)
+        return None
+    out: list[dict[str, Any]] = []
+    for rec in table.to_pylist():
+        if not isinstance(rec, dict):
+            return None
+        out.append({c: rec.get(c) for c in wanted})
+    return out
+
+
+def _project_orc_columns(source: Any, cols: Sequence[str]) -> list[dict[str, Any]] | None:
+    try:
+        from pyarrow import orc
+    except ImportError:
+        return None
+    wanted = [str(c) for c in cols if str(c).strip()]
+    if not wanted:
+        return []
+    try:
+        reader = orc.ORCFile(_seek_start(source))
+        names = set(str(n) for n in (getattr(reader.schema, "names", None) or ()))
+        available = [c for c in wanted if c in names]
+        if not available:
+            return None
+        table = reader.read(columns=available)
+    except UnmeasuredArtifact:
+        return None
+    except Exception as exc:
+        logger.info("iceberg ORC PK projection failed: %s", exc)
+        return None
+    out: list[dict[str, Any]] = []
+    for rec in table.to_pylist():
+        if not isinstance(rec, dict):
+            return None
+        out.append({c: rec.get(c) for c in wanted})
+    return out
+
+
+def _project_iceberg_handle(
+    source: Any, *, name: str, cols: Sequence[str]
+) -> list[dict[str, Any]] | None:
+    """Project requested columns from one snapshot data file. None if unreadable."""
+    wanted = [str(c) for c in cols if str(c).strip()]
+    kind, handle, gz_close = _artifact_stream_open(source, name=name)
+    try:
+        if kind in {"parquet", "orc"}:
+            image, spool_close = (
+                rewindable_byte_source(handle) if gz_close is not None else (handle, None)
+            )
+            try:
+                if kind == "parquet":
+                    return _project_parquet_columns(image, wanted)
+                return _project_orc_columns(image, wanted)
+            finally:
+                if spool_close is not None:
+                    try:
+                        spool_close()
+                    except Exception:
+                        pass
+        if kind in {"jsonl", "json"}:
+            out: list[dict[str, Any]] = []
+            for rec in _iter_streaming_kind(kind, handle, name=name):
+                if not isinstance(rec, dict):
+                    return None
+                out.append({c: rec.get(c) for c in wanted})
+            return out
+        logger.info("iceberg snapshot file format unprojected for keys: %s", name)
+        return None
+    except UnmeasuredArtifact as exc:
+        logger.info("iceberg snapshot PK projection unmeasured (%s): %s", name, exc)
+        return None
+    except Exception as exc:
+        logger.info("iceberg snapshot PK projection failed (%s): %s", name, exc)
+        return None
+    finally:
+        if gz_close is not None:
+            try:
+                gz_close()
+            except Exception:
+                pass
+
+
+def _iceberg_project_data_uri(
+    uri: str, *, endpoint: dict[str, Any], warehouse: str, cols: Sequence[str]
+) -> list[dict[str, Any]] | None:
+    """PK columns of one catalog data-file URI. Missing remote is unmeasured."""
+    from services.object_streaming import (
+        open_object_store_binary,
+        open_object_store_seekable,
+        parse_object_store_uri,
+    )
+
+    raw = str(uri or "").strip()
+    local = _iceberg_local_path(raw, warehouse=warehouse)
+    resolved = _resolve_iceberg_data_uri(raw, warehouse)
+    if local is None and resolved != raw:
+        local = _iceberg_local_path(resolved, warehouse=warehouse)
+    if local is not None:
+        handle, closer = open_artifact_binary(local)
+        try:
+            return _project_iceberg_handle(handle, name=local.name, cols=cols)
+        finally:
+            if closer is not None:
+                try:
+                    closer()
+                except Exception:
+                    pass
+    loc = parse_object_store_uri(resolved)
+    if loc is None:
+        logger.info("iceberg catalog data-file not a local path or object URI: %s", uri)
+        return None
+    store_cfg = _iceberg_object_store_cfg(endpoint, loc)
+    footer_kind = _object_store_footer_kind(loc.key)
+    opened: Any
+    if footer_kind is not None:
+        opened = open_object_store_seekable(loc.kind, store_cfg, loc.bucket, loc.key)
+        if opened is False:
+            return None
+        if opened is not None:
+            stream, closer = opened
+            try:
+                return _project_iceberg_handle(stream, name=loc.key, cols=cols)
+            finally:
+                if closer is not None:
+                    try:
+                        closer()
+                    except Exception:
+                        pass
+    opened = open_object_store_binary(loc.kind, store_cfg, loc.bucket, loc.key)
+    if opened is False or opened is None:
+        return None
+    stream, closer = opened
+    try:
+        return _project_iceberg_handle(stream, name=loc.key, cols=cols)
+    finally:
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+
+
+def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
+    """Sql/REST catalog COUNT via live data-file footers. Never ``scan().count()``.
+
+    Local ``file:`` URIs footer from disk. ``s3://`` / ``gs://`` / ``abfss://``
+    use the object-store Range kernel. Missing remote files are unmeasured.
+    """
+    from connectors.iceberg_catalog import parse_iceberg_catalog_config
+
+    paths = _iceberg_catalog_data_paths(endpoint)
+    if paths is None:
+        return None
+    if not paths:
+        return 0
+    parsed = parse_iceberg_catalog_config(endpoint)
+    warehouse = _iceberg_data_warehouse(endpoint, parsed)
     total = 0
     for uri in paths:
-        n = _count_iceberg_data_uri(
-            uri,
-            endpoint=endpoint,
-            warehouse=_iceberg_data_warehouse(endpoint, parsed),
-        )
+        n = _count_iceberg_data_uri(uri, endpoint=endpoint, warehouse=warehouse)
         if n is None:
             return None
         total += n
@@ -1733,39 +1912,45 @@ def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
 def _iceberg_snapshot_rows(
     cfg: dict[str, Any], *, schema: str, table_name: str, cols: Sequence[str]
 ) -> list[dict[str, Any]] | None:
-    """Current snapshot rows. Key list and leftover MERGE share this.
+    """Current snapshot PK (or requested) columns. Key list and leftover MERGE.
 
-    Dest COUNT does not use this materialization — it footers live data
-    files. Catalog path materializes ``scan().to_arrow()`` for keys only.
-    Metadata ``record-count`` and ``scan().count()`` are never dest
-    population. Missing table is ``[]``.
+    Same data-file population as dest COUNT. Catalog path projects columns
+    from live files — never ``scan().to_arrow()``. MoR delete files and a
+    missing snapshot file are unmeasured (``None``), not dest=0. Missing
+    table is ``[]``. Metadata ``record-count`` is never dest population.
     """
     from connectors.iceberg_writer import resolve_iceberg_write_path
 
+    wanted = [str(c) for c in cols if str(c).strip()]
     endpoint = _iceberg_endpoint(cfg, table_name, schema)
     try:
         path = resolve_iceberg_write_path(endpoint)
     except RuntimeError:
         return None
     if path == "catalog":
-        from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+        from connectors.iceberg_catalog import parse_iceberg_catalog_config
 
+        uris = _iceberg_catalog_data_paths(endpoint)
+        if uris is None:
+            return None
+        if not uris:
+            return []
         parsed = parse_iceberg_catalog_config(endpoint)
-        catalog = load_catalog(endpoint)
-        identifier = parsed["namespace"] + (parsed["table_name"],)
-        try:
-            tbl = catalog.load_table(identifier)
-        except Exception as exc:
-            if _iceberg_missing_table(exc):
-                return []
-            raise
-        wanted = [str(c) for c in cols if str(c).strip()]
-        scan = tbl.scan().select(*wanted) if wanted else tbl.scan()
-        return list(scan.to_arrow().to_pylist())
+        warehouse = _iceberg_data_warehouse(endpoint, parsed)
+        rows: list[dict[str, Any]] = []
+        for uri in uris:
+            part = _iceberg_project_data_uri(
+                uri, endpoint=endpoint, warehouse=warehouse, cols=wanted
+            )
+            if part is None:
+                return None
+            rows.extend(part)
+        return rows
     from connectors.iceberg_writer import (
-        _load_existing_rows,
         _load_metadata,
         _resolve_iceberg_table_dir,
+        snapshot_data_files,
+        snapshot_has_delete_files,
     )
 
     table_dir = _resolve_iceberg_table_dir(cfg, table_name, schema or None)
@@ -1778,10 +1963,29 @@ def _iceberg_snapshot_rows(
     current_meta = _load_metadata(versions[-1])
     if not current_meta:
         return []
-    schema_json = (current_meta.get("schemas") or [{}])[-1] or current_meta.get("schema") or {}
-    columns = [str(f.get("name")) for f in (schema_json.get("fields") or []) if f.get("name")]
-    load_cols = list(dict.fromkeys([*columns, *[str(c) for c in cols if str(c).strip()]]))
-    return _load_existing_rows(table_dir, load_cols or list(cols), current_meta)
+    if snapshot_has_delete_files(current_meta):
+        logger.info("iceberg MoR delete files present; dest key list unmeasured")
+        return None
+    try:
+        files = snapshot_data_files(table_dir, current_meta)
+    except ValueError as exc:
+        logger.info("iceberg snapshot data files unreadable: %s", exc)
+        return None
+    rows = []
+    for _rel, file_path in files:
+        handle, closer = open_artifact_binary(file_path)
+        try:
+            part = _project_iceberg_handle(handle, name=file_path.name, cols=wanted)
+        finally:
+            if closer is not None:
+                try:
+                    closer()
+                except Exception:
+                    pass
+        if part is None:
+            return None
+        rows.extend(part)
+    return rows
 
 
 def _norm_dest_key(values: Sequence[Any]) -> tuple[str, ...] | None:
@@ -1804,8 +2008,9 @@ def _iceberg_key_list(
     """Current-snapshot PK tuples. Never metadata ``record-count``. Never deletes.
 
     Same population as dest COUNT(*) (``len`` of this listing). Catalog
-    ``scan().count()`` / metadata ``record-count`` never close. Missing
-    table is ``[]``. Incomplete / unreadable snapshot is ``None``.
+    ``scan().count()`` / ``scan().to_arrow()`` / metadata ``record-count``
+    never close. Missing table is ``[]``. Incomplete / unreadable snapshot
+    is ``None``.
     """
     rows = _iceberg_snapshot_rows(cfg, schema=schema, table_name=table_name, cols=cols)
     if rows is None:
