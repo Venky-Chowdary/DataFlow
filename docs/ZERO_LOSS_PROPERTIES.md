@@ -14,7 +14,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py tests/test_unicode_form_carry.py tests/test_property8_unicode_form.py -q` (137 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16 + unicode-form 21; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal unscaled integer; unicode form: PG TEXT / MariaDB `general_ci`/`bin` UNIQUE BOTH_LAND for NFC vs NFD; MariaDB `unicode_ci` SECOND_REJECT; dest HEX `C3A9` vs `CC81`; bind does not NFC | UCA 0900 vs 1400 live MySQL 8; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
-| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_dialect_profiles.py tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py tests/test_stream_append_precount.py tests/test_execute_tracked_sqlite_to_csv_to_sqlite_roundtrip.py tests/test_milvus_writer.py tests/test_qdrant_writer.py tests/test_pinecone_writer.py tests/test_weaviate_writer.py tests/test_enterprise_hardening.py::test_strict_g8_writer_ack_for_dest_only tests/test_enterprise_hardening.py::test_strict_g8_qdrant_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_pinecone_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_weaviate_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_refuses_conservation_when_source_count_unmeasured tests/test_json_tabular.py tests/test_property5_five_layer_verification.py tests/test_adls_databricks_gate8_verify.py tests/test_sftp_gate8_wave39.py tests/test_sftp_host_key_propagation.py tests/test_gate8_sample_unavailable_wave100.py tests/test_excel_phantom_rows.py -q` (337 passed, 9 skipped in 40.22s on this host: 2 moto/object-store emulator absent, 3 Qdrant localhost:6333 unreachable, SQL Server :1433 leftover+SCD2 down, Oracle :1521 leftover+SCD2 down). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (29 passed); `npm run build` tsc+vite clean | Overwrite: dest COUNT(*). Complete PK census splits MISSING_TARGET vs EXTRA_TARGET. Complete overwrite snapshot MERGE-deletes dest keys not in S (`leftover = D \\ S`) before Gate-8 COUNT — SQL (sqlite/pg/mysql plus Oracle/SQL Server dest-engine `COUNT(*)`, never partition stats) plus Snowflake/BigQuery/DuckDB/Databricks/Redshift dest-engine `COUNT(*)` (never `INFORMATION_SCHEMA` / `__TABLES__` / `SVV_TABLE_INFO.tbl_rows` / `to_regclass`) plus ClickHouse `COUNT(*) FROM table FINAL` (never `system.tables.total_rows`; leftover MERGE unapplied — mutations async) and Iceberg filesystem CoW plus pyiceberg SqlCatalog (`len` of snapshot rows, never `scan().count()`); incremental CDC is a hard no-op. Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**. Dest-before before first write. Mirror: `COUNT(*) WHERE NOT _deleted`. Job closed iff every stream closed. File/object export: independent artifact record COUNT (CSV/JSON/JSONL/Parquet plus Excel value-bearing rows, streamed Avro, ORC footer `nrows`, XML unique record-path — never openpyxl used-range, never `parse_xml` ingest cap, never writer bytes). S3/GCS/ADLS GET uses that same machine — never JSON-fallback empty. Gate-8 cell checksum of those GET streams is `checksum_object_store` (CSV RFC 4180 / JSONL objects / JSON root array / streamed Avro OCF records / Parquet+ORC values / Excel value-bearing rows, never used-range / XML unique-path cell dicts and JSON unique-path cell dicts (root array or wrapped), second StAX pass, one-shot GET spooled). Vector/RAG: `COUNT(DISTINCT source_id)` (pgvector SQL, Milvus entity query, Qdrant point scroll, Pinecone list+fetch, Weaviate object listing) — never chunk COUNT(*) / collection rowCount / vectorCount / Aggregate meta.count / writer ack. SCD2: `COUNT(*) WHERE is_current` (sqlite/pg/mysql plus Oracle/SQL Server BIT/`NUMBER(1)` `= 1`, never `IS TRUE`; Snowflake/BQ/DuckDB/Databricks/Redshift BOOLEAN `IS TRUE`). Writer ack never closes. | Inferred deletes on incremental upsert/CDC without tombstone; stream-path this-run `soft_deleted` census; Oracle/SQL Server live leftover and SCD2 current COUNT when :1433/:1521 down; live Snowflake/BigQuery/Databricks/Redshift/ClickHouse clusters (PG-wire stand-in used for Redshift leftover MERGE); ClickHouse leftover MERGE (mutations async); live Pinecone index / Weaviate cluster; live moto/MinIO object-store GET; live Milvus cluster; live Qdrant (skipped this host); live shared-reader CDC dest-before on PG logical; Iceberg MoR / deletion vectors; exactly-once |
+| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_dialect_profiles.py tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py tests/test_stream_append_precount.py tests/test_execute_tracked_sqlite_to_csv_to_sqlite_roundtrip.py tests/test_milvus_writer.py tests/test_qdrant_writer.py tests/test_pinecone_writer.py tests/test_weaviate_writer.py tests/test_enterprise_hardening.py::test_strict_g8_writer_ack_for_dest_only tests/test_enterprise_hardening.py::test_strict_g8_qdrant_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_pinecone_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_weaviate_does_not_close_on_writer_ack tests/test_enterprise_hardening.py::test_strict_g8_refuses_conservation_when_source_count_unmeasured tests/test_json_tabular.py tests/test_property5_five_layer_verification.py tests/test_adls_databricks_gate8_verify.py tests/test_sftp_gate8_wave39.py tests/test_sftp_host_key_propagation.py tests/test_gate8_sample_unavailable_wave100.py tests/test_excel_phantom_rows.py -q` (339 passed, 9 skipped in 40.09s on this host: 2 moto/object-store emulator absent, 3 Qdrant localhost:6333 unreachable, SQL Server :1433 leftover+SCD2 down, Oracle :1521 leftover+SCD2 down). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (29 passed); `npm run build` tsc+vite clean | Overwrite: dest COUNT(*). Complete PK census splits MISSING_TARGET vs EXTRA_TARGET. Complete overwrite snapshot MERGE-deletes dest keys not in S (`leftover = D \\ S`) before Gate-8 COUNT — SQL (sqlite/pg/mysql plus Oracle/SQL Server dest-engine `COUNT(*)`, never partition stats) plus Snowflake/BigQuery/DuckDB/Databricks/Redshift dest-engine `COUNT(*)` (never `INFORMATION_SCHEMA` / `__TABLES__` / `SVV_TABLE_INFO.tbl_rows` / `to_regclass`) plus ClickHouse `COUNT(*) FROM table FINAL` (never `system.tables.total_rows`; leftover MERGE unapplied — mutations async) and Iceberg filesystem CoW plus pyiceberg SqlCatalog (dest-engine file footers of the current snapshot, never `scan().count()` / manifest `record-count`); incremental CDC is a hard no-op. Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**. Dest-before before first write. Mirror: `COUNT(*) WHERE NOT _deleted`. Job closed iff every stream closed. File/object export: independent artifact record COUNT (CSV/JSON/JSONL/Parquet plus Excel value-bearing rows, streamed Avro, ORC footer `nrows`, XML unique record-path — never openpyxl used-range, never `parse_xml` ingest cap, never writer bytes). S3/GCS/ADLS GET uses that same machine — never JSON-fallback empty. Gate-8 cell checksum of those GET streams is `checksum_object_store` (CSV RFC 4180 / JSONL objects / JSON root array / streamed Avro OCF records / Parquet+ORC values / Excel value-bearing rows, never used-range / XML unique-path cell dicts and JSON unique-path cell dicts (root array or wrapped), second StAX pass, one-shot GET spooled). Vector/RAG: `COUNT(DISTINCT source_id)` (pgvector SQL, Milvus entity query, Qdrant point scroll, Pinecone list+fetch, Weaviate object listing) — never chunk COUNT(*) / collection rowCount / vectorCount / Aggregate meta.count / writer ack. SCD2: `COUNT(*) WHERE is_current` (sqlite/pg/mysql plus Oracle/SQL Server BIT/`NUMBER(1)` `= 1`, never `IS TRUE`; Snowflake/BQ/DuckDB/Databricks/Redshift BOOLEAN `IS TRUE`). Writer ack never closes. | Inferred deletes on incremental upsert/CDC without tombstone; stream-path this-run `soft_deleted` census; Oracle/SQL Server live leftover and SCD2 current COUNT when :1433/:1521 down; live Snowflake/BigQuery/Databricks/Redshift/ClickHouse clusters (PG-wire stand-in used for Redshift leftover MERGE); ClickHouse leftover MERGE (mutations async); live Pinecone index / Weaviate cluster; live moto/MinIO object-store GET; live Milvus cluster; live Qdrant (skipped this host); live shared-reader CDC dest-before on PG logical; Iceberg MoR / deletion vectors; exactly-once |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
 | 12 | Adversarial and chaos testing | UNPROVEN | — | — | — |
@@ -674,8 +674,9 @@ rowcount is not that proof.
    local path stays unmeasured. Missing parser stays unmeasured, not
    dest=0. Ambiguous sibling XML collections stay unmeasured.
 10. Lakehouse / object-store dest-before: `destination_row_count` for
-    Iceberg (`len` of the leftover-MERGE snapshot — filesystem data
-    files or catalog `scan().to_arrow()`, never `scan().count()`) and
+    Iceberg (`dest-engine file footers of the current snapshot — Parquet
+    `num_rows` / JSONL object-per-line, never manifest `record-count` /
+    `scan().count()` / `len(to_pylist())`) and
     S3/GCS/ADLS GET using the same artifact COUNT as local files
     (Excel value rows, streamed Avro, Parquet/ORC footer, XML unique
     record-path, JSON unique array-of-object, JSONL object-per-line,
@@ -805,7 +806,10 @@ rowcount is not that proof.
 
   Lakehouse / object-store dest-before (this host, after 2026-08-14 slice):
     218 passed, 8 skipped in 35.02s (Property 9 command).
-    Iceberg filesystem: missing table dest-before=0; after upsert COUNT=2;
+    Iceberg filesystem: missing table dest-before=0; after upsert COUNT=2
+    from Parquet footer (lying metadata `record-count` 99999 does not
+    close; `pq.read_table` is not COUNT; MoR `delete-files` unmeasured;
+    missing data-file unmeasured not a prefix).
       key hits of {1,9}=1; DestBeforeCensus second capture stays 2 after
       CoW update (dest-after still 2). Adapters `write_destination_database`
       stamps target_rows_before=0 then 2. Writer upsert ack does not close.
@@ -816,7 +820,7 @@ rowcount is not that proof.
       unmeasured not JSON-empty. Live moto S3 missing-key=0 / JSON COUNT=2
       skipped this host (moto absent).
     Object-store Gate-8 checksum (this host, after 2026-08-14 slice):
-      337 passed, 9 skipped in 40.22s (Property 5 + 9 + ADLS/SFTP Gate-8 + Excel phantom).
+      339 passed, 9 skipped in 40.09s (Property 5 + 9 + ADLS/SFTP Gate-8 + Excel phantom).
       Gzip CSV GET: COUNT=3 and cell digest matches local `iter_csv_dicts`
       (not JSON-fallback dest=0; `_NoSlurpGet` forbids `Body.read()`).
       Garbage JSON GET: COUNT unmeasured, checksum `(-1, "")` not empty
@@ -925,14 +929,17 @@ rowcount is not that proof.
 
   Iceberg catalog dest COUNT + SqlCatalog leftover MERGE (this host, after 2026-08-14 slice):
     221 passed, 8 skipped in 35.24s (Property 9 command).
-    Dest COUNT is `len(_iceberg_snapshot_rows)`, never pyiceberg
-    `scan().count()` / manifest `record-count`. Missing SqlCatalog
+    Dest COUNT is dest-engine file footers of `inspect.data_files()`
+    paths, never pyiceberg `scan().count()` / `to_arrow()` / manifest
+    `record-count`. Missing SqlCatalog
     table = 0. Live sqlite SqlCatalog leftover: dest {1,2,3,99} vs
     S {1,2,3} deletes 99 → dest COUNT=3, extra=0; incremental
     `complete_snapshot=False` leaves dest 4. Filesystem leftover tests
     still pass. Catalog PK projection is `scan().select(*names)`.
     Catalog CoW delete uses parse-config `namespace + table_name`.
-    Gate-8 Iceberg count is `len` of the Arrow scan it already holds.
+    Gate-8 Iceberg count is file footers, not `len` of the Arrow scan
+    leftover MERGE holds for keys. SqlCatalog COUNT=2 with `DataScan.count`
+    / `to_arrow` forbidden.
     MoR / deletion vectors Planned. Frontend 29 passed; `npm run build`
     tsc+vite clean.
 
@@ -1193,7 +1200,7 @@ TypeScript does not recompute dest.
   MERGE is **PARTIAL** on filesystem CoW and pyiceberg SqlCatalog (same
   identity as SQL: dest `{1,2,3,99}` vs S `{1,2,3}` CoW-deletes 99,
   extra=0; missing source keys stay missing). Catalog dest COUNT is
-  `len` of that snapshot, never `scan().count()`. MoR / deletion
+  dest-engine file footers, never `scan().count()`. MoR / deletion
   vectors Planned.
 * Stream-path this-run `soft_deleted` / `reactivated` census — dest-engine
   COUNT of transitions before the anti-join UPDATE (currently deleted ∩
@@ -1300,7 +1307,8 @@ TypeScript does not recompute dest.
 * Iceberg dest-before — **PARTIAL** on filesystem CoW: missing=0, COUNT=2,
   key hits=1, DestBeforeCensus frozen. Leftover MERGE **PARTIAL** on
   filesystem CoW and pyiceberg SqlCatalog (`D \ S` then existing delete;
-  dest COUNT = `len` of snapshot rows, never `scan().count()`). Missing
+  dest COUNT = dest-engine file footers, never `scan().count()` /
+  manifest `record-count`). Missing
   catalog table = 0. MoR / deletion vectors Planned.
 * Multi-table job rollup — **PARTIAL** on named SQLite fixture: two overwrite
   tables (2+3) close as job dest 5, not last-table 3. Mixed/keyed kinds are not
