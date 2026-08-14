@@ -891,18 +891,26 @@ rowcount is not that proof.
     does not close. Streaming StAX of the same path Planned.
 
   XML artifact dest COUNT StAX (this host, after 2026-08-14 slice):
-    Identity unchanged: unique repeating record-path via defusedxml
-    `iterparse`, never `fromstring` + xmltodict DOM, never parse_xml
-    max_rows, never whole-document-as-one. Outer `records` win over
-    nested `items`. Local-name after Clark `}` so sibling collections
-    stay unmeasured. Empty wrapper 0; one collapsed record 1; document
-    / XXE / malformed unmeasured. Missing defusedxml falls back to
-    xmltodict; both missing unmeasured, not dest=0. Local file COUNT
-    opens the path (gzip still decompresses). `elem.clear()` drops
-    text; empty Element shells stay O(n) under a wide parent — lxml
-    O(depth) unlink is a future enhancement of this kernel, not a
-    second COUNT. parse_xml ingest stays DOM. Cardinality ≠ Gate-8.
-    Property 9 command measured after this slice.
+    Property 9 command: 255 passed, 9 skipped, 3 failed in 37.24s.
+    The 3 failures are sqlite upsert
+    (`test_sqlite_two_table_upsert_job_uses_dest_before_not_summed_count`,
+    `test_sqlite_upsert_updates_do_not_change_dest_count`,
+    `test_sqlite_upsert_tombstone_drops_dest_count`) — `success=False`
+    with "Row fidelity verified". Pre-existing sqlite_writer on this
+    branch; not the XML COUNT kernel (those tests never open XML).
+    `tests/test_row_conservation.py`: 149 passed, 6 skipped in 4.90s.
+    XML identity (StAX, defusedxml 0.7.1): writer 3 rows → dest 3;
+    one collapsed record → 1; empty wrapper → 0; document `<note>`
+    unmeasured; sibling orders+items unmeasured; nested `items` under
+    `record` → outer 3 not inner 6; Clark local-name 2 records;
+    5000-record file from path → 5000; DOCTYPE/XXE unmeasured not
+    dest=1; xmltodict.parse is not called when iterparse is available;
+    missing defusedxml+xmltodict unmeasured not dest=0.
+    `parse_xml` ingest `max_rows` still refuse (`test_xml_over_max_rows_fail_closed`).
+    `elem.clear()` drops text; empty Element shells stay O(n) under a
+    wide parent — lxml O(depth) unlink is a future enhancement of this
+    kernel, not a second COUNT. Cardinality ≠ Gate-8. Frontend not
+    run this slice (no UI change).
 
   Snowflake / BigQuery / DuckDB / Databricks dest COUNT (this host, after 2026-08-14 slice):
     232 passed, 8 skipped in 35.47s (Property 9 command).

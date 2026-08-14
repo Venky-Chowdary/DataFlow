@@ -353,6 +353,7 @@ def test_count_xml_records_stax_unique_path_not_dom_or_inner_items(
     must not run when defusedxml iterparse is available — a GB export is
     not two in-memory trees. Missing defusedxml+xmltodict stays unmeasured.
     """
+    pytest.importorskip("defusedxml.ElementTree")
     from services.file_parser import count_xml_records
 
     nested = (

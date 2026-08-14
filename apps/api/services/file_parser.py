@@ -1401,7 +1401,13 @@ def _count_xml_records_stax(source: Any, xml_iterparse: Any) -> int | None:
     saw_child: list[bool] = []
     saw_root = False
     root_text_nonempty = False
-    for event, elem in xml_iterparse(source, events=("start", "end")):  # nosec B314
+    for event, elem in xml_iterparse(  # nosec B314
+        source,
+        events=("start", "end"),
+        forbid_dtd=True,
+        forbid_entities=True,
+        forbid_external=True,
+    ):
         if event == "start":
             saw_root = True
             if saw_child:
@@ -1466,11 +1472,12 @@ def count_xml_records(content: bytes | str | Path) -> int | None:
     XXE / missing parser stay unmeasured, not dest=0. ``parse_xml`` ingest
     fallback that treats the whole document as one row is not this COUNT.
 
-    Walk is defusedxml ``iterparse`` (XXE-safe StAX). ``fromstring`` +
-    xmltodict DOM is not the COUNT — a GB export must not become two
-    in-memory trees. A stream error is unmeasured; do not then DOM-parse
-    the same poison file. xmltodict remains the ImportError fallback
-    when defusedxml is absent. Path inputs are counted from disk; bytes
+    Walk is defusedxml ``iterparse`` (XXE-safe StAX, ``forbid_dtd``).
+    ``fromstring`` + xmltodict DOM is not the COUNT — a GB export must
+    not become two in-memory trees. A stream error or a DOCTYPE is
+    unmeasured; do not then DOM-parse the same poison file. Writer XML
+    has no DTD. xmltodict remains the ImportError fallback when
+    defusedxml is absent. Path inputs are counted from disk; bytes
     (object-store GET) stream from a buffer already in RAM.
     """
     try:
