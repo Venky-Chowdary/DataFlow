@@ -1058,3 +1058,88 @@ def test_single_stream_still_uses_table_identity():
     assert ledger.conservation_kind == KIND_OVERWRITE
     assert ledger.dest_count == 4
     assert account_job_streams(job["destination_summary"]["streams"]) is None
+
+
+def test_dest_before_census_counts_once_per_table(tmp_path: Path):
+    """Second capture must not observe dest-after (that would close a false delta)."""
+    import sqlite3
+
+    from src.transfer.models import EndpointConfig
+    from services.dest_precount import DestBeforeCensus, count_endpoint_rows
+
+    path = tmp_path / "before.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO items (id) VALUES (1), (2), (3)")
+        conn.commit()
+    finally:
+        conn.close()
+    endpoint = EndpointConfig(kind="database", format="sqlite", database=str(path), table="items")
+    census = DestBeforeCensus()
+    first = census.capture(endpoint, table_name="items", aliases=("items_alias",))
+    assert first == 3
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("INSERT INTO items (id) VALUES (4)")
+        conn.commit()
+    finally:
+        conn.close()
+    second = census.capture(endpoint, table_name="items")
+    assert second == 3
+    assert census.get("items_alias") == 3
+    assert count_endpoint_rows(endpoint, table_name="items") == 4
+    summary: dict = {}
+    census.stamp(summary, "items")
+    assert summary["target_rows_before"] == 3
+
+
+def test_job_rollup_two_keyed_streams_closed_not_summed():
+    """Keyed dest COUNT(*) is not additive. Job dest stays per-stream."""
+    def _keyed(name: str, *, before: int, after: int, inserts: int, updates: int) -> dict:
+        return {
+            "name": name,
+            "row_accounting": account_job(
+                {
+                    "sync_mode": "cdc",
+                    "records_processed": 10_000,
+                    "reconciliation": {
+                        "source_rows": inserts + updates,
+                        "target_rows": after,
+                        "target_checksum": f"k-{name}",
+                        "target_rows_before": before,
+                    },
+                    "destination_summary": {
+                        "target_rows_before": before,
+                        "keyed_census": {
+                            "unique_batch_keys": inserts + updates,
+                            "dest_preexisting": updates,
+                            "tombstones": 0,
+                            "unique_tombstone_keys": 0,
+                            "events_read": inserts + updates,
+                        },
+                    },
+                }
+            ).to_dict(),
+        }
+
+    job = {
+        "records_processed": 10_000,
+        "sync_mode": "cdc",
+        "destination_summary": {
+            "streams": [
+                _keyed("customers", before=2, after=3, inserts=1, updates=2),
+                _keyed("orders", before=3, after=3, inserts=0, updates=3),
+            ],
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.conservation_kind == KIND_JOB
+    assert ledger.balanced is True
+    assert ledger.summable is False
+    assert ledger.dest_count is None
+    assert ledger.rows_written_source == DEST_PER_STREAM
+    assert ledger.per_stream[0]["conservation_kind"] == KIND_KEYED
+    assert ledger.per_stream[1]["conservation_kind"] == KIND_KEYED
+    assert ledger.per_stream[0]["dest_count"] == 3
+    assert ledger.per_stream[1]["dest_count"] == 3

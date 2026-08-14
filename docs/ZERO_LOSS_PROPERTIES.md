@@ -14,7 +14,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | **PARTIAL** | `cd apps/api && python -m pytest tests/test_collation_equality_carry.py tests/test_property8_collation_equality.py tests/test_timezone_instant_carry.py tests/test_timezone_policy_pg_mysql.py tests/test_property8_timezone_instant.py tests/test_mysql_strict_sql_mode.py tests/test_json_polarity_carry.py tests/test_property8_json_polarity.py tests/test_offset_label_carry.py tests/test_property8_offset_label.py tests/test_encoding_capacity_carry.py tests/test_property8_encoding_capacity.py tests/test_decimal_identity_carry.py tests/test_property8_decimal_identity.py tests/test_unicode_form_carry.py tests/test_property8_unicode_form.py -q` (137 passed on this host: collation 11 + instant 38 + JSON 12 + offset-label 19 + encoding 20 + decimal 16 + unicode-form 21; unit + live PG 16 ↔ MariaDB 10.11) | Collation CS `utf8mb4_bin`; session-independent instant; JSON polarity `"1"`≠`1`; offset-label unsupported on TIMESTAMPTZ; encoding `OCTET_LENGTH` of 😀 is 4; decimal unscaled integer; unicode form: PG TEXT / MariaDB `general_ci`/`bin` UNIQUE BOTH_LAND for NFC vs NFD; MariaDB `unicode_ci` SECOND_REJECT; dest HEX `C3A9` vs `CC81`; bind does not NFC | UCA 0900 vs 1400 live MySQL 8; Oracle/SQL Server live offset certify (`DATEPART(TZOFFSET)`); GB18030 live; generic_sql SA `collation=` |
-| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py -q` (82 passed in 5.58s on this host). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (24 passed); `npm run build` tsc+vite | Overwrite: dest COUNT(*). Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**, not at-least-once events. Mirror: `COUNT(*) WHERE NOT _deleted`. Multi-stream: job closed iff every stream ledger is closed; dest COUNT summed only for same additive kind. Writer ack never closes. | Inferred deletes on upsert/CDC without tombstone and not mirror; stream-path this-run `soft_deleted` census; Oracle/SQL Server live COUNT; dest-only / file-export; CDC shared-reader per-table dest-before; exactly-once |
+| 9 | Every row is accounted for | **PARTIAL** | `cd apps/api && python -m pytest tests/test_tombstone_polarity.py tests/test_row_conservation.py tests/test_property9_row_conservation.py tests/test_migration_certificate.py tests/test_transfer_mirror.py tests/test_non_cdc_multistream_sequential.py tests/test_stream_append_precount.py -q` (88 passed in 5.62s on this host). Frontend: `npx tsx --test src/lib/conservationLedger.test.ts src/lib/transferConstants.test.ts` (24 passed); `npm run build` tsc+vite | Overwrite: dest COUNT(*). Keyed/CDC: dest-engine `dest_delta == inserts - deletes` on **keys**, not at-least-once events; dest-before is COUNT(*) before the first write to that table this run. Mirror: `COUNT(*) WHERE NOT _deleted`. Multi-stream: job closed iff every stream ledger is closed; dest COUNT summed only for same additive kind. Writer ack never closes. | Inferred deletes on upsert/CDC without tombstone and not mirror; stream-path this-run `soft_deleted` census; Oracle/SQL Server live COUNT; dest-only / file-export; live shared-reader CDC dest-before on PG logical; exactly-once |
 | 10 | Determinism | UNPROVEN | — | — | — |
 | 11 | The migration certificate | UNPROVEN | — | — | — |
 | 12 | Adversarial and chaos testing | UNPROVEN | — | — | — |
@@ -619,6 +619,10 @@ rowcount is not that proof.
 7. Multi-stream: `job is closed iff every stream ledger is closed`. Dest
    COUNT(*) is summed only when every stream closed the same additive
    kind. Last-table Gate-8 is not the job.
+8. Keyed/CDC dest-before: `DestBeforeCensus` counts each dest object
+   once, before the first write this run. A second capture must not
+   observe dest-after (that would close a false delta). Empty dest is
+   dest-before 0 (insert-only overwrite identity).
 
 **Measured (this host, SQLite + PostgreSQL 16 → MariaDB 10.11):**
 ```
@@ -660,6 +664,13 @@ rowcount is not that proof.
     Live SQLite overwrite: customers 2 + orders 3; last table is 3; job dest
       COUNT(*)=5; conservation_kind=job_rollup; writer ack 10,000 does not close.
 
+  Dest-before keyed job (this host, after 2026-08-14 slice): 88 passed in 5.62s
+    DestBeforeCensus: dest held 3; insert 4th row; second capture still 3.
+    Two keyed streams: customers dest-before 2 → 3 (Δ1); orders 3 → 3 (Δ0);
+      job dest COUNT not summed (would invent 6); job_rollup balanced.
+    Live SQLite upsert: same split on execute_tracked; last table is 3;
+      job dest_count is None (per-stream); writer ack does not close.
+
   MySQL DELETE persists after connection close (PyMySQL autocommit method).
   Unit: last-op DELETE then INSERT is live; missing-key tombstone is not
     an insert; delete-only accumulator expected_delta=-2; is_active /
@@ -699,7 +710,10 @@ the sum only when every stream closed the same additive kind.
   read-back by design
 * Multi-table job rollup — **PARTIAL** on named SQLite fixture: two overwrite
   tables (2+3) close as job dest 5, not last-table 3. Mixed/keyed kinds are not
-  summed. CDC shared-reader per-table dest-before still unproven.
+  summed.
+* Keyed dest-before — **PARTIAL**: sequential upsert two tables dest-before 2→3
+  and 3→3; `DestBeforeCensus` refuses dest-after on second capture. Live
+  shared-reader CDC dest-before on PostgreSQL logical was not run this slice.
 * Exactly-once / 100% of all routes — not claimed
 
 ## Property 8 — PARTIAL (2026-08-14, originating offset-label)

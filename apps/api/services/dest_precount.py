@@ -7,10 +7,17 @@ appended nothing. The only honest cardinality proof for append is the delta
 
     rows_after - rows_before == expected_rows
 
-which requires the count taken before the writer runs. This module owns that
-one query, so every destination family answers it the same way and
-``reconcile()`` can tell "delta proven" apart from "delta unknown" instead of
-silently reporting the second as the first.
+which requires the count taken before the writer runs. Keyed / CDC
+conservation is the same shape:
+
+    dest_delta == inserts - deletes
+    dest_delta = COUNT(*)_after - COUNT(*)_before
+
+Counting after the first upsert of a table is dest-after, not dest-before.
+This module owns that one query, so every destination family answers it
+the same way and ``reconcile()`` / the conservation ledger can tell
+"delta proven" apart from "delta unknown" instead of silently reporting
+the second as the first.
 
 ``None`` means the count is unavailable (unsupported engine, missing table, or
 an unreachable destination); callers must degrade assurance rather than assume
@@ -20,6 +27,7 @@ zero.
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -34,6 +42,7 @@ __all__ = [
     "precount_destination",
     "precount_table",
     "count_endpoint_rows",
+    "DestBeforeCensus",
 ]
 
 # Dest-engine IN-list chunk. Partitioning the key set (not overlapping) so
@@ -367,3 +376,58 @@ def count_endpoint_rows(
     except Exception as exc:
         logger.warning("Endpoint COUNT(*) failed: %s", exc)
         return None
+
+
+class DestBeforeCensus:
+    """Dest COUNT(*) taken once per named object, before that object is written.
+
+    Append delta and keyed/CDC ``dest_delta`` both require this number.
+    A second capture of the same name must not re-query: that would observe
+    dest-after and close a false identity. ``None`` stored for a name means
+    the probe ran and was unknowable — do not retry after writes have begun.
+    """
+
+    def __init__(self) -> None:
+        self._before: dict[str, int | None] = {}
+
+    def capture(
+        self,
+        endpoint: Any,
+        *,
+        table_name: str,
+        aliases: Sequence[str] = (),
+    ) -> int | None:
+        names: list[str] = []
+        for raw in (table_name, *aliases):
+            name = str(raw or "").strip()
+            if name and name not in names:
+                names.append(name)
+        if not names:
+            return None
+        for name in names:
+            if name in self._before:
+                value = self._before[name]
+                for other in names:
+                    self._before.setdefault(other, value)
+                return value
+        value = count_endpoint_rows(endpoint, table_name=names[0])
+        for name in names:
+            self._before[name] = value
+        return value
+
+    def get(self, table_name: str) -> int | None:
+        return self._before.get(str(table_name or "").strip())
+
+    def stamp(self, summary: dict[str, Any], table_name: str) -> dict[str, Any]:
+        """Copy dest-before onto a stream summary. Never dest-after."""
+        key = str(table_name or "").strip()
+        if key not in self._before:
+            return summary
+        value = self._before[key]
+        if value is None:
+            return summary
+        summary[PRECOUNT_KEY] = int(value)
+        recon = dict(summary.get("reconciliation") or {})
+        recon[PRECOUNT_KEY] = int(value)
+        summary["reconciliation"] = recon
+        return summary

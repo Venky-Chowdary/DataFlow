@@ -413,12 +413,14 @@ export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityC
     }
     return cells;
   }
-  if (ledger.conservation_kind === "keyed") {
+    if (ledger.conservation_kind === "keyed") {
     const cells: LedgerIdentityCell[] = [
       { label: "Inserts", value: fmt(ledger.inserts) },
       { label: "Updates", value: fmt(ledger.updates) },
       { label: "Deletes", value: fmt(ledger.deletes) },
       { label: "Dest Δ", value: fmt(ledger.dest_delta) },
+      { label: "Dest before", value: fmt(ledger.dest_count_before) },
+      { label: "Dest after", value: fmt(ledger.dest_count) },
     ];
     if (ledger.events_read != null || ledger.unique_batch_keys != null) {
       cells.push(

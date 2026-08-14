@@ -35,6 +35,7 @@ from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
 from connectors.table_manager import delete_by_primary_keys
 from connectors.writer_common import DF_LSN_COL, extract_cdc_lsn
 from services.cdc_effectively_once import gate_cdc_destination
+from services.dest_precount import DestBeforeCensus
 from services.tombstone import (
     detect_tombstone_column as _detect_tombstone_column,
     is_tombstone_set as _is_tombstone_set,
@@ -420,6 +421,8 @@ class CdcState:
     accumulated_coerced_null_rows: int = 0
     #: Per destination table — keys from orders and users must not mix.
     census_accs: dict[str, Any] = field(default_factory=dict)
+    #: Dest COUNT(*) before the first write to each table this run.
+    dest_before: DestBeforeCensus = field(default_factory=DestBeforeCensus)
 
     def acc_for(self, table: str) -> Any:
         from services.row_conservation import KeyCensusAccumulator
@@ -1341,6 +1344,11 @@ def _run_cdc_shared_multi_table(
             else:
                 destination.table = stream
         dest_table = resolve_dest_table(dest_type, destination)
+        shared_accum.dest_before.capture(
+            destination,
+            table_name=str(dest_table or stream or ""),
+            aliases=(stream,),
+        )
         col_types = dict(schema)
         if change.inserts or change.updates:
             sample = (change.inserts or change.updates)[0]
@@ -1489,11 +1497,14 @@ def _run_cdc_shared_multi_table(
     for name, h in stream_health.items():
         acc = shared_accum.census_accs.get(name)
         census = acc.to_census() if acc is not None else None
+        payload: dict[str, Any] = {}
+        shared_accum.dest_before.stamp(payload, name)
         record_stream_health(
             stream_health,
             name=name,
             status="completed",
             records_processed=int(h.get("records_processed") or 0),
+            summary=payload,
             extra={
                 "cdc_lag_seconds": h.get("cdc_lag_seconds"),
                 "watermark": h.get("watermark"),
@@ -2100,6 +2111,7 @@ def _run_cdc_single_stream(
             dest_table=str(dest_table or ""),
             chunk_idx=int(chunk_idx),
         ):
+            state.dest_before.capture(destination, table_name=str(dest_table or ""))
             rows_written, last_checksum, dest_summary, deleted = _apply_change_batch(
                 dest_type,
                 destination,
@@ -2298,6 +2310,7 @@ def _run_cdc_single_stream(
         )
 
     summary = state.last_dest_summary or {}
+    state.dest_before.stamp(summary, str(dest_table or table_name or ""))
     summary["cdc"] = {
         "inserts": state.inserts,
         "updates": state.updates,

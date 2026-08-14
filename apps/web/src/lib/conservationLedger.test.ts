@@ -257,6 +257,8 @@ describe("keyed ledger shows events vs keys, never closes on event count", () =>
       ...overwriteLedger,
       conservation_kind: "keyed",
       dest_delta: 0,
+      dest_count_before: 3,
+      dest_count: 3,
       inserts: 0,
       updates: 3,
       deletes: 0,
@@ -268,6 +270,8 @@ describe("keyed ledger shows events vs keys, never closes on event count", () =>
     assert.equal(cells.find((c) => c.label === "Events")?.value, "10");
     assert.equal(cells.find((c) => c.label === "Keys")?.value, "3");
     assert.equal(cells.find((c) => c.label === "Dest Δ")?.value, "0");
+    assert.equal(cells.find((c) => c.label === "Dest before")?.value, "3");
+    assert.equal(cells.find((c) => c.label === "Dest after")?.value, "3");
   });
 });
 

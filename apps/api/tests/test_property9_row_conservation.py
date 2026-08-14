@@ -237,6 +237,125 @@ def test_sqlite_two_table_overwrite_job_is_not_last_table(tmp_path: Path):
     assert streams[1]["row_accounting"]["dest_count"] == 3
 
 
+def test_sqlite_two_table_upsert_job_uses_dest_before_not_summed_count(tmp_path: Path):
+    """Keyed dest_delta needs dest-before. Job dest COUNT is not 3+4."""
+    src_path = tmp_path / "p9_keyed_src.db"
+    dst_path = tmp_path / "p9_keyed_dst.db"
+    src = sqlite3.connect(str(src_path))
+    try:
+        src.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        src.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        src.executemany("INSERT INTO customers (id, label) VALUES (?, ?)", [(1, "a"), (2, "b")])
+        src.executemany(
+            "INSERT INTO orders (id, label) VALUES (?, ?)",
+            [(1, "o1"), (2, "o2"), (3, "o3")],
+        )
+        src.commit()
+    finally:
+        src.close()
+
+    contracts = [
+        {
+            "name": "customers",
+            "selected": True,
+            "sync_mode": "full_refresh_overwrite",
+            "primary_key": "id",
+            "mappings": _maps(),
+        },
+        {
+            "name": "orders",
+            "selected": True,
+            "sync_mode": "full_refresh_overwrite",
+            "primary_key": "id",
+            "mappings": _maps(),
+        },
+    ]
+    seed = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="sqlite", database=str(src_path), table="customers"
+        ),
+        destination=EndpointConfig(
+            kind="database", format="sqlite", database=str(dst_path), table="customers"
+        ),
+        mappings=_maps(),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="warn",
+        skip_preflight=True,
+        stream_contracts=contracts,
+    )
+    seeded = _run(seed)
+    assert seeded.success, seeded.error
+
+    src = sqlite3.connect(str(src_path))
+    try:
+        src.execute("UPDATE customers SET label = 'A' WHERE id = 1")
+        src.execute("INSERT INTO customers (id, label) VALUES (3, 'c')")
+        src.execute("UPDATE orders SET label = 'O1' WHERE id = 1")
+        src.commit()
+    finally:
+        src.close()
+
+    upsert_contracts = [
+        {**c, "sync_mode": "upsert"} for c in contracts
+    ]
+    result = _run(
+        TransferRequest(
+            source=EndpointConfig(
+                kind="database", format="sqlite", database=str(src_path), table="customers"
+            ),
+            destination=EndpointConfig(
+                kind="database", format="sqlite", database=str(dst_path), table="customers"
+            ),
+            mappings=_maps(),
+            sync_mode="upsert",
+            validation_mode="warn",
+            skip_preflight=True,
+            stream_contracts=upsert_contracts,
+        )
+    )
+    assert result.success, result.error
+    stamped = result.row_accounting or {}
+    assert stamped.get("conservation_kind") == "job_rollup", stamped
+    assert stamped.get("balanced") is True, stamped
+    assert stamped.get("dest_count") is None, stamped
+    assert stamped.get("summable") is False, stamped
+    streams = (result.destination_summary or {}).get("streams") or []
+    assert len(streams) == 2, streams
+    customers = streams[0]["row_accounting"]
+    orders = streams[1]["row_accounting"]
+    assert customers["conservation_kind"] == "keyed", customers
+    assert orders["conservation_kind"] == "keyed", orders
+    assert customers["dest_count_before"] == 2, customers
+    assert customers["dest_count"] == 3, customers
+    assert customers["dest_delta"] == 1, customers
+    assert customers["inserts"] == 1, customers
+    assert customers["balanced"] is True, customers
+    assert orders["dest_count_before"] == 3, orders
+    assert orders["dest_count"] == 3, orders
+    assert orders["dest_delta"] == 0, orders
+    assert orders["balanced"] is True, orders
+    dest = sqlite3.connect(str(dst_path))
+    try:
+        n_customers = dest.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
+        n_orders = dest.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        labels = dest.execute("SELECT id, label FROM customers ORDER BY id").fetchall()
+    finally:
+        dest.close()
+    assert n_customers == 3
+    assert n_orders == 3
+    assert labels == [(1, "A"), (2, "b"), (3, "c")]
+    job = _job_from_result(result, sync_mode="upsert", src_format="sqlite", dst_format="sqlite")
+    job["records_processed"] = 10_000
+    ledger = row_accounting(job)
+    assert ledger["conservation_kind"] == "job_rollup", ledger
+    assert ledger["dest_count"] is None, ledger
+    assert ledger["balanced"] is True, ledger
+    # Last table is orders (3). Summing dest COUNT(*) would invent 6. Writer ack
+    # is not the job. Job dest stays per-stream.
+    assert ledger["writer_ack"] != ledger.get("dest_count")
+
+
+
 @pytest.mark.skipif(not (_pg_up() and _mysql_up()), reason="PostgreSQL or MariaDB not listening")
 def test_pg_to_mariadb_dest_count_closes_the_certificate():
     import psycopg2
