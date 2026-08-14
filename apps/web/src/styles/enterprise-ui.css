@@ -648,6 +648,14 @@
   font-weight: 650;
 }
 
+.df2-job-row-rows.is-dest.is-warn {
+  color: #b45309;
+}
+
+.df2-job-row-rows.is-dest.is-danger {
+  color: #b91c1c;
+}
+
 .df2-job-row-rows.is-writer {
   color: var(--df-text-muted, #64748b);
 }
@@ -898,6 +906,17 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  .df2-job-row-meta {
+    flex-wrap: wrap;
+  }
+
+  .df2-job-row-route-meta {
+    max-width: 100%;
+    flex: 1 1 100%;
+  }
 }
 
 .df2-job-row-bar {
@@ -5102,6 +5121,26 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: #64748b;
   text-transform: uppercase;
   letter-spacing: 0.03em;
+}
+
+.df2-theater-v3-metric.is-warn {
+  border-color: #fcd34d;
+  background: #fffbeb;
+}
+
+.df2-theater-v3-metric.is-danger {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.df2-theater-v3-bar-legend .is-warn {
+  color: #b45309;
+  font-weight: 650;
+}
+
+.df2-theater-v3-bar-legend .is-danger {
+  color: #b91c1c;
+  font-weight: 650;
 }
 
 .df2-theater-v3-streams {

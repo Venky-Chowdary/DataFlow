@@ -2460,6 +2460,14 @@ textarea.df2-pilot-composer textarea {
   color: var(--df-text-primary, #0f172a) !important;
 }
 
+.df2-rail-split.is-warn strong {
+  color: #b45309 !important;
+}
+
+.df2-rail-split.is-danger strong {
+  color: #b91c1c !important;
+}
+
 .df2-algorithm-list div {
   padding: 10px 12px;
   border: 1px solid var(--df-border, #e2e8f0);

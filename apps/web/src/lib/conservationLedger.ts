@@ -462,6 +462,14 @@ export function destMetricCompact(metric: RowMetric): string {
   return `${metric.value} at dest`;
 }
 
+/** Jobs list / Theater CSS from dest headline tone — never invent dest COUNT from writer ack. */
+export function destMetricToneClass(metric: RowMetric): string {
+  if (!metric.measured) return "is-writer";
+  if (metric.tone === "danger") return "is-dest is-danger";
+  if (metric.tone === "warn") return "is-dest is-warn";
+  return "is-dest";
+}
+
 export function formatJobRowMetric(source: LedgerCarrier | null | undefined): RowMetric {
   const dest = destHeadline(source);
   if (dest.measured) return dest;

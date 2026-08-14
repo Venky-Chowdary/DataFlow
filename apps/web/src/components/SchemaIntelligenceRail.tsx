@@ -10,7 +10,7 @@ import {
 } from "../lib/schemaIntelligence";
 import type { EditableMapping } from "../lib/mapping";
 import type { EnhancedAnalysis, PreflightResult, TransferPlan, TransferResult } from "../lib/types";
-import { destHeadline, writerHeadline } from "../lib/conservationLedger";
+import { destHeadline, destMetricToneClass, writerHeadline } from "../lib/conservationLedger";
 
 interface SchemaIntelligenceRailProps {
   step: number;
@@ -240,7 +240,7 @@ export function SchemaIntelligenceRail({
       {result?.success && destMetric && writerMetric && (
         <div className="df2-rail-panel">
           <div className="df2-rail-kicker">Conservation</div>
-          <div className="df2-rail-split">
+          <div className={`df2-rail-split ${destMetricToneClass(destMetric)}`}>
             <span>{destMetric.label}</span>
             <strong title={destMetric.title}>{destMetric.value}</strong>
           </div>

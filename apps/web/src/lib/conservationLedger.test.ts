@@ -7,6 +7,7 @@ import {
   destHeadline,
   destProvenCount,
   destMetricCompact,
+  destMetricToneClass,
   formatJobRowMetric,
   isDestMeasured,
   ledgerEquation,
@@ -72,6 +73,7 @@ describe("destHeadline never falls back to writer ack", () => {
     assert.equal(h.value, "4");
     assert.equal(h.measured, true);
     assert.equal(h.label, "At destination");
+    assert.equal(destMetricToneClass(h), "is-dest");
   });
 
   it("shows artifact record count, never 'at destination table', when dest is a file", () => {
@@ -554,7 +556,9 @@ describe("append dest headline is dest Δ, not dest after", () => {
     assert.equal(h.label, "Appended this run");
     assert.equal(h.tone, "warn");
     assert.equal(destMetricCompact(h), "200 appended");
+    assert.equal(destMetricToneClass(h), "is-dest is-warn");
     assert.equal(destProvenCount(job), 200);
+    assert.equal(destMetricToneClass(h), "is-dest is-warn");
     assert.match(conservationCompleteCopy(job), /200 appended this run/);
     assert.match(conservationCompleteCopy(job), /100 → 300/);
     assert.doesNotMatch(conservationCompleteCopy(job), /300 at destination/);

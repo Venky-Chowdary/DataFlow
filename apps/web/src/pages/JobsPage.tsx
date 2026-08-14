@@ -26,7 +26,7 @@ import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
-import { destHeadline, formatJobRowMetric, writerAckDisagrees, writerHeadline, destMetricCompact } from "../lib/conservationLedger";
+import { destHeadline, formatJobRowMetric, writerAckDisagrees, writerHeadline, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
 import {
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
@@ -759,7 +759,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                               const rows = formatJobRowMetric(job);
                               return (
                                 <span
-                                  className={`df2-job-row-rows ${rows.measured ? "is-dest" : "is-writer"}`}
+                                  className={`df2-job-row-rows ${destMetricToneClass(rows)}`}
                                   title={rows.title}
                                 >
                                   {destMetricCompact(rows)}
@@ -2030,7 +2030,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <tr>
                 <th>Stream</th>
                 <th>Status</th>
-                <th>At dest</th>
+                <th>Conserved</th>
                 <th>Events written</th>
                 <th>Lag</th>
                 <th>Watermark</th>

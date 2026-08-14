@@ -21,7 +21,7 @@ import { QuarantinePanel } from "./transfer/QuarantinePanel";
 import { Gate8ProofCard, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch } from "./transfer/Gate8ProofCard";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
-import { destHeadline, destMetricCompact, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
+import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
@@ -862,7 +862,10 @@ export function JobTheaterView({
           </div>
         </div>
         <div className="df2-theater-v3-bar-legend">
-          <span title={isComplete || isQuarantine ? destMetric.title : writerMetric.title}>
+          <span
+            className={(isComplete || isQuarantine) ? destMetricToneClass(destMetric) : undefined}
+            title={isComplete || isQuarantine ? destMetric.title : writerMetric.title}
+          >
             {isComplete || isQuarantine
               ? destMetricCompact(destMetric)
               : `${processed.toLocaleString()} written so far`}
@@ -873,7 +876,10 @@ export function JobTheaterView({
       </div>
 
       <div className="df2-theater-v3-metrics">
-        <article className="df2-theater-v3-metric" title={isComplete || isQuarantine ? destMetric.title : writerMetric.title}>
+        <article
+          className={`df2-theater-v3-metric${isComplete || isQuarantine ? ` ${destMetricToneClass(destMetric)}` : ""}`}
+          title={isComplete || isQuarantine ? destMetric.title : writerMetric.title}
+        >
           <DtIcon name="trend" size={16} />
           <div>
             <strong>{isComplete || isQuarantine ? destMetric.value : processed.toLocaleString()}</strong>
