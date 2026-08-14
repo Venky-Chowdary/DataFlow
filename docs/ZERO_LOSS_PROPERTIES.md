@@ -11,7 +11,7 @@ exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 | 3 | Source reads are snapshot-consistent | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property3_source_snapshot_consistent.py -q` (3 passed) | PostgreSQL full-refresh REPEATABLE READ + LSN/export_snapshot; SQLite deferred txn; inline write-pass fingerprints (no second scan by default) | MySQL consistent snapshot; Mongo majority/clusterTime; Oracle flashback SCN; SQL Server SI; Snowflake/BQ time-travel; incremental sync (watermark by design) |
 | 4 | Writes are exactly-once observable | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property4_observable_exactly_once.py -q` (3 passed) | SQLite+PostgreSQL insert ledger (same-txn; row_start/row_end/attempt); kill-mid-chunk resume = clean checksum | Mongo/Kafka/object-store/warehouse sinks (NOT_GUARANTEED); MySQL live kill proof (Docker down); quarantine salvage path still not same-txn |
 | 5 | Five-layer verification, not sampling | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property5_five_layer_verification.py -q` (6 passed) | L1–L5 ladder in `verification_ladder.py`; SQLite always + live PG localization; screening rename | MySQL/warehouse SQL pushdown; >250k-row in-memory cap (honest skip); UI copy sweep |
-| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py -q` (53 passed with generic_sql create-new on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK carried and dest-catalog certified (violating INSERT refused); bare Map VARCHAR inherits source `(n)`; TEXT UNIQUE refused (no invented prefix) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; identity RESTART; partitioning |
+| 6 | Schema fidelity is more than column types | **PARTIAL** | `cd apps/api && python -m pytest tests/test_property6_schema_fidelity.py tests/test_check_constraint_carry.py tests/test_inherit_measured_string_width.py tests/test_generic_sql_create_new_fidelity.py tests/test_identity_carry_create_new.py tests/test_identity_generator_probe.py tests/test_identity_restart_cutover.py tests/test_sqlserver_identity_seed_carry.py -q` (90 passed on this host) | SQLite/PG/MariaDB create-new PK/NOT NULL/DEFAULT/UNIQUE + portable CHECK dest-catalog certified; bare Map VARCHAR inherits `(n)`; TEXT UNIQUE refused; identity seed/increment measured and cutover INSERT proven (PG stepped IDENTITY → 110, MariaDB AUTO_INCREMENT, sqlite AUTOINCREMENT→PG) | Oracle/SQL Server dedicated-writer DDL carry; unportable CHECK stays unsupported; SQLite dest cannot declare AUTOINCREMENT; partitioning; views/triggers |
 | 7 | Referential integrity across multi-table migration | **PARTIAL** | `cd apps/api && python -m pytest tests/test_foreign_key_carry.py tests/test_foreign_key_metadata.py tests/test_property7_referential_integrity.py -q` (44 passed on this host: unit + SQLite + live PG 16 + live MariaDB 10.11) | Parents-first load (not alphabetical); post-load ALTER certified from dest catalog; orphan ALTER is `integrity_violation`; SQLite dest refuses rebuild; PG dest schema isolation; single-table child when parent already on dest | Oracle/SQL Server live ALTER; SQLite dest cannot ADD FK (by design); CDC with FKs enabled; cross-schema FKs; composite live matrix |
 | 8 | Semantic value fidelity | UNPROVEN | — | — | — |
 | 9 | Every row is accounted for | UNPROVEN | — | — | — |
@@ -275,6 +275,13 @@ line — operators could not tell carry from loss.
    now measures CHECK/FK/index catalogs (same contract as PG/MySQL). Unportable
    CHECKs stay `unsupported` — never a lying predicate. Live SQLite / PG /
    MariaDB dest CHECK rejects violating rows.
+9. Identity **generator** (not just key values) is measured from the source
+   catalog (`probe_identity_generators`): PostgreSQL `pg_sequence` start/
+   increment, SQL Server `sys.identity_columns` (sql_variant decoded), Oracle
+   `IDENTITY_OPTIONS`, SQLite `AUTOINCREMENT`, MySQL `AUTO_INCREMENT` without
+   inventing a per-column step. Stamp onto `inferred_type` so the existing
+   planner emits `START WITH n INCREMENT BY m`. Cutover proof is a real
+   `INSERT` that omits the key.
 
 ### Proof output (this host)
 
@@ -282,17 +289,22 @@ line — operators could not tell carry from loss.
 pytest tests/test_inherit_measured_string_width.py \
        tests/test_property6_schema_fidelity.py \
        tests/test_check_constraint_carry.py \
-       tests/test_generic_sql_create_new_fidelity.py -q
-53 passed in 2.32s
+       tests/test_generic_sql_create_new_fidelity.py \
+       tests/test_identity_carry_create_new.py \
+       tests/test_identity_generator_probe.py \
+       tests/test_identity_restart_cutover.py \
+       tests/test_sqlserver_identity_seed_carry.py -q
+90 passed in 3.71s
 
-Includes:
-  SQLite E2E CHECK (status IN (...)) carried, sqlite_master has CHECK,
-    violating INSERT raises IntegrityError.
-  Live PG: CHECK carried, information_schema CHECK present, violating
-    INSERT raises IntegrityError.
-  Live MariaDB 10.11: CHECK carried, CONSTRAINT_TYPE CHECK present,
-    violating INSERT raises ER_CONSTRAINT_FAILED 4025.
-  Bare Map VARCHAR inherit still proven (dest varchar(n) + UNIQUE).
+Includes prior CHECK / VARCHAR-width / create-new structure, plus:
+  Live PG 16: source IDENTITY (START WITH 5 INCREMENT BY 10), explicit key
+    100 loaded, dest pg_sequence.seqincrement = 10, cutover
+    INSERT (name) RETURNING id = 110 (not 101).
+  Live MariaDB 10.11: AUTO_INCREMENT carried, cutover INSERT without id
+    returns LAST_INSERT_ID > migrated max.
+  SQLite AUTOINCREMENT → PG: dest attidentity set, cutover INSERT > max.
+  SQLite INTEGER PRIMARY KEY without AUTOINCREMENT is not flagged
+    (rowid reuse is not a never-reuse generator).
 ```
 
 ### NOT claimed / remaining for PROVEN
@@ -301,7 +313,13 @@ Includes:
 * FOREIGN KEY carry is Property 7 (post-load ALTER; not on single-table CREATE)
 * Unportable CHECK predicates (casts, subqueries, unknown functions) stay
   `unsupported` by design; no trigger-emulation of CHECK (AWS SCT class)
-* Views, triggers, generated expressions, identity RESTART, partitioning
+* Views, triggers, generated expressions, partitioning
+* SQLite destination cannot declare per-column AUTOINCREMENT (rowid aliasing;
+  sqlite→PG/MySQL generator carry is proven)
+* MySQL/MariaDB per-column increment is the server's
+  `@@auto_increment_increment` — not invented as column `INCREMENT BY`
+* Oracle / SQL Server live identity cutover not run on this host (unit probe
+  + sql_variant decode proven)
 * Name-collision remaps under adversarial identifier fixtures (policy coded;
   not yet matrix-proven)
 
