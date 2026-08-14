@@ -52,6 +52,23 @@ function gradeOf(score: number): string {
   return "F";
 }
 
+/** Matches Gate-8 ``isGate8AppendDelta`` — dest-before delta, not whole-table hashes. */
+function isAppendDeltaProof(recon: Record<string, unknown> | null | undefined): boolean {
+  if (!recon) return false;
+  if (String(recon.checksum_scope || "").toLowerCase() === "whole_table_not_comparable") return true;
+  const coverage = String(recon.assurance_level || recon.coverage || "").toLowerCase();
+  const phase = String(recon.phase || "").toLowerCase();
+  const src = String(recon.source_checksum || "");
+  const tgt = String(recon.target_checksum || "");
+  return (
+    (coverage === "row_count" || phase.includes("post_write_row_count"))
+    && Boolean(src)
+    && Boolean(tgt)
+    && src !== tgt
+    && recon.checksum_match !== true
+  );
+}
+
 export function computeJobTrustScore(job: TrustJobInput | null | undefined): JobTrustScore {
   if (job?.trust && typeof job.trust.score === "number") {
     return job.trust;
@@ -136,10 +153,7 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       assurance === "sample"
       || phase.includes("sample_verified")
       || /sample-verified|sample verified/i.test(msg);
-    const appendDelta =
-      assurance === "row_count"
-      || phase.includes("row_count")
-      || String(recon.checksum_scope || "").toLowerCase() === "whole_table_not_comparable";
+    const appendDelta = isAppendDeltaProof(recon);
     const fullChecksum =
       assurance === "full_checksum"
       || (
@@ -309,7 +323,13 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     if (weakest.id === "quarantine" || (rejected > 0 && (weakest.score as number) < 90)) {
       next_action = { code: "quarantine", label: "Review quarantine", detail: "Replay or export rejected rows — nothing was silently dropped." };
     } else if (weakest.id === "reconcile") {
-      next_action = { code: "reconcile", label: "Investigate Gate-8", detail: "Export proof JSON or re-run Validate after fixing drift." };
+      next_action = recon?.passed === true && isAppendDeltaProof(recon)
+        ? {
+            code: "append_delta",
+            label: "Append delta closed — not a dest replace",
+            detail: "Dest grew by this run. Overwrite to replace existing rows, or add a PK and upsert.",
+          }
+        : { code: "reconcile", label: "Investigate Gate-8", detail: "Export proof JSON or re-run Validate after fixing drift." };
     } else if (weakest.id === "freshness") {
       next_action = { code: "freshness", label: "Check CDC freshness", detail: "Open the pipeline — lag may need capacity or lease attention." };
     } else if (weakest.id === "coercion") {

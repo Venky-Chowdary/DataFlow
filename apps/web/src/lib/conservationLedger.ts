@@ -163,6 +163,17 @@ function isScd2Ledger(ledger: ConservationLedger | null | undefined): boolean {
   );
 }
 
+function isAppendLedger(ledger: ConservationLedger | null | undefined): boolean {
+  return Boolean(ledger && ledger.conservation_kind === "append_delta");
+}
+
+/** Engine dest Δ for Full Append — never recomputed from dest after − before. */
+function appendDeltaValue(ledger: ConservationLedger): number | null {
+  if (ledger.dest_delta != null) return ledger.dest_delta;
+  if (ledger.rows_written != null) return ledger.rows_written;
+  return null;
+}
+
 export function isDestMeasured(ledger: ConservationLedger | null | undefined): boolean {
   if (!ledger) return false;
   if (UNMEASURED_KINDS.has(ledger.conservation_kind)) return false;
@@ -257,6 +268,11 @@ export function writerAckDisagrees(source: unknown): boolean {
   const ledger = resolveLedger(source);
   if (!ledger) return false;
   if (ledger.writer_ack_delta != null) return ledger.writer_ack_delta !== 0;
+  if (isAppendLedger(ledger)) {
+    const identity = appendDeltaValue(ledger);
+    if (ledger.writer_ack == null || identity == null) return false;
+    return ledger.writer_ack !== identity;
+  }
   if (ledger.writer_ack == null || ledger.dest_count == null) return false;
   return ledger.writer_ack !== ledger.dest_count;
 }
@@ -358,6 +374,18 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
         tone: unbalanced ? "danger" : "ok",
       };
     }
+    if (isAppendLedger(ledger)) {
+      const appended = appendDeltaValue(ledger);
+      if (appended != null) {
+        return {
+          value: Number(appended).toLocaleString(),
+          label: running ? "Appended so far" : "Appended this run",
+          title: ledger.note || "Dest COUNT(*) growth this run. Pre-existing dest rows remain. Whole-table checksums are not comparable.",
+          measured: true,
+          tone: unbalanced ? "danger" : "warn",
+        };
+      }
+    }
     return {
       value: Number(ledger.dest_count).toLocaleString(),
       label: running ? "Dest so far" : "At destination",
@@ -414,6 +442,7 @@ export function destMetricCompact(metric: RowMetric): string {
   if (metric.label.toLowerCase().includes("artifact")) return `${metric.value} in artifact`;
   if (metric.label.toLowerCase().includes("identit")) return `${metric.value} identities`;
   if (metric.label.toLowerCase().includes("current")) return `${metric.value} current`;
+  if (metric.label.toLowerCase().includes("append")) return `${metric.value} appended`;
   return `${metric.value} at dest`;
 }
 
@@ -456,6 +485,7 @@ export function conservationCompleteCopy(
   const artifact = isArtifactLedger(ledger);
   const vector = isVectorLedger(ledger);
   const scd2 = isScd2Ledger(ledger);
+  const append = isAppendLedger(ledger);
   if (opts?.quarantine) {
     if (dest.measured) {
       return mirror
@@ -468,6 +498,8 @@ export function conservationCompleteCopy(
               ? `${dest.value} identities at dest; some rows held out or coerced to NULL`
               : scd2
                 ? `${dest.value} current at dest; some rows held out or coerced to NULL`
+                : append
+                  ? `${dest.value} appended this run; some rows held out or coerced to NULL`
                 : `${dest.value} at destination; some rows held out or coerced to NULL`;
     }
     return `${writer.value} writer-acked (dest COUNT unmeasured); some rows held out or coerced to NULL`;
@@ -478,6 +510,14 @@ export function conservationCompleteCopy(
     if (artifact) return `${dest.value} in export artifact`;
     if (vector) return `${dest.value} identities at dest`;
     if (scd2) return `${dest.value} current at dest`;
+    if (append) {
+      const before = ledger?.dest_count_before;
+      const after = ledger?.dest_count;
+      if (before != null && after != null) {
+        return `${dest.value} appended this run (dest ${Number(before).toLocaleString()} → ${Number(after).toLocaleString()})`;
+      }
+      return `${dest.value} appended this run`;
+    }
     return `${dest.value} at destination`;
   }
   return `${writer.value} writer-acked — dest COUNT unmeasured`;

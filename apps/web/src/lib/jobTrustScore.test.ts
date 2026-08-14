@@ -178,5 +178,7 @@ describe("computeJobTrustScore", () => {
     assert.ok(factor?.note.toLowerCase().includes("append delta"));
     assert.notEqual(append.grade, "A");
     assert.ok(append.score <= 89);
+    assert.equal(append.next_action.code, "append_delta");
+    assert.doesNotMatch(append.next_action.label, /investigate/i);
   });
 });

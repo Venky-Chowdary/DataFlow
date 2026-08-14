@@ -8457,6 +8457,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   min-width: 72px;
 }
 
+.df2-conservation-ledger.is-append.is-warn {
+  border-color: color-mix(in srgb, var(--df-warn, #b45309) 28%, var(--df-border, #e2e8f0));
+}
+
 .df2-conservation-ledger-head {
   display: flex;
   gap: 0.85rem;
@@ -8591,6 +8595,42 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 @media (max-width: 640px) {
   .df2-conservation-ledger-chips {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .df2-conservation-ledger-head,
+  .df2-trust-score-head {
+    flex-wrap: wrap;
+  }
+
+  .df2-conservation-ledger-next,
+  .df2-trust-score-next {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .df2-trust-score-factors li {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.2rem 0.5rem;
+  }
+
+  .df2-trust-score-factors em {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 560px) {
+  .df2-conservation-ledger-chips {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .df2-conservation-ledger-compare {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .df2-conservation-ledger-head {
+    flex-direction: column;
   }
 }
 

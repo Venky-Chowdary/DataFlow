@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from services.job_trust import attach_trust_to_updates, compute_job_trust, has_full_checksum_proof
+from services.job_trust import (
+    attach_trust_to_updates,
+    compute_job_trust,
+    has_full_checksum_proof,
+    is_append_delta_proof,
+)
 
 
 def test_clean_completed_job_high_trust() -> None:
@@ -126,6 +131,45 @@ def test_has_full_checksum_proof() -> None:
         "source_checksum": "x",
     })
     assert not has_full_checksum_proof({"passed": True})
+    append = {
+        "passed": True,
+        "assurance_level": "row_count",
+        "coverage": "row_count",
+        "phase": "post_write_row_count",
+        "checksum_scope": "whole_table_not_comparable",
+        "source_checksum": "aaa",
+        "target_checksum": "bbb",
+        "checksum_match": False,
+    }
+    assert is_append_delta_proof(append)
+    assert not has_full_checksum_proof(append)
+
+
+def test_append_delta_pass_does_not_say_investigate_gate8() -> None:
+    trust = compute_job_trust({
+        "status": "completed",
+        "records_processed": 200,
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "reconciliation": {
+            "passed": True,
+            "phase": "post_write_row_count",
+            "assurance_level": "row_count",
+            "coverage": "row_count",
+            "checksum_scope": "whole_table_not_comparable",
+            "source_checksum": "aaa",
+            "target_checksum": "bbb",
+            "checksum_match": False,
+            "migration_proven": False,
+            "message": "Append delta verified (200 row(s) appended: 100 → 300).",
+        },
+    })
+    factor = next(f for f in trust["factors"] if f["id"] == "reconcile")
+    assert "append delta" in factor["note"].lower()
+    assert trust["grade"] != "A"
+    assert trust["score"] <= 89
+    assert trust["next_action"]["code"] == "append_delta"
+    assert "investigate" not in trust["next_action"]["label"].lower()
 
 
 def test_quarantine_lowers_score() -> None:

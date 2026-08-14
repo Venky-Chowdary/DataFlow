@@ -25,15 +25,42 @@ def is_terminal_status(status: str | None) -> bool:
     return str(status or "").strip().lower() in _TERMINAL
 
 
+def is_append_delta_proof(recon: dict[str, Any] | None) -> bool:
+    """True when Gate-8 closed on dest-before delta, not comparable whole-table hashes.
+
+    Matches Gate-8 UI ``isGate8AppendDelta``: coverage/phase ``row_count``
+    alone is not enough — overwrite conservation fixtures reuse that phase.
+    """
+    if not isinstance(recon, dict) or not recon:
+        return False
+    scope = str(recon.get("checksum_scope") or "").strip().lower()
+    if scope == "whole_table_not_comparable":
+        return True
+    coverage = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
+    phase = str(recon.get("phase") or "").strip().lower()
+    src = str(recon.get("source_checksum") or "").strip()
+    tgt = str(recon.get("target_checksum") or "").strip()
+    hashes_diverge = bool(src and tgt and src != tgt)
+    return (
+        (coverage == "row_count" or "post_write_row_count" in phase)
+        and hashes_diverge
+        and recon.get("checksum_match") is not True
+    )
+
+
 def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
     """True only for independent source↔dest digest match (not writer-ack/sample)."""
     if not isinstance(recon, dict) or not recon:
         return False
+    if is_append_delta_proof(recon):
+        return False
     assurance = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
     if assurance == "full_checksum":
         return True
+    if assurance == "row_count":
+        return False
     phase = str(recon.get("phase") or "").strip().lower()
-    if "writer_ack" in phase or "sample" in phase or "skipped" in phase:
+    if "writer_ack" in phase or "sample" in phase or "skipped" in phase or "row_count" in phase:
         return False
     if recon.get("unproven") is True or recon.get("skipped_readback") is True:
         return False
@@ -92,6 +119,8 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
         recon_score = 58.0
     elif sample:
         recon_score = 68.0
+    elif is_append_delta_proof(recon):
+        recon_score = 70.0
     elif has_full_checksum_proof(recon):
         recon_score = 100.0
     elif passed is True:
@@ -115,6 +144,11 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
         r_note = "Writer acknowledgment only — independent read-back not captured."
     elif sample:
         r_note = "Sample-verified Gate-8 — not full independent checksum."
+    elif is_append_delta_proof(recon):
+        r_note = (
+            "Gate-8 append delta verified — whole-table checksums are not "
+            "comparable; per-cell fidelity is not proven."
+        )
     elif missing or extra:
         r_note = f"Keys missing={missing} extra={extra}."
         recon_score = min(recon_score, 70.0)
@@ -354,6 +388,7 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         lease_conflict=lease_conflict,
         cursor_gap=cursor_gap,
         rejected=rejected,
+        recon=recon if recon else None,
     )
 
     return {
@@ -399,6 +434,7 @@ def _next_action(
     lease_conflict: bool,
     cursor_gap: bool,
     rejected: float,
+    recon: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     if cursor_gap:
         return {
@@ -430,6 +466,15 @@ def _next_action(
             "detail": "Replay or export rejected rows — nothing was silently dropped.",
         }
     if wid == "reconcile":
+        if recon and recon.get("passed") is True and is_append_delta_proof(recon):
+            return {
+                "code": "append_delta",
+                "label": "Append delta closed — not a dest replace",
+                "detail": (
+                    "Dest grew by this run. Overwrite to replace existing rows, "
+                    "or add a PK and upsert."
+                ),
+            }
         return {
             "code": "reconcile",
             "label": "Investigate Gate-8",

@@ -503,3 +503,54 @@ describe("job rollup never takes last-stream dest COUNT(*)", () => {
     assert.equal(destProvenCount({ row_accounting: mixed }), null);
   });
 });
+
+const appendLedger = {
+  ...overwriteLedger,
+  rows_read: 200,
+  rows_written: 200,
+  writer_ack: 200,
+  dest_count: 300,
+  dest_count_before: 100,
+  dest_delta: 200,
+  unaccounted: 0,
+  balanced: true,
+  conservation_kind: "append_delta",
+  note: "This run's dest COUNT(*) growth is 200 (100 → 300). Pre-existing dest rows remain.",
+  writer_ack_delta: 0,
+};
+
+describe("append dest headline is dest Δ, not dest after", () => {
+  it("shows this run's growth, not dest COUNT(*) after", () => {
+    const job = {
+      status: "completed",
+      records_processed: 200,
+      row_accounting: appendLedger,
+    };
+    const h = destHeadline(job);
+    assert.equal(h.value, "200");
+    assert.equal(h.label, "Appended this run");
+    assert.equal(h.tone, "warn");
+    assert.equal(destMetricCompact(h), "200 appended");
+    assert.equal(destProvenCount(job), 300);
+    assert.match(conservationCompleteCopy(job), /200 appended this run/);
+    assert.match(conservationCompleteCopy(job), /100 → 300/);
+    assert.doesNotMatch(conservationCompleteCopy(job), /300 at destination/);
+    assert.equal(writerAckDisagrees(job), false);
+    const cells = ledgerIdentityCells(appendLedger);
+    assert.equal(cells.find((c) => c.label === "Dest Δ")?.value, "200");
+    assert.equal(cells.find((c) => c.label === "Dest before")?.value, "100");
+    assert.equal(cells.find((c) => c.label === "Dest after")?.value, "300");
+    assert.match(ledgerEquation(appendLedger), /dest Δ 200/);
+  });
+
+  it("does not treat dest after as writer disagreement when dest Δ matches ack", () => {
+    const noDeltaField = {
+      ...appendLedger,
+      dest_delta: null,
+      writer_ack_delta: null,
+    };
+    assert.equal(writerAckDisagrees({ row_accounting: noDeltaField }), false);
+    const h = destHeadline({ status: "completed", row_accounting: noDeltaField });
+    assert.equal(h.value, "200");
+  });
+});

@@ -1810,11 +1810,38 @@ def account_population(
         else "destination (independent COUNT(*))"
     )
     dest_short = "artifact record count" if artifact else "dest COUNT(*)"
+    if kind == KIND_APPEND_DELTA:
+        dest_short = "dest Δ"
 
     unaccounted = read - (written + quarantined + skipped)
     ack_delta = (written - ack) if ack is not None else None
+    append_delta = written if kind == KIND_APPEND_DELTA else None
 
-    if unaccounted > 0:
+    if kind == KIND_APPEND_DELTA:
+        before_s = f"{int(dest_count_before):,}"
+        after_s = f"{int(dest_count):,}"
+        delta_s = f"{int(written):,}"
+        if unaccounted > 0:
+            note = (
+                f"{unaccounted} source row(s) are not in this run's dest COUNT(*) "
+                f"growth ({delta_s}; dest {before_s} → {after_s}), quarantined, "
+                "or skipped. Treat as potential silent loss — the writer "
+                "acknowledgement is not evidence they landed."
+            )
+        elif unaccounted < 0:
+            note = (
+                f"{abs(unaccounted)} more row(s) are in this run's dest COUNT(*) "
+                f"growth ({delta_s}; dest {before_s} → {after_s}), quarantined, "
+                "or skipped than were read."
+            )
+        else:
+            note = (
+                f"This run's dest COUNT(*) growth is {delta_s} "
+                f"({before_s} → {after_s}). Every source row is in that delta, "
+                "quarantined, or skipped. Pre-existing dest rows remain. "
+                "Whole-table checksums are not comparable."
+            )
+    elif unaccounted > 0:
         note = (
             f"{unaccounted} source row(s) are neither in the {dest_phrase}, "
             "quarantined, nor skipped. Treat as potential silent loss — the "
@@ -1878,6 +1905,7 @@ def account_population(
         conservation_kind=kind,
         note=note,
         writer_ack_delta=ack_delta,
+        dest_delta=append_delta,
         missing_keys=missing,
         extra_keys=extra,
         leftover_deleted=leftover_deleted,

@@ -1170,7 +1170,12 @@ def test_append_uses_dest_delta_not_whole_table_count():
     )
     assert ledger.conservation_kind == KIND_APPEND_DELTA
     assert ledger.rows_written == 10
+    assert ledger.dest_delta == 10
+    assert ledger.dest_count == 40
+    assert ledger.dest_count_before == 30
     assert ledger.balanced is True
+    assert "Pre-existing dest rows remain" in ledger.note
+    assert "Every source row is in the destination" not in ledger.note
 
 
 def test_append_without_precount_is_unmeasured():
