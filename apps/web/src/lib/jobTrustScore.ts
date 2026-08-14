@@ -58,6 +58,7 @@ export const CDC_GAP_ERROR_CODES = [
   "cdc_binlog_gap",
   "cdc_slot_gap",
   "cdc_ct_gap",
+  "cdc_oplog_gap",
 ] as const;
 
 export function isCdcGapErrorCode(code?: string | null): boolean {

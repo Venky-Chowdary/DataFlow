@@ -3,13 +3,12 @@
 Honesty
 -------
 SQL Server ``min_lsn`` / Change Tracking ``CHANGE_TRACKING_MIN_VALID_VERSION``,
-Oracle oldest redo, MySQL purged binlog/GTID, and PostgreSQL
-``pg_replication_slots.wal_status=lost`` (or a dropped slot) mean continuous
-CDC across the gap is impossible. Recreating a logical slot at current WAL
-while holding an old watermark **skips the lost window** — that is silent
-data loss. Calling ``CHANGETABLE`` with a last_sync_version below
-``CHANGE_TRACKING_MIN_VALID_VERSION`` can return **invalid** change sets
-(Microsoft: reinitialize; do not enumerate). ``when_needed`` recovers by
+Oracle oldest redo, MySQL purged binlog/GTID, PostgreSQL
+``pg_replication_slots.wal_status=lost`` (or a dropped slot), and MongoDB
+``ChangeStreamHistoryLost`` (oplog window / ``invalidate``) mean continuous
+CDC across the gap is impossible. Recreating a logical slot at current WAL,
+or opening a Mongo change stream without the expired resume token, **skips
+the lost window** — that is silent data loss. ``when_needed`` recovers by
 blocking-snapshot of **current** source keys, then streaming from the new tip.
 ``initial`` / ``never`` stay fail-closed. Not exactly-once. Not continuous CDC.
 """
@@ -26,6 +25,7 @@ GAP_ERROR_CODES = frozenset(
         "cdc_binlog_gap",
         "cdc_slot_gap",
         "cdc_ct_gap",
+        "cdc_oplog_gap",
     }
 )
 
@@ -213,3 +213,35 @@ class CdcCtGapError(CdcCursorGapError):
         )
         self.resume_version = resume_version
         self.min_valid_version = min_valid_version
+
+
+class CdcOplogGapError(CdcCursorGapError):
+    """MongoDB: resume token is before the retained oplog (or stream invalidated).
+
+    Error 286 ``ChangeStreamHistoryLost`` — the capped oplog recycled the
+    resume point. Opening ``watch()`` without that token starts at *current*
+    clusterTime and skips the lost window. Collection ``invalidate`` (drop /
+    rename) is the same class: ``resumeAfter`` cannot continue. Recovery is
+    ``when_needed`` blocking snapshot, not "resume from now."
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        resume_unix: int | str = "",
+        oldest_oplog_unix: int | str = "",
+        cursor_key: str = "",
+        snapshot_plan: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            code="cdc_oplog_gap",
+            dialect="mongodb",
+            resume=str(resume_unix if resume_unix not in (None, "") else ""),
+            retained=str(oldest_oplog_unix if oldest_oplog_unix not in (None, "") else ""),
+            cursor_key=cursor_key,
+            snapshot_plan=snapshot_plan,
+        )
+        self.resume_unix = resume_unix
+        self.oldest_oplog_unix = oldest_oplog_unix

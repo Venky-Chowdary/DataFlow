@@ -40,7 +40,7 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
   const isGap =
     Boolean(job.cdc_cursor_gap)
     || isCdcGapErrorCode(job.error_code)
-    || /before capture retention|before available redo|min_lsn|min_valid_version|last_sync_version|change tracking|oldest_available|ora-01291|wal_status=lost|replication slot/i.test(
+    || /before capture retention|before available redo|min_lsn|min_valid_version|last_sync_version|change tracking|oldest_available|ora-01291|wal_status=lost|replication slot|changestreamhistorylost|resume point may no longer be in the oplog/i.test(
       String(job.error || ""),
     );
 

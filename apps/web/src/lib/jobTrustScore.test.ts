@@ -97,6 +97,19 @@ describe("computeJobTrustScore", () => {
     assert.match(t.next_action.label, /Resume/);
   });
 
+  it("treats cdc_oplog_gap error_code as a cursor gap", () => {
+    const t = computeJobTrustScore({
+      status: "failed",
+      records_processed: 10,
+      error_code: "cdc_oplog_gap",
+      snapshot_mode: "when_needed",
+      reconciliation: { passed: false },
+    });
+    assert.equal(t.cursor_gap, true);
+    assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Resume/);
+  });
+
   it("caps completeness when Gate-8 reconcile is missing", () => {
     const withRecon = computeJobTrustScore({
       status: "completed",

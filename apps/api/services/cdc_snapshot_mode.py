@@ -15,11 +15,12 @@ version has been purged is broken resume — not "already snapshotted, skip."
 Production must pass ``resume_broken`` from the retention probe (``status=gap``),
 otherwise ``when_needed`` silently skips snapshot and the job polls a purged
 cursor (or, for SQL Server CT, ``CHANGETABLE`` with a stale last_sync_version
-returns an **invalid** change set).
+returns an **invalid** change set; for MongoDB, ``watch()`` without the expired
+resume token starts at current clusterTime and skips the oplog window).
 
 Honesty
 -------
-Events in the purged WAL / binlog / redo window are gone forever. Recovery
+Events in the purged WAL / binlog / redo / oplog window are gone forever. Recovery
 re-upserts **current** source keys (blocking ``cdc.snapshot()`` LSN handoff),
 then streams from the new tip. That is at-least-once upsert of the live
 population, not continuous CDC across the gap, and never ``migration_proven``.

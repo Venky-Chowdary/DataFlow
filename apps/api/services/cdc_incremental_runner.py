@@ -14,6 +14,7 @@ import logging
 import uuid
 from typing import Any, Callable, Iterator, Optional
 
+from services.cdc_cursor_gap import CdcCursorGapError
 from services.cdc_engine import ChangeBatch
 from services.cdc_incremental_snapshot import (
     SnapshotSignal,
@@ -94,6 +95,8 @@ def interleave_incremental_snapshot(
             if stream_events_during_chunk is not None:
                 try:
                     stream_events = list(stream_events_during_chunk(sig) or [])
+                except CdcCursorGapError:
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "Stream peek during snapshot window failed for %s.%s: %s",

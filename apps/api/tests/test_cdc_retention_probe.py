@@ -280,3 +280,102 @@ def test_resume_ct_version_from_streaming_token():
     assert _resume_ct_version_from_watermark(snap) is None
     assert _resume_ct_version_from_watermark(None) is None
     assert _resume_ct_version_from_watermark("mssql-ct:orders:7") == 7
+
+
+def test_resume_token_unix_seconds_decodes_v1_timestamp():
+    from services.cdc_retention_probe import resume_token_unix_seconds
+
+    seconds = 1_700_000_000
+    token = {"_data": f"82{seconds:08x}00000001"}
+    assert resume_token_unix_seconds(token) == seconds
+    assert resume_token_unix_seconds(f"mongo:82{seconds:08x}00000001") == seconds
+    assert resume_token_unix_seconds({"phase": "snapshot", "token": token}) == seconds
+    assert resume_token_unix_seconds({"phase": "streaming", "offset": 0, "collection": "orders"}) is None
+    assert resume_token_unix_seconds({"_data": "not-hex"}) is None
+    assert resume_token_unix_seconds(None) is None
+
+
+def test_classify_mongo_oplog_ok_at_risk_gap():
+    from services.cdc_retention_probe import classify_mongo_oplog_retention
+
+    ok = classify_mongo_oplog_retention(1_700_100_000, 1_700_000_000, newest_oplog_unix=1_700_200_000)
+    assert ok.status == "ok"
+    assert ok.details.get("plugin") == "mongodb_change_stream"
+
+    edge = classify_mongo_oplog_retention(1_700_000_000, 1_700_000_000)
+    assert edge.status == "at_risk"
+
+    gap = classify_mongo_oplog_retention(1_699_000_000, 1_700_000_000, cursor_key="ck-mongo")
+    assert gap.status == "gap"
+    assert gap.cursor_key == "ck-mongo"
+    assert "clusterTime" in gap.message or "oplog" in gap.message.lower()
+
+    lost = classify_mongo_oplog_retention(1_700_000_000, None, history_lost=True)
+    assert lost.status == "gap"
+    assert lost.retained == "oplog_purged"
+
+    inv = classify_mongo_oplog_retention(None, None, invalidated=True)
+    assert inv.status == "gap"
+    assert inv.retained == "invalidate"
+
+    fresh = classify_mongo_oplog_retention(None, 1_700_000_000)
+    assert fresh.status == "no_watermark"
+
+    unknown = classify_mongo_oplog_retention(1_700_000_000, None)
+    assert unknown.status == "unknown"
+
+
+def test_when_needed_mongo_oplog_gap_is_blocking_snapshot():
+    from services.cdc_retention_probe import classify_mongo_oplog_retention
+    from services.cdc_snapshot_mode import KIND_BLOCKING, classify_snapshot_plan, SnapshotMode
+
+    probe = classify_mongo_oplog_retention(1_699_000_000, 1_700_000_000)
+    plan = classify_snapshot_plan(
+        SnapshotMode.WHEN_NEEDED, watermark="82", retention_status=probe.status
+    )
+    assert plan["kind"] == KIND_BLOCKING
+    assert plan["lost_window"] is True
+    assert plan["run_snapshot"] is True
+
+
+def test_attach_cdc_retention_uses_mongo_oplog_catalog():
+    from types import SimpleNamespace
+
+    from services.cdc_retention_probe import attach_cdc_retention
+
+    cdc = SimpleNamespace(
+        collection="orders",
+        cursor_key="mongodb:db:orders",
+        _oplog_catalog_status=lambda max_age_sec=0: {
+            "plugin": "mongodb_change_stream",
+            "resume_unix": 1_699_000_000,
+            "oldest_oplog_unix": 1_700_000_000,
+            "newest_oplog_unix": 1_700_100_000,
+        },
+    )
+    probe = attach_cdc_retention(cdc, {"type": "mongodb", "database": "db"}, table="orders")
+    assert probe is not None
+    assert probe.status == "gap"
+    assert probe.resume == "1699000000"
+    assert cdc._cdc_retention.status == "gap"
+
+
+def test_attach_mongo_catalog_unreachable_is_unknown_not_gap():
+    from types import SimpleNamespace
+
+    from services.cdc_retention_probe import attach_cdc_retention
+
+    cdc = SimpleNamespace(
+        collection="orders",
+        cursor_key="mongodb:db:orders",
+        _oplog_catalog_status=lambda max_age_sec=0: {
+            "plugin": "mongodb_change_stream",
+            "resume_unix": 1_700_000_000,
+            "oldest_oplog_unix": None,
+            "newest_oplog_unix": None,
+            "error": "not authorized on local",
+        },
+    )
+    probe = attach_cdc_retention(cdc, {"type": "mongodb"}, table="orders")
+    assert probe is not None
+    assert probe.status == "unknown"

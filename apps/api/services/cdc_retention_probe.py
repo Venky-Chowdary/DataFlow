@@ -4,9 +4,10 @@ Honesty
 -------
 ``ok`` / ``at_risk`` / ``gap`` classify resume against live retention. A ``gap``
 means continuous CDC across the window is impossible. PostgreSQL
-``wal_status=lost`` or a dropped slot is the same class as a purged binlog or
-SQL Server Change Tracking ``last_sync_version < CHANGE_TRACKING_MIN_VALID_VERSION``
-— ``CHANGETABLE`` on a stale version can return an invalid change set.
+``wal_status=lost``, a dropped slot, a purged binlog, SQL Server Change Tracking
+``last_sync_version < CHANGE_TRACKING_MIN_VALID_VERSION``, or MongoDB
+``ChangeStreamHistoryLost`` (oplog wrap / ``invalidate``) are the same class.
+Opening a Mongo change stream at current clusterTime skips the lost window.
 ``when_needed`` recovers by blocking-snapshot of current source keys (see
 ``cdc_snapshot_mode``); ``initial`` / ``never`` stay fail-closed.
 """
@@ -240,6 +241,217 @@ def classify_ct_version_retention(
             f"{f', current={current}' if current is not None else ''})."
         ),
         details=details,
+    )
+
+
+# Resume-token v1 wraps a BSON Timestamp as hex ``82`` + 8-char seconds + increment.
+# Unix-second sanity: 2010-01-01 .. 2100-01-01 — refuse invented timestamps.
+_MONGO_TOKEN_TS_MIN = 1_262_304_000
+_MONGO_TOKEN_TS_MAX = 4_102_444_800
+
+
+def resume_token_unix_seconds(token: Any) -> int | None:
+    """Extract clusterTime seconds from a MongoDB change-stream resume token.
+
+    Tokens are opaque for LSN-guard compares (``mongo_resume`` family). The
+    leading ``0x82`` Timestamp wrapper is the *retention* compare key against
+    ``local.oplog.rs`` — same role as SCN / min_lsn / min_valid_version.
+    Unknown encodings return ``None`` (probe ``unknown``), never a fake gap.
+    Snapshot-phase wrappers are not stream cursors.
+    """
+    if token is None:
+        return None
+    if isinstance(token, dict):
+        phase = str(token.get("phase") or "").strip().lower()
+        if phase == "snapshot":
+            nested = token.get("token")
+            return resume_token_unix_seconds(nested) if nested else None
+        if "token" in token and phase == "streaming":
+            nested = token.get("token")
+            if nested:
+                inner = resume_token_unix_seconds(nested)
+                if inner is not None:
+                    return inner
+        data = str(token.get("_data") or "").strip()
+        if not data:
+            return None
+    else:
+        text = str(token).strip()
+        if not text or text.lower() in {"none", "null", "~"}:
+            return None
+        if text.lower().startswith("mongo:"):
+            text = text[6:]
+        if text.startswith("{"):
+            try:
+                import json
+
+                return resume_token_unix_seconds(json.loads(text))
+            except Exception:
+                return None
+        data = text
+    hex_body = data.lower().replace("mongo:", "").strip()
+    if len(hex_body) < 10 or not all(c in "0123456789abcdef" for c in hex_body[:10]):
+        return None
+    if not hex_body.startswith("82"):
+        return None
+    try:
+        seconds = int(hex_body[2:10], 16)
+    except ValueError:
+        return None
+    if seconds < _MONGO_TOKEN_TS_MIN or seconds > _MONGO_TOKEN_TS_MAX:
+        return None
+    return seconds
+
+
+def classify_mongo_oplog_retention(
+    resume_unix: int | str | None,
+    oldest_oplog_unix: int | str | None,
+    *,
+    newest_oplog_unix: int | str | None = None,
+    history_lost: bool = False,
+    invalidated: bool = False,
+    cursor_key: str = "",
+    at_risk_headroom: int = 3_600,
+    dialect: str = "mongodb",
+) -> RetentionProbeResult:
+    """Compare resume-token clusterTime to the oldest retained oplog event.
+
+    MongoDB / Atlas (Kafka connector error 286, ``ChangeStreamHistoryLost``):
+
+    - Resume token is valid only while the oplog entry still exists.
+    - Capped oplog + idle namespace is the default Atlas failure (window is
+      hours, not days). Kafka heartbeats exist to advance idle tokens — that
+      is a documented future enhancement of *this* kernel, not a second path.
+    - Opening ``watch()`` without the expired token starts at current
+      clusterTime and **skips** the lost window. Forbidden on poll.
+    - Collection ``invalidate`` (drop/rename): ``resumeAfter`` cannot continue.
+
+    Honesty: recovery is at-least-once upsert of the **live** collection
+    (``when_needed`` blocking snapshot). Purged oplog events are gone. Not
+    continuous CDC. Not ``migration_proven``.
+    """
+    def _unix(value: int | str | None) -> int | None:
+        if value is None or value is False:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value > 0 else None
+        text = str(value).strip()
+        if not text or text.lower() in {"none", "null", "~", "invalidate", "oplog_purged"}:
+            try:
+                return int(text) if text.isdigit() else None
+            except ValueError:
+                return None
+        try:
+            n = int(text)
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    resume = _unix(resume_unix)
+    oldest = _unix(oldest_oplog_unix)
+    newest = _unix(newest_oplog_unix)
+    lost_note = (
+        "Opening a change stream at current clusterTime would skip the lost "
+        "window. when_needed snapshots current source keys then streams from "
+        "a new resume token. Not continuous CDC, not migration_proven."
+    )
+    details: dict[str, Any] = {
+        "plugin": "mongodb_change_stream",
+        "history_lost": bool(history_lost),
+        "invalidated": bool(invalidated),
+        "newest_oplog_unix": newest,
+        "at_risk_headroom": int(at_risk_headroom),
+    }
+    if invalidated:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume) if resume is not None else "",
+            retained="invalidate",
+            cursor_key=cursor_key,
+            message=(
+                "MongoDB change stream received invalidate (collection drop or "
+                f"rename). resumeAfter cannot continue. {lost_note}"
+            ),
+            details=details,
+        )
+    if history_lost:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume) if resume is not None else "",
+            retained=str(oldest) if oldest is not None else "oplog_purged",
+            cursor_key=cursor_key,
+            message=(
+                "MongoDB ChangeStreamHistoryLost (286): resume token is no "
+                f"longer in the oplog. {lost_note}"
+            ),
+            details=details,
+        )
+    if resume is None:
+        return RetentionProbeResult(
+            status="no_watermark",
+            dialect=dialect,
+            retained=str(oldest) if oldest is not None else "",
+            cursor_key=cursor_key,
+            message="No MongoDB change-stream resume token — next run will snapshot.",
+            details=details,
+        )
+    if oldest is None:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect=dialect,
+            resume=str(resume),
+            cursor_key=cursor_key,
+            message=(
+                "Could not read local.oplog.rs (privilege, mongos, or standalone). "
+                "Poll will fail-closed on ChangeStreamHistoryLost rather than "
+                "opening watch() from now."
+            ),
+            details=details,
+        )
+    if resume < oldest:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume),
+            retained=str(oldest),
+            cursor_key=cursor_key,
+            message=(
+                f"MongoDB resume token clusterTime {resume} is before oldest "
+                f"oplog event {oldest}. {lost_note}"
+            ),
+            details=details,
+        )
+    headroom = resume - oldest
+    if headroom <= max(0, int(at_risk_headroom)):
+        return RetentionProbeResult(
+            status="at_risk",
+            dialect=dialect,
+            resume=str(resume),
+            retained=str(oldest),
+            cursor_key=cursor_key,
+            message=(
+                f"MongoDB resume token is within {headroom}s of the oldest oplog "
+                "event. Atlas oplog wrap or an idle namespace may force a gap — "
+                "when_needed snapshot readiness is the recovery path."
+            ),
+            details={**details, "headroom": headroom},
+        )
+    return RetentionProbeResult(
+        status="ok",
+        dialect=dialect,
+        resume=str(resume),
+        retained=str(oldest),
+        cursor_key=cursor_key,
+        message=(
+            f"MongoDB resume token clusterTime {resume} is within the oplog "
+            f"(oldest={oldest}, headroom={headroom}s"
+            f"{f', newest={newest}' if newest is not None else ''})."
+        ),
+        details={**details, "headroom": headroom},
     )
 
 
@@ -955,6 +1167,16 @@ _PG_RETENTION_DIALECTS = frozenset(
     }
 )
 
+_MONGO_RETENTION_DIALECTS = frozenset(
+    {
+        "mongodb",
+        "mongo",
+        "documentdb",
+        "amazon_documentdb",
+        "atlas",
+    }
+)
+
 
 def probe_postgres_retention(
     cfg: dict[str, Any],
@@ -1063,6 +1285,64 @@ def probe_postgres_retention(
         )
 
 
+def probe_mongo_retention(
+    cfg: dict[str, Any],
+    *,
+    table: str = "",
+    cursor_key: str = "",
+    watermark: str | None = None,
+) -> RetentionProbeResult:
+    """Live probe: resume-token clusterTime vs ``local.oplog.rs`` oldest event."""
+    from connectors.mongodb_change_stream import MongodbChangeStreamCdc
+
+    from services.sync_cursor import get_watermark
+
+    ck = (cursor_key or "").strip()
+    wm = watermark if watermark is not None else (get_watermark(ck) if ck else None)
+    collection = table or str(cfg.get("collection") or cfg.get("table") or "")
+    try:
+        cdc = MongodbChangeStreamCdc(
+            {**cfg, "type": cfg.get("type") or "mongodb", "cursor_key": ck},
+            collection=collection or "probe",
+            primary_key=str(cfg.get("primary_key") or "_id"),
+            resume_token=wm,
+        )
+        try:
+            catalog = cdc._oplog_catalog_status(max_age_sec=0)
+        finally:
+            try:
+                cdc.close()
+            except Exception:
+                pass
+        if catalog.get("error") and catalog.get("oldest_oplog_unix") is None:
+            return RetentionProbeResult(
+                status="unknown",
+                dialect="mongodb",
+                resume=str(catalog.get("resume_unix") or resume_token_unix_seconds(wm) or ""),
+                cursor_key=ck,
+                message=f"MongoDB oplog catalog could not be read: {catalog.get('error')}",
+                details={"plugin": "mongodb_change_stream", "error": catalog.get("error")},
+            )
+        result = classify_mongo_oplog_retention(
+            catalog.get("resume_unix") if catalog.get("resume_unix") is not None else resume_token_unix_seconds(wm),
+            catalog.get("oldest_oplog_unix"),
+            newest_oplog_unix=catalog.get("newest_oplog_unix"),
+            cursor_key=ck,
+        )
+        result.capture_instance = collection
+        result.details["collection"] = collection
+        return result
+    except Exception as exc:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect="mongodb",
+            resume=str(resume_token_unix_seconds(wm) or ""),
+            cursor_key=ck,
+            message=f"MongoDB oplog retention probe failed: {exc}",
+            details={"error": str(exc)[:300], "plugin": "mongodb_change_stream"},
+        )
+
+
 def probe_cdc_retention(
     cfg: dict[str, Any],
     *,
@@ -1098,6 +1378,13 @@ def probe_cdc_retention(
             cursor_key=cursor_key,
             watermark=watermark,
         )
+    if dialect in _MONGO_RETENTION_DIALECTS:
+        return probe_mongo_retention(
+            cfg,
+            table=table,
+            cursor_key=cursor_key,
+            watermark=watermark,
+        )
     return RetentionProbeResult(
         status="n_a",
         dialect=dialect or "unknown",
@@ -1124,7 +1411,7 @@ def attach_cdc_retention(cdc: Any, src_cfg: dict[str, Any] | None, *, table: str
         "microsoft_sql_server",
         "azure_sql_database",
         "amazon_rds_sql_server",
-    } | _PG_RETENTION_DIALECTS:
+    } | _PG_RETENTION_DIALECTS | _MONGO_RETENTION_DIALECTS:
         return None
     table_name = table or str(getattr(cdc, "table", "") or src_cfg.get("table") or "")
     if isinstance(table_name, (list, tuple)):
@@ -1182,6 +1469,34 @@ def attach_cdc_retention(cdc: Any, src_cfg: dict[str, Any] | None, *, table: str
                 catalog.get("min_valid_version"),
                 current_version=catalog.get("current_version"),
                 ct_enabled=catalog.get("ct_enabled"),
+                cursor_key=cursor_key,
+            )
+        try:
+            setattr(cdc, "_cdc_retention", probe)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return probe
+    if cdc is not None and hasattr(cdc, "_oplog_catalog_status"):
+        catalog = {}
+        try:
+            catalog = dict(cdc._oplog_catalog_status(max_age_sec=0) or {})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        if not catalog:
+            probe = RetentionProbeResult(
+                status="unknown",
+                dialect="mongodb",
+                cursor_key=cursor_key,
+                message="MongoDB oplog catalog could not be read.",
+                details={"plugin": "mongodb_change_stream"},
+            )
+        else:
+            probe = classify_mongo_oplog_retention(
+                catalog.get("resume_unix"),
+                catalog.get("oldest_oplog_unix"),
+                newest_oplog_unix=catalog.get("newest_oplog_unix"),
+                history_lost=bool(catalog.get("history_lost")),
+                invalidated=bool(catalog.get("invalidated")),
                 cursor_key=cursor_key,
             )
         try:
