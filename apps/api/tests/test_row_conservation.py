@@ -24,7 +24,9 @@ from services.dest_precount import (
     VECTOR_ROWS_KEY,
     count_artifact_rows,
     count_scd2_current,
+    destination_key_list,
     destination_keyset_census,
+    destination_row_count,
     records_to_key_tuples,
     stamp_artifact_census,
     stamp_keyset_census,
@@ -53,6 +55,7 @@ from services.row_conservation import (
     conservation_kind,
     dest_count_from_recon,
     hold_outs,
+    apply_inferred_leftover_deletes,
 )
 
 
@@ -2258,3 +2261,196 @@ def test_sqlite_keyset_census_splits_missing_from_extra_target(tmp_path: Path):
     assert ledger.missing_keys == 1
     assert ledger.extra_keys == 1
     assert ledger.writer_ack == 10_000
+
+
+def test_inferred_leftover_delete_refuses_incomplete_snapshot(tmp_path: Path):
+    """Incremental CDC must not infer-delete dest keys the batch did not send."""
+    import sqlite3
+
+    path = tmp_path / "p9_no_infer.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        conn.executemany(
+            "INSERT INTO items (id, label) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    deleted = apply_inferred_leftover_deletes(
+        db_type="sqlite",
+        cfg={"database": str(path)},
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,)],
+        complete_snapshot=False,
+    )
+    assert deleted is None
+    assert destination_row_count(
+        "sqlite", {"database": str(path)}, schema="", table_name="items"
+    ) == 3
+
+
+def test_inferred_leftover_delete_skips_pgvector():
+    deleted = apply_inferred_leftover_deletes(
+        db_type="pgvector",
+        cfg={"host": "127.0.0.1"},
+        schema="public",
+        table_name="docs",
+        key_columns=["id"],
+        keys=[("a",), ("b",)],
+        complete_snapshot=True,
+    )
+    assert deleted is None
+
+
+def test_overwrite_merge_deletes_leftover_dest_keys_not_in_complete_s(tmp_path: Path):
+    """Dest {1,2,3,99} vs S {1,2,3}: MERGE-delete 99. COUNT(*) becomes 3, extra=0.
+
+    Fivetran would soft-flag 99 (_fivetran_deleted) so COUNT(*) stays 4.
+    Airbyte incremental would leave 99. DMS EXTRA_TARGET measures 99.
+    Complete overwrite snapshot hard-deletes dest \\ S, then proves extra=0.
+    """
+    import sqlite3
+
+    path = tmp_path / "p9_leftover_merge.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        conn.executemany(
+            "INSERT INTO items (id, label) VALUES (?, ?)",
+            [(1, "a"), (2, "b"), (3, "c"), (99, "ghost")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    cfg = {"database": str(path)}
+    listed = destination_key_list(
+        "sqlite", cfg, schema="", table_name="items", key_columns=["id"]
+    )
+    assert listed is not None
+    assert sorted(listed) == [(1,), (2,), (3,), (99,)]
+    before = destination_keyset_census(
+        "sqlite",
+        cfg,
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+    )
+    assert before is not None
+    assert before["dest_count"] == 4
+    assert before[EXTRA_KEYS_KEY] == 1
+    assert before[MISSING_KEYS_KEY] == 0
+
+    deleted = apply_inferred_leftover_deletes(
+        db_type="sqlite",
+        cfg=cfg,
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    after = destination_keyset_census(
+        "sqlite",
+        cfg,
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+    )
+    assert after is not None
+    assert after["dest_count"] == 3
+    assert after[EXTRA_KEYS_KEY] == 0
+    assert after[MISSING_KEYS_KEY] == 0
+    leftover = destination_key_list(
+        "sqlite", cfg, schema="", table_name="gone", key_columns=["id"]
+    )
+    assert leftover == []
+
+    ledger = account_job(
+        {
+            "sync_mode": "full_refresh_overwrite",
+            "records_processed": 10_000,
+            "destination_summary": {"leftover_deleted": 1},
+            "reconciliation": {
+                "source_rows": 3,
+                "target_rows": 3,
+                "target_checksum": "after-merge",
+                MISSING_KEYS_KEY: 0,
+                EXTRA_KEYS_KEY: 0,
+                "leftover_deleted": 1,
+            },
+        }
+    )
+    assert ledger.balanced is True
+    assert ledger.dest_count == 3
+    assert ledger.extra_keys == 0
+    assert ledger.missing_keys == 0
+    assert ledger.leftover_deleted == 1
+    assert ledger.writer_ack == 10_000
+    assert "merge" in ledger.note.lower() or "leftover" in ledger.note.lower()
+
+
+def test_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: Path):
+    """Dest {2,3,99} vs S {1,2,3}: delete 99, dest=2, missing=1 still unclosed."""
+    import sqlite3
+
+    path = tmp_path / "p9_leftover_missing.db"
+    conn = sqlite3.connect(str(path))
+    try:
+        conn.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, label TEXT)")
+        conn.executemany(
+            "INSERT INTO items (id, label) VALUES (?, ?)",
+            [(2, "b"), (3, "c"), (99, "ghost")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    cfg = {"database": str(path)}
+    deleted = apply_inferred_leftover_deletes(
+        db_type="sqlite",
+        cfg=cfg,
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+        complete_snapshot=True,
+    )
+    assert deleted == 1
+    census = destination_keyset_census(
+        "sqlite",
+        cfg,
+        schema="",
+        table_name="items",
+        key_columns=["id"],
+        keys=[(1,), (2,), (3,)],
+    )
+    assert census is not None
+    assert census["dest_count"] == 2
+    assert census[EXTRA_KEYS_KEY] == 0
+    assert census[MISSING_KEYS_KEY] == 1
+    ledger = account_job(
+        {
+            "sync_mode": "full_refresh_overwrite",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 3,
+                "target_rows": 2,
+                "target_checksum": "after-merge",
+                MISSING_KEYS_KEY: 1,
+                EXTRA_KEYS_KEY: 0,
+                "leftover_deleted": 1,
+            },
+        }
+    )
+    assert ledger.balanced is False
+    assert ledger.dest_count == 2
+    assert ledger.missing_keys == 1
+    assert ledger.extra_keys == 0
+    assert ledger.leftover_deleted == 1
+    assert ledger.unaccounted == 1

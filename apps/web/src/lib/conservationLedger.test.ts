@@ -222,6 +222,36 @@ describe("destHeadline never falls back to writer ack", () => {
     assert.doesNotMatch(conservationCompleteCopy(job), /10,000/);
   });
 
+  it("surfaces leftover deleted after complete-snapshot MERGE, never writer ack", () => {
+    const mergeLedger = {
+      ...overwriteLedger,
+      dest_count: 3,
+      rows_read: 3,
+      rows_written: 3,
+      unaccounted: 0,
+      balanced: true,
+      missing_keys: 0,
+      extra_keys: 0,
+      leftover_deleted: 1,
+      writer_ack: 10_000,
+      writer_ack_delta: -9997,
+      note: "Dest-engine MERGE deleted 1 leftover dest key(s) not in the complete source snapshot.",
+    };
+    const job = {
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: mergeLedger,
+    };
+    const h = destHeadline(job);
+    assert.equal(h.value, "3");
+    assert.equal(h.measured, true);
+    assert.doesNotMatch(h.label, /Active at dest/);
+    const cells = ledgerIdentityCells(mergeLedger);
+    assert.equal(cells.find((c) => c.label === "Extra dest keys")?.value, "0");
+    assert.equal(cells.find((c) => c.label === "Leftover deleted")?.value, "1");
+    assert.doesNotMatch(conservationCompleteCopy(job), /10,000/);
+  });
+
   it("shows em dash when dest is unmeasured — never invents dest = writer ack", () => {
     const h = destHeadline({
       status: "completed",

@@ -829,6 +829,9 @@ def run_reconciliation(
                 key_columns=list(keyset_stamp_ctx.get("key_columns") or []),
                 keys=keyset_stamp_ctx.get("keys"),
             )
+        leftover_n = dest_summary.get("leftover_deleted") if isinstance(dest_summary, dict) else None
+        if isinstance(leftover_n, int) and leftover_n >= 0:
+            stamped["leftover_deleted"] = leftover_n
         if scd2_stamp_ctx:
             stamped = stamp_scd2_census(
                 stamped,
@@ -1057,6 +1060,28 @@ def run_reconciliation(
     ):
         key_tuples = records_to_key_tuples(records, [str(c) for c in pk_cols], mapping_dicts)
         if key_tuples:
+            # Complete overwrite snapshot MERGE: hard-DELETE dest keys not
+            # in S *before* dest COUNT / checksum. Incremental CDC never
+            # enters this gate. Measure-without-apply is DMS EXTRA_TARGET;
+            # apply-without-this-gate is Airbyte issue #6383.
+            try:
+                from services.row_conservation import apply_inferred_leftover_deletes
+
+                deleted = apply_inferred_leftover_deletes(
+                    db_type=db_type,
+                    cfg=cfg,
+                    schema=str(schema or ""),
+                    table_name=str(table_name or ""),
+                    key_columns=[str(c) for c in pk_cols],
+                    keys=key_tuples,
+                    complete_snapshot=True,
+                )
+                if deleted:
+                    dest_summary["leftover_deleted"] = int(deleted)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Overwrite leftover MERGE skipped: %s", exc, exc_info=exc
+                )
             keyset_stamp_ctx.update(
                 cfg=cfg,
                 schema=schema,

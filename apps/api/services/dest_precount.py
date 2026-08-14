@@ -42,10 +42,12 @@ A complete source PK census plus dest-engine key hits splits DMS
 ``MISSING_TARGET`` from ``EXTRA_TARGET``. ``COUNT(*)`` nets one missing
 source key and one leftover dest key to a false balance. Incremental
 CDC must not run that split — the batch is not the source key set, and
-leftover would look like almost every dest row. This module never
-infer-deletes leftover keys on upsert/CDC; it only measures them when
-the source census is complete. Mirror already applies inferred deletes
-on full re-sync.
+leftover would look like almost every dest row. This module **lists**
+dest keys so a complete overwrite snapshot can MERGE-delete ``D \\ S``;
+it never deletes them itself. ``row_conservation.apply_inferred_leftover_deletes``
+applies the anti-join only when the source census is complete overwrite.
+Incremental CDC must not call that apply. Mirror already applies inferred
+soft-deletes on full re-sync.
 
 SCD Type 2 is the same 1-source-identity → N-history-row shape as
 vector chunks. Physical ``COUNT(*)`` of versions grows on every
@@ -93,6 +95,7 @@ __all__ = [
     "count_scd2_current",
     "count_scd2_populations",
     "destination_keyset_census",
+    "destination_key_list",
     "records_to_key_tuples",
     "IDENTITY_COUNT_KEY",
     "VECTOR_ROWS_KEY",
@@ -102,6 +105,7 @@ __all__ = [
     "DEST_COUNT_CURRENT",
     "MISSING_KEYS_KEY",
     "EXTRA_KEYS_KEY",
+    "LEFTOVER_DELETED_KEY",
     "DestBeforeCensus",
 ]
 
@@ -145,6 +149,7 @@ MISSING_KEYS_KEY = "missing_keys"
 EXTRA_KEYS_KEY = "extra_keys"
 DEST_KEY_HITS_KEY = "dest_key_hits"
 SOURCE_KEY_COUNT_KEY = "source_key_count"
+LEFTOVER_DELETED_KEY = "leftover_deleted"
 _KEYSET_CENSUS_MAX = 20_000
 
 _ARTIFACT_FORMATS = frozenset({"csv", "tsv", "json", "jsonl", "parquet"})
@@ -569,6 +574,131 @@ def stamp_keyset_census(
     out[EXTRA_KEYS_KEY] = census[EXTRA_KEYS_KEY]
     out[DEST_KEY_HITS_KEY] = census[DEST_KEY_HITS_KEY]
     out[SOURCE_KEY_COUNT_KEY] = census[SOURCE_KEY_COUNT_KEY]
+    return out
+
+
+def destination_key_list(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    key_columns: Sequence[str],
+) -> list[tuple[Any, ...]] | None:
+    """Dest-engine PK tuples, bounded. ``None`` when listing is unmeasurable.
+
+    Complete-snapshot MERGE needs the dest key *values* not in ``S``, not
+    only ``|D| − |D ∩ S|``. Dest COUNT larger than ``_KEYSET_CENSUS_MAX``
+    stays unlisted rather than scanning an unbounded table. Duplicate dest
+    PKs (len(unique) != COUNT(*)) refuse — inferred delete would guess.
+    Missing table is ``[]``. This function never deletes.
+    """
+    cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
+    table = (table_name or "").strip()
+    if not table or not cols:
+        return None
+    dest_n = destination_row_count(db_type, cfg, schema=schema, table_name=table)
+    if dest_n is None:
+        return None
+    if dest_n == 0:
+        return []
+    if dest_n > _KEYSET_CENSUS_MAX:
+        logger.info(
+            "Dest key list skipped: dest COUNT(*) %s exceeds %s",
+            dest_n,
+            _KEYSET_CENSUS_MAX,
+        )
+        return None
+    try:
+        rows = _key_list_sql(
+            db_type, cfg, schema=schema, table_name=table, cols=cols
+        )
+    except Exception as exc:  # pragma: no cover - destination-specific failure
+        logger.warning("Dest key list failed: %s", exc)
+        return None
+    if rows is None:
+        return None
+    unique = _unique_key_tuples(rows, len(cols))
+    if len(unique) != dest_n or len(unique) != len(rows):
+        return None
+    return unique
+
+
+def _key_list_sql(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+) -> list[tuple[Any, ...]] | None:
+    from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+
+    dialect = "mysql" if db_type == "mysql" else db_type
+    qchar = "`" if dialect == "mysql" else '"'
+    table_ref = quote_table_ref(
+        table_name,
+        schema if dialect == "postgresql" else None,
+        dialect="postgresql" if dialect == "postgresql" else dialect,
+    )
+    col_sql = ", ".join(quote_sql_identifier(c, qchar) for c in cols)
+    sql = f"SELECT {col_sql} FROM {table_ref}"  # nosec B608
+    if dialect == "sqlite":
+        import sqlite3
+
+        database = str(cfg.get("database") or "")
+        if not database:
+            return None
+        with sqlite3.connect(database) as conn:
+            return _fetch_key_rows(conn, sql, len(cols))
+    if dialect in {"postgresql", "redshift"}:
+        from connectors.postgresql_conn import get_connection
+
+        conn = get_connection(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or (5439 if db_type == "redshift" else 5432)),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+        try:
+            return _fetch_key_rows(conn, sql, len(cols))
+        finally:
+            conn.close()
+    if dialect == "mysql":
+        from connectors.mysql_conn import get_connection
+
+        conn = get_connection(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 3306),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+        try:
+            return _fetch_key_rows(conn, sql, len(cols))
+        finally:
+            conn.close()
+    return None
+
+
+def _fetch_key_rows(conn: Any, sql: str, width: int) -> list[tuple[Any, ...]]:
+    cur = conn.cursor()
+    try:
+        cur.execute(sql)
+        rows = cur.fetchall() or []
+    finally:
+        cur.close()
+    out: list[tuple[Any, ...]] = []
+    for row in rows:
+        tup = tuple(row[:width])
+        if len(tup) != width or any(v is None for v in tup):
+            continue
+        out.append(tup)
     return out
 
 

@@ -80,8 +80,12 @@ How dest_population is chosen:
       extra   = |D| − |D ∩ S|
 
   Incremental CDC must not run this split (the batch is not ``S``) and
-  must not infer-delete leftover dest keys. Mirror already applies
-  inferred deletes on full re-sync.
+  must not infer-delete leftover dest keys. A **complete overwrite
+  snapshot** may MERGE-delete ``D \\ S`` (dest-engine anti-join, then
+  ``delete_by_primary_keys``) so EXTRA_TARGET does not survive as a
+  COUNT(*) surplus. That apply is not incremental CDC and not mirror
+  ``_deleted``. Mirror already applies inferred soft-deletes on full
+  re-sync.
 * **mirror (inferred deletes)** — Fivetran-style ``_deleted`` flag:
   physical ``COUNT(*)`` does **not** drop. The identity is the dest-engine
   **active** population:
@@ -124,6 +128,7 @@ from services.dest_precount import (
     EXTRA_KEYS_KEY,
     HISTORY_ROWS_KEY,
     IDENTITY_COUNT_KEY,
+    LEFTOVER_DELETED_KEY,
     MISSING_KEYS_KEY,
     PRECOUNT_KEY,
     VECTOR_ROWS_KEY,
@@ -455,6 +460,91 @@ def apply_hard_deletes(
         keys=formatted,
         schema=schema or None,
     )
+
+
+def apply_inferred_leftover_deletes(
+    *,
+    db_type: str,
+    cfg: Mapping[str, Any],
+    schema: str,
+    table_name: str,
+    key_columns: Sequence[str],
+    keys: Sequence[tuple[Any, ...]] | Sequence[Sequence[Any]],
+    complete_snapshot: bool,
+) -> int | None:
+    """Hard-DELETE dest keys not in complete source set ``S``. Overwrite only.
+
+    Fivetran historical re-sync soft-flags leftovers (``_fivetran_deleted``)
+    so COUNT(*) does not drop. Airbyte incremental refuses inferred
+    deletes because a batch is not ``S``. DMS EXTRA_TARGET measures
+    leftovers and leaves them. The dest-engine identity is:
+
+        leftover = D \\ S
+        DELETE leftover
+        extra → 0
+
+    ``complete_snapshot=False`` (incremental CDC, resume tail, sample)
+    is a hard no-op — that would false-delete almost every dest row.
+    Dest without unique PKs, unsupported engines, or an oversized
+    census stay ``None`` (unapplied); Gate-8 still *measures* extra.
+    Vector destinations own identity COUNT, not this PK anti-join.
+    """
+    if not complete_snapshot:
+        return None
+    engine = str(db_type or "").strip().lower()
+    if engine in {"pgvector", "pinecone", "qdrant", "weaviate", "milvus", "email"}:
+        return None
+    cols = [str(c).strip() for c in key_columns if str(c).strip()]
+    from services.dest_precount import destination_key_list
+
+    unique_s = _unique_source_keys(keys, len(cols))
+    if not cols or unique_s is None:
+        return None
+    dest_keys = destination_key_list(
+        engine,
+        dict(cfg),
+        schema=str(schema or ""),
+        table_name=str(table_name or ""),
+        key_columns=cols,
+    )
+    if dest_keys is None:
+        return None
+    s_set = {tuple(coerce_pk_part(p) for p in tup) for tup in unique_s}
+    leftover = [
+        tup
+        for tup in dest_keys
+        if tuple(coerce_pk_part(p) for p in tup) not in s_set
+    ]
+    if not leftover:
+        return 0
+    return apply_hard_deletes(
+        db_type=engine,
+        cfg=cfg,
+        schema=schema,
+        table_name=table_name,
+        key_columns=cols,
+        keys=leftover,
+    )
+
+
+def _unique_source_keys(
+    keys: Sequence[tuple[Any, ...]] | Sequence[Sequence[Any]],
+    width: int,
+) -> list[tuple[Any, ...]] | None:
+    """Complete unique ``S``, or ``None`` if duplicates / width mismatch."""
+    if width <= 0 or not keys:
+        return None
+    unique: list[tuple[Any, ...]] = []
+    seen: set[tuple[Any, ...]] = set()
+    for raw in keys:
+        tup = tuple(raw)
+        if len(tup) != width or any(v is None for v in tup):
+            return None
+        if tup in seen:
+            return None
+        seen.add(tup)
+        unique.append(tup)
+    return unique or None
 
 
 def census_from_partition(
@@ -801,6 +891,7 @@ class ConservationLedger:
     history_rows: int | None = None
     missing_keys: int | None = None
     extra_keys: int | None = None
+    leftover_deleted: int | None = None
     stream_count: int | None = None
     measured_streams: int | None = None
     summable: bool | None = None
@@ -839,6 +930,7 @@ class ConservationLedger:
             "history_rows": self.history_rows,
             "missing_keys": self.missing_keys,
             "extra_keys": self.extra_keys,
+            "leftover_deleted": self.leftover_deleted,
         }
         if self.stream_count is not None:
             payload["stream_count"] = self.stream_count
@@ -1147,16 +1239,19 @@ def extract_keyset_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
     if isinstance(nested, dict) and (
         nested.get(MISSING_KEYS_KEY) is not None
         or nested.get(EXTRA_KEYS_KEY) is not None
+        or nested.get(LEFTOVER_DELETED_KEY) is not None
     ):
         return dict(nested)
     missing = data.get(MISSING_KEYS_KEY)
     extra = data.get(EXTRA_KEYS_KEY)
-    if missing is not None or extra is not None:
+    leftover_deleted = data.get(LEFTOVER_DELETED_KEY)
+    if missing is not None or extra is not None or leftover_deleted is not None:
         return {
             MISSING_KEYS_KEY: missing,
             EXTRA_KEYS_KEY: extra,
             "dest_key_hits": data.get("dest_key_hits"),
             "source_key_count": data.get("source_key_count"),
+            LEFTOVER_DELETED_KEY: leftover_deleted,
         }
     return {}
 
@@ -1738,6 +1833,7 @@ def account_population(
         )
     missing = _as_optional_int((keyset or {}).get(MISSING_KEYS_KEY))
     extra = _as_optional_int((keyset or {}).get(EXTRA_KEYS_KEY))
+    leftover_deleted = _as_optional_int((keyset or {}).get(LEFTOVER_DELETED_KEY))
     balanced = unaccounted == 0
     if missing is not None and extra is not None:
         if missing or extra:
@@ -1747,14 +1843,20 @@ def account_population(
                 f"{extra} EXTRA_TARGET leftover dest key(s). COUNT(*) can net "
                 "missing+extra to a false balance — that is the DMS validation "
                 "hole after Full Load success. Leftover keys are not inferred "
-                "deletes; incremental CDC must not delete dest keys the source "
-                "did not send."
+                "deletes on incremental CDC; a complete overwrite snapshot "
+                "MERGE-deletes dest keys not in S."
             )
         else:
             note += (
                 " Dest-engine keyset closed: every source key is on dest and "
                 "dest holds no extra keys."
             )
+    if leftover_deleted:
+        note += (
+            f" Dest-engine MERGE deleted {leftover_deleted} leftover dest "
+            "key(s) not in the complete source snapshot (overwrite only). "
+            "Incremental CDC must not infer-delete."
+        )
     return ConservationLedger(
         rows_read=read,
         rows_written=written,
@@ -1773,6 +1875,7 @@ def account_population(
         writer_ack_delta=ack_delta,
         missing_keys=missing,
         extra_keys=extra,
+        leftover_deleted=leftover_deleted,
     )
 
 
@@ -1805,9 +1908,10 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     vector = extract_vector_payload(dest)
     if not vector:
         vector = extract_vector_payload(recon)
-    keyset = extract_keyset_payload(dest)
-    if not keyset:
-        keyset = extract_keyset_payload(recon)
+    keyset = dict(extract_keyset_payload(dest))
+    for field, value in extract_keyset_payload(recon).items():
+        if value is not None or field not in keyset:
+            keyset[field] = value
     scd2 = extract_scd2_payload(dest)
     if not scd2:
         scd2 = extract_scd2_payload(recon)
