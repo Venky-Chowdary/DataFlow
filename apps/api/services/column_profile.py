@@ -32,6 +32,14 @@ route:
 Numeric statistics are canonicalized (``10.50`` == ``10.5000``) so a scale
 difference that carries the same value is not read as a divergence.
 
+The two ends may be *different* engines (PostgreSQL ↔ MySQL/MariaDB). A
+cross-engine route narrows the comparison further to the statistics that survive
+a change of engine — row count, per-column NULL rate, and canonicalized numeric
+min/max/sum — and declines temporal/text ordering, whose rendering, time-zone
+and collation semantics differ. That is the parity primitive a "supervisor"
+needs: attach to a source and a destination that no single tool moved between,
+and still prove — or disprove — that a column carries the same population.
+
 This extends the canonical reconcile ladder; it is not a parallel product. The
 result reuses the ``ColumnAggregate`` and ``compare_column_aggregates`` shapes
 the in-memory L2 already uses, and only ever runs on the oversized routes the
@@ -260,6 +268,47 @@ def _table_ref(family: str, schema: str, table: str) -> str:
     return quote_table_ref(table, schema or None, dialect=family)
 
 
+def _prepare_for_comparison(
+    profile: dict[str, Any], kinds: dict[str, str], *, cross_engine: bool
+) -> dict[str, Any]:
+    """Reduce a profile to the statistics that are comparable on this route.
+
+    Same-engine routes render every aggregate identically, so the profile is
+    returned unchanged. Across engines the rules tighten to what is provably
+    engine-independent:
+
+    * numeric min/max/sum are canonicalized to their value, so PostgreSQL's
+      ``10.50`` and MySQL's ``10.5000`` are one number and a float's text
+      residue does not masquerade as a divergence;
+    * temporal min/max are dropped — two engines format a timestamp differently
+      and interpret time zones differently, so a text difference there would be
+      about rendering, not data. Only the NULL rate is trusted for them.
+
+    (Text ``min``/``max`` and ``count(distinct)`` are already ``None`` from the
+    reader because they are collation-dependent even on one engine.)
+    """
+    if not cross_engine:
+        return profile
+    from dataclasses import replace as _replace_agg
+
+    out: dict[str, Any] = {}
+    for col, agg in profile.items():
+        kind = kinds.get(col, "other")
+        if kind in ("exact_numeric", "float"):
+            # Compare by value, not text: canonicalization is idempotent, so this
+            # is correct whether or not the reader already normalized it. Float
+            # sum is already absent (order-dependent) and stays that way.
+            out[col] = _replace_agg(
+                agg,
+                min_value=_canon_numeric(agg.min_value),
+                max_value=_canon_numeric(agg.max_value),
+                sum_value=_canon_numeric(agg.sum_value),
+            )
+        else:
+            out[col] = _replace_agg(agg, min_value=None, max_value=None, sum_value=None)
+    return out
+
+
 def engine_profile_ladder(
     *,
     source_engine: str,
@@ -278,44 +327,55 @@ def engine_profile_ladder(
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
 ) -> dict[str, Any] | None:
-    """L1 + engine-side L2 for a same-engine SQL route, at any scale.
+    """L1 + engine-side L2 for a SQL route, at any scale, same- or cross-engine.
 
     ``pairs`` are ordered ``(source_column, target_column)``; a rename is free
     because each side profiles its own names and the source profile is re-keyed
     onto the target name before the positional comparison. ``types`` are keyed by
     target column.
 
-    Returns a verification-ladder-shaped dict, or ``None`` when the route is not
-    a supported same-engine pair or a profile could not be read. It never claims
-    the population checksum proof (L3) or row localization (L5) — those still
-    need the in-memory or engine-digest paths — so it upgrades assurance for
-    nobody; it restores the *column-level* divergence signal that the oversized
-    route would otherwise lose entirely.
+    Both ends may be different engines (PostgreSQL ↔ MySQL/MariaDB). When they
+    are, the comparison narrows to the statistics that are engine-independent —
+    row count, per-column NULL rate, and canonicalized numeric min/max/sum — and
+    declines temporal/text ordering, which differs by rendering, time zone and
+    collation. This is the parity primitive a Zero-ETL supervisor needs: it
+    attaches to a source and a destination that no single tool moved between and
+    still proves, or disproves, that a column carries the same population.
+
+    Returns a verification-ladder-shaped dict, or ``None`` when either end is not
+    a supported SQL engine or a profile could not be read. It never claims the
+    population checksum proof (L3) or row localization (L5), so it upgrades
+    assurance for nobody; it restores the *column-level* divergence signal that
+    the oversized route would otherwise lose entirely.
     """
-    if not same_profile_family(source_engine, dest_engine):
+    src_family = profile_engine_family(source_engine)
+    dst_family = profile_engine_family(dest_engine)
+    if not src_family or not dst_family:
         return None
+    cross_engine = src_family != dst_family
     clean = [(str(s), str(t)) for s, t in pairs if s and t]
     if not clean:
         return None
-    family = profile_engine_family(dest_engine)
     dest_types = {str(k): str(v) for k, v in (types or {}).items()}
     source_cols = [s for s, _ in clean]
     target_cols = [t for _, t in clean]
     # Classify the source side by the destination type so both sides bucket a
-    # column the same way (same-engine routes declare the same type class).
+    # column the same way; a same-engine route declares the same type class, and
+    # a cross-engine route is only compared on the value-based statistics anyway.
     source_types = {s: dest_types.get(t, "") for s, t in clean}
+    kinds = {t: classify_column(dest_types.get(t)) for _, t in clean}
 
     src_conn = dst_conn = None
     try:
-        src_conn = _connect(family, source_cfg)
-        dst_conn = _connect(family, dest_cfg)
+        src_conn = _connect(src_family, source_cfg)
+        dst_conn = _connect(dst_family, dest_cfg)
         with src_conn.cursor() as sc, dst_conn.cursor() as dc:
             src_raw = read_column_profile(
-                source_engine, sc, _table_ref(family, source_schema, source_table),
+                source_engine, sc, _table_ref(src_family, source_schema, source_table),
                 source_cols, source_types,
             )
             dst_profile = read_column_profile(
-                dest_engine, dc, _table_ref(family, dest_schema, dest_table),
+                dest_engine, dc, _table_ref(dst_family, dest_schema, dest_table),
                 target_cols, dest_types,
             )
         # Re-key the source profile onto the destination names so a rename lines
@@ -323,10 +383,8 @@ def engine_profile_ladder(
         from dataclasses import replace as _replace_agg
 
         rename = {s: t for s, t in clean}
-        src_profile = {}
-        for s, agg in src_raw.items():
-            tgt = rename.get(s, s)
-            src_profile[tgt] = _replace_agg(agg, column=tgt)
+        src_profile = {rename.get(s, s): _replace_agg(agg, column=rename.get(s, s))
+                       for s, agg in src_raw.items()}
     except Exception as exc:  # noqa: BLE001 — any read failure declines to the caller's fallback
         logger.info("engine column profile unavailable, leaving ladder declined: %s", exc)
         return None
@@ -343,6 +401,9 @@ def engine_profile_ladder(
         layer_l1_row_balance,
     )
 
+    src_profile = _prepare_for_comparison(src_profile, kinds, cross_engine=cross_engine)
+    dst_profile = _prepare_for_comparison(dst_profile, kinds, cross_engine=cross_engine)
+
     l1 = layer_l1_row_balance(
         source_rows=int(source_rows),
         target_rows=int(target_rows),
@@ -354,17 +415,27 @@ def engine_profile_ladder(
     # Name what this pass does and does not prove, so no reader mistakes an
     # engine profile for the full five-layer localization.
     l2.details["source"] = "engine_sql_aggregates"
-    l2.details["compared_statistics"] = ["null_count", "non_null_count", "min", "max", "sum"]
-    l2.details["not_compared"] = [
-        "distinct_count (collation-dependent)",
-        "text min/max (collation-dependent)",
-        "float sum (order-dependent)",
-    ]
+    l2.details["cross_engine"] = cross_engine
+    if cross_engine:
+        l2.details["compared_statistics"] = ["null_count", "non_null_count", "numeric min/max/sum"]
+        l2.details["not_compared"] = [
+            "temporal min/max (rendering/time-zone-dependent across engines)",
+            "text min/max and distinct_count (collation-dependent)",
+            "float sum (order-dependent)",
+        ]
+    else:
+        l2.details["compared_statistics"] = ["null_count", "non_null_count", "min", "max", "sum"]
+        l2.details["not_compared"] = [
+            "distinct_count (collation-dependent)",
+            "text min/max (collation-dependent)",
+            "float sum (order-dependent)",
+        ]
     mismatched = list(l2.details.get("mismatched_columns") or [])
+    label = "cross-engine " if cross_engine else ""
     summary = ""
     if mismatched:
         summary = (
-            "Engine column profile diverged on "
+            f"Engine {label}column profile diverged on "
             + ", ".join(mismatched[:8])
             + (" …" if len(mismatched) > 8 else "")
         )
@@ -376,12 +447,13 @@ def engine_profile_ladder(
         "population_proof": False,
         "population_checksum_proof": False,
         "engine_profile": True,
+        "cross_engine": cross_engine,
         "skipped": False,
         "localization": {"columns": mismatched},
         "localization_summary": summary,
         "reason": (
             "In-memory L2/L4/L5 declined for an oversized population; the engine "
-            "computed per-column NULL/min/max/sum in SQL so column-level "
-            "divergence is still detected at full scale."
+            f"computed per-column aggregates in SQL{' on both engines' if cross_engine else ''} "
+            "so column-level divergence is still detected at full scale."
         ),
     }

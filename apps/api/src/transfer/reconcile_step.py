@@ -259,7 +259,7 @@ def _maybe_engine_profile_ladder(
     """
     if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
         return None
-    from services.column_profile import engine_profile_ladder, same_profile_family
+    from services.column_profile import engine_profile_ladder, profile_supported
     from services.verification_ladder import (
         MAX_LADDER_ROWS,
         attach_ladder_to_reconcile_report,
@@ -276,7 +276,9 @@ def _maybe_engine_profile_ladder(
     from .connector_capabilities import resolve_driver_type
 
     source_type = resolve_driver_type(source_endpoint.format or "")
-    if not same_profile_family(source_type, dest_type):
+    # Same- or cross-engine, as long as both ends are SQL engines the profiler
+    # knows how to render. Cross-engine narrows to value-based statistics itself.
+    if not (profile_supported(source_type) and profile_supported(dest_type)):
         return None
 
     from services.mapping_constraints import is_intentional_omit
