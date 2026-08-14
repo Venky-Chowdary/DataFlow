@@ -9,6 +9,8 @@ against itself.
 from __future__ import annotations
 
 from pathlib import Path
+import gzip
+import io
 
 import pytest
 
@@ -749,6 +751,80 @@ def test_count_artifact_payload_gzip_streams_not_decompress_slurp(
     assert _count_artifact_payload(gzip.compress(quoted), name="quoted.csv.gz") == 2
     assert _count_artifact_payload(b"not-gzip", name="bad.csv.gz") is None
     assert _count_artifact_payload(csv_body, name="export.csv") == 3
+
+
+def _oneshot_gzip(compressed: bytes) -> gzip.GzipFile:
+    """``GzipFile`` over a compressed GET body that cannot rewind.
+
+    boto3 ``StreamingBody`` / GCS / ADLS download streams are one-shot.
+    CSV COUNT used to ``seek(0)`` after the encoding prefix; that only
+    worked because the GET had already been ``read()`` into ``BytesIO``.
+    """
+
+    class _NoSeek(io.BytesIO):
+        def seekable(self) -> bool:
+            return False
+
+        def seek(self, *args: object, **kwargs: object) -> int:
+            raise AssertionError("compressed GET body is not rewindable")
+
+    return gzip.GzipFile(fileobj=_NoSeek(compressed), mode="rb")
+
+
+def test_count_csv_rows_one_shot_gzip_stream_no_seek() -> None:
+    """CSV COUNT on a non-rewindable gzip stream. Spark/Hadoop do this.
+
+    Encoding sniff consumes a prefix. ``seek(0)`` would fail on an HTTP
+    GET body. Prefix-then-rest is the COUNT from byte 0 without rewind.
+    JSON/XML/JSONL already walk forward-only; this locks the same
+    contract on those COUNT openers.
+    """
+    import gzip as gzip_mod
+
+    from services.csv_profiler import count_csv_rows
+    from services.file_parser import count_jsonl_records, count_xml_records
+    from services.format_converter import convert_rows
+    from services.json_tabular import count_json_records
+
+    csv_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    quoted, _ = convert_rows(
+        ["id", "note"],
+        [["1", "hello\nworld"], ["2", "b"]],
+        source_format="csv",
+        target_format="csv",
+    )
+    jsonl_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="jsonl",
+    )
+    json_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"], ["3", "c"]],
+        source_format="csv",
+        target_format="json",
+    )
+    xml_body, _ = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="xml",
+    )
+
+    assert count_csv_rows(_oneshot_gzip(gzip_mod.compress(csv_body))) == 3
+    assert count_csv_rows(_oneshot_gzip(gzip_mod.compress(quoted))) == 2
+    assert count_jsonl_records(_oneshot_gzip(gzip_mod.compress(jsonl_body))) == 2
+    assert count_json_records(_oneshot_gzip(gzip_mod.compress(json_body))) == 3
+    assert count_xml_records(_oneshot_gzip(gzip_mod.compress(xml_body))) == 2
+
+    with pytest.raises((OSError, EOFError, gzip_mod.BadGzipFile, ValueError)):
+        count_csv_rows(_oneshot_gzip(b"not-gzip"))
 
 
 def test_count_artifact_rows_missing_parser_is_unmeasured_not_zero(

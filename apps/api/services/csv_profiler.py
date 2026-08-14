@@ -4,7 +4,8 @@ Dest-engine CSV/TSV COUNT (``count_csv_rows``) is RFC 4180 ``csv.reader``
 records, not ``wc -l``. Quoted embedded newlines are one row. Header is
 not a record. ``is_blank_row`` lines (empty / ``,,,,``) are not records.
 Path inputs stream from disk; encoding and delimiter are sniffed from a
-prefix, not from a slurp of the whole export.
+prefix, not from a slurp of the whole export. A one-shot gzip / GET
+stream is prefix-then-rest — COUNT does not ``seek(0)`` the HTTP body.
 """
 
 from __future__ import annotations
@@ -13,11 +14,49 @@ import csv
 import io
 from collections import Counter
 from pathlib import Path
+from typing import Any
 
 from services.tabular_rows import is_blank_row
 
 _ENCODING_PREFIX = 65536
 _DELIMITER_PREFIX = 8192
+
+
+class _PrefixedRaw(io.RawIOBase):
+    """Replay an already-read prefix, then the rest of a binary source.
+
+    CSV encoding sniff consumes up to 64 KiB. Hadoop / Spark CSV readers
+    keep that sample and continue the parse; they do not rewind a
+    non-splittable gzip GET. ``seek(0)`` on ``GzipFile`` over ``BytesIO``
+    works only because the GET already materialized. Prefix-then-rest is
+    the same COUNT on a one-shot stream.
+    """
+
+    def __init__(self, prefix: bytes, rest: Any) -> None:
+        super().__init__()
+        self._prefix = prefix
+        self._rest = rest
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b: Any) -> int:
+        mv = memoryview(b)
+        n = len(mv)
+        if n == 0:
+            return 0
+        if self._prefix:
+            take = min(n, len(self._prefix))
+            mv[:take] = self._prefix[:take]
+            self._prefix = self._prefix[take:]
+            return take
+        chunk = self._rest.read(n)
+        if not chunk:
+            return 0
+        if not isinstance(chunk, (bytes, bytearray)):
+            raise TypeError("CSV COUNT stream must yield bytes")
+        mv[: len(chunk)] = chunk
+        return len(chunk)
 
 
 def detect_encoding(content: bytes) -> str:
@@ -32,56 +71,28 @@ def detect_encoding(content: bytes) -> str:
         return "latin-1"
 
 
-def _csv_prefix_bytes(content: bytes | str | Path) -> bytes:
-    """BOM / utf-8 / latin-1 sniff. Path (including gzip) reads a prefix, never the whole file."""
-    if isinstance(content, Path):
-        from services.dest_precount import open_artifact_binary
-
-        handle, closer = open_artifact_binary(content)
-        try:
-            return handle.read(_ENCODING_PREFIX)
-        finally:
-            if closer is not None:
-                closer()
+def _csv_prefix_bytes(content: bytes | str) -> bytes:
+    """BOM / utf-8 / latin-1 sniff from in-RAM CSV. Path/stream sniff in COUNT."""
     if isinstance(content, bytes):
         return content[:_ENCODING_PREFIX]
-    if isinstance(content, str):
-        return content.encode("utf-8")[:_ENCODING_PREFIX]
-    if hasattr(content, "read"):
-        prefix = content.read(_ENCODING_PREFIX)
-        seek = getattr(content, "seek", None)
-        if not callable(seek):
-            raise TypeError("CSV COUNT stream must be rewindable after prefix sniff")
-        seek(0)
-        return prefix
-    raise TypeError("CSV COUNT expects bytes, str, Path, or a readable stream")
+    return content.encode("utf-8")[:_ENCODING_PREFIX]
 
 
-def _csv_count_open(content: bytes | str | Path, encoding: str) -> io.TextIOBase:
-    """Text stream for ``csv.reader``. ``newline=''`` keeps quoted newlines one row."""
-    if isinstance(content, Path):
-        from services.dest_precount import open_artifact_binary
+def _csv_text_from_binary(source: Any, prefix: bytes, encoding: str) -> io.TextIOBase:
+    """RFC 4180 reader over prefix + remainder. Never seeks ``source``."""
+    chained = io.BufferedReader(_PrefixedRaw(prefix, source))
+    return io.TextIOWrapper(
+        chained, encoding=encoding, errors="replace", newline=""
+    )
 
-        binary, closer = open_artifact_binary(content)
-        try:
-            return io.TextIOWrapper(
-                binary, encoding=encoding, errors="replace", newline=""
-            )
-        except Exception:
-            if closer is not None:
-                closer()
-            raise
+
+def _csv_count_open(content: bytes | str, encoding: str) -> io.TextIOBase:
+    """Text stream for in-RAM CSV. ``newline=''`` keeps quoted newlines one row."""
     if isinstance(content, bytes):
         return io.TextIOWrapper(
             io.BytesIO(content), encoding=encoding, errors="replace", newline=""
         )
-    if isinstance(content, str):
-        return io.StringIO(content)
-    if hasattr(content, "read"):
-        return io.TextIOWrapper(
-            content, encoding=encoding, errors="replace", newline=""
-        )
-    raise TypeError("CSV COUNT expects bytes, str, Path, or a readable stream")
+    return io.StringIO(content)
 
 
 def detect_delimiter(sample: str) -> str:
@@ -133,6 +144,18 @@ def parse_csv_preview(content: bytes, encoding: str | None = None, preview_rows:
     return headers, preview, enc, delim
 
 
+def _csv_count_rows_from_reader(reader_file: io.TextIOBase, delim: str) -> int:
+    reader = csv.reader(reader_file, delimiter=delim)
+    count = 0
+    for i, row in enumerate(reader):
+        if i == 0:
+            continue
+        if is_blank_row(row):
+            continue
+        count += 1
+    return count
+
+
 def count_csv_rows(content: bytes | str | Path, encoding: str | None = None) -> int:
     """Dest-engine record COUNT of CSV/TSV. Never ``wc -l``. Never ingest parse.
 
@@ -141,28 +164,53 @@ def count_csv_rows(content: bytes | str | Path, encoding: str | None = None) -> 
     A quoted field that contains a newline is one record, not N physical
     lines. Header-only / empty is 0. Encoding and delimiter are sniffed
     from a prefix (BOM → utf-8-sig, else utf-8 else latin-1) so a GB
-    export is not decoded twice. Path inputs reopen from disk;
-    bytes (object-store GET) stream from a buffer already in RAM.
-    Local gzip CSV/TSV streams (prefix sniff, then a second gzip open).
-    Object-store GET gzip streams through a rewindable ``GzipFile``.
+    export is not decoded twice. In-RAM bytes/str keep a second view of
+    the same buffer. Path gzip is one ``gzip.open``, not a prefix open
+    plus a COUNT open. A one-shot stream (object-store GET gzip that is
+    not rewindable) is prefix-then-rest — COUNT does not ``seek(0)``.
     """
-    prefix = _csv_prefix_bytes(content)
-    enc = encoding or detect_encoding(prefix)
-    sample = prefix[:_DELIMITER_PREFIX].decode(enc, errors="replace")
-    delim = detect_delimiter(sample)
-    reader_file = _csv_count_open(content, enc)
+    if isinstance(content, (bytes, str)):
+        prefix = _csv_prefix_bytes(content)
+        enc = encoding or detect_encoding(prefix)
+        sample = prefix[:_DELIMITER_PREFIX].decode(enc, errors="replace")
+        delim = detect_delimiter(sample)
+        reader_file = _csv_count_open(content, enc)
+        try:
+            return _csv_count_rows_from_reader(reader_file, delim)
+        finally:
+            reader_file.close()
+
+    closer = None
+    reader_file: io.TextIOBase | None = None
     try:
-        reader = csv.reader(reader_file, delimiter=delim)
-        count = 0
-        for i, row in enumerate(reader):
-            if i == 0:
-                continue
-            if is_blank_row(row):
-                continue
-            count += 1
-        return count
+        if isinstance(content, Path):
+            from services.dest_precount import open_artifact_binary
+
+            source, closer = open_artifact_binary(content)
+        elif hasattr(content, "read"):
+            source = content
+        else:
+            raise TypeError("CSV COUNT expects bytes, str, Path, or a readable stream")
+        prefix = source.read(_ENCODING_PREFIX)
+        if not isinstance(prefix, (bytes, bytearray)):
+            raise TypeError("CSV COUNT stream must yield bytes")
+        prefix_b = bytes(prefix)
+        enc = encoding or detect_encoding(prefix_b)
+        sample = prefix_b[:_DELIMITER_PREFIX].decode(enc, errors="replace")
+        delim = detect_delimiter(sample)
+        reader_file = _csv_text_from_binary(source, prefix_b, enc)
+        return _csv_count_rows_from_reader(reader_file, delim)
     finally:
-        reader_file.close()
+        if reader_file is not None:
+            try:
+                reader_file.close()
+            except Exception:
+                pass
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
 
 
 def parse_csv_full(content: bytes, encoding: str | None = None) -> tuple[list[str], list[list[str]], str, str]:

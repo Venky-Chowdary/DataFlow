@@ -1745,10 +1745,10 @@ def _read_artifact_bytes(path: Path) -> bytes | None:
 def open_artifact_binary(path: Path) -> tuple[Any, Any]:
     """Byte source for dest COUNT. ``*.gz`` is a gzip stream, never a slurp.
 
-    Caller closes via the returned closer. Path gzip that needs a prefix
-    (CSV encoding sniff) opens, reads, closes, then opens again — a file
-    handle is cheap. Object-store GET gzip has no second GET: COUNT wraps
-    the compressed body in ``GzipFile`` and rewinds after the prefix.
+    Caller closes via the returned closer. CSV COUNT sniffs a prefix from
+    this handle and continues via prefix-then-rest — one gzip open, not a
+    second. Object-store GET gzip wraps the compressed body in
+    ``GzipFile``; CSV COUNT does not ``seek(0)`` that stream.
     """
     if path.name.lower().endswith(".gz"):
         handle = gzip.open(path, "rb")
@@ -1909,7 +1909,8 @@ def _count_artifact_payload(
     """Dest-engine COUNT of an object-store GET body. Same machine as a local file.
 
     Gzip keys of CSV/JSON/JSONL/XML stream through ``GzipFile`` — COUNT does
-    not ``gzip.decompress`` a second full copy. Excel/Avro/Parquet/ORC gzip
+    not ``gzip.decompress`` a second full copy. CSV encoding sniff is
+    prefix-then-rest on that stream (no ``seek(0)``). Excel/Avro/Parquet/ORC gzip
     still decompresses. Unparseable / unsupported / missing parser stay
     unmeasured — never JSON-fallback empty (that is dest=0).
     """
