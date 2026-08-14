@@ -139,7 +139,8 @@ def test_campaign_skips_probe_timeouts_and_counts_trailing_passes():
     ]
     state = evaluate_campaign(history, required_consecutive=3)
     assert state["verdict"] == VERDICT_IN_PROGRESS
-    assert state["consecutive_passes"] == 2
+    assert state["consecutive_passes"] == 0
+    assert state["screening_observed"] == 2
 
 
 def test_campaign_divergence_resets_the_window():
@@ -154,12 +155,106 @@ def test_campaign_divergence_resets_the_window():
     assert "amount" in state["next_action"]
 
 
-def test_campaign_cutover_ready_is_n_consecutive_not_one_green():
+def test_campaign_profiles_never_confer_cutover_ready():
+    """Column-profile greens are screening — Google Dual Run compares outputs."""
     history = [_cycle(passed=True)] * DEFAULT_REQUIRED_CONSECUTIVE
     state = evaluate_campaign(history)
+    assert state["verdict"] == VERDICT_IN_PROGRESS
+    assert state["consecutive_passes"] == 0
+    assert "Gate-8" in state["next_action"]
+
+
+def _gate8(*, passed: bool, checksum_match: bool | None = None) -> dict:
+    return {
+        "passed": passed,
+        "assurance_level": "full_checksum" if passed else "none",
+        "checksum_match": True if passed and checksum_match is None else checksum_match,
+        "message": "ok" if passed else "checksum mismatch",
+        "source_rows": 10,
+        "target_rows": 10 if passed else 9,
+    }
+
+
+def test_campaign_cutover_ready_is_n_consecutive_gate8():
+    history = [_gate8(passed=True)] * DEFAULT_REQUIRED_CONSECUTIVE
+    state = evaluate_campaign(history)
     assert state["verdict"] == VERDICT_CUTOVER_READY
-    assert "not cell fidelity" in state["next_action"]
-    assert "migration_proven" not in state["next_action"] or "not" in state["note"]
+    assert state["consecutive_passes"] == DEFAULT_REQUIRED_CONSECUTIVE
+    assert "not migration_proven" in state["next_action"]
+    assert "migration_proven" in state["note"]
+
+
+def test_campaign_profile_pass_does_not_break_gate8_window():
+    history = [
+        _gate8(passed=True),
+        _cycle(passed=True),
+        _gate8(passed=True),
+        _gate8(passed=True),
+    ]
+    state = evaluate_campaign(history, required_consecutive=3)
+    assert state["verdict"] == VERDICT_CUTOVER_READY
+    assert state["consecutive_passes"] == 3
+
+
+def test_campaign_profile_fail_after_gate8_diverges():
+    history = [
+        _gate8(passed=True),
+        _gate8(passed=True),
+        _gate8(passed=True),
+        _cycle(passed=False, cols=["amount"]),
+    ]
+    state = evaluate_campaign(history, required_consecutive=3)
+    assert state["verdict"] == VERDICT_DIVERGING
+    assert state["consecutive_passes"] == 0
+
+
+def test_record_gate8_cycle_confers_cutover_after_n():
+    from services.continuous_fidelity import record_gate8_cycle
+
+    campaign = None
+    recon = {
+        "passed": True,
+        "assurance_level": "full_checksum",
+        "checksum_match": True,
+        "source_rows": 4,
+        "target_rows": 4,
+        "message": "Row fidelity verified",
+    }
+    for _ in range(DEFAULT_REQUIRED_CONSECUTIVE):
+        campaign = record_gate8_cycle(campaign, recon, required_consecutive=3)
+    assert campaign["verdict"] == VERDICT_CUTOVER_READY
+    assert campaign["consecutive_passes"] == 3
+
+
+def test_writer_ack_does_not_confer_cutover():
+    history = [
+        {
+            "passed": True,
+            "assurance_level": "writer_ack",
+            "message": "writer digest",
+        }
+    ] * 5
+    state = evaluate_campaign(history, required_consecutive=3)
+    assert state["verdict"] == VERDICT_UNPROVEN
+    assert state["consecutive_passes"] == 0
+
+
+def test_compact_gate8_refuses_checksum_mismatch():
+    from services.continuous_fidelity import compact_gate8
+
+    cycle = compact_gate8(
+        {
+            "passed": True,
+            "assurance_level": "full_checksum",
+            "checksum_match": False,
+            "source_rows": 10,
+            "target_rows": 10,
+            "message": "counts match, digest does not",
+        }
+    )
+    assert cycle["passed"] is False
+    state = evaluate_campaign([cycle], required_consecutive=3)
+    assert state["verdict"] == VERDICT_DIVERGING
 
 
 def test_record_check_appends_and_is_tamper_evident():
@@ -174,11 +269,12 @@ def test_record_check_appends_and_is_tamper_evident():
     )
     campaign = record_check(None, report, required_consecutive=3)
     assert campaign["verdict"] == VERDICT_IN_PROGRESS
-    assert campaign["consecutive_passes"] == 1
+    assert campaign["consecutive_passes"] == 0
     assert campaign["history"][0]["report_digest"].startswith("sha256:")
     again = record_check(campaign, report)
     again = record_check(again, report)
-    assert again["verdict"] == VERDICT_CUTOVER_READY
+    assert again["verdict"] == VERDICT_IN_PROGRESS
+    assert again["consecutive_passes"] == 0
 
 
 def test_append_sync_is_not_a_same_population_dual_run():

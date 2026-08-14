@@ -252,6 +252,11 @@ veto a closed Gate-8 dest-before pass. migration_proven stays false.
 * SQL pushdown aggregates/digests for MySQL and warehouses (no full load)
 * UI copy sweep so no card says “proof” for sample screening
 * Streaming path without source SQL still depends on buffered records
+* Dual Run ``cutover_ready`` is N consecutive Gate-8 ``full_checksum``
+  cycles (unit: `tests/test_continuous_fidelity.py`). Column-profile
+  screening may diverge the window; it never confers cutover. Not
+  ``migration_proven``. Live N-night overwrite schedule campaign not run
+  this slice.
 
 ---
 

@@ -492,15 +492,20 @@ def _job_doc(job_id: str) -> dict | None:
         return None
 
 
-def _observe_parallel_run(sched: Any) -> None:
+def _observe_parallel_run(sched: Any, job_doc: dict | None = None) -> None:
     """Record one Dual Run cycle after a successful overwrite load.
 
     Never fails the transfer. Append/incremental dests are not the same
     population as the source — auto-running would false-diverge every night
     (the Full Append dest-Δ lesson). On-demand checks still run via the API.
+
+    Column-profile screening runs first; Gate-8 from this job is recorded
+    last so the campaign tail is the snapshot compare (Google Dual Run
+    output identity), not the KPI screen.
     """
     from services.continuous_fidelity import (
         population_comparable,
+        record_gate8_cycle,
         run_and_record_campaign,
     )
 
@@ -510,17 +515,32 @@ def _observe_parallel_run(sched: Any) -> None:
     dst = _resolve_connector(sched.dest_connector_id)
     if not src or not dst:
         return
+    campaign = dict(getattr(sched, "fidelity_campaign", None) or {})
     try:
         request = build_schedule_request(sched, src, dst)
-        from services.continuous_fidelity import run_and_record_campaign
-
         _report, campaign = run_and_record_campaign(
-            dict(getattr(sched, "fidelity_campaign", None) or {}),
+            campaign,
             source=request.source,
             destination=request.destination,
             mappings=list(getattr(request, "mappings", None) or []),
             workspace_id=str(getattr(sched, "workspace_id", "") or ""),
         )
+    except Exception as exc:
+        logger.info(
+            "Schedule %s parallel-run profile skipped: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+    try:
+        recon = (job_doc or {}).get("reconciliation")
+        campaign = record_gate8_cycle(campaign, recon if isinstance(recon, dict) else None)
+    except Exception as exc:
+        logger.info(
+            "Schedule %s Gate-8 Dual Run cycle skipped: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+    try:
         from services.schedule_store import update_schedule
 
         update_schedule(
@@ -588,7 +608,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
         schedule_id, job_id, status=status, run_entry=entry, cursor_value=cursor_value
     )
     if _is_success(status):
-        _observe_parallel_run(sched)
+        _observe_parallel_run(sched, job_doc)
     _notify_schedule(sched, job_id, status, job_doc)
 
 

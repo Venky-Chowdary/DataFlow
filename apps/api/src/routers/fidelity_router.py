@@ -4,7 +4,8 @@ The recurring-revenue answer to a migration or a managed pipeline: keep the old
 system and the new one live, and prove continuously that each column still
 carries the same population. One POST is a Dual Run *cycle*; when ``schedule_id``
 is set, the cycle is recorded on that pipeline's campaign (consecutive clean
-windows — Google Dual Run exit criterion, not a one-shot green).
+windows — Google Dual Run exit criterion is N consecutive Gate-8 checksum
+cycles, not a one-shot green and not column-profile screening).
 """
 
 from __future__ import annotations
