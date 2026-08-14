@@ -1266,8 +1266,8 @@ def _iceberg_snapshot_rows(
                 return []
             raise
         wanted = [str(c) for c in cols if str(c).strip()]
-        arrow = tbl.scan().select(wanted).to_arrow() if wanted else tbl.scan().to_arrow()
-        return list(arrow.to_pylist())
+        scan = tbl.scan().select(*wanted) if wanted else tbl.scan()
+        return list(scan.to_arrow().to_pylist())
     from connectors.iceberg_writer import (
         _load_existing_rows,
         _load_metadata,
