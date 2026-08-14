@@ -408,3 +408,17 @@ def test_sqlite_destination_key_hits_are_dest_engine_distinct(tmp_path: Path):
         keys=[(1,)],
     )
     assert empty == 0
+
+
+def test_stream_accumulator_reconstructs_preexisting_from_per_batch_hits():
+    from services.row_conservation import KeyCensusAccumulator
+
+    acc = KeyCensusAccumulator()
+    acc.add_batch([(1,), (2,)], dest_hits=2)
+    acc.add_batch([(3,), (4,)], dest_hits=1)
+    census = acc.to_census()
+    assert census is not None
+    assert census.unique_batch_keys == 4
+    assert census.dest_preexisting == 3
+    assert census.inserts == 1
+    assert census.updates == 3
