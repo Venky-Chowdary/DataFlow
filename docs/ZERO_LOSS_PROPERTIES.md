@@ -648,7 +648,9 @@ rowcount is not that proof.
    observe dest-after (that would close a false delta). Empty dest is
    dest-before 0 (insert-only overwrite identity).
 9. File/object export: `count_artifact_rows` re-opens the written file
-   and COUNTs records (`csv_profiler.count_csv_rows` for CSV/TSV;
+   and COUNTs records (`csv_profiler.count_csv_rows` RFC 4180 records
+   from the path for CSV/TSV, never `wc -l`, never spreadsheet `,,,,`
+   blank lines, never a slurp of the whole export;
    JSONL one object per non-blank line via `count_jsonl_records`, never
    `decode` + `splitlines` of the whole export, never ingest
    `parse_jsonl`; JSON unique array-of-object via `count_json_records` ijson StAX,
@@ -668,7 +670,8 @@ rowcount is not that proof.
     files or catalog `scan().to_arrow()`, never `scan().count()`) and
     S3/GCS/ADLS GET using the same artifact COUNT as local files
     (Excel value rows, streamed Avro, Parquet/ORC footer, XML unique
-    record-path, JSON unique array-of-object, JSONL object-per-line). JSON-parse
+    record-path, JSON unique array-of-object, JSONL object-per-line,
+    CSV/TSV RFC 4180 records). JSON-parse
     fallback empty is dest=0 and is forbidden. Unparseable or truncated
     parts stay unmeasured — never sum a prefix. Missing table or
     object is **0**. `amazon_s3` aliases onto `s3`. Iceberg key census
@@ -953,6 +956,16 @@ rowcount is not that proof.
     3; gzip JSONL 2 (decompress then stream lines); path 5000 → 5000
     without `Path.read_bytes` / `read_text`. `parse_jsonl` ingest still
     raises on empty and still refuses scalars. Cardinality ≠ Gate-8.
+    `engine.py` unchanged. Frontend not run this slice (no UI change).
+
+  CSV/TSV artifact dest COUNT (this host, after 2026-08-14 slice):
+    Property 5 + Property 9 + `test_json_tabular.py`: 284 passed,
+    9 skipped in 39.01s. Identity: RFC 4180 `csv.reader` from the path,
+    never `wc -l`, never `Path.read_bytes` of the whole export.
+    Writer 3 → dest 3; header-only → 0; blank / `,,,,` → not dest rows;
+    quoted embedded newline → 2 not physical-line count; TSV 2; UTF-8
+    BOM 2; gzip CSV 2 (decompress then stream); path 5000 → 5000.
+    `parse_csv_preview` ingest unchanged. Cardinality ≠ Gate-8.
     `engine.py` unchanged. Frontend not run this slice (no UI change).
 
   Snowflake / BigQuery / DuckDB / Databricks dest COUNT (this host, after 2026-08-14 slice):
