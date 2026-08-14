@@ -30,6 +30,14 @@ Lakehouse and object-store destinations already have dest-*after* read-back
 append delta and first-write overwrite (missing table/object = 0) can close.
 Writer ``Table.upsert`` / PUT rowcount is not that proof.
 
+Vector destinations (pgvector) are a 1-source-row → N-chunk identity.
+Physical ``COUNT(*)`` of embedding rows is **not** dest population — that
+is the Fivetran ``_deleted`` analogue for RAG: 2 documents → 5 chunks
+looks like silent duplication if chunk COUNT closes overwrite. Dest
+population is ``COUNT(DISTINCT source_id)``. Missing table is 0. Writer
+chunk-upsert ack never closes. Milvus/Qdrant/Pinecone/Weaviate stay
+unmeasured until dest-engine DISTINCT source_id exists.
+
 ``None`` means the count is unavailable (unsupported engine, missing table,
 unreachable destination, or an unreadable/unsupported artifact); callers
 must degrade assurance rather than assume zero.
@@ -61,6 +69,10 @@ __all__ = [
     "count_endpoint_rows",
     "count_artifact_rows",
     "stamp_artifact_census",
+    "stamp_vector_census",
+    "IDENTITY_COUNT_KEY",
+    "VECTOR_ROWS_KEY",
+    "DEST_COUNT_IDENTITY",
     "DestBeforeCensus",
 ]
 
@@ -77,6 +89,14 @@ PRECOUNT_KEY = "target_rows_before"
 ARTIFACT_COUNT_KEY = "artifact_row_count"
 DEST_COUNT_SOURCE_KEY = "dest_count_source"
 DEST_COUNT_ARTIFACT = "artifact_readback"
+
+# Independent COUNT(DISTINCT source_id) of a vector/RAG destination.
+# Physical embedding COUNT(*) is diagnostic (``vector_rows``) — never dest
+# population. Analogous to mirror active vs physical COUNT(*).
+IDENTITY_COUNT_KEY = "identity_rows"
+VECTOR_ROWS_KEY = "vector_rows"
+DEST_COUNT_IDENTITY = "identity_readback"
+_VECTOR_IDENTITY_ENGINES = frozenset({"pgvector"})
 
 _ARTIFACT_FORMATS = frozenset({"csv", "tsv", "json", "jsonl", "parquet"})
 _OBJECT_STORE_DRIVERS = frozenset({
@@ -97,6 +117,64 @@ def _count(conn: Any, table_ref: str) -> int:
         return int(row[0]) if row else 0
     finally:
         cur.close()
+
+
+def _count_distinct_source_id(conn: Any, table_ref: str) -> int:
+    """Identities, not embedding rows. SQL COUNT(DISTINCT) already skips NULL."""
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT COUNT(DISTINCT source_id) FROM {table_ref}")  # nosec B608
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        cur.close()
+
+
+def _pgvector_identity_count(
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> int | None:
+    """``COUNT(DISTINCT source_id)`` for a pgvector (PostgreSQL) table.
+
+    Physical ``COUNT(*)`` of chunks is not dest population. Missing table is
+    0 (create-on-first-write). A live table without ``source_id`` cannot
+    prove identity — return ``None``, never fall back to embedding COUNT(*).
+    The vector extension is not required: identity is a TEXT column.
+    """
+    from connectors.postgresql_conn import get_connection
+    from connectors.sql_identifiers import quote_table_ref
+
+    conn = get_connection(
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 5432),
+        database=str(cfg.get("database") or ""),
+        username=str(cfg.get("username") or ""),
+        password=str(cfg.get("password") or ""),
+        connection_string=str(cfg.get("connection_string") or ""),
+        ssl=bool(cfg.get("ssl", False)),
+    )
+    try:
+        sch = schema or "public"
+        with conn.cursor() as cur:
+            cur.execute("SELECT to_regclass(%s)", (f'"{sch}"."{table_name}"',))
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return 0
+            cur.execute(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s "
+                "AND column_name = 'source_id'",
+                (sch, table_name),
+            )
+            if cur.fetchone() is None:
+                return None
+        return _count_distinct_source_id(
+            conn, quote_table_ref(table_name, sch, dialect="postgresql")
+        )
+    finally:
+        conn.close()
 
 
 def destination_row_count(
@@ -200,6 +278,10 @@ def destination_row_count(
                 return int(coll.count_documents({}))
             finally:
                 client.close()
+
+        if db_type == "pgvector":
+            # Identities, not embedding rows. Physical COUNT(*) is not dest.
+            return _pgvector_identity_count(cfg, schema=schema, table_name=table)
 
         if db_type in {"iceberg", "apache_iceberg"}:
             return _iceberg_row_count(cfg, schema=schema, table_name=table)
@@ -891,4 +973,45 @@ def stamp_artifact_census(
     out[DEST_COUNT_SOURCE_KEY] = DEST_COUNT_ARTIFACT
     out["target_rows"] = counted
     out[PRECOUNT_KEY] = 0
+    return out
+
+
+def stamp_vector_census(
+    recon: Mapping[str, Any],
+    dest_cfg: Mapping[str, Any] | None,
+    *,
+    schema: str,
+    table_name: str,
+    dest_engine: str,
+) -> dict[str, Any]:
+    """Stamp COUNT(DISTINCT source_id). Never physical vector COUNT(*) or writer ack.
+
+    Gate-8 ``target_rows`` on pgvector is embedding cardinality (chunks).
+    That figure must not survive as dest population — 2 documents / 5
+    chunks would close overwrite as a surplus. Cell fidelity of opaque
+    embeddings stays with the caller (``skipped_readback`` /
+    ``migration_proven=false``). This only owns identity cardinality.
+
+    Engines without dest-engine DISTINCT ``source_id`` (Milvus, Qdrant,
+    Pinecone, Weaviate) are left untouched — their ``rowCount`` is not
+    identity.
+    """
+    out = dict(recon)
+    engine = str(dest_engine or "").strip().lower()
+    if engine not in _VECTOR_IDENTITY_ENGINES:
+        return out
+    identity = destination_row_count(
+        engine,
+        dict(dest_cfg or {}),
+        schema=str(schema or ""),
+        table_name=str(table_name or ""),
+    )
+    if identity is None:
+        out[DEST_COUNT_SOURCE_KEY] = "skipped_identity_readback"
+        return out
+    out[IDENTITY_COUNT_KEY] = int(identity)
+    out[DEST_COUNT_SOURCE_KEY] = DEST_COUNT_IDENTITY
+    physical = out.get("target_rows")
+    if isinstance(physical, int) and physical >= 0:
+        out[VECTOR_ROWS_KEY] = physical
     return out

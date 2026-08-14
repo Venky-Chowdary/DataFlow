@@ -45,6 +45,17 @@ How dest_population is chosen:
   move). Writer ``records_processed`` still counts updates; it never
   closes the identity. Without a dest-engine census the ledger stays
   unproven.
+* **vector / RAG (pgvector)** — one source row becomes N embedding
+  chunks. Physical ``COUNT(*)`` of vectors is **not** dest population
+  (2 documents → 5 chunks would invent a surplus). Dest population is
+  dest-engine ``COUNT(DISTINCT source_id)``:
+
+      reader == COUNT(DISTINCT source_id) + hold_outs + skipped
+
+  Empty dest (dest-before 0) is overwrite on identities. Non-empty dest
+  without a this-run source_id key census stays unproven — chunk ``id``
+  PK conflict is not source identity. Writer chunk-upsert ack never
+  closes. Cardinality ≠ embedding cell checksum: Gate-8 stays unproven.
 * **mirror (inferred deletes)** — Fivetran-style ``_deleted`` flag:
   physical ``COUNT(*)`` does **not** drop. The identity is the dest-engine
   **active** population:
@@ -81,7 +92,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
-from services.dest_precount import ARTIFACT_COUNT_KEY, PRECOUNT_KEY
+from services.dest_precount import ARTIFACT_COUNT_KEY, IDENTITY_COUNT_KEY, PRECOUNT_KEY, VECTOR_ROWS_KEY
 from services.reconcile_coverage import is_unproven_export
 from services.sync_cursor import is_append_sync, is_overwrite_sync
 
@@ -89,10 +100,14 @@ DEST_READBACK = "gate8_dest_readback"
 DEST_UNMEASURED = "unmeasured"
 DEST_EMPTY_PASS = "empty_pass"
 DEST_ARTIFACT_READBACK = "artifact_readback"
+DEST_IDENTITY_READBACK = "identity_readback"
 CENSUS_KEY = "keyed_census"
 # Dest population that may close overwrite cardinality. Artifact COUNT is
 # dest-engine analogue for a replaced file — not SQL COUNT(*), not writer ack.
-_INDEPENDENT_DEST = frozenset({DEST_READBACK, DEST_ARTIFACT_READBACK})
+# Identity COUNT is dest-engine analogue for chunked vector loads.
+_INDEPENDENT_DEST = frozenset(
+    {DEST_READBACK, DEST_ARTIFACT_READBACK, DEST_IDENTITY_READBACK}
+)
 
 KIND_OVERWRITE = "overwrite"
 KIND_APPEND_DELTA = "append_delta"
@@ -100,13 +115,16 @@ KIND_KEYED = "keyed"
 KIND_EMPTY_PASS = "empty_pass"
 KIND_UNMEASURED = "unmeasured"
 KIND_MIRROR = "mirror"
+KIND_VECTOR = "vector"
 KIND_JOB = "job_rollup"
 DEST_ACTIVE_READBACK = "gate8_dest_active_readback"
 DEST_PER_STREAM = "per_stream"
-# Dest COUNT(*) / active population is additive only when every stream
-# closed the *same* population identity. Mixing overwrite COUNT(*) with
-# keyed dest-delta invents a fake job-level table.
-_SUMMABLE_KINDS = frozenset({KIND_OVERWRITE, KIND_MIRROR, KIND_EMPTY_PASS})
+# Dest COUNT(*) / active / identity population is additive only when every
+# stream closed the *same* population identity. Mixing overwrite COUNT(*)
+# with keyed dest-delta invents a fake job-level table.
+_SUMMABLE_KINDS = frozenset(
+    {KIND_OVERWRITE, KIND_MIRROR, KIND_EMPTY_PASS, KIND_VECTOR}
+)
 
 
 @dataclass(frozen=True)
@@ -579,6 +597,11 @@ def dest_count_from_recon(recon: Mapping[str, Any] | None) -> tuple[int | None, 
     means no cell digest, but ``artifact_row_count`` re-opened the file.
     Only that keyed field closes dest population — ``target_rows`` on an
     export report is historically writer ack and never sufficient.
+
+    Vector identity is a fourth axis: Gate-8 ``target_rows`` on pgvector is
+    physical embedding COUNT(*) (chunks). ``identity_rows`` is
+    COUNT(DISTINCT source_id). Only the keyed identity field closes dest
+    population — checksum + stuffed chunk COUNT would invent a surplus.
     """
     report = dict(recon or {})
     source = str(report.get("dest_count_source") or "").strip()
@@ -586,6 +609,13 @@ def dest_count_from_recon(recon: Mapping[str, Any] | None) -> tuple[int | None, 
         counted = _as_optional_int(report.get(ARTIFACT_COUNT_KEY))
         if counted is not None and counted >= 0:
             return counted, DEST_ARTIFACT_READBACK
+        return None, DEST_UNMEASURED
+    if source == DEST_IDENTITY_READBACK:
+        counted = _as_optional_int(report.get(IDENTITY_COUNT_KEY))
+        if counted is not None and counted >= 0:
+            return counted, DEST_IDENTITY_READBACK
+        return None, DEST_UNMEASURED
+    if source == "skipped_identity_readback":
         return None, DEST_UNMEASURED
     msg = str(report.get("message") or "").lower()
     if report.get("skipped_readback") is True:
@@ -689,6 +719,8 @@ class ConservationLedger:
     inferred_deletes: int | None = None
     reactivated: int | None = None
     events_read: int | None = None
+    identity_count: int | None = None
+    vector_rows: int | None = None
     stream_count: int | None = None
     measured_streams: int | None = None
     summable: bool | None = None
@@ -721,6 +753,8 @@ class ConservationLedger:
             "inferred_deletes": self.inferred_deletes,
             "reactivated": self.reactivated,
             "events_read": self.events_read,
+            "identity_count": self.identity_count,
+            "vector_rows": self.vector_rows,
         }
         if self.stream_count is not None:
             payload["stream_count"] = self.stream_count
@@ -1003,6 +1037,154 @@ def _account_mirror(
     )
 
 
+def extract_vector_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Nested ``vector`` census or top-level identity/vector row fields."""
+    data = dict(dest or {})
+    nested = data.get("vector")
+    if isinstance(nested, dict) and (
+        nested.get("identity_rows") is not None
+        or nested.get("vector_rows") is not None
+    ):
+        return dict(nested)
+    identity = data.get(IDENTITY_COUNT_KEY)
+    physical = data.get(VECTOR_ROWS_KEY)
+    if identity is not None or physical is not None:
+        return {
+            "identity_rows": identity,
+            "vector_rows": physical,
+        }
+    return {}
+
+
+def _account_vector(
+    *,
+    read: int,
+    dest_count: int | None,
+    dest_count_source: str,
+    dest_count_before: int | None,
+    quarantined: int,
+    skipped: int,
+    coerced: int,
+    ack: int | None,
+    vector: Mapping[str, Any] | None,
+) -> ConservationLedger:
+    """Close COUNT(DISTINCT source_id), not physical embedding COUNT(*).
+
+    Empty dest (dest-before 0) is overwrite on identities. Non-empty dest
+    without a this-run source_id census stays unproven — chunk ``id`` PK
+    is not source identity. Writer chunk-upsert ack never closes.
+    """
+    payload = dict(vector or {})
+    identity = dest_count
+    physical = _as_optional_int(payload.get("vector_rows"))
+    base = dict(
+        rows_read=read,
+        rows_quarantined=quarantined,
+        rows_skipped=skipped,
+        rows_coerced_null=coerced,
+        writer_ack=ack,
+        dest_count=identity,
+        dest_count_before=dest_count_before,
+        rows_read_source="gate8_source_count",
+        conservation_kind=KIND_VECTOR,
+        identity_count=identity,
+        vector_rows=physical,
+        dest_delta=(
+            (int(identity) - int(dest_count_before))
+            if identity is not None and dest_count_before is not None
+            else None
+        ),
+    )
+    if identity is None or dest_count_source != DEST_IDENTITY_READBACK:
+        return ConservationLedger(
+            **base,
+            rows_written=None,
+            unaccounted=None,
+            balanced=False,
+            rows_written_source=DEST_UNMEASURED,
+            note=(
+                "Vector identity is unproven: dest-engine COUNT(DISTINCT "
+                "source_id) was not captured. Physical vector COUNT(*) is "
+                "chunk cardinality, not source-row conservation. Writer "
+                "chunk-upsert acknowledgement is not destination proof."
+            ),
+            writer_ack_delta=None,
+        )
+    if dest_count_before is None:
+        return ConservationLedger(
+            **base,
+            rows_written=int(identity),
+            unaccounted=None,
+            balanced=False,
+            rows_written_source=DEST_IDENTITY_READBACK,
+            note=(
+                "Vector identity dest-before was not measured, so "
+                f"COUNT(DISTINCT source_id)={identity} cannot prove this "
+                "run's documents landed versus pre-existing identities. "
+                "Physical vector COUNT(*) is diagnostic."
+            ),
+            writer_ack_delta=(int(identity) - ack) if ack is not None else None,
+        )
+    if dest_count_before > 0:
+        return ConservationLedger(
+            **base,
+            rows_written=int(identity),
+            unaccounted=None,
+            balanced=False,
+            rows_written_source=DEST_IDENTITY_READBACK,
+            note=(
+                "Vector identity keyed conservation is unproven: dest already "
+                f"held {dest_count_before} source identit(ies). Chunk upsert "
+                "conflict is on chunk id, not source_id, so dest Δ of "
+                "identities cannot be proven from this-run chunk events. "
+                "Empty dest (dest-before 0) closes "
+                "reader == COUNT(DISTINCT source_id). Physical vector "
+                "COUNT(*) is diagnostic."
+            ),
+            writer_ack_delta=(int(identity) - ack) if ack is not None else None,
+        )
+
+    unaccounted = read - (int(identity) + quarantined + skipped)
+    ack_delta = (int(identity) - ack) if ack is not None else None
+    if unaccounted == 0:
+        note = (
+            f"Vector identity closed: dest-engine COUNT(DISTINCT source_id) "
+            f"= {identity} equals rows read minus hold-outs and skips. "
+            "Physical vector COUNT(*) is chunk cardinality, not source-row "
+            "conservation."
+        )
+        if physical is not None:
+            note += f" Destination holds {physical} vector row(s)."
+    elif unaccounted > 0:
+        note = (
+            f"{unaccounted} source row(s) are not in dest-engine "
+            "COUNT(DISTINCT source_id), quarantined, or skipped. Treat as "
+            "potential silent loss — chunk-upsert acknowledgement is not "
+            "evidence they landed."
+        )
+    else:
+        note = (
+            f"{abs(unaccounted)} more dest identit(ies) than were read. "
+            "Pre-existing source_id values on an empty-dest proof, or "
+            "duplicate identity accounting."
+        )
+    if ack_delta:
+        sign = "more" if ack_delta > 0 else "fewer"
+        note += (
+            f" Writer acknowledged {ack:,} vector row(s); identity COUNT is "
+            f"{identity:,} ({abs(ack_delta):,} {sign} than the writer claimed)."
+        )
+    return ConservationLedger(
+        **base,
+        rows_written=int(identity),
+        unaccounted=unaccounted,
+        balanced=unaccounted == 0,
+        rows_written_source=DEST_IDENTITY_READBACK,
+        note=note,
+        writer_ack_delta=ack_delta,
+    )
+
+
 def account_population(
     *,
     rows_read: int | None,
@@ -1016,6 +1198,7 @@ def account_population(
     sync_mode: str | None,
     census: KeyCensus | None = None,
     mirror: Mapping[str, Any] | None = None,
+    vector: Mapping[str, Any] | None = None,
 ) -> ConservationLedger:
     """Close ``reader == dest_population + hold_outs + skipped`` or say why not."""
     quarantined = hold_outs(rejected_rows, coerced_null_rows)
@@ -1028,6 +1211,10 @@ def account_population(
     # identities do not apply to a replaced file.
     if dest_count_source == DEST_ARTIFACT_READBACK:
         kind = KIND_OVERWRITE
+    # Chunked vector loads are identity conservation regardless of the
+    # operator's SQL sync-mode label. Physical embedding COUNT(*) is not dest.
+    if dest_count_source == DEST_IDENTITY_READBACK:
+        kind = KIND_VECTOR
 
     if rows_read is None:
         return ConservationLedger(
@@ -1067,6 +1254,21 @@ def account_population(
             coerced=coerced,
             ack=ack,
             mirror=mirror,
+        )
+
+    if kind == KIND_VECTOR:
+        # Empty-pass must not fire: leftover dest identities stay on a
+        # non-empty index, so a zero-read load is still an identity census.
+        return _account_vector(
+            read=read,
+            dest_count=dest_count,
+            dest_count_source=dest_count_source,
+            dest_count_before=dest_count_before,
+            quarantined=quarantined,
+            skipped=skipped,
+            coerced=coerced,
+            ack=ack,
+            vector=vector,
         )
 
     if (
@@ -1253,6 +1455,9 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     mirror = extract_mirror_payload(dest)
     if not mirror:
         mirror = extract_mirror_payload(recon)
+    vector = extract_vector_payload(dest)
+    if not vector:
+        vector = extract_vector_payload(recon)
     return account_population(
         rows_read=_as_optional_int(recon.get("source_rows")),
         dest_count=dest_count,
@@ -1275,6 +1480,7 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
         sync_mode=str(job.get("sync_mode") or dest.get("sync_mode") or ""),
         census=census,
         mirror=mirror or None,
+        vector=vector or None,
     )
 
 
@@ -1350,6 +1556,8 @@ def stream_dest_measured(ledger: Mapping[str, Any] | None) -> bool:
         return False
     if kind == KIND_MIRROR:
         return data.get("active_count") is not None and source == DEST_ACTIVE_READBACK
+    if kind == KIND_VECTOR:
+        return data.get("dest_count") is not None and source == DEST_IDENTITY_READBACK
     if kind == KIND_EMPTY_PASS:
         return True
     if kind == KIND_JOB:
@@ -1442,6 +1650,14 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_ACTIVE_READBACK
+        unaccounted = rows_read - (rows_written + quarantined + skipped)
+    elif summable and only == KIND_VECTOR:
+        dest_count = sum(int(item["dest_count"] or 0) for item in per)
+        rows_written = dest_count
+        rows_read = sum(int(item["rows_read"] or 0) for item in per)
+        quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
+        skipped = sum(int(item["rows_skipped"] or 0) for item in per)
+        written_source = DEST_IDENTITY_READBACK
         unaccounted = rows_read - (rows_written + quarantined + skipped)
     elif summable and only == KIND_EMPTY_PASS:
         dest_count = 0

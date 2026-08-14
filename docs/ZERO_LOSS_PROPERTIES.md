@@ -583,8 +583,10 @@ a dest-engine key census: `dest_delta == inserts - deletes`. Updates do
 not change cardinality. Mirror (Fivetran-style `_deleted`) uses dest-engine
 `COUNT(*) WHERE NOT _deleted` — physical `COUNT(*)` does not drop.
 File/object export uses an independent artifact record COUNT (re-open
-the written file). Writer `records_processed` / file `rows` is diagnostic
-only.
+the written file). Vector / RAG (pgvector) uses dest-engine
+`COUNT(DISTINCT source_id)` — physical embedding `COUNT(*)` is chunk
+cardinality, not source-row conservation. Writer `records_processed` /
+file `rows` / chunk-upsert ack is diagnostic only.
 Hard-delete tombstones that dest actually holds drop `COUNT(*)`; a
 tombstone for a key dest does not hold is a no-op, never an insert.
 
@@ -638,6 +640,14 @@ rowcount is not that proof.
     object is **0**. Iceberg key census scans the current snapshot —
     `Table.upsert` rowcount never closes dest Δ. Metadata
     `record-count` is writer-stamped and is not dest COUNT.
+11. Vector / RAG identity: `COUNT(DISTINCT source_id)` is dest population.
+    Physical embedding `COUNT(*)` is diagnostic (`vector_rows`). Writer
+    chunk-upsert ack never closes. Empty dest (dest-before 0) closes
+    `reader == identities + hold_outs + skipped`. Non-empty dest without
+    a this-run source_id census stays unproven (chunk `id` PK is not
+    source identity). Milvus/Qdrant/Pinecone/Weaviate `rowCount` is not
+    identity. Cardinality ≠ embedding cell checksum — Gate-8 stays
+    `skipped_readback` / `migration_proven=false`.
 
 **Measured (this host, SQLite + PostgreSQL 16 → MariaDB 10.11):**
 ```
@@ -736,6 +746,8 @@ Jobs Streams drawer shows dest COUNT(*) per stream; the job headline is
 the sum only when every stream closed the same additive kind.
 File exports headline **In export artifact** (independent record count),
 never “at destination table”, and never writer bytes.
+Vector / RAG jobs headline **Identities at dest** (`COUNT(DISTINCT
+source_id)`), never physical vector COUNT(*) and never chunk-upsert ack.
 
 ### NOT claimed / remaining for PROVEN (conservation slice)
 
@@ -743,7 +755,12 @@ never “at destination table”, and never writer bytes.
 * Inferred deletes on **upsert/CDC** without a tombstone and **not** mirror mode
 * Stream-path this-run `soft_deleted` / `reactivated` census (module-size freeze on `stream.py`)
 * Oracle / SQL Server live dest COUNT certify
-* dest-only sinks (pgvector, Milvus) — no SQL read-back by design
+* dest-only sinks besides pgvector identity (Milvus / Qdrant / Pinecone /
+  Weaviate DISTINCT `source_id`) — physical `rowCount` is not identity.
+  pgvector identity is **PARTIAL** on live PG 16: 5 chunks / 2
+  `source_id`s close as dest 2; missing table = 0; table without
+  `source_id` is unmeasured (not physical COUNT); DestBeforeCensus frozen.
+  The vector extension is not required for identity COUNT.
 * Object-store dest COUNT — algorithm in `destination_row_count` (missing
   object = 0; GET + Gate-8 parser). Live moto/MinIO certify skipped this
   host (no moto). Local file_export artifact COUNT remains **PARTIAL**.

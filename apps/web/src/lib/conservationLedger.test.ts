@@ -107,6 +107,46 @@ describe("destHeadline never falls back to writer ack", () => {
     assert.match(ledgerEquation(artifactLedger), /artifact 3/);
   });
 
+  it("shows identity COUNT, never vector COUNT(*) or 'at destination table', for RAG dest", () => {
+    const vectorLedger = {
+      ...overwriteLedger,
+      dest_count: 2,
+      rows_written: 2,
+      rows_read: 2,
+      writer_ack: 10_000,
+      writer_ack_delta: -9998,
+      rows_written_source: "identity_readback",
+      conservation_kind: "vector",
+      identity_count: 2,
+      vector_rows: 5,
+      note: "Vector identity closed: dest-engine COUNT(DISTINCT source_id) = 2.",
+    };
+    const h = destHeadline({
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: vectorLedger,
+    });
+    assert.equal(h.value, "2");
+    assert.equal(h.measured, true);
+    assert.equal(h.label, "Identities at dest");
+    assert.equal(destMetricCompact(h), "2 identities");
+    const copy = conservationCompleteCopy({
+      status: "completed",
+      records_processed: 10_000,
+      row_accounting: vectorLedger,
+    });
+    assert.match(copy, /2 identities at dest/);
+    assert.doesNotMatch(copy, /at destination/);
+    assert.doesNotMatch(copy, /10,000/);
+    const cells = ledgerIdentityCells(vectorLedger);
+    assert.equal(cells.find((c) => c.label === "Identities")?.value, "2");
+    assert.equal(cells.find((c) => c.label === "Vectors")?.value, "5");
+    assert.equal(cells.find((c) => c.label === "Writer ack")?.value, "10,000");
+    assert.equal(cells.find((c) => c.label === "Dest COUNT(*)"), undefined);
+    assert.match(ledgerEquation(vectorLedger), /identities 2/);
+    assert.equal(destProvenCount({ row_accounting: vectorLedger }), 2);
+  });
+
   it("shows em dash when dest is unmeasured — never invents dest = writer ack", () => {
     const h = destHeadline({
       status: "completed",

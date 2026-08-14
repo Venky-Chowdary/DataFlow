@@ -32,6 +32,8 @@ export type ConservationLedger = {
   inferred_deletes: number | null;
   reactivated: number | null;
   events_read: number | null;
+  identity_count: number | null;
+  vector_rows: number | null;
   stream_count: number | null;
   measured_streams: number | null;
   summable: boolean | null;
@@ -58,6 +60,7 @@ export type LedgerCarrier = {
 const UNMEASURED_SOURCES = new Set(["unmeasured", ""]);
 const UNMEASURED_KINDS = new Set(["unmeasured", ""]);
 const ARTIFACT_READBACK = "artifact_readback";
+const IDENTITY_READBACK = "identity_readback";
 
 function num(value: unknown): number | null {
   if (value == null || value === "") return null;
@@ -107,6 +110,8 @@ export function readConservationLedger(
     inferred_deletes: num(raw.inferred_deletes),
     reactivated: num(raw.reactivated),
     events_read: num(raw.events_read),
+    identity_count: num(raw.identity_count),
+    vector_rows: num(raw.vector_rows),
     stream_count: num(raw.stream_count),
     measured_streams: num(raw.measured_streams),
     summable: raw.summable == null ? null : Boolean(raw.summable),
@@ -133,6 +138,13 @@ function isArtifactLedger(ledger: ConservationLedger | null | undefined): boolea
   return Boolean(ledger && ledger.rows_written_source === ARTIFACT_READBACK);
 }
 
+function isVectorLedger(ledger: ConservationLedger | null | undefined): boolean {
+  return Boolean(
+    ledger &&
+      (ledger.conservation_kind === "vector" || ledger.rows_written_source === IDENTITY_READBACK),
+  );
+}
+
 export function isDestMeasured(ledger: ConservationLedger | null | undefined): boolean {
   if (!ledger) return false;
   if (UNMEASURED_KINDS.has(ledger.conservation_kind)) return false;
@@ -143,6 +155,9 @@ export function isDestMeasured(ledger: ConservationLedger | null | undefined): b
   }
   if (ledger.conservation_kind === "mirror") {
     return ledger.active_count != null;
+  }
+  if (ledger.conservation_kind === "vector") {
+    return ledger.dest_count != null && ledger.rows_written_source === IDENTITY_READBACK;
   }
   if (ledger.dest_count == null) return false;
   return true;
@@ -158,6 +173,8 @@ export function conservationKindLabel(kind: string | null | undefined): string {
       return "Keyed · inserts − deletes (keys, not events)";
     case "mirror":
       return "Mirror · active population";
+    case "vector":
+      return "Vector · identities, not chunks";
     case "job_rollup":
       return "Job · every stream closed";
     case "empty_pass":
@@ -191,6 +208,9 @@ export function ledgerEquation(ledger: ConservationLedger): string {
   }
   if (kind === "mirror") {
     return `read ${fmt(ledger.rows_read)} = active ${fmt(ledger.active_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
+  }
+  if (kind === "vector") {
+    return `read ${fmt(ledger.rows_read)} = identities ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
   }
   if (kind === "append_delta") {
     return `dest Δ ${fmt(ledger.dest_delta)} = COUNT(*) after ${fmt(ledger.dest_count)} − before ${fmt(ledger.dest_count_before)}`;
@@ -294,6 +314,15 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
         tone: unbalanced ? "danger" : "ok",
       };
     }
+    if (isVectorLedger(ledger)) {
+      return {
+        value: Number(ledger.dest_count).toLocaleString(),
+        label: running ? "Identities so far" : "Identities at dest",
+        title: ledger.note || "Dest-engine COUNT(DISTINCT source_id). Physical vector COUNT(*) is chunk cardinality, not source-row conservation.",
+        measured: true,
+        tone: unbalanced ? "danger" : "ok",
+      };
+    }
     return {
       value: Number(ledger.dest_count).toLocaleString(),
       label: running ? "Dest so far" : "At destination",
@@ -348,6 +377,7 @@ export function destMetricCompact(metric: RowMetric): string {
   if (metric.label.toLowerCase().includes("per-stream")) return "per-stream dest";
   if (metric.label.toLowerCase().includes("active")) return `${metric.value} active`;
   if (metric.label.toLowerCase().includes("artifact")) return `${metric.value} in artifact`;
+  if (metric.label.toLowerCase().includes("identit")) return `${metric.value} identities`;
   return `${metric.value} at dest`;
 }
 
@@ -388,6 +418,7 @@ export function conservationCompleteCopy(
   const mirror = ledger?.conservation_kind === "mirror";
   const job = ledger?.conservation_kind === "job_rollup";
   const artifact = isArtifactLedger(ledger);
+  const vector = isVectorLedger(ledger);
   if (opts?.quarantine) {
     if (dest.measured) {
       return mirror
@@ -396,7 +427,9 @@ export function conservationCompleteCopy(
           ? "Per-stream dest; some rows held out or coerced to NULL"
           : artifact
             ? `${dest.value} in export artifact; some rows held out or coerced to NULL`
-            : `${dest.value} at destination; some rows held out or coerced to NULL`;
+            : vector
+              ? `${dest.value} identities at dest; some rows held out or coerced to NULL`
+              : `${dest.value} at destination; some rows held out or coerced to NULL`;
     }
     return `${writer.value} writer-acked (dest COUNT unmeasured); some rows held out or coerced to NULL`;
   }
@@ -404,6 +437,7 @@ export function conservationCompleteCopy(
     if (mirror) return `${dest.value} active at destination`;
     if (job && dest.value === "—") return "Every stream ledger is closed — dest COUNT not summed";
     if (artifact) return `${dest.value} in export artifact`;
+    if (vector) return `${dest.value} identities at dest`;
     return `${dest.value} at destination`;
   }
   return `${writer.value} writer-acked — dest COUNT unmeasured`;
@@ -458,6 +492,15 @@ export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityC
       { label: "Inferred deletes", value: fmt(ledger.inferred_deletes) },
       { label: "Reactivated", value: fmt(ledger.reactivated) },
       { label: "Physical COUNT(*)", value: fmt(ledger.dest_count) },
+    ];
+  }
+  if (ledger.conservation_kind === "vector") {
+    return [
+      { label: "Identities", value: fmt(ledger.dest_count) },
+      { label: "Vectors", value: fmt(ledger.vector_rows) },
+      { label: "Writer ack", value: fmt(ledger.writer_ack) },
+      { label: "Held out", value: fmt(ledger.rows_quarantined) },
+      { label: "Skipped", value: fmt(ledger.rows_skipped) },
     ];
   }
   if (ledger.conservation_kind === "append_delta") {

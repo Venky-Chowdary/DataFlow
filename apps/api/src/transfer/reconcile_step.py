@@ -10,7 +10,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
-from services.dest_precount import PRECOUNT_KEY, stamp_artifact_census
+from services.dest_precount import PRECOUNT_KEY, stamp_artifact_census, stamp_vector_census
 from services.reconcile_coverage import (
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
@@ -789,6 +789,9 @@ def run_reconciliation(
     # paths below run before it is known, and the report must never claim two
     # independent digests agreed when only the writer's was available.
     digest_provenance: dict[str, str] = {"source": ""}
+    # Late-bound: populated once driver/schema/table are resolved. _finalize
+    # is defined before those names exist; file-export returns must not stamp.
+    vector_stamp_ctx: dict[str, Any] = {}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
         if digest_provenance["source"] and "source_checksum_provenance" not in payload:
@@ -799,6 +802,14 @@ def run_reconciliation(
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
         stamped = _finalize_reconcile(payload, dest_summary=dest_summary)
+        if vector_stamp_ctx:
+            stamped = stamp_vector_census(
+                stamped,
+                vector_stamp_ctx.get("cfg"),
+                schema=str(vector_stamp_ctx.get("schema") or ""),
+                table_name=str(vector_stamp_ctx.get("table_name") or ""),
+                dest_engine=str(vector_stamp_ctx.get("engine") or ""),
+            )
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:
             stamped = _maybe_attach_verification_ladder(
@@ -925,6 +936,13 @@ def run_reconciliation(
 
     schema = dest_summary.get("schema") or schema_from_cfg(db_type, cfg)
     table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""
+    if db_type == "pgvector":
+        vector_stamp_ctx.update(
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            engine=db_type,
+        )
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]
     dest_types = _dest_types_from_mappings(mapping_dicts)
@@ -1196,6 +1214,39 @@ def run_reconciliation(
             pk_column=None,
         )
 
+    if db_type == "pgvector":
+        # Physical embedding COUNT(*) is chunk cardinality, not source-row
+        # conservation. Do not run Gate-8 as reader == vector COUNT(*) —
+        # 2 documents / 5 chunks would fail (or invent a surplus if stuffed
+        # as dest population). Identity COUNT(DISTINCT source_id) is stamped
+        # in _finalize. Embeddings are opaque: cell fidelity stays unproven.
+        measured = isinstance(target_rows, int) and target_rows >= 0
+        return _finalize({
+            "passed": measured,
+            "unproven": True,
+            "skipped_readback": True,
+            "migration_proven": False,
+            "message": (
+                "pgvector write completed — Gate-8 embedding cell fidelity "
+                "unproven (opaque vectors). Independent identity is "
+                "COUNT(DISTINCT source_id); physical vector COUNT(*) and "
+                "writer chunk-upsert acknowledgement are diagnostic."
+                if measured
+                else (
+                    "pgvector destination read-back unavailable — identity "
+                    "COUNT(DISTINCT source_id) could not be compared. Writer "
+                    "chunk-upsert acknowledgement is not destination proof."
+                )
+            ),
+            "source_rows": source_rows,
+            "target_rows": target_rows if measured else None,
+            "source_checksum": source_checksum,
+            "target_checksum": target_checksum if measured else "",
+            "rejected_rows": rejected_rows,
+            "coerced_null_rows": coerced_null_rows,
+            "rows_skipped": rows_skipped,
+        })
+
     strict_checksum = validation_mode in ("strict", "maximum")
 
     if source_checksum_scope_note and target_rows >= 0:
@@ -1346,9 +1397,10 @@ def run_reconciliation(
 
     # No read-back verifier available for this destination.
     if target_rows < 0:
-        # dest_only sinks (pgvector, milvus, …) have no independent SQL read-back
-        # by design — fail-closed strict mode would ban every production write.
-        # Accept writer-ack when row counts match; surface that read-back was N/A.
+        # dest_only sinks (milvus, pinecone, …) have no independent SQL
+        # identity read-back by design — fail-closed strict mode would ban
+        # every production write. pgvector identity is stamped above; do not
+        # accept writer-ack as dest population for that driver.
         dest_only = False
         try:
             from src.transfer.connector_capabilities import _DRIVER_CAPS

@@ -15,12 +15,16 @@ import pytest
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
     DEST_COUNT_ARTIFACT,
+    IDENTITY_COUNT_KEY,
+    VECTOR_ROWS_KEY,
     count_artifact_rows,
     stamp_artifact_census,
+    stamp_vector_census,
 )
 from services.row_conservation import (
     DEST_ACTIVE_READBACK,
     DEST_ARTIFACT_READBACK,
+    DEST_IDENTITY_READBACK,
     DEST_PER_STREAM,
     DEST_READBACK,
     DEST_UNMEASURED,
@@ -30,6 +34,7 @@ from services.row_conservation import (
     KIND_KEYED,
     KIND_MIRROR,
     KIND_OVERWRITE,
+    KIND_VECTOR,
     account_job,
     account_job_streams,
     account_population,
@@ -196,6 +201,148 @@ def test_stamp_artifact_census_never_keeps_writer_target_rows(tmp_path: Path):
     )
     assert ARTIFACT_COUNT_KEY not in unmeasured
     assert unmeasured["target_rows"] is None
+
+
+def test_identity_readback_closes_on_distinct_source_id_not_vector_count():
+    """RAG hole: 2 documents / 5 chunks / writer 10,000 never closes dest as 5."""
+    count, source = dest_count_from_recon(
+        {
+            "target_rows": 5,
+            "target_checksum": "abc123",
+            "skipped_readback": True,
+            "unproven": True,
+            "migration_proven": False,
+            "dest_count_source": DEST_IDENTITY_READBACK,
+            IDENTITY_COUNT_KEY: 2,
+            VECTOR_ROWS_KEY: 5,
+            "message": "pgvector write completed — Gate-8 embedding cell fidelity unproven",
+        }
+    )
+    assert count == 2
+    assert source == DEST_IDENTITY_READBACK
+
+
+def test_identity_source_without_identity_rows_is_unmeasured():
+    """Forged dest_count_source + stuffed vector COUNT(*) is still not dest."""
+    count, source = dest_count_from_recon(
+        {
+            "target_rows": 10_000,
+            "target_checksum": "abc123",
+            "skipped_readback": True,
+            "dest_count_source": DEST_IDENTITY_READBACK,
+        }
+    )
+    assert count is None
+    assert source == DEST_UNMEASURED
+
+
+def test_skipped_identity_readback_refuses_physical_vector_count():
+    count, source = dest_count_from_recon(
+        {
+            "target_rows": 5,
+            "target_checksum": "abc123",
+            "dest_count_source": "skipped_identity_readback",
+        }
+    )
+    assert count is None
+    assert source == DEST_UNMEASURED
+
+
+def test_vector_overwrite_balances_on_identities_not_chunks_or_writer_ack():
+    ledger = account_population(
+        rows_read=2,
+        dest_count=2,
+        dest_count_source=DEST_IDENTITY_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=10_000,
+        sync_mode="full_refresh_overwrite",
+        vector={"identity_rows": 2, "vector_rows": 5},
+    )
+    assert ledger.conservation_kind == KIND_VECTOR
+    assert ledger.rows_written == 2
+    assert ledger.rows_written_source == DEST_IDENTITY_READBACK
+    assert ledger.identity_count == 2
+    assert ledger.vector_rows == 5
+    assert ledger.writer_ack == 10_000
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.writer_ack_delta == -9998
+    assert "identity" in ledger.note.lower() or "source_id" in ledger.note.lower()
+    assert "chunk" in ledger.note.lower() or "vector" in ledger.note.lower()
+
+
+def test_vector_physical_count_does_not_close_as_overwrite_surplus():
+    """If dest_count were physical 5 against reader 2, overwrite would invent dupes."""
+    ledger = account_population(
+        rows_read=2,
+        dest_count=5,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=5,
+        sync_mode="full_refresh_overwrite",
+    )
+    assert ledger.conservation_kind == KIND_OVERWRITE
+    assert ledger.balanced is False
+    assert ledger.unaccounted == -3
+
+
+def test_vector_nonempty_dest_stays_unproven_without_source_id_census():
+    ledger = account_population(
+        rows_read=2,
+        dest_count=12,
+        dest_count_source=DEST_IDENTITY_READBACK,
+        dest_count_before=10,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=5,
+        sync_mode="incremental_append",
+        vector={"identity_rows": 12, "vector_rows": 40},
+    )
+    assert ledger.conservation_kind == KIND_VECTOR
+    assert ledger.balanced is False
+    assert ledger.unaccounted is None
+    assert ledger.dest_count == 12
+    assert ledger.dest_count_before == 10
+    assert ledger.dest_delta == 2
+    assert "unproven" in ledger.note.lower()
+
+
+def test_vector_dest_before_unmeasured_does_not_close():
+    ledger = account_population(
+        rows_read=2,
+        dest_count=2,
+        dest_count_source=DEST_IDENTITY_READBACK,
+        dest_count_before=None,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=5,
+        sync_mode="full_refresh_overwrite",
+        vector={"identity_rows": 2, "vector_rows": 5},
+    )
+    assert ledger.conservation_kind == KIND_VECTOR
+    assert ledger.balanced is False
+    assert ledger.unaccounted is None
+
+
+def test_stamp_vector_census_milvus_is_not_identity():
+    """Milvus rowCount is physical, not DISTINCT source_id — do not pretend."""
+    stamped = stamp_vector_census(
+        {"target_rows": 5, "target_checksum": "abc"},
+        {},
+        schema="public",
+        table_name="docs",
+        dest_engine="milvus",
+    )
+    assert IDENTITY_COUNT_KEY not in stamped
+    assert stamped.get("dest_count_source") != DEST_IDENTITY_READBACK
 
 
 def test_failed_gate8_still_exposes_independent_dest_count():
@@ -1406,3 +1553,202 @@ def test_job_rollup_two_keyed_streams_closed_not_summed():
     assert ledger.per_stream[1]["conservation_kind"] == KIND_KEYED
     assert ledger.per_stream[0]["dest_count"] == 3
     assert ledger.per_stream[1]["dest_count"] == 3
+
+
+def test_job_rollup_two_vector_streams_sums_identities_not_chunks():
+    def _vector(name: str, identities: int, vectors: int) -> dict:
+        return {
+            "name": name,
+            "row_accounting": account_population(
+                rows_read=identities,
+                dest_count=identities,
+                dest_count_source=DEST_IDENTITY_READBACK,
+                dest_count_before=0,
+                rejected_rows=0,
+                coerced_null_rows=0,
+                rows_skipped=0,
+                writer_ack=vectors * 100,
+                sync_mode="full_refresh_overwrite",
+                vector={"identity_rows": identities, "vector_rows": vectors},
+            ).to_dict(),
+        }
+
+    job = {
+        "records_processed": 10_000,
+        "destination_summary": {
+            "streams": [
+                _vector("docs_a", 2, 5),
+                _vector("docs_b", 3, 9),
+            ],
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.conservation_kind == KIND_JOB
+    assert ledger.balanced is True
+    assert ledger.summable is True
+    assert ledger.dest_count == 5
+    assert ledger.rows_written == 5
+    assert ledger.rows_written_source == DEST_IDENTITY_READBACK
+    assert ledger.per_stream[0]["dest_count"] == 2
+    assert ledger.per_stream[1]["dest_count"] == 3
+
+
+def test_account_job_vector_recon_never_uses_writer_or_chunk_count():
+    ledger = account_job(
+        {
+            "sync_mode": "full_refresh_overwrite",
+            "records_processed": 10_000,
+            "reconciliation": {
+                "source_rows": 2,
+                "target_rows": 5,
+                "target_checksum": "chunks",
+                "skipped_readback": True,
+                "dest_count_source": DEST_IDENTITY_READBACK,
+                IDENTITY_COUNT_KEY: 2,
+                VECTOR_ROWS_KEY: 5,
+                "target_rows_before": 0,
+            },
+        }
+    )
+    assert ledger.conservation_kind == KIND_VECTOR
+    assert ledger.dest_count == 2
+    assert ledger.identity_count == 2
+    assert ledger.vector_rows == 5
+    assert ledger.writer_ack == 10_000
+    assert ledger.balanced is True
+
+
+def _pg_up() -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("127.0.0.1", 5432), timeout=0.4):
+            return True
+    except OSError:
+        return False
+
+
+def _pg_cfg() -> dict:
+    import os
+
+    return {
+        "host": os.environ.get("P9_PG_HOST", "127.0.0.1"),
+        "port": int(os.environ.get("P9_PG_PORT", "5432")),
+        "database": os.environ.get("P9_PG_DB", "dataflow"),
+        "username": os.environ.get("P9_PG_USER", "dataflow"),
+        "password": os.environ.get("P9_PG_PASSWORD", "dataflow"),
+    }
+
+
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+def test_pgvector_identity_count_distinct_source_id_not_physical_rows():
+    """Identity COUNT does not require the vector extension — source_id is TEXT."""
+    import psycopg2
+
+    from services.dest_precount import DestBeforeCensus, destination_row_count, stamp_vector_census
+    from src.transfer.models import EndpointConfig
+
+    cfg = _pg_cfg()
+    table = "p9_vector_identity_chunks"
+    conn = psycopg2.connect(
+        host=cfg["host"],
+        port=cfg["port"],
+        dbname=cfg["database"],
+        user=cfg["username"],
+        password=cfg["password"],
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS public.{table}")
+            cur.execute(
+                f"CREATE TABLE public.{table} (id TEXT PRIMARY KEY, source_id TEXT, chunk_index INT)"
+            )
+            cur.executemany(
+                f"INSERT INTO public.{table} (id, source_id, chunk_index) VALUES (%s, %s, %s)",
+                [
+                    ("d1-0", "doc-1", 0),
+                    ("d1-1", "doc-1", 1),
+                    ("d1-2", "doc-1", 2),
+                    ("d2-0", "doc-2", 0),
+                    ("d2-1", "doc-2", 1),
+                ],
+            )
+        conn.commit()
+        assert destination_row_count("pgvector", cfg, schema="public", table_name=table) == 2
+        assert destination_row_count("postgresql", cfg, schema="public", table_name=table) == 5
+        missing = destination_row_count(
+            "pgvector", cfg, schema="public", table_name="p9_vector_identity_missing"
+        )
+        assert missing == 0
+
+        stamped = stamp_vector_census(
+            {"target_rows": 10_000, "target_checksum": "writer"},
+            cfg,
+            schema="public",
+            table_name=table,
+            dest_engine="pgvector",
+        )
+        assert stamped[IDENTITY_COUNT_KEY] == 2
+        assert stamped["dest_count_source"] == DEST_IDENTITY_READBACK
+        assert stamped[VECTOR_ROWS_KEY] == 10_000
+        assert stamped["target_rows"] == 10_000
+        count, source = dest_count_from_recon(stamped)
+        assert count == 2
+        assert source == DEST_IDENTITY_READBACK
+
+        endpoint = EndpointConfig(
+            kind="database",
+            format="pgvector",
+            host=cfg["host"],
+            port=cfg["port"],
+            database=cfg["database"],
+            username=cfg["username"],
+            password=cfg["password"],
+            schema="public",
+            table=table,
+        )
+        census = DestBeforeCensus()
+        before = census.capture(endpoint, table_name=table)
+        assert before == 2
+        with conn.cursor() as cur:
+            cur.execute(
+                f"INSERT INTO public.{table} (id, source_id, chunk_index) VALUES (%s, %s, %s)",
+                ("d3-0", "doc-3", 0),
+            )
+        conn.commit()
+        assert census.capture(endpoint, table_name=table) == 2
+        assert destination_row_count("pgvector", cfg, schema="public", table_name=table) == 3
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS public.{table}")
+        conn.commit()
+        conn.close()
+
+
+@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+def test_pgvector_table_without_source_id_is_unmeasured_not_physical_count():
+    import psycopg2
+
+    from services.dest_precount import destination_row_count
+
+    cfg = _pg_cfg()
+    table = "p9_vector_no_source_id"
+    conn = psycopg2.connect(
+        host=cfg["host"],
+        port=cfg["port"],
+        dbname=cfg["database"],
+        user=cfg["username"],
+        password=cfg["password"],
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS public.{table}")
+            cur.execute(f"CREATE TABLE public.{table} (id TEXT PRIMARY KEY, body TEXT)")
+            cur.execute(f"INSERT INTO public.{table} (id, body) VALUES ('a', 'x'), ('b', 'y')")
+        conn.commit()
+        assert destination_row_count("pgvector", cfg, schema="public", table_name=table) is None
+    finally:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS public.{table}")
+        conn.commit()
+        conn.close()

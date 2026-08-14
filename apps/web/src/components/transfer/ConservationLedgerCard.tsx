@@ -45,6 +45,7 @@ export function ConservationLedgerCard({
   const isMirror = ledger?.conservation_kind === "mirror";
   const isJob = ledger?.conservation_kind === "job_rollup";
   const isArtifact = ledger?.rows_written_source === "artifact_readback";
+  const isVector = ledger?.conservation_kind === "vector" || ledger?.rows_written_source === "identity_readback";
   const leftover =
     isMirror && ledger?.dest_count != null && ledger.active_count != null
       ? Math.max(ledger.dest_count - ledger.active_count, 0)
@@ -58,7 +59,7 @@ export function ConservationLedgerCard({
       ? { label: "Open Validate", onClick: onOpenValidate }
       : null;
 
-  const unit = isMirror ? "ACTIVE" : isJob && dest.value === "—" ? "STREAMS" : isArtifact ? "RECORDS" : "COUNT(*)";
+  const unit = isMirror ? "ACTIVE" : isJob && dest.value === "—" ? "STREAMS" : isArtifact ? "RECORDS" : isVector ? "IDENTITIES" : "COUNT(*)";
   const nextTitle = unbalanced
     ? "Ledger unbalanced"
     : measured
@@ -71,7 +72,9 @@ export function ConservationLedgerCard({
       ? "Rows read do not equal dest-engine active population plus hold-outs and skips."
       : isArtifact
         ? "Rows read do not equal independent artifact record count plus hold-outs and skips."
-        : "Rows read do not equal dest COUNT(*) plus hold-outs and skips."
+        : isVector
+          ? "Rows read do not equal dest-engine COUNT(DISTINCT source_id) plus hold-outs and skips."
+          : "Rows read do not equal dest COUNT(*) plus hold-outs and skips."
     : measured
       ? isJob
         ? dest.value === "—"
@@ -83,7 +86,9 @@ export function ConservationLedgerCard({
           : "Every source row is active at destination, quarantined, or skipped. Physical COUNT(*) does not drop on soft-delete."
         : isArtifact
           ? "Every source row is in the export artifact, quarantined, or skipped. Cell fidelity is unproven."
-          : "Every source row is at destination, quarantined, or skipped."
+          : isVector
+            ? "Every source row is a dest identity, quarantined, or skipped. Physical vector COUNT(*) is chunk cardinality, not source-row conservation."
+            : "Every source row is at destination, quarantined, or skipped."
       : "Do not treat writer events as rows at destination.";
 
   return (
@@ -96,7 +101,9 @@ export function ConservationLedgerCard({
             ? "Mirror active population conservation"
             : isArtifact
               ? "Export artifact population conservation"
-              : "Destination population conservation"
+              : isVector
+                ? "Vector identity population conservation"
+                : "Destination population conservation"
       }
     >
       <div className="df2-conservation-ledger-head">
@@ -113,7 +120,9 @@ export function ConservationLedgerCard({
                   ? "Active destination population"
                   : isArtifact
                     ? "Export artifact population"
-                    : "Destination population"}
+                    : isVector
+                      ? "Vector identity population"
+                      : "Destination population"}
             </h3>
             <span className="df2-conservation-ledger-kind">
               {conservationKindLabel(ledger?.conservation_kind)}
@@ -129,17 +138,21 @@ export function ConservationLedgerCard({
                 ? "Dest-engine COUNT(*) WHERE NOT _deleted. Writer acknowledgement is diagnostic only. Physical COUNT(*) does not drop."
                 : isArtifact
                   ? "Independent record count of the written file. Writer acknowledgement is diagnostic only. Gate-8 cell fidelity remains unproven."
-                  : "Independent dest-engine read-back. Writer acknowledgement is diagnostic only."
+                  : isVector
+                    ? "Dest-engine COUNT(DISTINCT source_id). Physical vector COUNT(*) and writer chunk-upsert acknowledgement are diagnostic only. Embedding cell fidelity remains unproven."
+                    : "Independent dest-engine read-back. Writer acknowledgement is diagnostic only."
               : isMirror
                 ? "Active dest population was not captured. Writer ack is not COUNT(*) WHERE NOT _deleted."
                 : isJob
                   ? "Not every stream has a dest-engine ledger. Last-table COUNT(*) and writer ack are not the job."
-                  : "Dest COUNT(*) was not captured. Writer ack is not destination proof."}
+                  : isVector
+                    ? "Identity COUNT(DISTINCT source_id) was not captured. Vector COUNT(*) and writer ack are not destination proof."
+                    : "Dest COUNT(*) was not captured. Writer ack is not destination proof."}
           </p>
         </div>
       </div>
 
-      <div className="df2-conservation-ledger-compare" aria-label={isMirror ? "Active dest versus writer acknowledgement" : isArtifact ? "Artifact records versus writer acknowledgement" : "Dest COUNT versus writer acknowledgement"}>
+      <div className="df2-conservation-ledger-compare" aria-label={isMirror ? "Active dest versus writer acknowledgement" : isArtifact ? "Artifact records versus writer acknowledgement" : isVector ? "Identities versus writer acknowledgement" : "Dest COUNT versus writer acknowledgement"}>
         <article className={measured ? "is-dest" : "is-muted"}>
           <span>{dest.label}</span>
           <strong title={dest.title}>{dest.value}</strong>
@@ -176,14 +189,18 @@ export function ConservationLedgerCard({
                 ? "Writer ack disagrees with active dest population"
                 : isArtifact
                   ? "Writer ack disagrees with artifact record count"
-                  : "Writer ack disagrees with dest COUNT(*)"}
+                  : isVector
+                    ? "Writer ack disagrees with identity COUNT"
+                    : "Writer ack disagrees with dest COUNT(*)"}
             </strong>
             <span>
               {isMirror
                 ? `Active dest holds ${dest.measured ? dest.value : "an unmeasured population"}. Writer counted ${writer.value}. Soft-deleted leftovers are not writer events — acknowledgement never closes conservation.`
                 : isArtifact
                   ? `The export artifact holds ${dest.measured ? dest.value : "an unmeasured population"}. Writer counted ${writer.value}. That is the DMS Full Load / MISSING_TARGET hole — writer acknowledgement never closes conservation.`
-                  : `Dest holds ${dest.measured ? dest.value : "an unmeasured population"}. Writer counted ${writer.value}. That is the DMS Full Load / MISSING_TARGET hole — writer acknowledgement never closes conservation.`}
+                  : isVector
+                    ? `Dest holds ${dest.measured ? dest.value : "an unmeasured"} identit(ies). Writer counted ${writer.value} vector row(s). Physical chunk COUNT(*) is not source-row conservation — acknowledgement never closes conservation.`
+                    : `Dest holds ${dest.measured ? dest.value : "an unmeasured population"}. Writer counted ${writer.value}. That is the DMS Full Load / MISSING_TARGET hole — writer acknowledgement never closes conservation.`}
             </span>
           </div>
         </div>
