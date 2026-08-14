@@ -659,7 +659,9 @@ rowcount is not that proof.
    `count_excel_rows` value-bearing rows, never openpyxl `max_row`;
    streamed Avro records; ORC footer `nrows`; XML unique repeating
    record-path via `count_xml_records` StAX, never `parse_xml` ingest
-   `max_rows`, never `fromstring`+xmltodict DOM, never whole-document-as-one). Writer `rows` /
+   `max_rows`, never `fromstring`+xmltodict DOM, never whole-document-as-one).
+   Local CSV/JSON/JSONL/XML gzip streams (`open_artifact_binary`); Excel/Avro/Parquet/ORC
+   gzip still decompresses first. Writer `rows` /
    bytes-landed never closes dest. File replace is overwrite
    (dest-before 0). Cardinality ≠ cell checksum — Gate-8 stays
    `skipped_readback` / `migration_proven=false`. Remote URI without a
@@ -966,6 +968,16 @@ rowcount is not that proof.
     quoted embedded newline → 2 not physical-line count; TSV 2; UTF-8
     BOM 2; gzip CSV 2 (decompress then stream); path 5000 → 5000.
     `parse_csv_preview` ingest unchanged. Cardinality ≠ Gate-8.
+    `engine.py` unchanged. Frontend not run this slice (no UI change).
+
+  Gzip artifact dest COUNT stream (this host, after 2026-08-14 slice):
+    Property 5 + Property 9 + `test_json_tabular.py`: 285 passed,
+    9 skipped in 40.63s. Local `.csv.gz` / `.json.gz` / `.jsonl.gz` /
+    `.xml.gz` COUNT via `gzip.open` stream, never `read_bytes` of the
+    compressed file. Writer CSV gzip 3 → dest 3; JSONL gzip 2; JSON gzip
+    3; XML gzip 2; quoted-newline CSV gzip 2; corrupt gzip unmeasured.
+    Excel/Avro/Parquet/ORC gzip still decompresses first. Object-store
+    GET gzip still decompresses the GET body. Cardinality ≠ Gate-8.
     `engine.py` unchanged. Frontend not run this slice (no UI change).
 
   Snowflake / BigQuery / DuckDB / Databricks dest COUNT (this host, after 2026-08-14 slice):
