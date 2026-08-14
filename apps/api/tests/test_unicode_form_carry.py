@@ -46,6 +46,12 @@ def test_bin_and_pg_default_are_codepoint_identity():
     pg = classify_uca("postgresql", "")
     assert pg.table == "codepoint"
     assert pg.folds_forms is False
+    libc = classify_uca("postgresql", "en_US.utf8")
+    assert libc.table == "codepoint"
+    assert libc.folds_forms is False
+    icu = classify_uca("postgresql", "und-x-icu")
+    assert icu.table == "uca"
+    assert icu.version is None
     bin_p = classify_uca("mysql", "utf8mb4_bin")
     assert bin_p.table == "codepoint"
     assert bin_p.canonical_equivalence is False
@@ -232,6 +238,7 @@ def test_create_new_pg_text_to_mysql_carries_form_on_bin():
         dialect="postgresql",
         columns=["id", "code"],
         column_types={"id": "BIGINT", "code": "TEXT"},
+        collations={"code": "en_US.utf8"},
         primary_key=["id"],
         unique_keys=[["code"]],
     )

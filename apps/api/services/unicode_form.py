@@ -293,6 +293,26 @@ def classify_uca(engine: str, collation: str = "") -> UcaProfile:
             engine=eng,
             collation=name,
         )
+    # PostgreSQL libc / default collations (en_US.utf8, C.UTF-8, ucs_basic)
+    # are not UCA. Live PG TEXT UNIQUE lands NFC and NFD as distinct keys.
+    # ICU names are the UCA path; version is unmeasured without dest-engine.
+    if eng in {"postgresql", "redshift"}:
+        if "icu" in name.lower():
+            return UcaProfile(
+                table="uca",
+                version=None,
+                expansions=None,
+                canonical_equivalence=None,
+                engine=eng,
+                collation=name,
+            )
+        return UcaProfile(
+            table="codepoint",
+            expansions=False,
+            canonical_equivalence=False,
+            engine=eng,
+            collation=name,
+        )
     if _GENERAL_RE.search(name):
         return UcaProfile(
             table="general",
