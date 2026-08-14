@@ -4778,7 +4778,7 @@ def test_iceberg_destination_key_list_missing_table_is_empty(tmp_path: Path):
 
 
 def test_iceberg_overwrite_merge_deletes_leftover_snapshot_keys(tmp_path: Path):
-    """Lakehouse leftover MERGE: dest {1,2,3,99} vs S {1,2,3} → CoW-delete 99.
+    """Lakehouse leftover MERGE: dest {1,2,3,99} vs S {1,2,3} → MoR-delete 99.
 
     Same identity as SQL leftover MERGE. Metadata record-count and writer
     upsert ack never close. Incremental remains a hard no-op.
@@ -4855,6 +4855,17 @@ def test_iceberg_overwrite_merge_deletes_leftover_snapshot_keys(tmp_path: Path):
     assert after[EXTRA_KEYS_KEY] == 0
     assert after[MISSING_KEYS_KEY] == 0
     assert destination_row_count("iceberg", cfg, schema="", table_name="orders") == 3
+    from connectors.iceberg_writer import _load_metadata, _resolve_iceberg_table_dir
+
+    table_dir = _resolve_iceberg_table_dir(cfg, "orders", None)
+    versions = sorted((table_dir / "metadata").glob("v*.metadata.json"))
+    meta = _load_metadata(versions[-1])
+    deletes = list(meta.get("delete-files") or [])
+    assert deletes, "leftover MERGE must write equality deletes, not CoW-rewrite"
+    assert deletes[-1].get("content") == 2
+    assert (meta.get("properties") or {}).get("dataflow.write_strategy") == (
+        "merge-on-read"
+    )
 
 
 def test_iceberg_overwrite_merge_does_not_invent_missing_source_keys(tmp_path: Path):
@@ -5749,8 +5760,99 @@ def test_parse_object_store_uri_iceberg_schemes() -> None:
     assert adls.key == "wh/data/f.parquet"
     assert adls.account == "acct"
     assert parse_object_store_uri("file:///tmp/wh/data/f.parquet") is None
-    assert parse_object_store_uri("hdfs://nn:8020/wh/data/f.parquet") is None
+    hdfs = parse_object_store_uri("hdfs://nn:8020/wh/data/f.parquet")
+    assert hdfs is not None
+    assert hdfs.kind == "hdfs"
+    assert hdfs.bucket == "nn:8020"
+    assert hdfs.key == "wh/data/f.parquet"
+    assert hdfs.account == "hdfs"
+    webhdfs = parse_object_store_uri("webhdfs://nn:9870/wh/data/f.parquet")
+    assert webhdfs is not None
+    assert webhdfs.kind == "hdfs"
+    assert webhdfs.bucket == "nn:9870"
+    assert webhdfs.account == "webhdfs"
+    assert parse_object_store_uri("hdfs://nn:8020") is None
     assert parse_object_store_uri("s3://lake") is None
+
+
+def test_webhdfs_count_unmeasured_without_http_endpoint() -> None:
+    """hdfs://nn:8020 is RPC. Dest COUNT stays unmeasured until WebHDFS is set."""
+    from services.object_streaming import (
+        object_store_content_length,
+        open_object_store_binary,
+        open_object_store_seekable,
+    )
+
+    cfg = {"hdfs_scheme": "hdfs"}
+    assert object_store_content_length("hdfs", cfg, "nn:8020", "wh/data/f.parquet") is None
+    assert open_object_store_seekable("hdfs", cfg, "nn:8020", "wh/data/f.parquet") is None
+    assert open_object_store_binary("hdfs", cfg, "nn:8020", "wh/data/f.parquet") is None
+
+
+def test_webhdfs_range_get_uses_open_offset_length(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WebHDFS dest COUNT Range-GETs OPEN&offset&length — never unsized GET."""
+    from services.format_converter import convert_rows
+    from services.object_streaming import (
+        object_store_content_length,
+        open_object_store_seekable,
+        range_get_object_bytes,
+    )
+
+    content, _mime = convert_rows(
+        ["id", "v"],
+        [["1", "a"], ["2", "b"]],
+        source_format="csv",
+        target_format="parquet",
+    )
+    seen: list[dict] = []
+
+    class _Resp:
+        def __init__(self, status: int, payload: dict | None = None, body: bytes = b""):
+            self.status_code = status
+            self._payload = payload
+            self.content = body
+
+        def json(self):
+            if self._payload is None:
+                raise ValueError("not json")
+            return self._payload
+
+        def close(self) -> None:
+            return None
+
+    def _get(url, params=None, timeout=30, allow_redirects=True, stream=False):
+        seen.append({"url": url, "params": dict(params or {}), "stream": stream})
+        op = str((params or {}).get("op") or "")
+        if op == "GETFILESTATUS":
+            return _Resp(200, {"FileStatus": {"length": len(content)}})
+        if op == "OPEN":
+            start = int((params or {}).get("offset") or 0)
+            length = int((params or {}).get("length") or 0)
+            return _Resp(200, None, content[start : start + length])
+        raise AssertionError(f"unexpected WebHDFS op {op}")
+
+    monkeypatch.setattr("requests.get", _get)
+    cfg = {"webhdfs_endpoint": "http://nn:9870", "webhdfs_user": "hive"}
+    assert object_store_content_length("hdfs", cfg, "nn:8020", "wh/data/f.parquet") == len(
+        content
+    )
+    assert seen[0]["url"] == "http://nn:9870/webhdfs/v1/wh/data/f.parquet"
+    assert seen[0]["params"]["op"] == "GETFILESTATUS"
+    assert seen[0]["params"]["user.name"] == "hive"
+    chunk = range_get_object_bytes("hdfs", cfg, "nn:8020", "wh/data/f.parquet", 0, 8)
+    assert chunk == content[:8]
+    assert seen[1]["params"]["op"] == "OPEN"
+    assert seen[1]["params"]["offset"] == 0
+    assert seen[1]["params"]["length"] == 8
+
+    opened = open_object_store_seekable("hdfs", cfg, "nn:8020", "wh/data/f.parquet")
+    assert opened not in (None, False)
+    stream, closer = opened
+    from services.dest_precount import _count_parquet_handle
+
+    assert _count_parquet_handle(stream) == 2
+    if closer is not None:
+        closer()
 
 
 def _fake_iceberg_inspect_catalog(file_paths: list[str], *, delete_rows: int = 0):
@@ -6189,7 +6291,8 @@ def test_iceberg_catalog_object_store_count_is_range_footer_not_scan(
 
     Spark COUNT(*) still uses manifest record-count. A snapshot file that
     404s is unmeasured — dest=0 would close overwrite on a truncated lake.
-    Relative manifest paths join the warehouse URI. hdfs stays unmeasured.
+    Relative manifest paths join the warehouse URI. ``hdfs://`` without
+    a WebHDFS HTTP endpoint stays unmeasured (RPC ``:8020`` is not HTTP).
     """
     pytest.importorskip("pyiceberg")
     pytest.importorskip("pyarrow.parquet")
@@ -6301,6 +6404,44 @@ def test_iceberg_catalog_object_store_count_is_range_footer_not_scan(
         destination_row_count("iceberg", cfg, schema="default", table_name="orders")
         is None
     )
+
+    hdfs_cfg = dict(cfg)
+    hdfs_cfg["warehouse"] = "hdfs://nn:8020/wh"
+    hdfs_cfg["extra"] = {
+        "webhdfs.endpoint": "http://nn:9870",
+        "hdfs.user": "hive",
+    }
+    seen.clear()
+
+    def _open_hdfs(kind: str, store_cfg: dict, bucket: str, key: str):
+        seen["kind"] = kind
+        seen["bucket"] = bucket
+        seen["key"] = key
+        seen["endpoint"] = store_cfg.get("webhdfs_endpoint")
+        seen["user"] = store_cfg.get("webhdfs_user")
+        src = RangeGetSource(len(content), lambda start, n: content[start : start + n])
+        return src, src.close
+
+    monkeypatch.setattr(
+        "connectors.iceberg_catalog.load_catalog",
+        lambda _ep: _fake_iceberg_inspect_catalog(
+            ["hdfs://nn:8020/wh/ns/orders/data/part-0.parquet"]
+        ),
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_seekable", _open_hdfs
+    )
+    assert (
+        destination_row_count(
+            "iceberg", hdfs_cfg, schema="default", table_name="orders"
+        )
+        == 2
+    )
+    assert seen["kind"] == "hdfs"
+    assert seen["bucket"] == "nn:8020"
+    assert seen["key"] == "wh/ns/orders/data/part-0.parquet"
+    assert seen["endpoint"] == "http://nn:9870"
+    assert seen["user"] == "hive"
 
     monkeypatch.setattr(
         "connectors.iceberg_catalog.load_catalog",

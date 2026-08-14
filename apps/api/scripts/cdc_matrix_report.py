@@ -28,6 +28,7 @@ CDC_TARGETS = [
     "tests/test_postgresql_cdc_transport_f4.py",
     "tests/test_iceberg_cdc_delete.py",
     "tests/test_iceberg_deletion_vector.py",
+    "tests/test_scn_mongo_iceberg_cow_wave81.py",
     "tests/test_cdc_lsn_stamp.py",
     "tests/test_cdc_schema_history.py",
     "tests/test_cdc_multistream_mappings.py",

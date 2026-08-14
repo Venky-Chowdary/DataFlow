@@ -803,17 +803,18 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
-        # Writes stay Copy-on-Write. Dest-engine COUNT/leftover listing
-        # apply v2 position/equality and v3 deletion-vector-v1 when the
-        # puffin blob is readable. Do not claim MoR writes.
-        "write_strategy": "copy-on-write",
-        "supports_merge_on_read": False,
+        # Upserts stay Copy-on-Write (and compact delete files). CDC /
+        # leftover-MERGE deletes write v2 equality-delete files. Dest
+        # COUNT applies v2 position/equality and v3 deletion-vector-v1.
+        # MoR upsert writes stay Planned.
+        "write_strategy": "copy-on-write-upserts, merge-on-read-deletes",
+        "supports_merge_on_read": True,
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
         "common_issues": [
             "Schema evolution is supported but should be declared explicitly.",
-            "Upserts/deletes rewrite data files (copy-on-write). Dest COUNT applies v2 MoR and v3 deletion vectors; MoR writes stay Planned.",
+            "CDC/leftover deletes write Iceberg v2 equality-delete files (merge-on-read). Upserts stay copy-on-write and compact delete files. MoR upsert writes stay Planned.",
         ],
         "recommended_batch_size": 10000,
     },

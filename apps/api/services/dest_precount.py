@@ -128,13 +128,14 @@ dest keys so a complete overwrite snapshot can MERGE-delete ``D \\ S``;
 it never deletes them itself. Iceberg dest COUNT is dest-engine
 population of current-snapshot data files (Parquet footer / JSONL
 stream), never metadata ``record-count`` / ``scan().count()`` /
-``len(to_pylist())``. Catalog ``s3://`` / ``gs://`` / ``abfss://``
-data files Range-GET the footer through the object-store kernel;
-a snapshot file that 404s is unmeasured, not dest=0. Key list and leftover
+``len(to_pylist())``. Catalog ``s3://`` / ``gs://`` / ``abfss://`` / ``hdfs://``
+data files Range-GET the footer through the object-store kernel
+(WebHDFS only when ``webhdfs.endpoint`` is set; RPC ``:8020`` is not
+HTTP). A snapshot file that 404s is unmeasured, not dest=0. Key list and leftover
 MERGE project PK columns from those same snapshot files — never
 ``scan().to_arrow()`` of the table. ``row_conservation.apply_inferred_leftover_deletes``
 applies the anti-join only when the source census is complete overwrite
-(SQL and Iceberg CoW). Incremental CDC must not call that apply. Mirror
+(SQL and Iceberg). Incremental CDC must not call that apply. Mirror
 already applies inferred soft-deletes on full re-sync. Iceberg v2 MoR
 (position/equality) and v3 deletion vectors (Puffin
 ``deletion-vector-v1``) are dest − applied deletes. Missing
@@ -1660,7 +1661,20 @@ def _iceberg_data_warehouse(endpoint: dict[str, Any], parsed: dict[str, Any]) ->
             continue
         lower = raw.lower()
         if lower.startswith(
-            ("s3://", "s3a://", "s3n://", "gs://", "gcs://", "abfs://", "abfss://", "wasb://", "wasbs://")
+            (
+                "s3://",
+                "s3a://",
+                "s3n://",
+                "gs://",
+                "gcs://",
+                "abfs://",
+                "abfss://",
+                "wasb://",
+                "wasbs://",
+                "hdfs://",
+                "webhdfs://",
+                "swebhdfs://",
+            )
         ):
             return raw.rstrip("/")
         if parse_object_store_uri(raw) is not None:
@@ -1782,6 +1796,28 @@ def _iceberg_object_store_cfg(
         elif not str(cfg.get("connection_string") or "").startswith(("http://", "https://")):
             if "AccountName" not in str(cfg.get("connection_string") or ""):
                 cfg["connection_string"] = ""
+        return cfg
+    if kind == "hdfs":
+        endpoint = str(
+            extra.get("webhdfs.endpoint")
+            or extra.get("hdfs.webhdfs")
+            or extra.get("hdfs.webhdfs.endpoint")
+            or extra.get("webhdfs_endpoint")
+            or cfg.get("webhdfs_endpoint")
+            or ""
+        ).strip()
+        if endpoint:
+            cfg["webhdfs_endpoint"] = endpoint.rstrip("/")
+        user = str(
+            extra.get("webhdfs.user")
+            or extra.get("hdfs.user")
+            or extra.get("webhdfs_user")
+            or cfg.get("username")
+            or ""
+        ).strip()
+        if user:
+            cfg["webhdfs_user"] = user
+        cfg["hdfs_scheme"] = str(getattr(location, "account", "") or "")
         return cfg
     return cfg
 
@@ -2433,7 +2469,9 @@ def _iceberg_catalog_file_count(endpoint: dict[str, Any]) -> int | None:
     """Sql/REST catalog COUNT via live data-file footers. Never ``scan().count()``.
 
     Local ``file:`` URIs footer from disk. ``s3://`` / ``gs://`` / ``abfss://``
-    use the object-store Range kernel. Missing remote files are unmeasured.
+    / ``hdfs://`` (WebHDFS when ``webhdfs.endpoint`` is set) use the
+    object-store Range kernel. Missing remote files are unmeasured.
+    ``hdfs://`` without a WebHDFS HTTP endpoint stays unmeasured.
     """
     from connectors.iceberg_catalog import parse_iceberg_catalog_config
 

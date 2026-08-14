@@ -6,9 +6,11 @@ Two paths:
    REST / Glue / SQL / Nessie): uses ``pyiceberg`` to read/write real Iceberg
    tables. Supports append, overwrite, and MERGE/upsert via ``Table.upsert``.
 
-2. Legacy filesystem CoW mode (bare local path, no catalog): keeps the original
-   V2 metadata-file writer for backwards compatibility and environments without
-   ``pyiceberg``.
+2. Filesystem mode (bare local path, no catalog): V2 metadata-file writer.
+   Upserts/overwrites stay copy-on-write and compact delete files. CDC and
+   leftover-MERGE deletes write Iceberg v2 equality-delete files (content=2)
+   so dest-engine COUNT / leftover listing apply MoR instead of rewriting
+   every data file. MoR upsert writes stay Planned.
 """
 
 from __future__ import annotations
@@ -475,6 +477,65 @@ def snapshot_has_delete_files(current_meta: dict[str, Any] | None) -> bool:
     return bool(deletes)
 
 
+def _snapshot_delete_files(current_meta: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not current_meta:
+        return []
+    refs = current_meta.get("delete-files") or current_meta.get("delete_files") or []
+    return [dict(ref) for ref in refs if isinstance(ref, dict)]
+
+
+def _optional_sequence(ref: dict[str, Any]) -> int | None:
+    raw = ref.get("sequence-number")
+    if raw is None or raw == "":
+        raw = ref.get("sequence_number")
+    if raw is None or raw == "":
+        return None
+    return int(raw)
+
+
+def _max_iceberg_sequence(
+    data_files: Sequence[dict[str, Any]],
+    delete_files: Sequence[dict[str, Any]] = (),
+) -> int:
+    max_seq = 0
+    for ref in list(data_files) + list(delete_files):
+        seq = _optional_sequence(ref)
+        if seq is not None:
+            max_seq = max(max_seq, seq)
+    return max_seq
+
+
+def _ensure_data_file_sequences(data_files: list[dict[str, Any]]) -> None:
+    """Stamp missing data-file sequence-number to 1 (equality deletes need it)."""
+    for ref in data_files:
+        if _optional_sequence(ref) is None:
+            ref["sequence-number"] = 1
+
+
+def _equality_ids_for_columns(
+    schema_json: dict[str, Any], pk_cols: Sequence[str]
+) -> list[int]:
+    by_name: dict[str, int] = {}
+    for field in schema_json.get("fields") or []:
+        name = str(field.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            by_name[name] = int(field.get("id"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Iceberg schema field {name!r} missing integer id"
+            ) from exc
+    ids: list[int] = []
+    for col in pk_cols:
+        if col not in by_name:
+            raise ValueError(
+                f"Iceberg equality-delete PK {col!r} is not in the snapshot schema"
+            )
+        ids.append(by_name[col])
+    return ids
+
+
 def _evolve_schema(
     existing: dict[str, Any] | None,
     columns: list[str],
@@ -540,46 +601,88 @@ def _evolve_schema(
     return {"type": "struct", "schema-id": schema_id, "fields": fields}, notes
 
 
+def _read_snapshot_data_file(
+    rel: str, path: Path, columns: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Fail-closed read of one snapshot data file (JSONL/Parquet)."""
+    cols = [str(c) for c in columns]
+    rows: list[dict[str, Any]] = []
+    if rel.endswith(".parquet") or str(path).endswith(".parquet"):
+        try:
+            import pyarrow.parquet as pq
+
+            table = pq.read_table(path)
+            for batch in table.to_pylist():
+                rows.append({c: batch.get(c) for c in cols})
+        except Exception as exc:
+            raise ValueError(
+                f"Iceberg Parquet data-file unreadable for upsert merge: {rel}: {exc}"
+            ) from exc
+        return rows
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception as exc:
+                    raise ValueError(
+                        f"Iceberg JSONL data-file corrupt at {rel}:{line_no}: {exc}"
+                    ) from exc
+                rows.append({c: obj.get(c) for c in cols})
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(
+            f"Iceberg JSONL data-file unreadable for upsert merge: {rel}: {exc}"
+        ) from exc
+    return rows
+
+
+def _project_snapshot_file(
+    rel: str, path: Path | None, cols: Sequence[str]
+) -> list[dict[str, Any]] | None:
+    """MoR project callback. Unreadable → None (unmeasured), never raw resurrect."""
+    if path is None:
+        return None
+    try:
+        return _read_snapshot_data_file(rel or str(path), path, cols)
+    except ValueError:
+        return None
+
+
 def _load_existing_rows(table_dir: Path, columns: list[str], current_meta: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Load all rows referenced by current metadata data-files (JSONL/Parquet).
+    """Load surviving snapshot rows (MoR when delete files exist).
 
     Fail-closed: missing or unreadable referenced files abort the upsert so we
     never silently drop existing rows (Airbyte/warehouse silent-loss class).
-    Dest COUNT does not use this materialization — it footers the same files.
+    Delete files must be applied here — a raw data-file scan would resurrect
+    CDC / leftover-MERGE keys that dest COUNT already treats as gone.
+    Dest COUNT does not use this materialization — it footers the same files
+    and applies the same MoR kernel.
     """
-    rows: list[dict[str, Any]] = []
-    for rel, path in snapshot_data_files(table_dir, current_meta):
-        if rel.endswith(".parquet"):
-            try:
-                import pyarrow.parquet as pq
+    files = snapshot_data_files(table_dir, current_meta)
+    if snapshot_has_delete_files(current_meta):
+        from connectors.iceberg_mor import filesystem_mor_snapshot_rows
 
-                table = pq.read_table(path)
-                for batch in table.to_pylist():
-                    rows.append({c: batch.get(c) for c in columns})
-            except Exception as exc:
-                raise ValueError(
-                    f"Iceberg Parquet data-file unreadable for upsert merge: {rel}: {exc}"
-                ) from exc
-        else:
-            try:
-                with path.open(encoding="utf-8") as fh:
-                    for line_no, line in enumerate(fh, start=1):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except Exception as exc:
-                            raise ValueError(
-                                f"Iceberg JSONL data-file corrupt at {rel}:{line_no}: {exc}"
-                            ) from exc
-                        rows.append({c: obj.get(c) for c in columns})
-            except ValueError:
-                raise
-            except Exception as exc:
-                raise ValueError(
-                    f"Iceberg JSONL data-file unreadable for upsert merge: {rel}: {exc}"
-                ) from exc
+        surviving = filesystem_mor_snapshot_rows(
+            table_dir,
+            current_meta or {},
+            files,
+            cols=columns,
+            project_file=_project_snapshot_file,
+        )
+        if surviving is None:
+            raise ValueError(
+                "Iceberg MoR snapshot unreadable for upsert/delete merge "
+                "(refuse silent resurrect of deleted keys)"
+            )
+        return surviving
+    rows: list[dict[str, Any]] = []
+    for rel, path in files:
+        rows.extend(_read_snapshot_data_file(rel, path, columns))
     return rows
 
 
@@ -934,6 +1037,44 @@ def _write_data_file(
             fh.write(line + "\n")
             digest.update(line.encode())
     return rel, len(dict_rows), digest.hexdigest()[:16], warnings
+
+
+def _write_equality_delete_file(
+    data_dir: Path,
+    columns: list[str],
+    rows: list[dict[str, Any]],
+    *,
+    column_types: dict[str, str] | None = None,
+) -> tuple[str, int, str]:
+    """Write Iceberg v2 equality-delete parquet (PK columns only).
+
+    Dest COUNT applies these via ``iceberg_mor`` (content=2). JSONL is not
+    a legal equality-delete carrier — refuse if pyarrow is missing.
+    """
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise ValueError(
+            "Iceberg equality-delete write requires pyarrow"
+        ) from exc
+    data_dir.mkdir(parents=True, exist_ok=True)
+    file_id = uuid.uuid4().hex
+    types = column_types or {}
+    dict_rows = [{c: row.get(c) for c in columns} for row in rows]
+    arrow_types = [_logical_to_arrow_type(types.get(c, "string"), pa) for c in columns]
+    schema = pa.schema([(c, t) for c, t in zip(columns, arrow_types)])
+    arrays = []
+    for col, at in zip(columns, arrow_types):
+        cells = [_coerce_arrow_cell(r.get(col), at, pa) for r in dict_rows]
+        arrays.append(pa.array(cells, type=at))
+    table = pa.Table.from_arrays(arrays, schema=schema)
+    rel = f"data/{file_id}-eq-deletes.parquet"
+    path = data_dir.parent / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, path)
+    digest = hashlib.sha256(path.read_bytes())
+    return rel, len(dict_rows), digest.hexdigest()[:16]
 
 
 def _checksum_arrow_table(pa_table: Any) -> str:
@@ -2304,6 +2445,23 @@ def _write_mapped_rows_filesystem(
         if mode in {"overwrite", "replace"}:
             data_files = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]
 
+    compact = mode in upsert_modes or mode in {"overwrite", "replace"}
+    prior_deletes = [] if compact else _snapshot_delete_files(current_meta)
+    prior_data = [dict(ref) for ref in data_files[:-1]] if data_files else []
+    _ensure_data_file_sequences(prior_data)
+    if compact:
+        delete_files: list[dict[str, Any]] = []
+        write_strategy = "copy-on-write"
+        new_seq = 1
+    else:
+        delete_files = prior_deletes
+        write_strategy = "merge-on-read" if delete_files else "copy-on-write"
+        new_seq = _max_iceberg_sequence(prior_data, delete_files) + 1
+    if data_files:
+        newest = dict(data_files[-1])
+        newest["sequence-number"] = new_seq
+        data_files = prior_data + [newest]
+
     snapshot_id = int(time.time() * 1000)
     now_ms = snapshot_id
 
@@ -2321,7 +2479,7 @@ def _write_mapped_rows_filesystem(
             "added-data-files": "1",
             "dataflow.checksum": checksum,
             "dataflow.write_mode": mode,
-            "dataflow.write_strategy": "copy-on-write",
+            "dataflow.write_strategy": write_strategy,
         },
         "manifest-list": rel_path,
         "schema-id": schema_json.get("schema-id", 0),
@@ -2346,9 +2504,10 @@ def _write_mapped_rows_filesystem(
             "dataflow.engine": "iceberg_writer",
             "dataflow.evolve": ",".join(evolve_notes) if evolve_notes else "",
             "dataflow.write_mode": mode,
-            "dataflow.write_strategy": "copy-on-write",
+            "dataflow.write_strategy": write_strategy,
         },
         "data-files": data_files,
+        "delete-files": delete_files,
     }
 
     # Atomic commit: write temp then rename; update version-hint
@@ -2635,13 +2794,15 @@ def delete_by_primary_keys(
     incoming_lsn: str | None = None,
     lsn_column: str = "_df_lsn",
 ) -> int:
-    """CDC / leftover-MERGE delete with LSN guard (filesystem CoW and catalogs).
+    """CDC / leftover-MERGE delete with LSN guard (filesystem MoR + catalogs).
 
     ``primary_key_column`` is one column or an ordered composite. Composite
     keys use the CDC unit separator (same as SQL leftover MERGE), never a
     literal ``order_id,line_id`` column. Stale deletes that would wipe a
-    newer ``_df_lsn`` row are skipped (at-least-once redelivery). Returns
-    the number of keys requested for delete after the LSN filter.
+    newer ``_df_lsn`` row are skipped (at-least-once redelivery). Filesystem
+    deletes write Iceberg v2 equality-delete files (content=2) and keep
+    existing data files. Returns the number of surviving keys deleted after
+    the LSN filter.
     """
     if not keys:
         return 0
@@ -2737,13 +2898,109 @@ def _delete_filesystem(
     width = len(pk_cols)
     for key in work_keys:
         _iceberg_split_key(key, width)
+    delete_rows = [
+        {c: row.get(c) for c in pk_cols}
+        for row in existing
+        if (_iceberg_row_pk(row, pk_cols) or "") in work_keys
+    ]
+    if not delete_rows:
+        return 0
+    write_types = _write_types_from_schema(schema_json, {})
+    try:
+        rel_path, n_written, checksum = _write_equality_delete_file(
+            table_dir / "data",
+            list(pk_cols),
+            delete_rows,
+            column_types=write_types,
+        )
+    except ValueError as exc:
+        if "requires pyarrow" not in str(exc):
+            raise
+        return _delete_filesystem_cow(
+            table_dir,
+            meta_dir,
+            versions,
+            current_meta,
+            schema_json,
+            columns,
+            existing,
+            work_keys,
+            pk_cols,
+            write_types,
+        )
+    data_files = [dict(ref) for ref in (current_meta.get("data-files") or []) if isinstance(ref, dict)]
+    _ensure_data_file_sequences(data_files)
+    delete_files = _snapshot_delete_files(current_meta)
+    delete_seq = _max_iceberg_sequence(data_files, delete_files) + 1
+    equality_ids = _equality_ids_for_columns(schema_json, pk_cols)
+    delete_files.append(
+        {
+            "path": rel_path,
+            "content": 2,
+            "equality-ids": equality_ids,
+            "sequence-number": delete_seq,
+            "record-count": n_written,
+            "checksum": checksum,
+        }
+    )
+    snapshot_id = int(time.time() * 1000)
+    snapshots = list(current_meta.get("snapshots") or [])
+    snapshots.append({
+        "snapshot-id": snapshot_id,
+        "timestamp-ms": snapshot_id,
+        "summary": {
+            "operation": "delete",
+            "added-delete-files": "1",
+            "deleted-records": str(len(delete_rows)),
+            "dataflow.checksum": checksum,
+            "dataflow.write_mode": "cdc_delete",
+            "dataflow.write_strategy": "merge-on-read",
+            "dataflow.deleted_keys": str(len(delete_rows)),
+        },
+        "manifest-list": rel_path,
+        "schema-id": schema_json.get("schema-id", 0),
+    })
+    new_version = int(versions[-1].stem[1:].split(".")[0]) + 1
+    metadata = {
+        **current_meta,
+        "last-updated-ms": snapshot_id,
+        "snapshots": snapshots,
+        "current-snapshot-id": snapshot_id,
+        "data-files": data_files,
+        "delete-files": delete_files,
+        "properties": {
+            **(current_meta.get("properties") or {}),
+            "dataflow.write_mode": "cdc_delete",
+            "dataflow.write_strategy": "merge-on-read",
+        },
+    }
+    meta_path = meta_dir / f"v{new_version}.metadata.json"
+    tmp = meta_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(metadata, indent=2, default=json_default), encoding="utf-8")
+    os.replace(tmp, meta_path)
+    (meta_dir / "version-hint.text").write_text(str(new_version), encoding="utf-8")
+    return len(delete_rows)
+
+
+def _delete_filesystem_cow(
+    table_dir: Path,
+    meta_dir: Path,
+    versions: list[Path],
+    current_meta: dict[str, Any],
+    schema_json: dict[str, Any],
+    columns: list[str],
+    existing: list[dict[str, Any]],
+    work_keys: set[str],
+    pk_cols: list[str],
+    write_types: dict[str, str],
+) -> int:
+    """CoW rewrite when equality-delete parquet cannot be written (no pyarrow)."""
     kept = [
         row
         for row in existing
         if (_iceberg_row_pk(row, pk_cols) or "") not in work_keys
     ]
     deleted = len(existing) - len(kept)
-    write_types = _write_types_from_schema(schema_json, {})
     rel_path, n_written, checksum, _warnings = _write_data_file(
         table_dir / "data",
         columns,
@@ -2773,7 +3030,15 @@ def _delete_filesystem(
         "last-updated-ms": snapshot_id,
         "snapshots": snapshots,
         "current-snapshot-id": snapshot_id,
-        "data-files": [{"path": rel_path, "record-count": n_written, "checksum": checksum}],
+        "data-files": [
+            {
+                "path": rel_path,
+                "record-count": n_written,
+                "checksum": checksum,
+                "sequence-number": 1,
+            }
+        ],
+        "delete-files": [],
         "properties": {
             **(current_meta.get("properties") or {}),
             "dataflow.write_mode": "cdc_delete",

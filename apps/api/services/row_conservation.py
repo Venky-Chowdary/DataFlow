@@ -490,9 +490,10 @@ def apply_inferred_leftover_deletes(
     census stay ``None`` (unapplied); Gate-8 still *measures* extra.
     Vector destinations own identity COUNT, not this PK anti-join.
     Iceberg applies the same anti-join through dest-engine snapshot
-    listing + CoW delete (existing ``delete_by_primary_keys``). Filesystem
-    and catalog MoR (v2 position/equality and v3 deletion-vector-v1) is
-    already applied in that listing (surviving rows).
+    listing + ``delete_by_primary_keys`` (filesystem v2 equality-delete
+    writes). Filesystem and catalog MoR (v2 position/equality and v3
+    deletion-vector-v1) is already applied in that listing (surviving
+    rows). Incremental leftover MERGE stays a hard no-op.
     """
     if not complete_snapshot:
         return None

@@ -1093,12 +1093,13 @@ rowcount is not that proof.
     * Catalog inspect with `content_offset` applies the same kernel.
       Remote `s3://` puffin Range-GETs `[offset, offset+size)` — never
       unsized GET of the puffin.
-    Writes stay copy-on-write (`supports_merge_on_read=False`).
+    Writes: upserts stay copy-on-write; CDC/leftover deletes write v2
+    equality-delete files (`supports_merge_on_read=True` for deletes).
     Incremental leftover MERGE stays a hard no-op. CDC delivery stays
     at-least-once (`EXACTLY_ONCE_CLAIMED=False`). F4 streaming transport
     unit tests now run (7 passed); capability remains
-    `cdc_streaming_status=planned_opt_in`. `hdfs://` COUNT, Delta/Hudi
-    writers, live snapshot→stream ITs, and Properties 10–12 stay
+    `cdc_streaming_status=planned_opt_in`. Delta/Hudi writers, live
+    snapshot→stream ITs, MoR upsert writes, and Properties 10–12 stay
     Planned / UNPROVEN.
 
   CDC DDD-3 gap recovery when dest is keyed (this host, after 2026-08-14
@@ -1117,7 +1118,25 @@ rowcount is not that proof.
     * Mocked Mongo CDC runner no longer false-skips (`fake_mongo`).
     * Delta/Hudi sidecar `transfer_ready` is False (no writer modules).
     Still Planned: F4 streaming as default, live snapshot→stream ITs,
-    Iceberg MoR writes, `hdfs://` COUNT, Delta/Hudi drivers.
+    Iceberg MoR upsert writes, Delta/Hudi drivers.
+
+  Iceberg MoR equality-delete writes + WebHDFS dest COUNT (this host,
+  after 2026-08-14 slice):
+    Filesystem CDC / leftover-MERGE deletes write Iceberg v2
+    equality-delete parquet (content=2, `equality-ids` from schema
+    field ids, `sequence-number` stamped on data + delete files).
+    Dest-engine COUNT / leftover listing apply the existing MoR kernel
+    (`data_seq < delete_seq`). Upsert CoW loads MoR survivors then
+    compact (drop delete files) so deleted keys do not resurrect.
+    A later insert of the same PK is a new row. Capability:
+    `write_strategy=copy-on-write-upserts, merge-on-read-deletes`.
+    `hdfs://` / `webhdfs://` parse for warehouse joins. Dest COUNT
+    Range-GETs WebHDFS `OPEN&offset&length` only when
+    `webhdfs.endpoint` / `hdfs.webhdfs` is set — RPC `:8020` stays
+    unmeasured. Incremental leftover MERGE stays a hard no-op.
+    MoR upsert writes, live namenode COUNT, Delta/Hudi drivers, F4
+    default streaming, live snapshot→stream ITs, and exactly-once
+    stay Planned / UNPROVEN.
 
   XML artifact dest COUNT (this host, after 2026-08-14 slice):
     221 passed, 8 skipped in 35.35s (Property 9 command).
@@ -1376,7 +1395,7 @@ TypeScript does not recompute dest.
   complete overwrite snapshot MERGE-deletes leftover dest keys (`D \ S`).
   Incremental remains a hard no-op (a batch is not `S`). Iceberg leftover
   MERGE is **PARTIAL** on filesystem CoW and pyiceberg SqlCatalog (same
-  identity as SQL: dest `{1,2,3,99}` vs S `{1,2,3}` CoW-deletes 99,
+  identity as SQL: dest `{1,2,3,99}` vs S `{1,2,3}` MoR-deletes 99,
   extra=0; composite dest `{(1,1),(1,2),(9,9)}` vs S `{(1,1),(1,2)}`
   deletes `(9,9)`; missing source keys stay missing). Overwrite sync on
   filesystem Iceberg replaces the first snapshot (`drop_table` unsupported).
@@ -1386,7 +1405,7 @@ TypeScript does not recompute dest.
   MoR (position/equality) and v3 `deletion-vector-v1` are dest − applied
   deletes; catalog inspect applies the same kernel when delete parquet /
   puffin is local, GET-spooled, or Range-GET of the DV blob from
-  `s3://` / `gs://` / `abfss://`. `hdfs://` COUNT stays Planned.
+  `s3://` / `gs://` / `abfss://` / `hdfs://` (WebHDFS endpoint required).
 * Stream-path this-run `soft_deleted` / `reactivated` census — dest-engine
   COUNT of transitions before the anti-join UPDATE (currently deleted ∩
   staging = reactivated; currently active \\ staging = inferred delete).
@@ -1498,11 +1517,12 @@ TypeScript does not recompute dest.
   host.
 * Iceberg dest-before — **PARTIAL** on filesystem CoW: missing=0, COUNT=2,
   key hits=1, DestBeforeCensus frozen. Leftover MERGE **PARTIAL** on
-  filesystem CoW and pyiceberg SqlCatalog (`D \ S` then existing delete;
-  dest COUNT = dest-engine file footers, never `scan().count()` /
-  manifest `record-count`). Missing
-  catalog table = 0. Dest-engine v2/v3 MoR COUNT measured; MoR writes
-  Planned.
+  filesystem MoR equality deletes and pyiceberg SqlCatalog (`D \ S`
+  then existing delete; dest COUNT = dest-engine file footers, never
+  `scan().count()` / manifest `record-count`). Missing
+  catalog table = 0. Dest-engine v2/v3 MoR COUNT measured; filesystem
+  equality-delete writes measured; MoR upsert writes Planned.
+  `hdfs://` COUNT measured only with WebHDFS endpoint (mocked).
 * Multi-table job rollup — **PARTIAL** on named SQLite fixture: two overwrite
   tables (2+3) close as job dest 5, not last-table 3. Mixed/keyed kinds are not
   summed.

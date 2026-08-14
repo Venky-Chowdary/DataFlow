@@ -1,4 +1,4 @@
-"""Iceberg CDC deletes: CoW exclude + LSN guard (at-least-once safe)."""
+"""Iceberg CDC deletes: v2 equality-delete MoR + LSN guard (at-least-once)."""
 
 from __future__ import annotations
 
@@ -84,6 +84,21 @@ def test_iceberg_delete_removes_row_and_honors_newer_lsn(tmp_path: Path) -> None
     keep = next(r for r in rows if str(r.get("id")) == "1")
     assert keep.get("note") == "keep"
     assert str(keep.get(DF_LSN_COL)) == "0/200"
+
+    deletes = list(meta.get("delete-files") or [])
+    assert deletes, "CDC delete must write an equality-delete file, not CoW-rewrite"
+    assert deletes[-1].get("content") == 2
+    assert deletes[-1].get("equality-ids") == [1]
+    assert deletes[-1].get("sequence-number") is not None
+    data_refs = list(meta.get("data-files") or [])
+    assert data_refs
+    assert all(ref.get("sequence-number") is not None for ref in data_refs)
+    assert (meta.get("properties") or {}).get("dataflow.write_strategy") == (
+        "merge-on-read"
+    )
+    from services.dest_precount import destination_row_count
+
+    assert destination_row_count("iceberg", _cfg(tmp_path), schema="", table_name=table) == 1
 
 
 def test_table_manager_routes_iceberg_deletes(tmp_path: Path) -> None:
@@ -247,3 +262,102 @@ def test_resolve_projected_names_requires_every_pk_part() -> None:
     ]
     assert _resolve_projected_names({"order_id", "qty"}, ["order_id", "line_id"]) is None
     assert _resolve_projected_names({"id"}, ["id", "id"]) is None
+
+
+def test_iceberg_upsert_after_mor_delete_does_not_resurrect(tmp_path: Path) -> None:
+    """CoW upsert must MoR-load first, then compact. Deleted keys stay gone."""
+    from services.dest_precount import destination_row_count
+
+    table = "orders"
+    common = {
+        **_cfg(tmp_path),
+        "table_name": table,
+        "headers": ["id", "note", DF_LSN_COL],
+        "mappings": [
+            {"source": "id", "target": "id", "confidence": 1},
+            {"source": "note", "target": "note", "confidence": 1},
+            {"source": DF_LSN_COL, "target": DF_LSN_COL, "confidence": 1},
+        ],
+        "column_types": {
+            "id": "string",
+            "note": "string",
+            DF_LSN_COL: "string",
+        },
+        "create_table": True,
+        "write_mode": "upsert",
+        "conflict_columns": ["id"],
+    }
+    assert write_mapped_rows(
+        **common, data_rows=[["1", "keep", "0/200"], ["2", "gone", "0/100"]]
+    ).ok
+    assert delete_by_primary_keys(_cfg(tmp_path), table, "id", ["2"]) == 1
+    assert destination_row_count("iceberg", _cfg(tmp_path), schema="", table_name=table) == 1
+
+    r2 = write_mapped_rows(**common, data_rows=[["1", "keep2", "0/300"]])
+    assert r2.ok, r2.error
+
+    from connectors.iceberg_writer import (
+        _load_existing_rows,
+        _load_metadata,
+        _resolve_iceberg_table_dir,
+    )
+
+    table_dir = _resolve_iceberg_table_dir(_cfg(tmp_path), table, None)
+    versions = sorted((table_dir / "metadata").glob("v*.metadata.json"))
+    meta = _load_metadata(versions[-1])
+    assert not (meta.get("delete-files") or []), "upsert CoW must compact delete files"
+    assert (meta.get("properties") or {}).get("dataflow.write_strategy") == (
+        "copy-on-write"
+    )
+    rows = _load_existing_rows(table_dir, ["id", "note", DF_LSN_COL], meta)
+    ids = {str(r.get("id")) for r in rows}
+    assert ids == {"1"}
+    keep = next(r for r in rows if str(r.get("id")) == "1")
+    assert keep.get("note") == "keep2"
+    assert destination_row_count("iceberg", _cfg(tmp_path), schema="", table_name=table) == 1
+
+
+def test_iceberg_upsert_reinserts_deleted_key_after_mor_compact(tmp_path: Path) -> None:
+    """A later CDC insert of a deleted PK is a new row, not a phantom undelete."""
+    from services.dest_precount import destination_row_count
+
+    table = "orders"
+    common = {
+        **_cfg(tmp_path),
+        "table_name": table,
+        "headers": ["id", "note", DF_LSN_COL],
+        "mappings": [
+            {"source": "id", "target": "id", "confidence": 1},
+            {"source": "note", "target": "note", "confidence": 1},
+            {"source": DF_LSN_COL, "target": DF_LSN_COL, "confidence": 1},
+        ],
+        "column_types": {
+            "id": "string",
+            "note": "string",
+            DF_LSN_COL: "string",
+        },
+        "create_table": True,
+        "write_mode": "upsert",
+        "conflict_columns": ["id"],
+    }
+    assert write_mapped_rows(
+        **common, data_rows=[["1", "keep", "0/200"], ["2", "gone", "0/100"]]
+    ).ok
+    assert delete_by_primary_keys(_cfg(tmp_path), table, "id", ["2"]) == 1
+    r2 = write_mapped_rows(**common, data_rows=[["2", "reborn", "0/400"]])
+    assert r2.ok, r2.error
+    from connectors.iceberg_writer import (
+        _load_existing_rows,
+        _load_metadata,
+        _resolve_iceberg_table_dir,
+    )
+
+    table_dir = _resolve_iceberg_table_dir(_cfg(tmp_path), table, None)
+    versions = sorted((table_dir / "metadata").glob("v*.metadata.json"))
+    meta = _load_metadata(versions[-1])
+    rows = _load_existing_rows(table_dir, ["id", "note"], meta)
+    ids = {str(r.get("id")) for r in rows}
+    assert ids == {"1", "2"}
+    reborn = next(r for r in rows if str(r.get("id")) == "2")
+    assert reborn.get("note") == "reborn"
+    assert destination_row_count("iceberg", _cfg(tmp_path), schema="", table_name=table) == 2

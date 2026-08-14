@@ -48,6 +48,7 @@ _STREAMABLE = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avr
 _S3_URI_SCHEMES = frozenset({"s3", "s3a", "s3n"})
 _GCS_URI_SCHEMES = frozenset({"gs", "gcs"})
 _ADLS_URI_SCHEMES = frozenset({"abfs", "abfss", "wasb", "wasbs"})
+_HDFS_URI_SCHEMES = frozenset({"hdfs", "webhdfs", "swebhdfs"})
 
 
 class ObjectStoreLocation(NamedTuple):
@@ -60,11 +61,13 @@ class ObjectStoreLocation(NamedTuple):
 
 
 def parse_object_store_uri(uri: str) -> ObjectStoreLocation | None:
-    """``s3://`` / ``gs://`` / ``abfss://`` → (kind, bucket, key). Else None.
+    """``s3://`` / ``gs://`` / ``abfss://`` / ``hdfs://`` → (kind, bucket, key).
 
     Iceberg catalog ``file_path`` is typically an object URI. Dest COUNT
     Range-GETs that blob through the same opener as S3/GCS/ADLS dest.
-    ``file:`` / ``hdfs:`` / relative paths are not this helper.
+    ``hdfs://`` / ``webhdfs://`` parse so warehouse joins work; Range-GET
+    still requires a configured WebHDFS HTTP endpoint (RPC ``:8020`` is
+    not HTTP). ``file:`` / relative paths are not this helper.
     """
     raw = str(uri or "").strip()
     if not raw:
@@ -101,6 +104,12 @@ def parse_object_store_uri(uri: str) -> ObjectStoreLocation | None:
             if len(parts) < 2:
                 return None
             return ObjectStoreLocation("adls", parts[0], "/".join(parts[1:]), account)
+    if scheme in _HDFS_URI_SCHEMES:
+        authority = unquote(parsed.netloc or "")
+        key = unquote((parsed.path or "").lstrip("/"))
+        if not authority or not key:
+            return None
+        return ObjectStoreLocation("hdfs", authority, key, scheme)
     return None
 
 
@@ -391,6 +400,85 @@ def _object_missing_from_client_error(exc: BaseException) -> bool:
     )
 
 
+def _webhdfs_endpoint(cfg: dict[str, Any], bucket: str) -> str | None:
+    """HTTP namenode for WebHDFS. ``hdfs://nn:8020`` RPC is not this URL.
+
+    ``webhdfs://`` / ``swebhdfs://`` authorities are HTTP(S). Bare
+    ``hdfs://`` requires ``webhdfs.endpoint`` / ``hdfs.webhdfs``.
+    """
+    for key in (
+        "webhdfs_endpoint",
+        "webhdfs.endpoint",
+        "hdfs.webhdfs",
+        "hdfs.webhdfs.endpoint",
+        "hdfs_webhdfs",
+    ):
+        raw = str(cfg.get(key) or "").strip()
+        if raw:
+            return raw.rstrip("/")
+    scheme = str(cfg.get("hdfs_scheme") or "").strip().lower()
+    authority = str(bucket or "").strip()
+    if scheme in {"webhdfs", "swebhdfs"} and authority:
+        proto = "https" if scheme == "swebhdfs" else "http"
+        return f"{proto}://{authority}"
+    return None
+
+
+def _webhdfs_path(key: str) -> str:
+    return "/" + str(key or "").lstrip("/")
+
+
+def _webhdfs_params(cfg: dict[str, Any], extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    params = dict(extra or {})
+    user = str(
+        cfg.get("webhdfs_user")
+        or cfg.get("hdfs.user")
+        or cfg.get("username")
+        or ""
+    ).strip()
+    if user:
+        params["user.name"] = user
+    return params
+
+
+def _webhdfs_missing(status_code: int, payload: Any) -> bool:
+    if int(status_code) == 404:
+        return True
+    if not isinstance(payload, dict):
+        return False
+    remote = payload.get("RemoteException") or payload.get("remoteException") or {}
+    if not isinstance(remote, dict):
+        return False
+    name = str(remote.get("exception") or remote.get("Exception") or "")
+    return "FileNotFound" in name
+
+
+def _webhdfs_request(
+    cfg: dict[str, Any],
+    bucket: str,
+    key: str,
+    params: dict[str, Any],
+    *,
+    stream: bool = False,
+) -> Any:
+    import requests
+
+    endpoint = _webhdfs_endpoint(cfg, bucket)
+    if not endpoint:
+        raise OSError(
+            "WebHDFS endpoint unset — hdfs:// RPC authority is not HTTP; "
+            "set webhdfs.endpoint / hdfs.webhdfs"
+        )
+    url = f"{endpoint}/webhdfs/v1{_webhdfs_path(key)}"
+    return requests.get(
+        url,
+        params=_webhdfs_params(cfg, params),
+        timeout=30,
+        allow_redirects=True,
+        stream=stream,
+    )
+
+
 def object_store_content_length(
     kind: str, cfg: dict[str, Any], bucket: str, key: str
 ) -> int | bool | None:
@@ -441,6 +529,26 @@ def object_store_content_length(
                     return False
                 raise
             size = getattr(props, "size", None)
+            if size is None:
+                return None
+            return int(size)
+        if kind == "hdfs":
+            if _webhdfs_endpoint(cfg, bucket) is None:
+                return None
+            response = _webhdfs_request(
+                cfg, bucket, key, {"op": "GETFILESTATUS"}
+            )
+            payload: Any = None
+            try:
+                payload = response.json()
+            except Exception:
+                payload = None
+            if _webhdfs_missing(response.status_code, payload):
+                return False
+            if response.status_code >= 400:
+                return None
+            status = (payload or {}).get("FileStatus") or (payload or {}).get("fileStatus") or {}
+            size = status.get("length") if isinstance(status, dict) else None
             if size is None:
                 return None
             return int(size)
@@ -499,6 +607,25 @@ def range_get_object_bytes(
         if callable(reader):
             return bytes(reader())
         return bytes(downloader.read())
+    if kind == "hdfs":
+        response = _webhdfs_request(
+            cfg,
+            bucket,
+            key,
+            {"op": "OPEN", "offset": start, "length": length},
+        )
+        payload: Any = None
+        try:
+            payload = response.json()
+        except Exception:
+            payload = None
+        if _webhdfs_missing(response.status_code, payload):
+            raise FileNotFoundError(f"WebHDFS object missing: {key}")
+        if response.status_code >= 400:
+            raise OSError(
+                f"WebHDFS OPEN failed for {key}: HTTP {response.status_code}"
+            )
+        return bytes(response.content)
     raise OSError(f"Range GET is not implemented for store {kind!r}")
 
 
@@ -587,6 +714,30 @@ def open_object_store_binary(
                 raise
             stream = _ChunkReader(downloader.chunks())
             return stream, stream.close
+        if kind == "hdfs":
+            if _webhdfs_endpoint(cfg, bucket) is None:
+                return None
+            response = _webhdfs_request(
+                cfg, bucket, key, {"op": "OPEN"}, stream=True
+            )
+            payload: Any = None
+            if response.status_code >= 400:
+                try:
+                    payload = response.json()
+                except Exception:
+                    payload = None
+                if _webhdfs_missing(response.status_code, payload):
+                    return False
+                raise OSError(
+                    f"WebHDFS OPEN failed for {key}: HTTP {response.status_code}"
+                )
+            def _close() -> None:
+                try:
+                    response.close()
+                except Exception:
+                    pass
+
+            return response.raw, _close
     except Exception as exc:
         _logger.info(
             "object-store GET stream failed for dest COUNT (%s/%s): %s",
