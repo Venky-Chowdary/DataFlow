@@ -34,6 +34,18 @@ def test_normalize_schema_sqlserver_and_mysql():
     assert normalize_schema("mysql", None) is None
 
 
+def test_catalog_namespace_does_not_look_up_mysql_under_public():
+    """information_schema on MySQL is keyed by database, never Postgres public."""
+    from services.dialect_profiles import catalog_namespace
+
+    cfg = {"database": "appdb", "schema": "public"}
+    assert catalog_namespace("mysql", cfg) == "appdb"
+    assert catalog_namespace("mariadb", cfg, schema="public") == "appdb"
+    assert catalog_namespace("mysql", {"database": "appdb"}, schema="") == "appdb"
+    assert catalog_namespace("postgresql", {"schema": "sales"}) == "sales"
+    assert catalog_namespace("postgresql", {}) == "public"
+
+
 def test_oracle_falls_back_to_username():
     assert normalize_schema("oracle", None, username="APP_USER") == "APP_USER"
     assert normalize_schema("oracle", "hr") == "HR"

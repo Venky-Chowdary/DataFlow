@@ -189,6 +189,11 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         return out
 
     if independent_match and not writer_only:
+        from services.signed_proof_pack import apply_fidelity_veto
+
+        vetoed = apply_fidelity_veto(out)
+        if vetoed.get("coverage") == "coerced" or vetoed.get("phase") == "post_write_failed":
+            return vetoed
         out["phase"] = "post_write_verified"
         out["post_write_pending"] = False
         out["preview"] = False
@@ -676,7 +681,7 @@ def reconcile(
         sample_compare=sample_compare,
         checksum_match=True,
         population_proof=False,
-        assurance_level="full_checksum",
+        assurance_level="coerced" if coerced_null_rows else "full_checksum",
         checksum_scope=checksum_scope,
     )
 

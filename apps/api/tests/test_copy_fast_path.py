@@ -544,3 +544,128 @@ def test_repeated_runs_replace_rather_than_accumulate(pg):
         assert tables.count(tables.dst) == 2
     finally:
         tables.drop()
+
+
+def test_a_gin_index_is_reproduced_not_silently_turned_into_btree(pg):
+    tables = _Tables(pg, "id bigint, payload jsonb")
+    try:
+        tables.insert("INSERT INTO {src} SELECT 1, jsonb_build_object('a', 1)")
+        with pg.cursor() as cur:
+            cur.execute(f'CREATE INDEX ix_gin ON "{tables.src}" USING gin (payload)')
+        result = _copy(tables, [("id", "id"), ("payload", "payload")])
+        assert result.verified
+        assert result.indexes_carried
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT am.amname
+                FROM pg_index ix
+                JOIN pg_class c ON c.oid = ix.indrelid
+                JOIN pg_class i ON i.oid = ix.indexrelid
+                JOIN pg_am am ON am.oid = i.relam
+                WHERE c.relname = %s AND NOT ix.indisprimary
+                """,
+                (tables.dst,),
+            )
+            methods = [r[0] for r in cur.fetchall()]
+        assert methods == ["gin"]
+    finally:
+        tables.drop()
+
+
+def test_an_operator_class_travels_with_the_index(pg):
+    tables = _Tables(pg, "id bigint, code text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'aa'), (2, 'ab')")
+        with pg.cursor() as cur:
+            cur.execute(
+                f'CREATE INDEX ix_ops ON "{tables.src}" (code varchar_pattern_ops)'
+            )
+        result = _copy(tables, [("id", "id"), ("code", "code")])
+        assert result.verified
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT pg_get_indexdef(ix.indexrelid)
+                FROM pg_index ix
+                JOIN pg_class c ON c.oid = ix.indrelid
+                WHERE c.relname = %s AND NOT ix.indisprimary
+                """,
+                (tables.dst,),
+            )
+            defs = [r[0] for r in cur.fetchall()]
+        assert any("varchar_pattern_ops" in d for d in defs)
+    finally:
+        tables.drop()
+
+
+def test_a_non_default_collation_is_carried(pg):
+    tables = _Tables(pg, 'id bigint, code text COLLATE "C"')
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'A'), (2, 'b')")
+        result = _copy(tables, [("id", "id"), ("code", "code")])
+        assert result.verified
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT col.collname
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                JOIN pg_collation col ON col.oid = a.attcollation
+                WHERE c.relname = %s AND a.attname = 'code' AND a.attnum > 0
+                """,
+                (tables.dst,),
+            )
+            assert cur.fetchone()[0] == "C"
+    finally:
+        tables.drop()
+
+
+def test_a_stale_destination_shell_is_replaced_not_truncated(pg):
+    """CREATE IF NOT EXISTS + TRUNCATE would keep the wrong types."""
+    tables = _Tables(pg, "id bigint, amount numeric(12,2)")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 10.50)")
+        with pg.cursor() as cur:
+            cur.execute(
+                f'CREATE TABLE "{tables.dst}" (id text, amount integer)'
+            )
+        result = _copy(tables, [("id", "id"), ("amount", "amount")])
+        assert result.verified
+        with pg.cursor() as cur:
+            cur.execute(
+                """
+                SELECT format_type(a.atttypid, a.atttypmod)
+                FROM pg_attribute a
+                JOIN pg_class c ON c.oid = a.attrelid
+                WHERE c.relname = %s AND a.attname = 'amount' AND a.attnum > 0
+                """,
+                (tables.dst,),
+            )
+            assert "numeric" in cur.fetchone()[0]
+    finally:
+        tables.drop()
+
+
+def test_a_trigger_makes_the_path_decline(pg):
+    tables = _Tables(pg, "id bigint, note text")
+    try:
+        tables.insert("INSERT INTO {src} VALUES (1, 'a')")
+        with pg.cursor() as cur:
+            cur.execute(
+                f"""
+                CREATE FUNCTION {tables.src}_fn() RETURNS trigger AS $$
+                BEGIN RETURN NEW; END;
+                $$ LANGUAGE plpgsql
+                """
+            )
+            cur.execute(
+                f'CREATE TRIGGER {tables.src}_tg BEFORE INSERT ON "{tables.src}" '
+                f"FOR EACH ROW EXECUTE PROCEDURE {tables.src}_fn()"
+            )
+        with pytest.raises(FastPathUnavailable, match="trigger"):
+            _copy(tables, [("id", "id"), ("note", "note")])
+    finally:
+        with pg.cursor() as cur:
+            cur.execute(f"DROP FUNCTION IF EXISTS {tables.src}_fn() CASCADE")
+        tables.drop()

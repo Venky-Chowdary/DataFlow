@@ -718,6 +718,12 @@ def attach_ladder_to_reconcile_report(
     if not ladder:
         return out
     out["verification_ladder"] = ladder
+    # Evidence changed — recompute the fidelity claim from the single procedure.
+    from services.signed_proof_pack import apply_fidelity_veto
+
+    out = apply_fidelity_veto(out)
+    if out.get("phase") == "post_write_failed":
+        return out
     if ladder.get("localization_summary") and not out.get("passed"):
         base = str(out.get("message") or "").rstrip()
         loc = str(ladder["localization_summary"])

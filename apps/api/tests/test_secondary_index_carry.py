@@ -19,6 +19,7 @@ from services.secondary_indexes import (  # noqa: E402
     IndexColumn,
     SourceIndex,
     SourceIndexes,
+    _split_index_key,
     plan_index_carry,
     probe_secondary_indexes,
 )
@@ -41,6 +42,14 @@ def _plan(indexes: SourceIndexes, dest: str = "postgresql", **kw):
     }
     params.update(kw)
     return plan_index_carry(indexes, **params)
+
+
+def test_index_key_parse_keeps_operator_class_and_rejects_expressions():
+    assert _split_index_key("status") == ("status", "")
+    assert _split_index_key("status DESC") == ("status", "")
+    assert _split_index_key("status varchar_pattern_ops") == ("status", "varchar_pattern_ops")
+    assert _split_index_key('"Code" text_pattern_ops') == ("Code", "text_pattern_ops")
+    assert _split_index_key("lower(status)") is None
 
 
 def test_plain_composite_index_is_carried_with_column_order():
@@ -68,6 +77,44 @@ def test_expression_index_is_refused_not_approximated():
     assert not d.carried and not d.skipped
     assert "expression" in d.reason
 
+
+def test_gin_index_is_reproduced_with_its_access_method():
+    """A gin index recreated as btree is a different index — USING must travel."""
+    idx = SourceIndex(
+        "idx_payload",
+        (IndexColumn("status"),),
+        method="gin",
+    )
+    [d] = _plan(_measured(idx))
+    assert d.carried
+    assert " USING gin " in d.dest_sql
+
+
+def test_operator_class_travels_with_the_key():
+    idx = SourceIndex(
+        "idx_code",
+        (IndexColumn("status", opclass="varchar_pattern_ops"),),
+    )
+    [d] = _plan(_measured(idx))
+    assert d.carried
+    assert "varchar_pattern_ops" in d.dest_sql
+
+
+def test_operator_class_is_refused_on_a_dialect_that_has_none():
+    idx = SourceIndex(
+        "idx_code",
+        (IndexColumn("status", opclass="varchar_pattern_ops"),),
+    )
+    [d] = _plan(_measured(idx), dest="mysql")
+    assert not d.carried
+    assert "operator class" in d.reason
+
+
+def test_sqlite_cannot_hold_a_gin_index():
+    idx = SourceIndex("idx_payload", (IndexColumn("status"),), method="gin")
+    [d] = _plan(_measured(idx), dest="sqlite")
+    assert not d.carried
+    assert "access method" in d.reason or "cannot reproduce" in d.reason
 
 def test_index_over_an_unmapped_column_is_refused():
     idx = SourceIndex("idx_secret", (IndexColumn("ssn"),))

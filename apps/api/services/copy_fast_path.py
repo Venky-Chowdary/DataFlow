@@ -73,6 +73,9 @@ class FastPathResult(NamedTuple):
     #: fewer rules and reads more slowly than its source, so they travel with the
     #: result the same way the primary key and defaults do.
     indexes_carried: tuple[str, ...] = ()
+    #: What the checksum proves. Mapped column values, not triggers, RLS,
+    #: unmapped columns, or destination objects this path declined.
+    proof_scope: str = "mapped_columns"
 
     @property
     def verified(self) -> bool:
@@ -131,6 +134,10 @@ class SourceShape(NamedTuple):
     not_null: set[str]
     defaults: dict[str, str]
     primary_key: list[str]
+    #: Non-default collations, keyed by column, already quoted for ``COLLATE``.
+    #: A column whose collation is the type default is absent — carrying the
+    #: default would pin dest to a collation the source did not declare.
+    collations: dict[str, str]
 
 
 def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) -> SourceShape:
@@ -146,10 +153,19 @@ def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) ->
         SELECT a.attname,
                format_type(a.atttypid, a.atttypmod),
                a.attnotnull,
-               pg_get_expr(ad.adbin, ad.adrelid)
+               pg_get_expr(ad.adbin, ad.adrelid),
+               CASE
+                 WHEN a.attcollation <> 0
+                  AND a.attcollation <> t.typcollation
+                 THEN quote_ident(nc.nspname) || '.' || quote_ident(col.collname)
+                 ELSE NULL
+               END
         FROM pg_catalog.pg_attribute a
         JOIN pg_catalog.pg_class c ON a.attrelid = c.oid
         JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid
+        JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+        LEFT JOIN pg_catalog.pg_collation col ON col.oid = a.attcollation
+        LEFT JOIN pg_catalog.pg_namespace nc ON nc.oid = col.collnamespace
         LEFT JOIN pg_catalog.pg_attrdef ad
           ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
         WHERE n.nspname = %s AND c.relname = %s
@@ -162,7 +178,8 @@ def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) ->
     types: dict[str, str] = {}
     not_null: set[str] = set()
     defaults: dict[str, str] = {}
-    for name, declared, notnull, default in cur.fetchall():
+    collations: dict[str, str] = {}
+    for name, declared, notnull, default, collation in cur.fetchall():
         if str(name).lower() not in wanted:
             continue
         types[str(name)] = str(declared)
@@ -170,6 +187,8 @@ def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) ->
             not_null.add(str(name))
         if default:
             defaults[str(name)] = str(default)
+        if collation:
+            collations[str(name)] = str(collation)
 
     cur.execute(
         """
@@ -185,7 +204,7 @@ def source_table_shape(cur: Any, schema: str, table: str, columns: list[str]) ->
         (schema or "public", table),
     )
     primary_key = [str(r[0]) for r in cur.fetchall()]
-    return SourceShape(types, not_null, defaults, primary_key)
+    return SourceShape(types, not_null, defaults, primary_key, collations)
 
 
 def unsupported_structure(cur: Any, schema: str, table: str) -> str:
@@ -228,6 +247,30 @@ def unsupported_structure(cur: Any, schema: str, table: str) -> str:
     )
     if int(cur.fetchone()[0] or 0):
         found.append("identity or generated column")
+    cur.execute(
+        """
+        SELECT count(*)
+        FROM pg_catalog.pg_trigger t
+        JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s AND c.relname = %s AND NOT t.tgisinternal
+        """,
+        (schema or "public", table),
+    )
+    if int(cur.fetchone()[0] or 0):
+        found.append("trigger")
+    cur.execute(
+        """
+        SELECT c.relrowsecurity
+        FROM pg_catalog.pg_class c
+        JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = %s AND c.relname = %s
+        """,
+        (schema or "public", table),
+    )
+    row = cur.fetchone()
+    if row and bool(row[0]):
+        found.append("row level security")
     return ", ".join(sorted(set(found)))
 
 
@@ -247,6 +290,7 @@ def create_destination_like_source(
     lowered = {k.lower(): v for k, v in shape.types.items()}
     not_null = {c.lower() for c in shape.not_null}
     defaults = {k.lower(): v for k, v in shape.defaults.items()}
+    collations = {k.lower(): v for k, v in shape.collations.items()}
     rename = {s.lower(): t for s, t in pairs}
 
     cols: list[str] = []
@@ -257,8 +301,16 @@ def create_destination_like_source(
                 f"source column {source_col!r} has no declared type"
             )
         piece = f"{_quote(target_col)} {declared}"
+        collation = collations.get(source_col.lower())
+        if collation:
+            piece += f" COLLATE {collation}"
         default = defaults.get(source_col.lower())
         if default:
+            if "nextval(" in default.lower():
+                raise FastPathUnavailable(
+                    f"source column {source_col!r} DEFAULT references a sequence "
+                    "that cannot be proven present on the destination"
+                )
             piece += f" DEFAULT {default}"
         if source_col.lower() in not_null:
             piece += " NOT NULL"
@@ -272,7 +324,7 @@ def create_destination_like_source(
             "PRIMARY KEY (" + ", ".join(_quote(c) for c in pk_targets if c) + ")"
         )
     cur.execute(
-        f"CREATE TABLE IF NOT EXISTS {_table_ref(schema, table)} ({', '.join(cols)})"  # nosec B608
+        f"CREATE TABLE {_table_ref(schema, table)} ({', '.join(cols)})"  # nosec B608
     )
 
 
@@ -519,9 +571,6 @@ def copy_between_postgres(
                 raise FastPathUnavailable(
                     f"source columns absent from catalog: {', '.join(missing)}"
                 )
-            create_destination_like_source(
-                dst_cur, dest_schema, dest_table, pairs, shape
-            )
             # Decide index carry before the load so an index this path cannot
             # reproduce declines the whole route while the destination is still
             # empty, rather than after a full table has been copied.
@@ -534,10 +583,34 @@ def copy_between_postgres(
                 pairs=pairs,
             )
             if replace_destination:
-                # A full refresh replaces rather than adds. TRUNCATE rather than
-                # DELETE: this runs in the same transaction as the load, so a
-                # failure rolls back to the previous contents.
-                dst_cur.execute(f"TRUNCATE TABLE {dest_ref}")  # nosec B608
+                # DROP + CREATE, not CREATE IF NOT EXISTS + TRUNCATE: a stale
+                # dest shell (wrong types, missing collation, leftover indexes)
+                # would otherwise survive the load and still checksum-verify
+                # over the mapped columns.
+                try:
+                    dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
+                except Exception as exc:  # noqa: BLE001 — DROP failure is a catalog/lock condition
+                    raise FastPathUnavailable(
+                        f"cannot drop destination {dest_ref} to replace it: {exc}"
+                    ) from exc
+                create = True
+            else:
+                dst_cur.execute(
+                    "SELECT to_regclass(%s)",
+                    (f"{dest_schema or 'public'}.{dest_table}",),
+                )
+                create = dst_cur.fetchone()[0] is None
+            if create:
+                try:
+                    create_destination_like_source(
+                        dst_cur, dest_schema, dest_table, pairs, shape
+                    )
+                except FastPathUnavailable:
+                    raise
+                except Exception as exc:  # noqa: BLE001 — CREATE failure is a catalog/lock condition
+                    raise FastPathUnavailable(
+                        f"cannot create destination like source: {exc}"
+                    ) from exc
 
             source_digest = postgresql_engine_checksum(
                 src_cur, source_ref, source_cols
@@ -552,7 +625,16 @@ def copy_between_postgres(
                 "TO STDOUT (FORMAT binary)",
                 f"COPY {dest_ref} ({target_list}) FROM STDIN (FORMAT binary)",  # nosec B608
             )
-            rows_copied = int(dst_cur.rowcount or 0)
+            # Driver rowcount is operational; the digest count is the proof.
+            # A positive disagreement means we cannot say what landed.
+            driver_rows = int(dst_cur.rowcount or 0)
+            if driver_rows > 0 and driver_rows != source_digest.row_count:
+                raise ValueError(
+                    "COPY fast path refused: driver rowcount "
+                    f"{driver_rows} disagrees with the source snapshot "
+                    f"({source_digest.row_count} rows)"
+                )
+            rows_copied = source_digest.row_count
 
             # Build indexes after the bulk load, not before: on an empty table
             # each COPYed row would pay index maintenance, and building once over
@@ -561,9 +643,10 @@ def copy_between_postgres(
             # rows copied verbatim; if one somehow did, the surrounding
             # transaction rolls the whole load back rather than half-applying it.
             indexes_carried: list[str] = []
-            for index_name, index_sql in index_plan:
-                dst_cur.execute(index_sql)  # nosec B608 — identifiers quoted by planner
-                indexes_carried.append(index_name)
+            if create:
+                for index_name, index_sql in index_plan:
+                    dst_cur.execute(index_sql)  # nosec B608 — identifiers quoted by planner
+                    indexes_carried.append(index_name)
 
             dest_digest = postgresql_engine_checksum(dst_cur, dest_ref, target_cols)
             if dest_digest is None:

@@ -126,6 +126,35 @@ def test_attach_ladder_enriches_failed_message():
     assert out["verification_ladder"] is ladder
 
 
+def test_a_failed_column_profile_vetoes_a_green_checksum():
+    """Checksum match is not full fidelity when L2 names a silently-nulled column."""
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    report = {
+        "passed": True,
+        "source_checksum": "aaa",
+        "target_checksum": "aaa",
+        "checksum_match": True,
+        "phase": "post_write_verified",
+        "coverage": "full_checksum",
+        "message": "Row fidelity verified",
+    }
+    ladder = {
+        "passed": False,
+        "skipped": False,
+        "localization_summary": "Engine column profile diverged on amount",
+        "assurance_level": "engine_column_profile",
+        "engine_profile": True,
+    }
+    out = attach_ladder_to_reconcile_report(report, ladder)
+    assert out["passed"] is False
+    assert out["phase"] == "post_write_failed"
+    assert out["migration_proven"] is False
+    claim = classify_post_write_assurance(out)
+    assert claim["migration_proven"] is False
+    assert claim["claim_level"] == "failed"
+
+
 def test_sqlite_transfer_ladder_localizes_post_write_drift(tmp_path: Path):
     """End-to-end: transfer succeeds, then dest cell is corrupted → ladder localizes."""
     src = tmp_path / "p5_src.sqlite"

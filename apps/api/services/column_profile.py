@@ -331,10 +331,29 @@ def _connect(family: str, cfg: dict[str, Any]) -> Any:
     if family == "mysql":
         from connectors.mysql_conn import get_connection
 
-        return get_connection(purpose="read", **kwargs)
-    from connectors.postgresql_conn import get_connection
+        conn = get_connection(purpose="read", **kwargs)
+    else:
+        from connectors.postgresql_conn import get_connection
 
-    return get_connection(**kwargs)
+        conn = get_connection(**kwargs)
+    _prepare_profile_session(family, conn)
+    return conn
+
+
+def _prepare_profile_session(family: str, conn: Any) -> None:
+    """Session invariants the profile comparison assumes.
+
+    MySQL ``TIMESTAMP`` renders in the session time zone. Two connections with
+    different zones would disagree on min/max of the same stored instants.
+    Pinning UTC is part of the comparison, not a connection-library default.
+    """
+    if family != "mysql":
+        return
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SET time_zone = '+00:00'")
+    except Exception as exc:  # noqa: BLE001 — a pin failure declines later if types mis-render
+        logger.debug("mysql profile session time_zone pin skipped: %s", exc)
 
 
 def _table_ref(family: str, schema: str, table: str) -> str:
@@ -356,11 +375,18 @@ def _introspect_types(
     """
     wanted = {c.lower() for c in columns}
     try:
-        cur.execute(
-            "SELECT column_name, data_type FROM information_schema.columns "
-            "WHERE table_schema = %s AND table_name = %s",
-            (schema or ("public" if family != "mysql" else ""), table),
-        )
+        if family == "mysql" and not schema:
+            cur.execute(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,),
+            )
+        else:
+            cur.execute(
+                "SELECT column_name, data_type FROM information_schema.columns "
+                "WHERE table_schema = %s AND table_name = %s",
+                (schema or ("public" if family != "mysql" else ""), table),
+            )
         rows = cur.fetchall() or []
     except Exception as exc:  # noqa: BLE001 — fall back to caller-supplied hints
         logger.debug("catalog type introspection unavailable for %s.%s: %s", schema, table, exc)
@@ -476,6 +502,13 @@ def engine_profile_ladder(
     attaches to a source and a destination that no single tool moved between and
     still proves, or disproves, that a column carries the same population.
 
+    The live catalog namespace is resolved with
+    :func:`services.dialect_profiles.catalog_namespace` so a leaked Postgres
+    ``public`` on MySQL does not miss the table. The profile is the *named
+    table as it exists now* — callers whose write was a batch into a larger
+    table (append/upsert) must not use this for Gate-8; that is a different
+    population.
+
     Returns a verification-ladder-shaped dict, or ``None`` when either end is not
     a supported SQL engine or a profile could not be read. It never claims the
     population checksum proof (L3) or row localization (L5), so it upgrades
@@ -505,18 +538,22 @@ def engine_profile_ladder(
         from dataclasses import replace as _replace_agg
 
         with src_conn.cursor() as sc, dst_conn.cursor() as dc:
+            from services.dialect_profiles import catalog_namespace
+
+            src_ns = catalog_namespace(source_engine, source_cfg, schema=source_schema)
+            dst_ns = catalog_namespace(dest_engine, dest_cfg, schema=dest_schema)
             src_types, src_kinds_by_src = _column_kinds(
-                src_family, sc, source_schema, source_table, source_cols, source_hints
+                src_family, sc, src_ns, source_table, source_cols, source_hints
             )
             dst_types, dst_kinds = _column_kinds(
-                dst_family, dc, dest_schema, dest_table, target_cols, dest_hints
+                dst_family, dc, dst_ns, dest_table, target_cols, dest_hints
             )
             src_rows_obs, src_raw = read_column_profile(
-                source_engine, sc, _table_ref(src_family, source_schema, source_table),
+                source_engine, sc, _table_ref(src_family, src_ns, source_table),
                 source_cols, src_types,
             )
             dst_rows_obs, dst_profile = read_column_profile(
-                dest_engine, dc, _table_ref(dst_family, dest_schema, dest_table),
+                dest_engine, dc, _table_ref(dst_family, dst_ns, dest_table),
                 target_cols, dst_types,
             )
         # Re-key the source profile and its kinds onto the destination names so a

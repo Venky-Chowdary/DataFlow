@@ -265,8 +265,8 @@ def run_fidelity_check(
 
     src_cfg = resolve_connector_config(source, workspace_id or None)
     dst_cfg = resolve_connector_config(destination, workspace_id or None)
-    source_schema = str(source.schema or src_cfg.get("schema") or "public")
-    dest_schema = str(destination.schema or dst_cfg.get("schema") or "public")
+    source_schema = str(source.schema or src_cfg.get("schema") or "")
+    dest_schema = str(destination.schema or dst_cfg.get("schema") or "")
     source_table = str(source.table or source.collection or src_cfg.get("table") or "")
     dest_table = str(destination.table or destination.collection or dst_cfg.get("table") or "")
 
@@ -316,6 +316,12 @@ def run_fidelity_check(
             f"Parity holds: {source_rows} rows on each side, "
             f"{l2_details.get('columns_compared', 0)} columns in agreement."
         )
+        not_compared = list(l2_details.get("not_compared") or [])
+        if not_compared:
+            message += " Not compared: " + "; ".join(str(x) for x in not_compared[:4])
+            if len(not_compared) > 4:
+                message += " …"
+            message += "."
     elif not row_ok:
         message = (
             f"Row counts diverge: source {source_rows} vs destination {target_rows}."

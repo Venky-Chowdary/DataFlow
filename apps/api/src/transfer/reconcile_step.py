@@ -259,6 +259,13 @@ def _maybe_engine_profile_ladder(
     """
     if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
         return None
+    from services.sync_cursor import is_overwrite_sync
+
+    # Whole-table aggregates are not the batch that an append/upsert wrote.
+    # Profiling them would mix historical rows into Gate-8 L1/L2.
+    sync = str(dest_summary.get("sync_mode") or "")
+    if sync and not is_overwrite_sync(sync):
+        return None
     from services.column_profile import engine_profile_ladder, profile_supported
     from services.verification_ladder import (
         MAX_LADDER_ROWS,
@@ -312,7 +319,7 @@ def _maybe_engine_profile_ladder(
         ladder = engine_profile_ladder(
             source_engine=source_type,
             source_cfg=src_cfg,
-            source_schema=str(source_endpoint.schema or src_cfg.get("schema") or "public"),
+            source_schema=str(source_endpoint.schema or src_cfg.get("schema") or ""),
             source_table=str(
                 source_endpoint.table
                 or source_endpoint.collection
@@ -321,7 +328,7 @@ def _maybe_engine_profile_ladder(
             ),
             dest_engine=dest_type,
             dest_cfg=dst_cfg,
-            dest_schema=str(dst_cfg.get("schema") or dest_summary.get("schema") or "public"),
+            dest_schema=str(dst_cfg.get("schema") or dest_summary.get("schema") or ""),
             dest_table=str(
                 endpoint.table or dest_summary.get("table") or dst_cfg.get("table") or ""
             ),
@@ -382,19 +389,19 @@ def _maybe_attach_verification_ladder(
     if engine_profile is not None:
         return engine_profile
 
-    if dest_type not in {"sqlite", "postgresql", "redshift"}:
-        return report
-
-    # L2/L4/L5 localization is in-memory. Decide from the counts we already have
-    # rather than after both populations are resident: a 10M-row destination
-    # cost ~15 GB here before run_five_layer_verification could decline it.
     known = max(
         _as_count(report.get("source_rows")),
         _as_count(report.get("target_rows")),
         len(records or []),
     )
     if known > MAX_LADDER_ROWS:
+        # Every oversized dest, not just PG/SQLite: a MySQL/MariaDB route that
+        # could not profile must still name the decline instead of returning a
+        # bare Gate-8 report with no ladder at all.
         return _ladder_declined(report, known, MAX_LADDER_ROWS)
+
+    if dest_type not in {"sqlite", "postgresql", "redshift"}:
+        return report
     target_cols = _mapped_targets(mappings, columns) if mappings else list(columns or [])
     if not target_cols:
         return report
@@ -1484,7 +1491,7 @@ def run_reconciliation(
     ):
         from services.reconciliation import ReconciliationReport
 
-        return ReconciliationReport(
+        return _finalize(ReconciliationReport(
             passed=False,
             source_rows=source_rows,
             target_rows=target_rows,
@@ -1496,7 +1503,7 @@ def run_reconciliation(
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
-        ).to_dict()
+        ).to_dict())
 
     # Upsert/append into a larger sink: whole-table digests are not comparable to
     # the batch. Re-fingerprint destination WHERE pk IN (batch keys) while keeping
@@ -1514,7 +1521,6 @@ def run_reconciliation(
         and target_rows > expected_batch
         and source_checksum
         and target_checksum
-        and source_checksum != target_checksum
         and str(db_type) in KEYED_READBACK_ENGINES
     ):
         _keyed_rows, keyed_checksum = verify_target(

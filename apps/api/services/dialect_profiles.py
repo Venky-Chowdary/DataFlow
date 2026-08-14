@@ -169,6 +169,41 @@ def schema_from_cfg(
     return normalize_schema(driver, raw, username=user) or ""
 
 
+def catalog_namespace(
+    driver: str | None,
+    cfg: dict | None = None,
+    *,
+    schema: str | None = None,
+) -> str:
+    """The name the engine catalog uses to find this object.
+
+    Distinct from :func:`schema_from_cfg`, which is the SQL qualifier in front
+    of a table. MySQL has no schema layer, so that helper correctly returns
+    empty — but ``information_schema.columns.table_schema`` is the *database
+    name*. Looking up ``public`` on MySQL matches nothing and silently falls
+    back to mapping hints, which is how ``timestamp`` (an instant on MySQL, a
+    wall clock on PostgreSQL) gets misclassified.
+
+    This is the single lookup rule every catalog reader should use. Extend the
+    per-dialect branch when a new engine's catalog is keyed differently; do
+    not copy a ``or "public"`` fallback into the caller.
+    """
+    cfg = cfg or {}
+    profile = dialect_profile(driver)
+    hinted = schema if schema is not None else cfg.get("schema")
+    if profile.uses_schema:
+        return schema_from_cfg(driver, cfg, schema=hinted if isinstance(hinted, str) or hinted is None else str(hinted))
+    key = normalize_driver(driver)
+    if key in {"mysql", "mariadb"}:
+        database = str(cfg.get("database") or "").strip()
+        leaked = str(hinted or "").strip()
+        # A leaked Postgres default is not a MySQL database.
+        if leaked.lower() in {"", "public"}:
+            return database
+        return leaked or database
+    return str(cfg.get("database") or hinted or "").strip()
+
+
 # Dialects that reject ``LIMIT``/``OFFSET`` and use the SQL:2008 form instead.
 # Oracle (12c+), SQL Server (2012+), DB2 and Derby all parse
 # ``OFFSET n ROWS FETCH NEXT m ROWS ONLY``; emitting ``LIMIT`` there raises

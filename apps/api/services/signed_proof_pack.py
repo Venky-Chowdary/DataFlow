@@ -30,6 +30,113 @@ class ProofClaimError(RuntimeError):
     """Raised when a pack is asked to claim migration proven without post-write proof."""
 
 
+class FidelityVeto:
+    """A write that landed but is not full-fidelity.
+
+    One decision procedure. Gate-8 stamping, ladder attach, and the proof pack
+    all consult this — they must not grow parallel if-trees for the same
+    evidence (a failed column profile, a value coerced to NULL).
+    """
+
+    __slots__ = ("claim_level", "phase", "operational_passed", "assurance_level", "coverage", "note")
+
+    def __init__(
+        self,
+        *,
+        claim_level: str,
+        phase: str,
+        operational_passed: bool,
+        assurance_level: str,
+        coverage: str,
+        note: str,
+    ) -> None:
+        self.claim_level = claim_level
+        self.phase = phase
+        self.operational_passed = operational_passed
+        self.assurance_level = assurance_level
+        self.coverage = coverage
+        self.note = note
+
+    def as_claim(self, checksum_match: bool) -> dict[str, Any]:
+        return {
+            "claim_level": self.claim_level,
+            "post_write_verified": False,
+            "migration_proven": False,
+            "population_proof": False,
+            "referential_integrity_proven": False,
+            "checksum_match": checksum_match,
+            "note": self.note,
+        }
+
+
+def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
+    """Return a veto when the destination does not hold the source values.
+
+    Operational ``passed`` (rows landed) is a different question — a coerced
+    write can complete and still be forbidden from claiming ``migration_proven``.
+    """
+    ladder = recon.get("verification_ladder") if isinstance(recon.get("verification_ladder"), dict) else {}
+    if ladder and not ladder.get("skipped") and ladder.get("passed") is False:
+        loc = str(ladder.get("localization_summary") or "").strip()
+        note = "Column-profile / verification ladder failed — migration not proven."
+        if loc:
+            note = f"{note} {loc}"
+        return FidelityVeto(
+            claim_level="failed",
+            phase="post_write_failed",
+            operational_passed=False,
+            assurance_level="none",
+            coverage="none",
+            note=note,
+        )
+    coverage = str(recon.get("coverage") or "").lower()
+    phase = str(recon.get("phase") or "").lower()
+    # Only veto a write that operationally completed. A failed run with
+    # coerced_null_rows is still a failure, not a "partial success".
+    if bool(recon.get("passed", True)) and (
+        int(recon.get("coerced_null_rows") or 0) > 0
+        or coverage == "coerced"
+        or phase.endswith("partial")
+    ):
+        return FidelityVeto(
+            claim_level="coerced",
+            phase="post_write_partial",
+            operational_passed=True,
+            assurance_level="coerced",
+            coverage="coerced",
+            note=(
+                "Values were coerced to NULL to land the write — checksums can "
+                "still match because the same coercion is applied on the source "
+                "re-read. That is not full fidelity."
+            ),
+        )
+    return None
+
+
+def apply_fidelity_veto(report: dict[str, Any]) -> dict[str, Any]:
+    """Stamp a veto onto a Gate-8 report, or return it unchanged."""
+    out = dict(report or {})
+    veto = fidelity_veto(out)
+    if veto is None:
+        return out
+    out["phase"] = veto.phase
+    out["passed"] = veto.operational_passed
+    out["assurance_level"] = veto.assurance_level
+    out["coverage"] = veto.coverage
+    out["migration_proven"] = False
+    out["post_write_pending"] = False
+    out["preview"] = False
+    if not veto.operational_passed:
+        loc = ""
+        ladder = out.get("verification_ladder") if isinstance(out.get("verification_ladder"), dict) else {}
+        loc = str(ladder.get("localization_summary") or "").strip()
+        if loc:
+            base = str(out.get("message") or "").rstrip()
+            if loc not in base:
+                out["message"] = f"{base} — {loc}" if base else loc
+    return out
+
+
 def _platform_secret() -> bytes:
     try:
         from services.auth_service import _token_secret
@@ -126,6 +233,10 @@ def classify_post_write_assurance(
         checksum_match = False
     elif recon.get("checksum_match") is True:
         checksum_match = True
+
+    veto = fidelity_veto(recon)
+    if veto is not None:
+        return veto.as_claim(checksum_match)
 
     if preview or phase.startswith("pre_write") or "simulation" in phase:
         return {
