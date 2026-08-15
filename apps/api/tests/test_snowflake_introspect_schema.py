@@ -23,24 +23,24 @@ def test_resolve_schema_falls_back_when_requested_missing() -> None:
         return None
 
     cur.execute.side_effect = execute
-    cur.fetchall.side_effect = [
-        [("PUBLIC",), ("ANALYTICS",)],  # schemata list
-    ]
 
     resolved, available, warning = _snowflake_resolve_schema(cur, "MISSING")
     assert resolved == "PUBLIC"
-    assert "PUBLIC" in available
+    # USE SCHEMA PUBLIC succeeded — do not list every schema on the cold warehouse.
+    assert available == []
     assert warning and "MISSING" in warning and "PUBLIC" in warning
 
 
 def test_resolve_schema_uses_exact_match() -> None:
     cur = MagicMock()
-    cur.fetchall.return_value = [("PUBLIC",), ("MART",)]
 
     resolved, available, warning = _snowflake_resolve_schema(cur, "MART")
     assert resolved == "MART"
     assert warning is None
-    assert "MART" in available
+    assert available == []
+    executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list)
+    assert "USE SCHEMA" in executed.upper()
+    assert "MART" in executed.upper()
 
 
 def test_introspect_snowflake_returns_actionable_error_on_bad_database() -> None:
@@ -88,17 +88,20 @@ def test_introspect_snowflake_ok_with_schema_fallback() -> None:
         return None
 
     cur.execute.side_effect = execute
-    # fetchall order: schemata list → tables → columns for first table
-    cur.fetchall.side_effect = [
-        [("PUBLIC",)],
-        [("CUSTOMERS",), ("ORDERS",)],
-        # name, data_type, nullable, char_len, num_prec, num_scale, dt_prec
-        [
-            ("ID", "NUMBER", "NO", None, 38, 0, None),
-            ("NAME", "TEXT", "YES", 50, None, None, None),
-            ("BLOB", "BINARY", "YES", 16, None, None, None),
-        ],
-    ]
+
+    def fetchall():
+        last = calls[-1].upper() if calls else ""
+        if "INFORMATION_SCHEMA.TABLES" in last and "TABLE_NAME" in last:
+            return [("CUSTOMERS",), ("ORDERS",)]
+        if "INFORMATION_SCHEMA.COLUMNS" in last:
+            return [
+                ("ID", "NUMBER", "NO", None, 38, 0, None),
+                ("NAME", "TEXT", "YES", 50, None, None, None),
+                ("BLOB", "BINARY", "YES", 16, None, None, None),
+            ]
+        return []
+
+    cur.fetchall.side_effect = fetchall
 
     with (
         patch("connectors.snowflake_conn.get_connection", return_value=conn),

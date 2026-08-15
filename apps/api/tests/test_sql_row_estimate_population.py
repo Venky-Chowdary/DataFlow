@@ -195,4 +195,5 @@ def test_dest_missing_table_still_create_on_write():
         _attach_db_sample(out, endpoint)
 
     assert out["table_exists"] is False
-    assert any("created automatically" in str(item) for item in (out.get("auto_create") or []))
+    assert any("CREATE TABLE" in str(item) for item in (out.get("auto_create") or []))
+    assert "created automatically" in str(out.get("message") or "")
