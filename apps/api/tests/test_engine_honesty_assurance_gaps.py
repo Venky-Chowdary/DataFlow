@@ -69,11 +69,18 @@ def test_email_is_not_transfer_ready_without_preflight():
 
 
 def test_transfer_live_driver_count_excludes_email_and_matches_fe_constant():
+    from src.transfer.connector_capabilities import driver_available
+
     live = transfer_live_driver_types()
     assert "email" not in live
-    assert "sftp" in live
-    # Keep FE marketing constant honest — regenerate provenEvidence.ts together.
-    assert len(live) == 43
+    # Package-available list, not a marketing constant. Missing paramiko must
+    # not invent a transfer-ready SFTP tile (catalog count ≠ live).
+    if driver_available("sftp"):
+        assert "sftp" in live
+        assert len(live) == 43
+    else:
+        assert "sftp" not in live
+        assert len(live) == 42
 
 
 def test_mongodb_registry_does_not_claim_sql_merge():
