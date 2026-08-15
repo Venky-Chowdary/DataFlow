@@ -10529,7 +10529,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-validate-dashboard-host > .df2-validate-footer,
-.df2-validate-dashboard-host > .df2-validate-footer-cdc {
+.df2-validate-dashboard-host > .df2-validate-footer-cdc,
+.df2-validate-dashboard-host > .df2-validate-footer-contract {
   flex-shrink: 0 !important;
 }
 

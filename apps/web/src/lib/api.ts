@@ -2215,6 +2215,9 @@ export async function runUniversalTransfer(options: {
   approvedDdlIdentityHash?: string;
   /** Optional full artifact payload (content_hash must match approved hash). */
   decisionArtifact?: Record<string, unknown>;
+  /** Bound data contract — same fail-closed SIGNED gate as scheduled runs. */
+  contractId?: string;
+  requireSignedContract?: boolean;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2272,6 +2275,11 @@ export async function runUniversalTransfer(options: {
     formData.append("stream_contracts_json", JSON.stringify(options.streamContracts));
   }
   if (options.planId) formData.append("plan_id", options.planId);
+  if (options.contractId) formData.append("contract_id", options.contractId);
+  formData.append(
+    "require_signed_contract",
+    options.requireSignedContract === true ? "true" : "false",
+  );
   formData.append("date_locale", options.dateLocale || "");
   formData.append(
     "compliance_acknowledged",

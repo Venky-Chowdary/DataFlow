@@ -300,6 +300,8 @@ TOOL_DEFINITIONS: list[dict] = [
                 "dest_table": {"type": "string"},
                 "sync_mode": {"type": "string"},
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
+                "contract_id": {"type": "string", "description": "Signed data contract to enforce on Confirm"},
+                "require_signed_contract": {"type": "boolean"},
             },
             "required": [],
         },
@@ -2078,6 +2080,8 @@ class DataPilotTools:
         procedure_call: str = "",
         source_query: str = "",
         procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -2097,6 +2101,8 @@ class DataPilotTools:
             procedure_call=procedure_call,
             source_query=source_query,
             procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
         )
 
     def _analyze_result(

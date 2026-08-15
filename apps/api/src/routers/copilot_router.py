@@ -142,6 +142,16 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
         skip_preflight=False,
         triggered_by="data-pilot",
     )
+    from ..transfer.contract_engine import stamp_bound_contract
+
+    try:
+        stamp_bound_contract(
+            request_obj,
+            contract_id=str(payload.get("contract_id") or ""),
+            require_signed=bool(payload.get("require_signed_contract", False)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request_obj)
     run_transfer_async(job_id, request_obj)

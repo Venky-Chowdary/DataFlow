@@ -218,6 +218,13 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     if pf.get("run_id"):
         lines.append(f"• Preflight run `{pf.get('run_id')}`")
 
+    preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
+    bound_id = str((preview or {}).get("contract_id") or "").strip()
+    if tool == "start_transfer" and bound_id:
+        lines.append(
+            f"• Bound contract `{bound_id}` — Confirm fails closed unless it is SIGNED."
+        )
+
     if tool == "start_transfer" and o.get("requires_confirm"):
         if o.get("destructive"):
             lines.append(

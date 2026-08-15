@@ -27,6 +27,25 @@ except ImportError:  # pragma: no cover - compatibility for tests
     )
 
 
+def stamp_bound_contract(
+    request: Any,
+    *,
+    contract_id: str = "",
+    require_signed: bool = False,
+) -> None:
+    """Bind an operator-selected contract before enqueue. Fail-closed if SIGNED is required."""
+    cid = str(contract_id or "").strip()
+    require = bool(require_signed)
+    if cid or require:
+        from services.schedule_store import assert_signed_contract
+
+        assert_signed_contract(cid, require_signed=require)
+    if cid:
+        request.contract_id = cid
+        request.enforce_contract = True
+        request.require_signed_contract = require
+
+
 def enforce_or_create_contract(
     request: Any,
     schema: dict[str, str] | None,

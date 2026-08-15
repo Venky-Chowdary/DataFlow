@@ -462,7 +462,7 @@ def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
         raise ValueError(f"Contract {contract_id} not found")
     if require_signed and contract.status != ContractStatus.SIGNED:
         raise ValueError(
-            f"Contract {contract_id} must be SIGNED before scheduling "
+            f"Contract {contract_id} must be SIGNED before this run "
             f"(current status: {contract.status.value})"
         )
 

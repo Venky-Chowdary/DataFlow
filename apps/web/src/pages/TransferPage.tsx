@@ -19,6 +19,7 @@ import { ObjectNameCombobox } from "../components/transfer/ObjectNameCombobox";
 import { Button } from "../components/ui/Button";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
+import { ContractBindField } from "../components/contracts/ContractBindField";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
@@ -247,6 +248,9 @@ export function TransferPage({
   const lastNewTableToastRef = useRef("");
   const [preflighting, setPreflighting] = useState(false);
   const [savingContract, setSavingContract] = useState(false);
+  const [boundContractId, setBoundContractId] = useState("");
+  const [requireSignedContract, setRequireSignedContract] = useState(false);
+  const [contractBlockReason, setContractBlockReason] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -3866,6 +3870,14 @@ export function TransferPage({
     const approvedDdlIdentityHash = String(
       preflight?.proof_bundle?.ddl_identity?.ddl_identity_hash || "",
     ).trim();
+    if (contractBlockReason) {
+      toast({
+        title: "Signed contract required",
+        message: contractBlockReason,
+        tone: "warning",
+      });
+      return;
+    }
     if (
       enforcePreflight
       && (!approvedDecisionArtifactHash || approvedDecisionArtifactHash.length !== 64)
@@ -4032,6 +4044,8 @@ export function TransferPage({
         ].filter(Boolean).join("; ") || undefined,
         approvedDecisionArtifactHash: approvedDecisionArtifactHash || undefined,
         approvedDdlIdentityHash: approvedDdlIdentityHash || undefined,
+        contractId: boundContractId.trim() || undefined,
+        requireSignedContract: Boolean(boundContractId.trim() && requireSignedContract),
         decisionArtifact:
           preflight?.proof_bundle?.decision_artifact
           && typeof preflight.proof_bundle.decision_artifact === "object"
@@ -4251,6 +4265,8 @@ export function TransferPage({
           confidence: m.confidence,
           transform: m.transform,
         })),
+        contract_id: boundContractId.trim(),
+        require_signed_contract: Boolean(boundContractId.trim() && requireSignedContract),
       });
       toast({
         title: "Pipeline created",
@@ -6024,12 +6040,23 @@ export function TransferPage({
             rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
             transferLaunch={transferLaunch}
             savingContract={savingContract}
-            executeBlocked={multiStreamUnsupportedMode}
+            executeBlocked={multiStreamUnsupportedMode || Boolean(contractBlockReason)}
             executeBlockedReason={
               multiStreamUnsupportedMode
                 ? MULTI_STREAM_SCD2_MIRROR_BLOCK
-                : undefined
+                : contractBlockReason || undefined
             }
+            contractSlot={(
+              <ContractBindField
+                idPrefix="studio"
+                contractId={boundContractId}
+                requireSigned={requireSignedContract}
+                onContractIdChange={setBoundContractId}
+                onRequireSignedChange={setRequireSignedContract}
+                onBlockReasonChange={setContractBlockReason}
+                compact
+              />
+            )}
             cdcRetentionSlot={
               syncMode === "cdc"
               && sourceConnector

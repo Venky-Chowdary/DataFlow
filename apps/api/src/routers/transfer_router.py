@@ -740,6 +740,16 @@ async def execute_transfer_json(
     )
 
     _residency_check(request, dst, region)
+    from src.transfer.contract_engine import stamp_bound_contract
+
+    try:
+        stamp_bound_contract(
+            request_obj,
+            contract_id=body.contract_id or "",
+            require_signed=bool(body.require_signed_contract),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -896,6 +906,8 @@ async def run_universal_transfer(
     approved_decision_artifact_hash: str = Form(""),
     approved_ddl_identity_hash: str = Form(""),
     decision_artifact_json: str = Form(""),
+    contract_id: str = Form(""),
+    require_signed_contract: str = Form("false"),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -1138,6 +1150,17 @@ async def run_universal_transfer(
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     _residency_check(request, destination, region)
+
+    from src.transfer.contract_engine import stamp_bound_contract
+
+    try:
+        stamp_bound_contract(
+            request_obj,
+            contract_id=contract_id,
+            require_signed=require_signed_contract.lower() in ("true", "1", "yes"),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     engine = get_transfer_engine()
     try:

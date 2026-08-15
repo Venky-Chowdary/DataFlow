@@ -960,6 +960,34 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
         return []
 
 
+def _stage_bound_contract(
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+) -> dict[str, Any]:
+    """Fail-closed SIGNED bind at Pilot staging. Empty id leaves enforce unset.
+
+    Selecting a contract defaults ``require_signed`` the same way Studio and
+    ScheduleForm do. Confirm is not offered for an unsigned bind.
+    """
+    cid = str(contract_id or "").strip()
+    if require_signed_contract is None:
+        require = bool(cid)
+    elif isinstance(require_signed_contract, str):
+        require = require_signed_contract.strip().lower() in {"1", "true", "yes", "on"}
+    else:
+        require = bool(require_signed_contract)
+    from services.schedule_store import assert_signed_contract
+
+    assert_signed_contract(cid, require_signed=require)
+    if not cid:
+        return {}
+    return {
+        "contract_id": cid,
+        "enforce_contract": True,
+        "require_signed_contract": require,
+    }
+
+
 def start_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
@@ -976,6 +1004,8 @@ def start_transfer(
     procedure_call: str = "",
     source_query: str = "",
     procedure_params: Any = None,
+    contract_id: str = "",
+    require_signed_contract: Any = None,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -1070,6 +1100,11 @@ def start_transfer(
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
     }
+    try:
+        bound = _stage_bound_contract(contract_id, require_signed_contract)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
+    payload.update(bound)
     # Belt-and-suspenders: ignore any injected/mutated skip even if schema drifts.
     payload["skip_preflight"] = False  # hard deny - Pilot never bypasses Validate
     preview = {
@@ -1086,6 +1121,10 @@ def start_transfer(
         "preflight_run_id": preflight.get("run_id"),
         "readiness_score": preflight.get("readiness_score"),
     }
+    if bound.get("contract_id"):
+        preview["contract_id"] = bound["contract_id"]
+        preview["require_signed_contract"] = bound["require_signed_contract"]
+        preview["enforce_contract"] = True
 
     from .ack_ledger import get_ack_ledger
 
