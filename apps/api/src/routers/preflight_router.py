@@ -105,6 +105,8 @@ class PreflightRequest(BaseModel):
     acknowledgment_reason: str = ""
     # Pre-ingestion staging (SQL destinations only) — Validate must fail closed.
     write_via_staging: bool = False
+    # Connector-specific dest settings (Redshift staging_bucket / iam_role, etc.).
+    dest_extra: dict[str, Any] | None = None
 
 
 def _schema_default(db_type: str) -> str:
@@ -184,6 +186,7 @@ async def run_preflight(body: PreflightRequest):
         dest_api_key=body.dest_api_key,
         dest_service_account=body.dest_service_account,
         dest_kind=body.dest_kind,
+        dest_extra=dict(body.dest_extra or {}),
     )
 
     if body.dest_kind == "file_export" or dest_meta.get("connected"):
@@ -296,6 +299,7 @@ async def run_preflight(body: PreflightRequest):
             destination_can_create=dest_meta.get("can_create_table"),
             destination_can_write=dest_meta.get("can_write"),
             privilege_probe=dest_meta.get("privilege_probe"),
+            redshift_staging_probe=dest_meta.get("redshift_staging_probe"),
             destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
             source_connector_id=body.source_connector_id or "",
             source_config=body.source_config,

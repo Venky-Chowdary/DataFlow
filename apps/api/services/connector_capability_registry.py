@@ -236,8 +236,10 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "JSON/ARRAY land as SUPER; binary as VARBYTE.",
             "Upsert prefers native MERGE with NULL-safe PK match; falls back to delete+insert. Still at-least-once (not exactly-once).",
             "DISTKEY/SORTKEY are operator-owned — Datawrap does not invent them.",
-            "Bulk loads use COPY FROM S3 when staging_bucket and iam_role are set; "
-            "otherwise the PostgreSQL-wire insert path is used. Still at-least-once.",
+            "Bulk loads use COPY FROM S3 when staging_bucket and iam_role are set "
+            "(TSV, gzip when the stage file is large; Parquet when "
+            "redshift_stage_format=parquet). Inserts below REDSHIFT_COPY_THRESHOLD "
+            "keep the PostgreSQL-wire path. Still at-least-once.",
         ],
         "recommended_batch_size": 5000,
     },

@@ -341,6 +341,8 @@ export async function runPreflight(payload: {
   acknowledgment_reason?: string;
   /** Pre-ingestion staging (SQL destinations only). */
   write_via_staging?: boolean;
+  /** Connector-specific dest settings (Redshift staging_bucket / iam_role). */
+  dest_extra?: Record<string, unknown>;
   source_kind?: string;
   source_type?: string;
 }): Promise<import("./types").PreflightResult> {

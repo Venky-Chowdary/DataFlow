@@ -111,6 +111,9 @@ class DestinationConfig:
     error: str | None = None
     # Optional G2 privilege probe metadata (method/status/detail) for UI honesty.
     privilege_probe: dict[str, Any] | None = None
+    # Redshift COPY FROM S3 staging-bucket probe. Missing config is not a block
+    # (PostgreSQL-wire insert remains valid). Denied is a G2 block.
+    redshift_staging_probe: dict[str, Any] | None = None
 
 
 @dataclass

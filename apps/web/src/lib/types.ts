@@ -897,6 +897,14 @@ export interface PreflightResult {
     can_write?: boolean | null;
     can_create_table?: boolean | null;
   };
+  /** Redshift COPY FROM S3 staging-bucket probe (also on g2_destination.details). */
+  redshift_staging_probe?: {
+    status?: string;
+    method?: string;
+    engine?: string;
+    detail?: string;
+    bucket?: string;
+  };
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
   load_history_report?: LoadHistoryReport;

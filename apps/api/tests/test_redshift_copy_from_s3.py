@@ -16,8 +16,12 @@ from connectors.redshift_copy import (  # noqa: E402
     RedshiftCopyConfig,
     build_redshift_copy_sql,
     copy_redshift_rows_from_s3,
+    probe_redshift_staging,
     render_redshift_copy_text,
     resolve_redshift_copy_config,
+    resolve_redshift_stage_format,
+    should_gzip_redshift_stage,
+    should_use_redshift_s3_copy_for_insert,
     staging_object_key,
 )
 _ROLE = "arn:aws:iam::123456789012:role/DatawrapRedshiftCopy"
@@ -242,3 +246,215 @@ def test_staging_key_is_stable_per_chunk():
     assert a == b
     assert a.endswith("part-00002.tsv")
     assert "Orders" in a or "orders" in a.lower() or "Orders_" in a
+
+
+def test_insert_copy_respects_row_threshold():
+    cfg = RedshiftCopyConfig(bucket="dw-stage", iam_role=_ROLE)
+    assert should_use_redshift_s3_copy_for_insert(
+        copy_config=cfg, write_mode="insert", conflict_columns=[], row_count=2, threshold=1000
+    ) is False
+    assert should_use_redshift_s3_copy_for_insert(
+        copy_config=cfg, write_mode="insert", conflict_columns=[], row_count=1000, threshold=1000
+    ) is True
+    assert should_use_redshift_s3_copy_for_insert(
+        copy_config=cfg, write_mode="upsert", conflict_columns=["id"], row_count=5000, threshold=1000
+    ) is False
+    assert should_use_redshift_s3_copy_for_insert(
+        copy_config=None, write_mode="insert", conflict_columns=[], row_count=5000
+    ) is False
+
+
+def test_gzip_only_for_large_tsv():
+    small = b"1\tok\n"
+    huge = b"x" * 1_048_576
+    assert should_gzip_redshift_stage(small, stage_format="tsv") is False
+    assert should_gzip_redshift_stage(huge, stage_format="tsv") is True
+    assert should_gzip_redshift_stage(huge, stage_format="parquet") is False
+    assert should_gzip_redshift_stage(small, stage_format="tsv", threshold=1) is True
+
+
+def test_copy_sql_gzip_and_parquet_shapes():
+    gzip_sql = build_redshift_copy_sql(
+        "analytics",
+        "orders",
+        ["id"],
+        "s3://dw-stage/x/part-00000.tsv",
+        iam_role=_ROLE,
+        gzip=True,
+    )
+    assert " GZIP" in gzip_sql
+    assert "DELIMITER" in gzip_sql
+    pq_sql = build_redshift_copy_sql(
+        "analytics",
+        "orders",
+        ["id", "amount"],
+        "s3://dw-stage/x/part-00000.parquet",
+        iam_role=_ROLE,
+        region="us-east-1",
+        stage_format="parquet",
+    )
+    assert "FORMAT AS PARQUET" in pq_sql
+    assert "DELIMITER" not in pq_sql
+    assert "NULL AS" not in pq_sql
+    assert "GZIP" not in pq_sql
+    assert "REGION 'us-east-1'" in pq_sql
+
+
+def test_stage_and_copy_gzips_when_threshold_is_one():
+    puts: list[dict] = []
+    executed: list[str] = []
+
+    class FakeS3:
+        def put_object(self, **kwargs):
+            puts.append(kwargs)
+
+        def delete_object(self, Bucket, Key):  # noqa: N803
+            return {}
+
+    class FakeCur:
+        def execute(self, sql, params=None):
+            executed.append(str(sql))
+
+    cfg = RedshiftCopyConfig(bucket="dw-stage", iam_role=_ROLE)
+    copy_redshift_rows_from_s3(
+        FakeCur(),
+        schema="public",
+        table="orders",
+        columns=["id", "note"],
+        rows=[(1, "ok")],
+        config=cfg,
+        s3_client=FakeS3(),
+        gzip_threshold=1,
+    )
+    assert puts[0]["ContentEncoding"] == "gzip"
+    assert puts[0]["ContentType"] == "application/gzip"
+    assert puts[0]["Body"][:2] == b"\x1f\x8b"
+    assert " GZIP" in executed[0]
+
+
+def test_parquet_stage_uses_format_as_parquet():
+    pytest.importorskip("pyarrow")
+    puts: list[dict] = []
+    executed: list[str] = []
+
+    class FakeS3:
+        def put_object(self, **kwargs):
+            puts.append(kwargs)
+
+        def delete_object(self, Bucket, Key):  # noqa: N803
+            return {}
+
+    class FakeCur:
+        def execute(self, sql, params=None):
+            executed.append(str(sql))
+
+    cfg = RedshiftCopyConfig(bucket="dw-stage", iam_role=_ROLE)
+    uri = copy_redshift_rows_from_s3(
+        FakeCur(),
+        schema="public",
+        table="orders",
+        columns=["id", "amount"],
+        rows=[(1, 10.5), (2, 20.0)],
+        config=cfg,
+        s3_client=FakeS3(),
+        dest_types={"id": "INTEGER", "amount": "DOUBLE"},
+        stage_format="parquet",
+    )
+    assert uri.endswith(".parquet")
+    assert puts[0]["Key"].endswith(".parquet")
+    assert "parquet" in str(puts[0]["ContentType"]).lower()
+    assert "ContentEncoding" not in puts[0]
+    assert "FORMAT AS PARQUET" in executed[0]
+    assert "DELIMITER" not in executed[0]
+
+
+def test_resolve_stage_format():
+    assert resolve_redshift_stage_format({}) == "tsv"
+    assert resolve_redshift_stage_format({"redshift_stage_format": "parquet"}) == "parquet"
+    assert resolve_redshift_stage_format({"stage_format": "PQ"}) == "parquet"
+
+
+def test_probe_not_configured_is_not_a_block():
+    out = probe_redshift_staging({}, env_get=lambda *_a, **_k: "")
+    assert out["status"] == "not_configured"
+    assert "PostgreSQL-wire" in out["detail"]
+
+
+def test_probe_denied_on_access_denied_head():
+    class Denied:
+        def head_bucket(self, Bucket):  # noqa: N803
+            err = Exception("denied")
+            err.response = {"Error": {"Code": "AccessDenied"}}
+            raise err
+
+        def put_object(self, **_k):
+            raise AssertionError("probe must never PutObject")
+
+    out = probe_redshift_staging(
+        {"staging_bucket": "dw-stage", "iam_role": _ROLE},
+        s3_client=Denied(),
+        env_get=lambda *_a, **_k: "",
+    )
+    assert out["status"] == "denied"
+    assert out["bucket"] == "dw-stage"
+
+
+def test_probe_ok_when_acl_grants_write():
+    class Ok:
+        def head_bucket(self, Bucket):  # noqa: N803
+            return {}
+
+        def get_bucket_acl(self, Bucket):  # noqa: N803
+            return {"Grants": [{"Permission": "FULL_CONTROL"}]}
+
+        def put_object(self, **_k):
+            raise AssertionError("probe must never PutObject")
+
+    out = probe_redshift_staging(
+        {"staging_bucket": "dw-stage", "iam_role": _ROLE},
+        s3_client=Ok(),
+        env_get=lambda *_a, **_k: "",
+    )
+    assert out["status"] == "ok"
+    assert out["method"] == "GetBucketAcl"
+
+
+def test_probe_denied_when_acl_is_read_only():
+    class ReadOnly:
+        def head_bucket(self, Bucket):  # noqa: N803
+            return {}
+
+        def get_bucket_acl(self, Bucket):  # noqa: N803
+            return {"Grants": [{"Permission": "READ"}]}
+
+        def put_object(self, **_k):
+            raise AssertionError("probe must never PutObject")
+
+    out = probe_redshift_staging(
+        {"staging_bucket": "dw-stage", "iam_role": _ROLE},
+        s3_client=ReadOnly(),
+        env_get=lambda *_a, **_k: "",
+    )
+    assert out["status"] == "denied"
+
+
+def test_probe_unavailable_when_acl_disabled():
+    class NoAcl:
+        def head_bucket(self, Bucket):  # noqa: N803
+            return {}
+
+        def get_bucket_acl(self, Bucket):  # noqa: N803
+            err = Exception("acls off")
+            err.response = {"Error": {"Code": "AccessDenied"}}
+            raise err
+
+        def put_object(self, **_k):
+            raise AssertionError("probe must never PutObject")
+
+    out = probe_redshift_staging(
+        {"staging_bucket": "dw-stage", "iam_role": _ROLE},
+        s3_client=NoAcl(),
+        env_get=lambda *_a, **_k: "",
+    )
+    assert out["status"] == "unavailable"
+    assert "GetBucketAcl" in out["detail"] or out["method"] == "GetBucketAcl"

@@ -379,6 +379,8 @@ def _redshift_delete_by_keys(
     copy_config: Any | None = None,
     s3_client: Any | None = None,
     job_id: str = "",
+    dest_types: dict[str, str] | None = None,
+    stage_format: str = "tsv",
 ) -> list[tuple] | list[list]:
     """Upsert matching keys on Redshift (MERGE preferred).
 
@@ -417,6 +419,8 @@ def _redshift_delete_by_keys(
             copy_config=copy_config,
             s3_client=s3_client,
             job_id=job_id,
+            dest_types=dest_types,
+            stage_format=stage_format,
         )
     except ValueError:
         raise
@@ -582,6 +586,8 @@ def _redshift_merge_upsert(
     copy_config: Any | None = None,
     s3_client: Any | None = None,
     job_id: str = "",
+    dest_types: dict[str, str] | None = None,
+    stage_format: str = "tsv",
 ) -> list[tuple] | list[list]:
     """Apply batch via native Redshift MERGE; return [] (nothing left to INSERT)."""
     to_write = _redshift_filter_stale_lsn_rows(
@@ -627,6 +633,8 @@ def _redshift_merge_upsert(
             config=copy_config,
             s3_client=s3_client,
             job_id=job_id,
+            dest_types=dest_types,
+            stage_format=stage_format,
         )
     else:
         cursor.executemany(insert_sql, rows_out)
@@ -1510,10 +1518,16 @@ def write_mapped_rows(
     )
     redshift_copy_cfg = None
     redshift_copy_warning = ""
+    redshift_stage_format = "tsv"
     if engine in {"redshift", "amazon_redshift", "redshift_serverless"}:
-        from connectors.redshift_copy import resolve_redshift_copy_config
+        from connectors.redshift_copy import (
+            resolve_redshift_copy_config,
+            resolve_redshift_stage_format,
+            should_use_redshift_s3_copy_for_insert,
+        )
 
         extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+        redshift_stage_format = resolve_redshift_stage_format(extra)
         try:
             redshift_copy_cfg = resolve_redshift_copy_config(extra)
         except ValueError as exc:
@@ -1532,11 +1546,12 @@ def write_mapped_rows(
                 "iam_role are set; this load uses the PostgreSQL-wire insert path."
             )
             transform_errors.append(redshift_copy_warning)
-    use_redshift_s3_copy = (
-        redshift_copy_cfg is not None
-        and write_mode == "insert"
-        and not conflict_columns
-    )
+    use_redshift_s3_copy = should_use_redshift_s3_copy_for_insert(
+        copy_config=redshift_copy_cfg,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+        row_count=total,
+    ) if engine in {"redshift", "amazon_redshift", "redshift_serverless"} else False
     load_method = (
         "s3_copy" if use_redshift_s3_copy else ("copy" if use_copy else "insert")
     )
@@ -2250,6 +2265,8 @@ def write_mapped_rows(
                                 s3_client=_kwargs.get("s3_client"),
                                 job_id=job_id,
                                 chunk_idx=chunk_idx,
+                                dest_types=dest_types if isinstance(dest_types, dict) else None,
+                                stage_format=redshift_stage_format,
                             )
                         elif use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)
@@ -2293,6 +2310,8 @@ def write_mapped_rows(
                                     copy_config=redshift_copy_cfg,
                                     s3_client=_kwargs.get("s3_client"),
                                     job_id=job_id,
+                                    dest_types=dest_types if isinstance(dest_types, dict) else None,
+                                    stage_format=redshift_stage_format,
                                 )
                                 rows_skipped += max(0, len(batch) - len(write_batch))
                             elif (

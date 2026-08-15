@@ -983,6 +983,7 @@ def _execute_preflight_parity_kwargs(
         "contract_primary_key": contract_pk,
         "stream_contracts": stream_contracts,
         "privilege_probe": privilege_probe or None,
+        "redshift_staging_probe": dest_meta.get("redshift_staging_probe") or None,
         "destination_can_create": bool(can_create),
         "destination_can_write": bool(can_write),
         # Always owned here — never also pass at the call site with **parity.

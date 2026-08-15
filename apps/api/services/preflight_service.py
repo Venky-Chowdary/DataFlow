@@ -626,6 +626,7 @@ def run_file_preflight(
     destination_can_create: bool | None = None,
     destination_can_write: bool | None = None,
     privilege_probe: dict[str, Any] | None = None,
+    redshift_staging_probe: dict[str, Any] | None = None,
     available_staging_bytes: int | None = None,
     destination_db_type: str = "postgresql",
     source_connector_id: str = "",
@@ -1049,6 +1050,7 @@ def run_file_preflight(
             table_exists=dest_table_exists,
             error=destination_error,
             privilege_probe=privilege_probe,
+            redshift_staging_probe=redshift_staging_probe,
         ),
         mappings=plan_mappings,
         dry_run_passed=False,
@@ -1433,6 +1435,7 @@ def run_file_preflight(
         "validation_findings": [],
         "date_locale": date_locale,
         "privilege_probe": privilege_probe or {},
+        "redshift_staging_probe": redshift_staging_probe or {},
         "recommended_batch_size": min(
             recommended_batch_size(_src_fmt),
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
@@ -2402,4 +2405,12 @@ def inspect_destination_for_preflight(
                 logger.debug(
                     "mongodb auth_source persistence failed: %s", exc, exc_info=exc
                 )
+    db = (out.get("db_type") or "").lower()
+    if db in {"redshift", "amazon_redshift", "redshift_serverless"} and out.get("connected"):
+        from connectors.redshift_copy import probe_redshift_staging
+
+        probe_extra: dict[str, Any] = {}
+        probe_extra.update(dict(getattr(endpoint, "extra", None) or {}))
+        probe_extra.update(dict(dest_extra or {}))
+        out["redshift_staging_probe"] = probe_redshift_staging(probe_extra)
     return out

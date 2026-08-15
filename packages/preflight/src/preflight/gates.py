@@ -146,6 +146,11 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     dest = ctx.plan.destination
     probe = dict(dest.privilege_probe or {}) if isinstance(getattr(dest, "privilege_probe", None), dict) else {}
+    staging = (
+        dict(dest.redshift_staging_probe or {})
+        if isinstance(getattr(dest, "redshift_staging_probe", None), dict)
+        else {}
+    )
     details: dict = {
         "table_exists": dest.table_exists,
         "can_create_table": dest.can_create_table,
@@ -153,6 +158,8 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     }
     if probe:
         details["privilege_probe"] = probe
+    if staging:
+        details["redshift_staging_probe"] = staging
 
     if dest.error:
         return _block(
@@ -237,6 +244,16 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
             _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
         )
 
+    staging_status = str(staging.get("status") or "").strip()
+    if staging_status == "denied":
+        detail = str(staging.get("detail") or "Redshift COPY staging bucket denied").strip()
+        return _block(
+            GateId.G2_DESTINATION,
+            detail,
+            start,
+            _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
+        )
+
     create_note = ""
     if dest.table_exists is False and dest.can_create_table:
         create_note = "; CREATE table allowed"
@@ -245,17 +262,25 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     elif dest.table_exists is None:
         create_note = "; table existence unknown"
 
+    staging_note = ""
+    if staging_status == "ok":
+        staging_note = "; COPY staging bucket writable"
+    elif staging_status == "not_configured":
+        staging_note = "; COPY FROM S3 not configured (PostgreSQL-wire insert remains valid)"
+    elif staging_status == "unavailable" and staging.get("detail"):
+        staging_note = f"; COPY staging probe unavailable — {staging['detail']}"
+
     method = str(probe.get("method") or "").strip()
     if status == "unavailable" and probe.get("detail"):
         msg = (
-            f"Destination reachable with write access{create_note} "
+            f"Destination reachable with write access{create_note}{staging_note} "
             f"(privilege catalog unavailable — {probe['detail']}; "
             "append/upsert to existing table only)"
         )
     elif method:
-        msg = f"Destination writable via {method}{create_note}"
+        msg = f"Destination writable via {method}{create_note}{staging_note}"
     else:
-        msg = f"Destination reachable with write access{create_note}"
+        msg = f"Destination reachable with write access{create_note}{staging_note}"
     return _pass(
         GateId.G2_DESTINATION,
         msg,

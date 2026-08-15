@@ -1586,7 +1586,7 @@ def _write_destination_database(
         from connectors.postgresql_writer import write_mapped_rows
 
         common["schema"] = schema_from_cfg(db_type, cfg)
-        if db_type == "redshift":
+        if db_type in {"redshift", "amazon_redshift", "redshift_serverless"}:
             common["port"] = cfg["port"] or 5439
             common["dest_extra"] = dict(cfg.get("extra") or {})
         for col in columns:

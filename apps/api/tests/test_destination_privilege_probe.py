@@ -742,3 +742,31 @@ def test_g2_pass_includes_probe_method_in_message():
     assert g2["status"] == "pass"
     assert "SHOW GRANTS" in g2["message"]
     assert g2["details"]["privilege_probe"]["method"] == "SHOW GRANTS"
+
+
+def test_g2_blocks_redshift_staging_denied_via_run_file_preflight():
+    from services.preflight_service import run_file_preflight
+
+    pf = run_file_preflight(
+        columns=["id"],
+        column_types={"id": "INTEGER"},
+        row_count=1,
+        mappings=[{"source": "id", "target": "id", "confidence": 0.99}],
+        destination_connected=True,
+        destination_can_write=True,
+        destination_can_create=True,
+        destination_table_exists=True,
+        destination_db_type="redshift",
+        sample_rows=[{"id": 1}],
+        redshift_staging_probe={
+            "status": "denied",
+            "method": "head_bucket",
+            "engine": "redshift",
+            "detail": "Staging bucket `dw-stage` is not writable for COPY FROM S3",
+            "bucket": "dw-stage",
+        },
+    )
+    g2 = next(g for g in pf["gates"] if g["id"] == "g2_destination")
+    assert g2["status"] == "block"
+    assert "staging" in g2["message"].lower()
+    assert pf["redshift_staging_probe"]["status"] == "denied"

@@ -96,17 +96,23 @@ function issueTextsFromDetails(details?: Record<string, unknown> | null): string
   if (Array.isArray(issues)) {
     return issues.map((e) => (typeof e === "string" ? e : String((e as { message?: string })?.message ?? e))).filter(Boolean).slice(0, 12);
   }
-  // Privilege probe honesty on G2
+  // Privilege / Redshift staging probe honesty on G2
   const probe = details.privilege_probe;
+  const staging = details.redshift_staging_probe;
+  const lines: string[] = [];
   if (probe && typeof probe === "object") {
     const p = probe as Record<string, unknown>;
-    const lines: string[] = [];
     if (p.method) lines.push(`Probe: ${String(p.method)}`);
     if (p.status) lines.push(`Privilege status: ${String(p.status)}`);
     if (p.engine) lines.push(`Engine: ${String(p.engine)}`);
     if (p.detail && String(p.status) !== "ok") lines.push(String(p.detail));
-    if (lines.length) return lines.slice(0, 8);
   }
+  if (staging && typeof staging === "object") {
+    const s = staging as Record<string, unknown>;
+    if (s.status) lines.push(`COPY staging: ${String(s.status)}`);
+    if (s.detail && String(s.status) !== "ok") lines.push(String(s.detail));
+  }
+  if (lines.length) return lines.slice(0, 8);
   // G4 / G6 structured detail keys that are not named "issues"
   const extras: string[] = [];
   for (const key of ["low_confidence", "ambiguous_mappings", "unmapped", "sample_duplicates", "encoding_issues"] as const) {
@@ -150,6 +156,18 @@ function privilegeProbeFromDetails(details?: Record<string, unknown> | null): Pr
         : p.can_create_table == null
           ? null
           : Boolean(p.can_create_table),
+  };
+}
+
+function stagingProbeFromDetails(details?: Record<string, unknown> | null): PrivilegeProbeMeta | null {
+  const raw = details?.redshift_staging_probe;
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  return {
+    status: p.status != null ? String(p.status) : undefined,
+    method: p.method != null ? String(p.method) : undefined,
+    engine: p.engine != null ? String(p.engine) : undefined,
+    detail: p.detail != null ? String(p.detail) : undefined,
   };
 }
 
@@ -778,17 +796,21 @@ export function ValidateDashboard({
   const isPrivilegeBlock = Boolean(
     preflight?.blockers.some((b) => {
       const probe = privilegeProbeFromDetails(b.details);
+      const staging = stagingProbeFromDetails(b.details);
       return (
         (b.id === "g2_destination" || /g2_destination/i.test(b.id || ""))
         && (probe?.status === "denied"
-          || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT/i.test(b.message || ""))
+          || staging?.status === "denied"
+          || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT|staging bucket/i.test(b.message || ""))
       );
     })
     || preflight?.gates.some((g) => {
       if (g.id !== "g2_destination" || g.status !== "block") return false;
       const probe = privilegeProbeFromDetails(g.details);
+      const staging = stagingProbeFromDetails(g.details);
       return probe?.status === "denied"
-        || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT/i.test(g.message || "");
+        || staging?.status === "denied"
+        || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT|staging bucket/i.test(g.message || "");
     }),
   );
   const isConnectionBlock = Boolean(
@@ -1176,16 +1198,22 @@ export function ValidateDashboard({
         };
       }
       const privilegeProbe = privilegeProbeFromDetails(gate.details);
+      const stagingProbe = stagingProbeFromDetails(gate.details);
       const issues = gate.status === "block" ? issueTextsFromDetails(gate.details) : [];
       const evidenceScope = (gate.details?.evidence_scope
         && typeof gate.details.evidence_scope === "object")
         ? (gate.details.evidence_scope as Record<string, unknown>)
         : null;
       // On pass, still surface probe method/status as non-blocking issues for G2 honesty.
-      if (gate.status === "pass" && privilegeProbe?.method && meta.key === "g2_destination") {
-        const soft: string[] = [`Probe: ${privilegeProbe.method}`];
-        if (privilegeProbe.status === "unavailable" && privilegeProbe.detail) {
+      if (gate.status === "pass" && (privilegeProbe?.method || stagingProbe?.status) && meta.key === "g2_destination") {
+        const soft: string[] = [];
+        if (privilegeProbe?.method) soft.push(`Probe: ${privilegeProbe.method}`);
+        if (privilegeProbe?.status === "unavailable" && privilegeProbe.detail) {
           soft.push(privilegeProbe.detail);
+        }
+        if (stagingProbe?.status) soft.push(`COPY staging: ${stagingProbe.status}`);
+        if (stagingProbe?.status && stagingProbe.status !== "ok" && stagingProbe.detail) {
+          soft.push(stagingProbe.detail);
         }
         return {
           status: gate.status,
