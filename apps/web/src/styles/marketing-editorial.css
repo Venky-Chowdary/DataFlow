@@ -8583,8 +8583,14 @@
   .lp-sales-hero--split .lp-sales-hero-inner,
   .lp-sales-honesty,
   .lp-mkt-legal-layout,
-  .lp-footer--compact .lp-footer-grid {
+  .lp-footer--compact .lp-footer-grid,
+  .lp-sales-compare header {
     grid-template-columns: 1fr !important;
+  }
+
+  .lp-sales-compare header p:last-of-type {
+    grid-column: 1 !important;
+    grid-row: auto !important;
   }
 
   .lp-sales-hero-slas {
@@ -8621,7 +8627,6 @@
   padding: 48px 0 !important;
 }
 
-.lp-sales-compare header,
 .lp-sales-faq h2,
 .lp-pricing-v2-compare-head,
 .lp-ent-section-head,
@@ -8629,6 +8634,32 @@
 .lp-sec-section-head,
 .lp-int-section-head {
   max-width: 40rem;
+}
+
+.lp-sales-compare header {
+  max-width: none !important;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+  gap: 8px 40px;
+  align-items: end;
+  margin-bottom: 4px;
+}
+
+.lp-sales-compare header .lp-sales-kicker {
+  grid-column: 1;
+}
+
+.lp-sales-compare header h2 {
+  grid-column: 1;
+  margin: 0;
+}
+
+.lp-sales-compare header p:last-of-type {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: end;
+  max-width: none !important;
+  margin: 0 !important;
 }
 
 .lp-sales-table-wrap,
