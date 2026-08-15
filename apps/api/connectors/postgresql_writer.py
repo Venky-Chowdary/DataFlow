@@ -376,6 +376,9 @@ def _redshift_delete_by_keys(
     batch: list[tuple] | list[list],
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
+    copy_config: Any | None = None,
+    s3_client: Any | None = None,
+    job_id: str = "",
 ) -> list[tuple] | list[list]:
     """Upsert matching keys on Redshift (MERGE preferred).
 
@@ -411,6 +414,9 @@ def _redshift_delete_by_keys(
             target_cols=target_cols,
             conflict_cols=conflict_cols,
             batch=batch,
+            copy_config=copy_config,
+            s3_client=s3_client,
+            job_id=job_id,
         )
     except ValueError:
         raise
@@ -573,6 +579,9 @@ def _redshift_merge_upsert(
     target_cols: list[str],
     conflict_cols: list[str],
     batch: list[tuple] | list[list],
+    copy_config: Any | None = None,
+    s3_client: Any | None = None,
+    job_id: str = "",
 ) -> list[tuple] | list[list]:
     """Apply batch via native Redshift MERGE; return [] (nothing left to INSERT)."""
     to_write = _redshift_filter_stale_lsn_rows(
@@ -606,7 +615,21 @@ def _redshift_merge_upsert(
         rows_out.append(
             tuple(row[i] if i < len(row) else None for i in range(len(target_cols)))
         )
-    cursor.executemany(insert_sql, rows_out)
+    if copy_config is not None:
+        from connectors.redshift_copy import copy_redshift_rows_from_s3
+
+        copy_redshift_rows_from_s3(
+            cursor,
+            schema="",
+            table=stage,
+            columns=target_cols,
+            rows=rows_out,
+            config=copy_config,
+            s3_client=s3_client,
+            job_id=job_id,
+        )
+    else:
+        cursor.executemany(insert_sql, rows_out)
 
     # Redshift MERGE: target without alias; source aliased as s.
     # NULL-safe ON (Airbyte destination-redshift class). Lattice is dest-owned
@@ -1485,6 +1508,38 @@ def write_mapped_rows(
         and not any(t == "BYTEA" for t in target_types)
         and port != 5439
     )
+    redshift_copy_cfg = None
+    redshift_copy_warning = ""
+    if engine in {"redshift", "amazon_redshift", "redshift_serverless"}:
+        from connectors.redshift_copy import resolve_redshift_copy_config
+
+        extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+        try:
+            redshift_copy_cfg = resolve_redshift_copy_config(extra)
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema,
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+            )
+        if redshift_copy_cfg is None:
+            redshift_copy_warning = (
+                "Redshift bulk COPY FROM S3 is available when staging_bucket and "
+                "iam_role are set; this load uses the PostgreSQL-wire insert path."
+            )
+            transform_errors.append(redshift_copy_warning)
+    use_redshift_s3_copy = (
+        redshift_copy_cfg is not None
+        and write_mode == "insert"
+        and not conflict_columns
+    )
+    load_method = (
+        "s3_copy" if use_redshift_s3_copy else ("copy" if use_copy else "insert")
+    )
     job_id = str(_kwargs.get("job_id") or "").strip()
     write_batch_key = str(_kwargs.get("write_batch_key") or "").strip() or build_write_batch_key(
         table_name=table_name,
@@ -2182,7 +2237,21 @@ def write_mapped_rows(
                                 # reconcile checksum disagree with the table.
                                 chunk_written = already
                                 break
-                        if use_copy:
+                        if use_redshift_s3_copy:
+                            from connectors.redshift_copy import copy_redshift_rows_from_s3
+
+                            copy_redshift_rows_from_s3(
+                                cur,
+                                schema=schema,
+                                table=table_name,
+                                columns=target_cols,
+                                rows=batch,
+                                config=redshift_copy_cfg,
+                                s3_client=_kwargs.get("s3_client"),
+                                job_id=job_id,
+                                chunk_idx=chunk_idx,
+                            )
+                        elif use_copy:
                             _copy_rows(cur, schema, table_name, target_cols, batch)
                         else:
                             write_batch = batch
@@ -2221,6 +2290,9 @@ def write_mapped_rows(
                                     batch=batch,
                                     rejected_details=rejected_details,
                                     policy=policy,
+                                    copy_config=redshift_copy_cfg,
+                                    s3_client=_kwargs.get("s3_client"),
+                                    job_id=job_id,
                                 )
                                 rows_skipped += max(0, len(batch) - len(write_batch))
                             elif (
@@ -2265,7 +2337,7 @@ def write_mapped_rows(
                                     _execute_values_insert(
                                         cur, insert, [tuple(r) for r in write_batch]
                                     )
-                        landed = len(batch if use_copy else write_batch)
+                        landed = len(batch if (use_copy or use_redshift_s3_copy) else write_batch)
                         if use_ledger:
                             mark_raw_chunk_committed(
                                 cur,
@@ -2438,7 +2510,7 @@ def write_mapped_rows(
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 warnings=transform_errors,
-                load_method="copy" if use_copy else "insert",
+                load_method=load_method,
             )
         _final_abort = reject_on_strict_policy(policy, rejected_details, "PostgreSQL")
         if _final_abort:
@@ -2455,7 +2527,7 @@ def write_mapped_rows(
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 warnings=transform_errors,
-                load_method="copy" if use_copy else "insert",
+                load_method=load_method,
             )
         from connectors.writer_common import gate8_writer_meta
 
@@ -2488,7 +2560,7 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
-            load_method="copy" if use_copy else "insert",
+            load_method=load_method,
             meta=meta_out,
         )
     except Exception as exc:

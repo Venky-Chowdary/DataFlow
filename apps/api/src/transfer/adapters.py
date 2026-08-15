@@ -1588,6 +1588,7 @@ def _write_destination_database(
         common["schema"] = schema_from_cfg(db_type, cfg)
         if db_type == "redshift":
             common["port"] = cfg["port"] or 5439
+            common["dest_extra"] = dict(cfg.get("extra") or {})
         for col in columns:
             ddl_log.append(
                 f"{db_type.upper()} COLUMN {col} {ddl_type(db_type, schema.get(col, 'string'))}"
