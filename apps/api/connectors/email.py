@@ -12,19 +12,15 @@ from email.mime.text import MIMEText
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from connectors.object_store_common import (
-    resolve_object_store_write_dest_types,
-    serialize_object_store_export,
+from connectors.object_store_common import resolve_object_store_write_dest_types
+from connectors.object_store_materialize import (
+    materialize_object_store_export,
+    resolve_materialize_batch,
 )
 from connectors.object_store_multipart import resolve_spill_max
-from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
+from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
-    _rejected_row_count,
-    apply_write_quarantine_matrix,
-    build_mapped_rows_with_details,
-    gate8_writer_meta,
     resolve_target_columns,
-    row_checksum,
     transform_error_policy,
 )
 
@@ -220,10 +216,11 @@ def write_mapped_rows(
 ) -> WriteResult:
     """Send mapped rows as an email attachment via the shared object-store spool.
 
-    JSON/CSV/TSV/JSONL/Parquet serialize one record at a time into the same
-    spool S3/GCS/ADLS/SFTP use. SMTP still materializes the MIME payload
-    (base64 + ``msg.as_string()``) — this is not SMTP streaming and not
-    exactly-once. ``mapped_rows`` stay in RAM.
+    JSON/CSV/TSV/JSONL/Parquet map+quarantine+serialize in bounded bundles
+    onto the same spool S3/GCS/ADLS/SFTP use. SMTP still materializes the
+    MIME payload (base64 + ``msg.as_string()``) — this is not SMTP streaming
+    and not exactly-once. Accepted mapped_rows are not retained; ``data_rows``
+    stay in RAM.
     """
     cfg = _parse_email_config(
         connection_string=connection_string,
@@ -287,62 +284,25 @@ def write_mapped_rows(
             error=cov_err,
         )
     policy = transform_error_policy(error_policy)
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        error_policy=policy,
-        preserve_case=True,
-        dest_kind="email",
-        destination_pk_columns=None,
-    )
-    # Typed carriers still apply — refuse silent invent into the attachment
-    # (parity with S3/SFTP). SMTP has no independent Gate-8 read-back; stamp
-    # reconcile_sample so sample-verified honesty can still fire.
-    tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
-    mapped_rows = apply_write_quarantine_matrix(
-        mapped_rows,
-        target_cols,
-        tgt_types,
-        rejected_details,
-        policy,
-        dialect_label="Email",
-        mappings=mappings,
-    )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "Email", transform_errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table_name,
-            target_schema=cfg.host,
-            checksum="",
-            chunks_completed=0,
-            error=_map_abort,
-            rejected_details=rejected_details,
-            rejected_rows=len(rejected_details),
-        )
-
-    rejected_rows = max(
-        _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
-        len(data_rows) - len(mapped_rows),
-    )
-
     extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
     fmt = (cfg.format or "csv").strip().lower()
     if fmt not in _EMAIL_FORMATS:
         fmt = "csv"
     filename = _EMAIL_FILENAMES[fmt]
     try:
-        export = serialize_object_store_export(
+        mat = materialize_object_store_export(
             key=filename,
-            mapped_rows=mapped_rows,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
             target_cols=target_cols,
+            column_types=column_types,
             dest_types=dest_types,
+            error_policy=policy,
+            dest_kind="email",
+            dialect_label="Email",
             spill_max_size=resolve_spill_max(extra),
+            batch_size=resolve_materialize_batch(extra),
         )
     except Exception as exc:
         return WriteResult(
@@ -353,9 +313,24 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=f"Email serialize failed: {exc}",
-            rejected_details=list(rejected_details),
         )
-    written = len(mapped_rows)
+    transform_errors = mat.transform_errors
+    rejected_details = mat.rejected_details
+    if mat.abort_error:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=cfg.host,
+            checksum="",
+            chunks_completed=0,
+            error=mat.abort_error,
+            rejected_details=rejected_details,
+            rejected_rows=mat.rejected_rows,
+        )
+    export = mat.export
+    written = mat.rows_written
+    rejected_rows = mat.rejected_rows
 
     try:
         # SMTP still materializes the MIME payload (base64 of the attachment
@@ -402,12 +377,12 @@ def write_mapped_rows(
             rows_written=written,
             table_name=filename,
             target_schema=cfg.host,
-            checksum=row_checksum(mapped_rows, target_cols),
+            checksum=mat.checksum,
             chunks_completed=1,
             warnings=transform_errors[:10],
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
-            meta=gate8_writer_meta(mapped_rows, target_cols),
+            meta=mat.meta,
         )
     except Exception as exc:
         return WriteResult(

@@ -11,7 +11,10 @@ from connectors.object_store_common import (
     purge_object_store_parts,
     resolve_object_store_write_dest_types,
     resolve_object_write_layout,
-    serialize_object_store_export,
+)
+from connectors.object_store_materialize import (
+    materialize_object_store_export,
+    resolve_materialize_batch,
 )
 from connectors.object_store_multipart import (
     land_object_store_export,
@@ -23,11 +26,7 @@ from connectors.writer_common import (
 )
 from connectors.writer_common import (
     _coerced_null_row_count,
-    _rejected_row_count,
-    apply_write_quarantine_matrix,
-    build_mapped_rows_with_details,
     resolve_target_columns,
-    row_checksum,
     transform_error_policy,
 )
 
@@ -117,48 +116,22 @@ def write_mapped_rows(
             error=cov_err,
         )
     policy = transform_error_policy(error_policy)
-    mapped_rows, errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        error_policy=policy,
-        preserve_case=True,
-        dest_kind="adls",
-        destination_pk_columns=None,
-    )
-    tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
-    mapped_rows = apply_write_quarantine_matrix(
-        mapped_rows, target_cols, tgt_types, rejected_details, policy, dialect_label="ADLS",
-        mappings=mappings,
-    )
-    from connectors.writer_common import reject_on_strict_policy
-
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "ADLS", errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=key,
-            target_schema=container,
-            checksum="",
-            chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(errors[:3])}",
-            warnings=errors[:10],
-            rejected_rows=len({d.get("row") for d in rejected_details if d.get("row") is not None}),
-            rejected_details=list(rejected_details),
-        )
-
     extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
     try:
-        export = serialize_object_store_export(
+        mat = materialize_object_store_export(
             key=key,
-            mapped_rows=mapped_rows,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
             target_cols=target_cols,
+            column_types=column_types,
             dest_types=dest_types,
+            error_policy=policy,
+            dest_kind="adls",
+            dialect_label="ADLS",
             spill_max_size=resolve_spill_max(extra),
+            batch_size=resolve_materialize_batch(extra),
+            dest_db_type="adls",
         )
     except Exception as exc:
         return WriteResult(
@@ -169,9 +142,24 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=f"ADLS serialize failed: {exc}",
+        )
+    errors = mat.transform_errors
+    rejected_details = mat.rejected_details
+    if mat.abort_error:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=key,
+            target_schema=container,
+            checksum="",
+            chunks_completed=0,
+            error=mat.abort_error or f"Transform errors: {'; '.join(errors[:3])}",
+            warnings=errors[:10],
+            rejected_rows=mat.rejected_rows,
             rejected_details=list(rejected_details),
         )
-    written = len(mapped_rows)
+    export = mat.export
+    written = mat.rows_written
 
     try:
         client = blob_service_client(cfg)
@@ -227,10 +215,12 @@ def write_mapped_rows(
                 purge_warnings.append(
                     f"ADLS post-promote purge deferred (write committed): {purge_exc}"
                 )
-        checksum = row_checksum(mapped_rows, target_cols, dest_db_type="adls")
+        checksum = mat.checksum
         if on_checkpoint:
             on_checkpoint(1, 1, written)
         warn_out = (errors[:10] + purge_warnings)[:20]
+        from connectors.writer_common import reject_on_strict_policy
+
         _final_abort = reject_on_strict_policy(policy, rejected_details, "ADLS")
         if _final_abort:
             return WriteResult(
@@ -242,10 +232,7 @@ def write_mapped_rows(
                 chunks_completed=1,
                 error=_final_abort,
                 warnings=warn_out,
-                rejected_rows=max(
-                    _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
-                    len(data_rows) - len(mapped_rows),
-                ),
+                rejected_rows=mat.rejected_rows,
                 rejected_details=rejected_details,
             )
         return WriteResult(
@@ -256,10 +243,7 @@ def write_mapped_rows(
             checksum=checksum,
             chunks_completed=1,
             warnings=warn_out,
-            rejected_rows=max(
-                _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
-                len(data_rows) - len(mapped_rows),
-            ),
+            rejected_rows=mat.rejected_rows,
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
         )

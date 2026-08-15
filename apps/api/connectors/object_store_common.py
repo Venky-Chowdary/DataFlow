@@ -478,81 +478,24 @@ def serialize_object_store_export(
 ) -> ObjectStoreExport:
     """Serialize JSON / JSONL / CSV / Parquet into a spool that rolls to disk.
 
-    JSON/JSONL/CSV write one record at a time (no full ``dumps`` of the array).
-    Parquet still builds an Arrow table, then writes that table to the spool
-    instead of holding a second parquet-bytes copy. ``mapped_rows`` stay in RAM
-    — this is not a source-stream spill.
+    Writers that still hold ``mapped_rows`` (tests, Iceberg helpers) go through
+    the same ``ObjectStoreEncoder`` as chunked materialize. Prefer
+    ``materialize_object_store_export`` on the S3/GCS/ADLS/SFTP/Email path so
+    the accepted-row list is never retained. ``data_rows`` stay in RAM.
     """
-    import csv
-    import io
-    import json
-    import tempfile
+    from connectors.object_store_materialize import ObjectStoreEncoder
 
-    from connectors.writer_common import iter_mapped_json_records
-    from services.value_serializer import cell_to_string, json_default
-
-    dest_types = dest_types or {}
-    key_l = (key or "").lower()
-    spool = tempfile.SpooledTemporaryFile(max_size=max(1, int(spill_max_size)), mode="w+b")
+    encoder = ObjectStoreEncoder(
+        key=key,
+        target_cols=target_cols,
+        dest_types=dest_types,
+        spill_max_size=spill_max_size,
+    )
     try:
-        if key_l.endswith(".parquet"):
-            from services.arrow_write import write_mapped_rows_parquet
-
-            content_type = write_mapped_rows_parquet(
-                mapped_rows, target_cols, dest_types, spool
-            )
-        else:
-            records = iter_mapped_json_records(mapped_rows, target_cols, dest_types)
-            if key_l.endswith(".csv") or key_l.endswith(".tsv"):
-                delim = "\t" if key_l.endswith(".tsv") else ","
-                text = io.TextIOWrapper(spool, encoding="utf-8", newline="", write_through=True)
-                try:
-                    writer = csv.DictWriter(
-                        text,
-                        fieldnames=target_cols,
-                        delimiter=delim,
-                        extrasaction="ignore",
-                    )
-                    writer.writeheader()
-                    for record in records:
-                        writer.writerow({k: cell_to_string(v) for k, v in record.items()})
-                    text.flush()
-                finally:
-                    text.detach()
-                content_type = (
-                    "text/tab-separated-values" if delim == "\t" else "text/csv"
-                )
-            elif key_l.endswith(".jsonl"):
-                first = True
-                for record in records:
-                    if not first:
-                        spool.write(b"\n")
-                    spool.write(
-                        json.dumps(
-                            record,
-                            default=json_default,
-                            ensure_ascii=False,
-                            allow_nan=False,
-                        ).encode("utf-8")
-                    )
-                    first = False
-                content_type = "application/x-ndjson"
-            else:
-                _write_json_array(spool, records)
-                content_type = "application/json"
-        size = int(spool.tell())
-        spool.seek(0)
-        return ObjectStoreExport(
-            content_type=content_type,
-            size=size,
-            spilled=size > max(1, int(spill_max_size)),
-            _spool=spool,
-        )
+        encoder.append_rows(mapped_rows)
+        return encoder.finish()
     except Exception:
-        try:
-            spool.close()
-        except Exception:
-            pass
+        encoder.abort()
         raise
 
 

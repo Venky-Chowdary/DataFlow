@@ -1340,6 +1340,9 @@ def build_mapped_rows_with_details(
     stream_contracts: list[dict[str, Any]] | None = None,
     destination_column_nullability: dict[str, bool] | None = None,
     empty_cells_as_null: bool = False,
+    row_number_start: int = 1,
+    accepted_source_rows: list[int] | None = None,
+    struct_already_materialized: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
     """Returns mapped rows, error messages, and structured rejected-row details.
 
@@ -1355,7 +1358,11 @@ def build_mapped_rows_with_details(
         error_policy, allow_coerce_null=allow_job_coerce_null
     )
     # Honor Map STRUCT policy (JSON blob vs flatten top-level keys) before bind.
-    headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
+    # Object-store chunked materialize expands once on the full engine batch,
+    # then maps slices — re-flattening each slice would miss keys that only
+    # appear after the first 50 rows of that slice.
+    if not struct_already_materialized:
+        headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
     source_indices = {h: i for i, h in enumerate(headers)}
     # Case-insensitive fallback — Map/header drift must not invent NULL wipes.
     source_indices_ci = {str(h).lower(): i for i, h in enumerate(headers)}
@@ -1418,7 +1425,8 @@ def build_mapped_rows_with_details(
     )
 
     mapped: list[tuple] = []
-    for row_number, raw in enumerate(data_rows, start=1):
+    start_no = max(1, int(row_number_start or 1))
+    for row_number, raw in enumerate(data_rows, start=start_no):
         out = [None] * len(sanitized_target_cols)
         row_has_error = False
         # ok | fail | stop_table | abort_transaction | retry_then_fail |
@@ -1652,6 +1660,8 @@ def build_mapped_rows_with_details(
                 for c in out
             )
         )
+        if accepted_source_rows is not None:
+            accepted_source_rows.append(row_number)
 
     return mapped, errors, rejected_details
 
@@ -4043,6 +4053,7 @@ def apply_write_quarantine_matrix(
     dialect_label: str = "destination",
     mappings: list[dict[str, Any]] | None = None,
     dest_db: str = "",
+    source_row_numbers: list[int] | None = None,
 ) -> list[tuple]:
     """Shared fail-closed quarantine matrix for every typed write path.
 
@@ -4053,7 +4064,40 @@ def apply_write_quarantine_matrix(
 
     When ``mappings`` is provided, holdouts dual-stamp ``source_values`` for
     quarantine replay (Wave 34).
+
+    ``source_row_numbers`` (object-store batch materialize) aligns each mapped
+    tuple with its 1-based source row. The matrix still runs the same 12-pass
+    SSOT, one source row at a time, so holdout ``row`` stamps stay global
+    across batches. SQL writers leave this ``None`` and keep the vectorized
+    scan.
     """
+    if source_row_numbers is not None:
+        if len(source_row_numbers) != len(mapped_rows):
+            raise ValueError(
+                "source_row_numbers length must match mapped_rows "
+                "(object-store batch materialize)"
+            )
+        kept: list[tuple] = []
+        for row, src_row in zip(mapped_rows, source_row_numbers):
+            n0 = len(rejected_details)
+            one = apply_write_quarantine_matrix(
+                [row],
+                target_cols,
+                target_types,
+                rejected_details,
+                policy,
+                dialect_label=dialect_label,
+                mappings=mappings,
+                dest_db=dest_db,
+                source_row_numbers=None,
+            )
+            src = int(src_row)
+            for detail in rejected_details[n0:]:
+                if detail.get("row") == 1:
+                    detail["row"] = src
+            kept.extend(one)
+        return kept
+
     token = _active_quarantine_mappings.set(mappings)
     try:
         label = (dialect_label or "destination").strip() or "destination"

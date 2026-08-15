@@ -9,9 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from connectors.object_store_common import (
-    resolve_object_store_write_dest_types,
-    serialize_object_store_export,
+from connectors.object_store_common import resolve_object_store_write_dest_types
+from connectors.object_store_materialize import (
+    materialize_object_store_export,
+    resolve_materialize_batch,
 )
 from connectors.object_store_multipart import resolve_multipart_limits, resolve_spill_max
 from connectors.sftp_common import (
@@ -23,12 +24,7 @@ from connectors.sftp_common import (
 from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
 from connectors.writer_common import (
     _coerced_null_row_count,
-    _rejected_row_count,
-    apply_write_quarantine_matrix,
-    build_mapped_rows_with_details,
-    gate8_writer_meta,
     resolve_target_columns,
-    row_checksum,
     transform_error_policy,
 )
 
@@ -115,7 +111,11 @@ def write_mapped_rows(
     on_checkpoint: Any | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
-    """Upload mapped rows as a CSV/JSON file to an SFTP server."""
+    """Upload mapped rows as a CSV/JSON/Parquet file to an SFTP server.
+
+    Map+quarantine+serialize uses the shared object-store bundle algorithm.
+    Accepted mapped_rows are not retained. Still at-least-once.
+    """
     cfg = parse_sftp_config(
         connection_string=connection_string,
         host=host,
@@ -166,45 +166,6 @@ def write_mapped_rows(
             error=cov_err,
         )
     policy = transform_error_policy(_kwargs.get("error_policy"))
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        error_policy=policy,
-        preserve_case=True,
-        dest_kind="sftp",
-        destination_pk_columns=None,
-    )
-    # Same object-store honesty as S3/GCS/ADLS — typed DECIMAL/BINARY/VARCHAR(n)
-    # must quarantine before CSV/JSON serialize (Airbyte SFTP-JSON has no Gate-8).
-    tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
-    mapped_rows = apply_write_quarantine_matrix(
-        mapped_rows,
-        target_cols,
-        tgt_types,
-        rejected_details,
-        policy,
-        dialect_label="SFTP",
-        mappings=mappings,
-    )
-    # FAIL_JOB / strict abort after matrix — never write when matrix added abort-class rejects.
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "SFTP", transform_errors)
-    if _map_abort:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table_name,
-            target_schema=cfg.host,
-            checksum="",
-            chunks_completed=0,
-            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_details=list(rejected_details),
-            rejected_rows=len(rejected_details),
-        )
-
     directory, filename = split_remote_path(cfg.path)
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
     if ext in ("csv", "jsonl", "json", "tsv", "parquet"):
@@ -214,24 +175,27 @@ def write_mapped_rows(
         if not filename.endswith(".csv"):
             filename = f"{filename.rstrip('/')}.csv"
             cfg.path = f"{directory.rstrip('/')}/{filename}" if directory else f"/{filename}"
-
-    rejected_rows = max(
-        _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
-        len(data_rows) - len(mapped_rows),
-    )
-
     extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
     spill_max = resolve_spill_max(extra)
     _, stream_chunk = resolve_multipart_limits(extra)
     if extra.get("sftp_stream_chunk"):
         stream_chunk = max(1, int(extra["sftp_stream_chunk"]))
+    serialize_key = filename if filename.lower().endswith(f".{fmt}") else f"export.{fmt}"
     try:
-        export = serialize_object_store_export(
-            key=filename if filename.lower().endswith(f".{fmt}") else f"export.{fmt}",
-            mapped_rows=mapped_rows,
+        mat = materialize_object_store_export(
+            key=serialize_key,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
             target_cols=target_cols,
+            column_types=column_types,
             dest_types=dest_types,
+            error_policy=policy,
+            dest_kind="sftp",
+            dialect_label="SFTP",
             spill_max_size=spill_max,
+            batch_size=resolve_materialize_batch(extra),
+            dest_db_type="sftp",
         )
     except Exception as exc:
         return WriteResult(
@@ -242,9 +206,24 @@ def write_mapped_rows(
             checksum="",
             chunks_completed=0,
             error=f"SFTP serialize failed: {exc}",
-            rejected_details=list(rejected_details),
         )
-    written = len(mapped_rows)
+    transform_errors = mat.transform_errors
+    rejected_details = mat.rejected_details
+    if mat.abort_error:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=cfg.host,
+            checksum="",
+            chunks_completed=0,
+            error=mat.abort_error or f"Transform errors: {'; '.join(transform_errors[:3])}",
+            rejected_details=list(rejected_details),
+            rejected_rows=mat.rejected_rows,
+        )
+    export = mat.export
+    written = mat.rows_written
+    rejected_rows = mat.rejected_rows
 
     try:
         transport, sftp = connect_sftp(cfg)
@@ -303,15 +282,13 @@ def write_mapped_rows(
             rows_written=written,
             table_name=filename,
             target_schema=cfg.host,
-            checksum=row_checksum(
-                mapped_rows, target_cols, dest_db_type="sftp"
-            ),
+            checksum=mat.checksum,
             chunks_completed=1,
             warnings=transform_errors[:10],
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
-            meta=gate8_writer_meta(mapped_rows, target_cols),
+            meta=mat.meta,
         )
     except Exception as exc:
         return WriteResult(

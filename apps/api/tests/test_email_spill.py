@@ -19,10 +19,8 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from connectors import email as email_connector  # noqa: E402
-from connectors.object_store_common import (  # noqa: E402
-    serialize_object_store_body,
-    serialize_object_store_export,
-)
+from connectors.object_store_common import serialize_object_store_body  # noqa: E402
+from connectors.object_store_materialize import ObjectStoreEncoder  # noqa: E402
 
 
 def _send_and_attachment(
@@ -116,10 +114,14 @@ def test_email_tsv_attachment_matches_shared_serialize():
 
 def test_email_passes_spill_max_into_shared_export():
     rows = [[str(i), "n" * 12] for i in range(20)]
-    with patch(
-        "connectors.email.serialize_object_store_export",
-        wraps=serialize_object_store_export,
-    ) as spy:
+    seen: list[int] = []
+    orig_init = ObjectStoreEncoder.__init__
+
+    def _init(self, *args, **kwargs):
+        seen.append(int(kwargs.get("spill_max_size") or 0))
+        return orig_init(self, *args, **kwargs)
+
+    with patch.object(ObjectStoreEncoder, "__init__", _init):
         result, payload, filename = _send_and_attachment(
             fmt="jsonl",
             data_rows=rows,
@@ -127,8 +129,7 @@ def test_email_passes_spill_max_into_shared_export():
         )
     assert result.ok
     assert filename == "export.jsonl"
-    spy.assert_called_once()
-    assert spy.call_args.kwargs["spill_max_size"] == 40
+    assert 40 in seen
     assert payload.count(b"\n") == 19
     assert result.meta.get("source_row_count") == 20
 
