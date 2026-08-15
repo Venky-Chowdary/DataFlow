@@ -572,6 +572,12 @@ def write_mapped_rows(
 ) -> WriteResult:
     dest_nullability = _kwargs.get("destination_column_nullability")
     live_dest_types = _kwargs.get("destination_column_types")
+    from connectors.sql_write_materialize import sql_source_from_writer
+
+    _sql_extra = (
+        _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+    )
+    _sql_src = sql_source_from_writer(_kwargs, _sql_extra)
     del username, password, ssl, warehouse, _kwargs
     from connectors.writer_common import resolve_writer_backfill
 
@@ -625,7 +631,7 @@ def write_mapped_rows(
     from connectors.sql_write_materialize import sample_sql_source_values
 
     batch_samples = sample_sql_source_values(
-        headers, data_rows, mappings, records=_kwargs.get("records") if isinstance(_kwargs.get("records"), list) else None
+        headers, data_rows, mappings, records=_sql_src["records"]
     )
     target_cols, logical_types = resolve_target_columns(
         mappings,
@@ -966,20 +972,13 @@ def write_mapped_rows(
             for i, col in enumerate(target_cols)
         ]
 
-        from connectors.sql_write_materialize import (
-            build_mapped_rows_from_source,
-            sql_source_from_writer,
-        )
+        from connectors.sql_write_materialize import build_mapped_rows_from_source
 
-        _sql_src = sql_source_from_writer(
-            _kwargs,
-            _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
-        )
         _mapped = build_mapped_rows_from_source(
             headers=headers,
             data_rows=data_rows,
             records=_sql_src["records"],
-            extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+            extra=_sql_extra,
             batch_size=_sql_src["materialize_batch"],
             mappings=mappings,
             target_cols=target_cols,
