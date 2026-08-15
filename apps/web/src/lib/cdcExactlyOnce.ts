@@ -92,8 +92,14 @@ export function cdcDeliveryResultCopy(input: {
   const delivery = namedCdcDeliveryGuarantee(input.cdcDelivery);
   if (input.exactlyOnceActive || delivery === CDC_DELIVERY_EXACTLY_ONCE) {
     const parts = ["exactly_once dest-owned watermark · dest authoritative · not platform-wide"];
-    if (input.protocol === "dest_authoritative_fenced_bundle") {
+    if (
+      input.protocol === "dest_authoritative_fenced_bundle"
+      || input.protocol === "dest_authoritative_open_bundle"
+    ) {
       parts.push("shared-log bundle");
+    }
+    if (input.protocol === "dest_authoritative_open_bundle") {
+      parts.push("dest Open");
     }
     if (input.destLsn) parts.push(`dest LSN ${input.destLsn}`);
     if (input.fenceEpoch) parts.push(`fence ${input.fenceEpoch}`);

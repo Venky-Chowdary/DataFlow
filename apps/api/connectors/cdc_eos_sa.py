@@ -21,12 +21,17 @@ from services.cdc_exactly_once import (
     EosBundleResult,
     EosBundleStream,
     EosCrash,
+    EosOpenResult,
     ExactlyOnceRouteError,
+    assert_bundle_members_reached,
     batch_apply_checksum,
     combine_change_batch,
     decide_from_view,
+    encode_resume_blob,
     extract_cdc_phase,
+    is_incremental_snapshot_token,
     next_handoff_phase,
+    plan_open_session,
 )
 from services.cdc_effectively_once import should_apply_pk_delete, should_apply_pk_row
 from services.cdc_engine import ChangeBatch
@@ -265,6 +270,14 @@ def _ensure_wm_columns(conn: Any, dialect: str) -> None:
                 "VARCHAR(64)" if dialect in _MYSQL_LIKE else "VARCHAR2(64)"
             )
         )),
+        ("resume_blob", "TEXT" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
+            "NVARCHAR(MAX)" if dialect in _MSSQL_LIKE else (
+                "LONGTEXT" if dialect in _MYSQL_LIKE else "CLOB"
+            )
+        )),
+        ("apply_seq", "INTEGER" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
+            "INT" if dialect in _MSSQL_LIKE | _MYSQL_LIKE else "NUMBER"
+        )),
     ]
     table_q = WATERMARK_TABLE
     for col, typ in adds:
@@ -395,6 +408,8 @@ def _sa_write_watermark(
     prev_lsn: str | None,
     phase: str,
     apply_checksum: str,
+    resume_blob: str = "",
+    apply_seq: int = 0,
 ) -> None:
     conn.execute(
         text(_upsert_watermark_sql(dialect)),
@@ -411,6 +426,17 @@ def _sa_write_watermark(
             "ck": apply_checksum,
         },
     )
+    if resume_blob or apply_seq:
+        try:
+            conn.execute(
+                text(
+                    f"UPDATE {WATERMARK_TABLE} SET resume_blob = :rb, apply_seq = :seq "
+                    f"WHERE stream_key = :k"
+                ),
+                {"rb": resume_blob, "seq": apply_seq, "k": stream_key},
+            )
+        except Exception:
+            pass
 
 
 def _sa_apply_member(
@@ -470,11 +496,14 @@ def _sa_apply_member(
         incoming_fence=writer_fence,
         incoming_phase=incoming_phase,
         incoming_checksum=incoming_checksum,
+        incremental_snapshot=is_incremental_snapshot_token(change.resume_token),
+        change=change,
     )
     phase = next_handoff_phase(incoming_phase, dest.phase or None)
-    if action == "already_committed":
+    resume_blob = encode_resume_blob(change.resume_token)
+    if action in {"already_committed", "stream_wins_skip"}:
         return EosApplyResult(
-            status="already_committed",
+            status=action,
             committed_lsn=dest.committed_lsn,
             batch_id=batch_id,
             epoch=dest.epoch,
@@ -497,6 +526,8 @@ def _sa_apply_member(
             prev_lsn=dest.committed_lsn,
             phase="streaming",
             apply_checksum=incoming_checksum or dest.apply_checksum,
+            resume_blob=resume_blob or dest.resume_blob,
+            apply_seq=dest.apply_seq + 1,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -550,6 +581,8 @@ def _sa_apply_member(
         prev_lsn=dest.committed_lsn,
         phase=phase,
         apply_checksum=incoming_checksum,
+        resume_blob=resume_blob,
+        apply_seq=dest.apply_seq + 1,
     )
     if crash_after == "after_watermark_before_commit":
         raise EosCrash(crash_after)
@@ -665,6 +698,10 @@ def apply_eos_sa_bundle(
                         writer_fence=writer_fence,
                     )
                 )
+            if incoming_lsn and members:
+                assert_bundle_members_reached(
+                    [m.committed_lsn for m in members], incoming_lsn
+                )
             if bundle_key and incoming_lsn:
                 locked = conn.execute(
                     text(_lock_watermark_sql(dialect)), {"k": bundle_key}
@@ -710,6 +747,88 @@ def apply_eos_sa_bundle(
         fence_epoch=fence,
         bundle_key=bundle_key,
     )
+
+
+def open_eos_sa_session(
+    *,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    stream_key: str,
+    incoming_fence: int = 0,
+    job_resume: Any = None,
+) -> EosOpenResult:
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+
+    dialect = normalize_eos_dialect(dest_type, dest_cfg)
+    cfg = dict(dest_cfg)
+    cfg.setdefault("type", dialect if dialect != "generic_sql" else (dest_cfg.get("type") or dest_type))
+    engine = _engine(cfg)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(_wm_ddl(dialect)))
+            _ensure_wm_columns(conn, dialect)
+            locked = conn.execute(text(_lock_watermark_sql(dialect)), {"k": stream_key}).fetchone()
+            view = _row_to_wm(locked)
+            try:
+                extra = conn.execute(
+                    text(
+                        f"SELECT resume_blob, apply_seq FROM {WATERMARK_TABLE} "
+                        f"WHERE stream_key = :k"
+                    ),
+                    {"k": stream_key},
+                ).fetchone()
+                if extra:
+                    view.resume_blob = str(extra[0] or "")
+                    view.apply_seq = int(extra[1] or 0)
+            except Exception:
+                pass
+            opened = plan_open_session(
+                dest=view, incoming_fence=incoming_fence, job_resume=job_resume
+            )
+            if opened.fence_raised and view.committed_lsn:
+                _sa_write_watermark(
+                    conn,
+                    dialect,
+                    stream_key=stream_key,
+                    lsn=view.committed_lsn,
+                    batch_id="eos-open",
+                    dest_object="",
+                    epoch=view.epoch,
+                    fence_epoch=opened.fence_epoch,
+                    prev_lsn=view.committed_lsn,
+                    phase=view.phase or "streaming",
+                    apply_checksum=view.apply_checksum,
+                    resume_blob=view.resume_blob,
+                    apply_seq=view.apply_seq,
+                )
+            return opened
+    finally:
+        release_engine(engine)
+
+
+def sa_dest_resume_blob(dest_cfg: dict[str, Any], stream_key: str, dest_type: str) -> str:
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+
+    dialect = normalize_eos_dialect(dest_type, dest_cfg)
+    cfg = dict(dest_cfg)
+    cfg.setdefault("type", dialect)
+    engine = _engine(cfg)
+    try:
+        with engine.connect() as conn:
+            try:
+                row = conn.execute(
+                    text(
+                        f"SELECT resume_blob FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+                    ),
+                    {"k": stream_key},
+                ).fetchone()
+            except Exception:
+                return ""
+            return str(row[0] or "") if row else ""
+    finally:
+        release_engine(engine)
 
 
 def sa_dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str, dest_type: str) -> str | None:

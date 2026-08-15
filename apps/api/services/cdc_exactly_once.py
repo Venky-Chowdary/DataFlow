@@ -28,8 +28,18 @@ commit-on-restore, plus Debezium-class snapshot/stream LSN compare:
 9. Snapshot→stream handoff is dest-owned: same LSN, dest phase=snapshot,
    incoming=streaming → phase-only update, no double-write.
 10. Redelivery checksum: same LSN + different payload is refused
-    (not a silent overwrite). Handoff skips this check.
-11. COMMIT dest. Persist job watermark and ack the source **after**.
+    (not a silent overwrite). Handoff skips this check. Conflict rows
+    are quarantined — never dropped, never overwritten.
+11. Open (Estuary): raise dest fence in a dest txn with **no data apply**,
+    and return the dest-stored resume blob. Job store wipe cannot invent
+    a cursor ahead of dest.
+12. Dest-owned DDD-3 stream-wins: incremental snapshot READ cannot
+    overwrite a dest row whose ``_df_lsn`` / watermark is already
+    streaming at the same or newer LSN. Debezium does this in an
+    in-memory Kafka buffer (lost on crash).
+13. Bundle coordinator LSN cannot advance past a member that did not
+    reach it (Estuary multi-binding checkpoint is all-or-nothing).
+14. COMMIT dest. Persist job watermark and ack the source **after**.
 
 Crash before dest COMMIT → dest rolls back; source not acked; retry.
 Crash after dest COMMIT → dest watermark wins; redelivery is a no-op.
@@ -110,16 +120,24 @@ REASON_CALLABLE = "exactly_once_refuses_callable_source"
 REASON_AT_MOST = "at_most_once_not_offered"
 REASON_STALE_FENCE = "exactly_once_stale_writer_fence"
 REASON_CHECKSUM = "exactly_once_checksum_mismatch"
+REASON_BUNDLE_LSN = "exactly_once_bundle_lsn_divergence"
 REASON_OK = "dest_owned_watermark_txn"
-PROTOCOL = "dest_authoritative_fenced_bundle"
+PROTOCOL = "dest_authoritative_open_bundle"
 
 
 class ExactlyOnceRouteError(ValueError):
     """Fail-closed: operator asked for exactly-once on an ineligible route."""
 
-    def __init__(self, message: str, *, reason: str = "") -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason: str = "",
+        quarantine: list[dict[str, Any]] | None = None,
+    ) -> None:
         super().__init__(message)
         self.reason = reason or "exactly_once_ineligible"
+        self.quarantine = list(quarantine or [])
 
 
 class EosCrash(RuntimeError):
@@ -296,15 +314,43 @@ def next_dest_fence(incoming_fence: int, dest_fence: int) -> int:
     return max(int(incoming_fence or 0), int(dest_fence or 0))
 
 
+def encode_resume_blob(resume_token: Any) -> str:
+    import json
+
+    if resume_token is None:
+        return ""
+    if isinstance(resume_token, (dict, list)):
+        return json.dumps(resume_token, sort_keys=True, default=str)
+    return str(resume_token)
+
+
+def decode_resume_blob(blob: str | None) -> Any:
+    import json
+
+    raw = (blob or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("{") or raw.startswith("["):
+        try:
+            return json.loads(raw)
+        except Exception:
+            return raw
+    return raw
+
+
 def clamp_job_resume_to_dest(
     job_resume: Any,
     dest_lsn: str | None,
+    dest_resume: Any = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Dest watermark is SSOT (Estuary remote-store-authoritative).
 
     Job cursor ahead of dest would skip uncommitted LSNs — rewind.
     Job cursor behind dest is already committed — fast-forward.
+    When dest stored a resume blob (Estuary Opened checkpoint), that blob
+    wins over a job-only LSN rewrite so slot/GTID/file:pos is not invented.
     """
+    dest_blob = decode_resume_blob(dest_resume) if isinstance(dest_resume, str) else dest_resume
     proof: dict[str, Any] = {
         "dest_authoritative": True,
         "protocol": PROTOCOL,
@@ -312,10 +358,28 @@ def clamp_job_resume_to_dest(
         "reason": "no_dest_watermark",
         "dest_lsn": dest_lsn,
         "job_lsn": extract_cdc_lsn(job_resume),
+        "dest_resume_blob": bool(dest_blob),
     }
     if not dest_lsn or not str(dest_lsn).strip():
         return job_resume, proof
     job_lsn = proof["job_lsn"]
+    if dest_blob is not None:
+        blob_lsn = extract_cdc_lsn(dest_blob)
+        if blob_lsn and compare_lsn(blob_lsn, dest_lsn) == 0:
+            if not job_lsn or compare_lsn(job_lsn, dest_lsn) != 0:
+                proof["clamped"] = True
+                proof["reason"] = (
+                    "job_resume_missing_dest_blob"
+                    if not job_lsn
+                    else (
+                        "job_ahead_rewound_to_dest_blob"
+                        if compare_lsn(job_lsn, dest_lsn) > 0
+                        else "job_behind_fast_forward_to_dest_blob"
+                    )
+                )
+                return dest_blob, proof
+            proof["reason"] = "dest_resume_blob_authoritative"
+            return dest_blob, proof
     if not job_lsn:
         proof["clamped"] = True
         proof["reason"] = "job_resume_missing"
@@ -339,6 +403,52 @@ def _resume_with_lsn(job_resume: Any, dest_lsn: str) -> Any:
         out["lsn"] = dest_lsn
         return out
     return dest_lsn
+
+
+@dataclass
+class EosOpenResult:
+    """Estuary Open: dest fence raised, dest resume returned, no data apply."""
+
+    resume: Any
+    dest_lsn: str | None
+    fence_epoch: int
+    apply_seq: int = 0
+    opened: bool = True
+    dest_authoritative: bool = True
+    protocol: str = PROTOCOL
+    fence_raised: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "opened": self.opened,
+            "dest_lsn": self.dest_lsn,
+            "fence_epoch": self.fence_epoch,
+            "apply_seq": self.apply_seq,
+            "fence_raised": self.fence_raised,
+            "dest_authoritative": self.dest_authoritative,
+            "exactly_once_protocol": self.protocol,
+        }
+
+
+def plan_open_session(
+    *,
+    dest: DestWmView,
+    incoming_fence: int,
+    job_resume: Any,
+) -> EosOpenResult:
+    """Decide Open fence + dest-authoritative resume (no data)."""
+    assert_writer_fence(incoming_fence, dest.fence_epoch)
+    fence = next_dest_fence(incoming_fence, dest.fence_epoch)
+    resume, _proof = clamp_job_resume_to_dest(
+        job_resume, dest.committed_lsn, dest.resume_blob or None
+    )
+    return EosOpenResult(
+        resume=resume,
+        dest_lsn=dest.committed_lsn,
+        fence_epoch=fence,
+        apply_seq=dest.apply_seq,
+        fence_raised=fence > int(dest.fence_epoch or 0),
+    )
 
 
 def combine_change_batch(change: Any, *, pk_cols: list[str]) -> Any:
@@ -392,16 +502,123 @@ def extract_cdc_phase(resume_token: Any) -> str:
             phase = extract_cdc_phase(nested)
             if phase:
                 return phase
+        if resume_token.get("incremental_snapshot") or resume_token.get("snapshot_window"):
+            return "snapshot"
         raw = str(resume_token.get("phase") or "").strip().lower()
         if raw in {"snapshot", "streaming"}:
             return raw
         return "streaming"
     text = str(resume_token or "").lower()
-    if "phase=snapshot" in text:
+    if "incremental_snapshot" in text or "phase=snapshot" in text:
         return "snapshot"
     if "phase=streaming" in text:
         return "streaming"
     return "streaming"
+
+
+def is_incremental_snapshot_token(resume_token: Any) -> bool:
+    if isinstance(resume_token, dict):
+        if resume_token.get("incremental_snapshot") or resume_token.get("snapshot_window"):
+            return True
+        nested = resume_token.get("token")
+        if isinstance(nested, (dict, str)) and nested:
+            return is_incremental_snapshot_token(nested)
+        return False
+    return "incremental_snapshot" in str(resume_token or "").lower()
+
+
+def dest_owned_stream_wins(
+    *,
+    incoming_phase: str,
+    dest_phase: str,
+    incoming_lsn: str,
+    dest_lsn: str | None,
+    incremental_snapshot: bool = False,
+) -> bool:
+    """Dest-owned DDD-3: snapshot READ cannot overwrite streaming dest.
+
+    Debezium stream-wins lives in an in-memory window before Kafka
+    (at-least-once; crash re-emits the READ). We decide on the dest
+    watermark so a committed stream row cannot be clobbered.
+    """
+    incoming_snap = (incoming_phase or "") == "snapshot" or incremental_snapshot
+    if not incoming_snap:
+        return False
+    if (dest_phase or "").strip().lower() != "streaming":
+        return False
+    return already_committed(incoming_lsn, dest_lsn)
+
+
+def assert_bundle_members_reached(
+    member_lsns: list[str | None],
+    coordinator_lsn: str,
+) -> None:
+    """Coordinator cannot ack a shared LSN a member did not commit.
+
+    Estuary multi-binding writes one checkpoint for every binding. A
+    member behind that LSN would be silently skipped on dest-authoritative
+    resume.
+    """
+    if not coordinator_lsn or not member_lsns:
+        return
+    for lsn in member_lsns:
+        if not lsn or compare_lsn(lsn, coordinator_lsn) < 0:
+            raise ExactlyOnceRouteError(
+                "exactly_once bundle coordinator LSN "
+                f"{coordinator_lsn} is ahead of a member ({lsn!r}). "
+                "Refuse dest-authoritative skip.",
+                reason=REASON_BUNDLE_LSN,
+            )
+
+
+def checksum_conflict_quarantine(
+    *,
+    incoming_lsn: str,
+    incoming_checksum: str,
+    dest_checksum: str,
+    change: Any = None,
+) -> list[dict[str, Any]]:
+    """Surface conflicting redelivery — never drop, never overwrite dest."""
+    from services.quarantine_row_contract import normalize_quarantine_row
+
+    records = list(getattr(change, "inserts", None) or []) + list(
+        getattr(change, "updates", None) or []
+    )
+    if not records:
+        records = [
+            {
+                "lsn": incoming_lsn,
+                "incoming_checksum": incoming_checksum,
+                "dest_checksum": dest_checksum,
+            }
+        ]
+    rows: list[dict[str, Any]] = []
+    for rec in records:
+        if not isinstance(rec, dict):
+            continue
+        rows.append(
+            normalize_quarantine_row(
+                {
+                    "reason": REASON_CHECKSUM,
+                    "failure_reason": REASON_CHECKSUM,
+                    "stage": "cdc_exactly_once",
+                    "source_record": rec,
+                    "original_value": rec,
+                    "error": (
+                        f"LSN {incoming_lsn} dest_checksum={dest_checksum[:16]} "
+                        f"incoming_checksum={incoming_checksum[:16]}"
+                    ),
+                    "recovery_suggestion": (
+                        "Dest already committed this LSN. Inspect quarantine, "
+                        "do not overwrite dest; fix the producer or replay a "
+                        "matching payload."
+                    ),
+                    "retry_status": "open",
+                    "connector": "cdc_exactly_once",
+                }
+            )
+        )
+    return rows
 
 
 def next_handoff_phase(incoming_phase: str, dest_phase: str | None) -> str:
@@ -445,14 +662,27 @@ def batch_apply_checksum(
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def assert_redelivery_checksum(incoming: str, dest: str | None) -> None:
+def assert_redelivery_checksum(
+    incoming: str,
+    dest: str | None,
+    *,
+    incoming_lsn: str = "",
+    change: Any = None,
+) -> None:
     if not dest or not incoming:
         return
     if dest != incoming:
         raise ExactlyOnceRouteError(
             "exactly_once redelivery checksum mismatch — dest already committed "
-            "this LSN with a different payload. Refuse silent overwrite.",
+            "this LSN with a different payload. Refuse silent overwrite; "
+            "conflicting rows are quarantined.",
             reason=REASON_CHECKSUM,
+            quarantine=checksum_conflict_quarantine(
+                incoming_lsn=incoming_lsn or "",
+                incoming_checksum=incoming,
+                dest_checksum=dest,
+                change=change,
+            ),
         )
 
 
@@ -476,6 +706,8 @@ class DestWmView:
     fence_epoch: int = 0
     phase: str = ""
     apply_checksum: str = ""
+    resume_blob: str = ""
+    apply_seq: int = 0
 
 
 def decide_eos_apply(
@@ -489,22 +721,35 @@ def decide_eos_apply(
     dest_phase: str = "",
     incoming_checksum: str = "",
     dest_checksum: str = "",
+    incremental_snapshot: bool = False,
+    change: Any = None,
 ) -> tuple[str, int]:
-    """Return ``(action, next_fence)`` — apply | already_committed | handoff_phase.
+    """Return ``(action, next_fence)``.
 
-    Handoff (snapshot→streaming at the same LSN) must not checksum-compare
-    snapshot rows against an empty/stream batch — that is the Debezium
-    handoff window, not a conflicting redelivery.
+    Actions: apply | already_committed | handoff_phase | stream_wins_skip
     """
     assert_writer_fence(incoming_fence, dest_fence)
     fence = next_dest_fence(incoming_fence, dest_fence)
+    if dest_owned_stream_wins(
+        incoming_phase=incoming_phase,
+        dest_phase=dest_phase,
+        incoming_lsn=incoming_lsn,
+        dest_lsn=dest_lsn,
+        incremental_snapshot=incremental_snapshot,
+    ):
+        return "stream_wins_skip", fence
     if already_committed(incoming_lsn, dest_lsn):
         if (
             (incoming_phase or "streaming") == "streaming"
             and (dest_phase or "") == "snapshot"
         ):
             return "handoff_phase", fence
-        assert_redelivery_checksum(incoming_checksum, dest_checksum or None)
+        assert_redelivery_checksum(
+            incoming_checksum,
+            dest_checksum or None,
+            incoming_lsn=incoming_lsn,
+            change=change,
+        )
         return "already_committed", fence
     _ = dest_epoch
     return "apply", fence
@@ -517,6 +762,8 @@ def decide_from_view(
     incoming_fence: int = 0,
     incoming_phase: str = "",
     incoming_checksum: str = "",
+    incremental_snapshot: bool = False,
+    change: Any = None,
 ) -> tuple[str, int]:
     return decide_eos_apply(
         incoming_lsn=incoming_lsn,
@@ -528,6 +775,8 @@ def decide_from_view(
         dest_phase=dest.phase,
         incoming_checksum=incoming_checksum,
         dest_checksum=dest.apply_checksum,
+        incremental_snapshot=incremental_snapshot,
+        change=change,
     )
 
 
@@ -564,7 +813,10 @@ def classify_exactly_once_route(
         "Batch is reduced last-op-per-PK before apply.",
         "Shared-log multi-stream applies N tables in one dest transaction.",
         "Snapshot→stream handoff is dest-owned (same LSN does not double-write).",
-        "Redelivery checksum must match the dest-committed payload.",
+        "Redelivery checksum must match the dest-committed payload; mismatch quarantines.",
+        "Open raises dest fence with no data and returns the dest resume blob.",
+        "Dest-owned DDD-3 stream-wins: snapshot READ cannot overwrite streaming dest.",
+        "Bundle coordinator LSN cannot pass a member that did not reach it.",
         "Platform never claims all CDC is exactly-once.",
         "At-most-once is not offered (silent loss).",
     ]

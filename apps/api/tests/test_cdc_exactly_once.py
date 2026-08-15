@@ -24,6 +24,7 @@ from connectors.cdc_eos_sql import (  # noqa: E402
     dest_engine_count,
     dest_watermark_lsn,
     dest_watermark_view,
+    open_eos_session,
 )
 from connectors.lsn_guards import DF_LSN_COL  # noqa: E402
 from services.cdc_engine import ChangeBatch  # noqa: E402
@@ -33,6 +34,7 @@ from services.cdc_exactly_once import (  # noqa: E402
     PROTOCOL,
     WATERMARK_TABLE,
     REASON_APPEND,
+    REASON_BUNDLE_LSN,
     REASON_CHECKSUM,
     REASON_DEST_NOT_TXN,
     REASON_NOT_CDC,
@@ -49,6 +51,8 @@ from services.cdc_exactly_once import (  # noqa: E402
     chaos_crash_after_commit_redelivery,
     chaos_crash_before_commit_then_retry,
     classify_exactly_once_route,
+    assert_bundle_members_reached,
+    dest_owned_stream_wins,
     decide_eos_apply,
     eos_stream_key,
 )
@@ -199,6 +203,33 @@ def test_decide_handoff_skips_checksum() -> None:
     )
     assert action == "handoff_phase"
     assert fence == 1
+
+
+def test_dest_owned_stream_wins_skips_incremental_after_stream() -> None:
+    assert dest_owned_stream_wins(
+        incoming_phase="snapshot",
+        dest_phase="streaming",
+        incoming_lsn="0/10",
+        dest_lsn="0/10",
+        incremental_snapshot=True,
+    )
+    action, _fence = decide_eos_apply(
+        incoming_lsn="0/10",
+        dest_lsn="0/10",
+        incoming_phase="snapshot",
+        dest_phase="streaming",
+        incremental_snapshot=True,
+        incoming_checksum="snap",
+        dest_checksum="stream",
+    )
+    assert action == "stream_wins_skip"
+
+
+def test_bundle_coordinator_refuses_member_behind() -> None:
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        assert_bundle_members_reached(["0/10", "0/05"], "0/10")
+    assert exc.value.reason == REASON_BUNDLE_LSN
+    assert_bundle_members_reached(["0/10", "0/20"], "0/10")
 
 
 def test_decide_same_lsn_payload_mismatch_refuses() -> None:
@@ -524,6 +555,8 @@ def test_sqlite_eos_checksum_mismatch_refuses_overwrite() -> None:
             )
         assert exc.value.reason == REASON_CHECKSUM
         assert dest_engine_count(dest_cfg, "orders") == 1
+        assert exc.value.quarantine
+        assert exc.value.quarantine[0]["failure_reason"] == REASON_CHECKSUM
         conn = sqlite3.connect(path)
         try:
             v = conn.execute("SELECT v FROM orders WHERE id = ?", ("1",)).fetchone()[0]
@@ -817,6 +850,108 @@ def test_shared_transfer_eos_bundle_two_tables_one_dest_txn(tmp_path, monkeypatc
     assert rows >= 3
 
 
+def test_sqlite_eos_open_raises_fence_without_data() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_open.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string"}
+        token = {"lsn": "0/70", "slot": "df_open", "phase": "streaming"}
+        apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=ChangeBatch(inserts=[{"id": "1", "v": "keep"}], resume_token=token),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="open|orders",
+            writer_fence=2,
+        )
+        opened = open_eos_session(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            stream_key="open|orders",
+            incoming_fence=5,
+            job_resume=None,
+        )
+        assert opened.fence_raised is True
+        assert opened.fence_epoch == 5
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        assert dest_watermark_view(dest_cfg, "open|orders").fence_epoch == 5
+        assert opened.resume["lsn"] == "0/70"
+        assert opened.resume.get("slot") == "df_open"
+        with pytest.raises(ExactlyOnceRouteError) as exc:
+            apply_change_batch_exactly_once(
+                dest_type="sqlite",
+                dest_cfg=dest_cfg,
+                dest_table="orders",
+                change=_batch("0/80", inserts=[{"id": "1", "v": "zombie"}]),
+                mappings=mappings,
+                column_types=types,
+                headers=["id", "v"],
+                pk_target_cols=["id"],
+                cursor_key="open|orders",
+                writer_fence=3,
+            )
+        assert exc.value.reason == REASON_STALE_FENCE
+        assert dest_engine_count(dest_cfg, "orders") == 1
+
+
+def test_sqlite_eos_incremental_snapshot_stream_wins() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_ddd3.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string"}
+        apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=_batch("0/40", inserts=[{"id": "1", "v": "stream"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="ddd3|orders",
+        )
+        snap = ChangeBatch(
+            inserts=[{"id": "1", "v": "stale-read"}],
+            resume_token={
+                "lsn": "0/40",
+                "phase": "snapshot",
+                "incremental_snapshot": True,
+            },
+        )
+        rows, _ck, summary, _del = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=snap,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="ddd3|orders",
+        )
+        assert summary["eos_status"] == "stream_wins_skip"
+        assert rows == 0
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        conn = sqlite3.connect(path)
+        try:
+            v = conn.execute("SELECT v FROM orders WHERE id = ?", ("1",)).fetchone()[0]
+        finally:
+            conn.close()
+        assert v == "stream"
+
+
 def test_named_matrix_artifact_matches_measured() -> None:
     """Write / verify the named fixture. Floor is 1.0 on this matrix only."""
     cases = [
@@ -970,9 +1105,10 @@ def test_named_matrix_artifact_matches_measured() -> None:
         "cases": results,
         "notes": [
             "100% means this named fixture only — not live warehouse CDC.",
-            "Protocol dest_authoritative_fenced_bundle: dest SSOT + fence + "
-            "last-op-per-PK + shared-log N-table dest txn + snapshot/stream "
-            "handoff + redelivery checksum.",
+            "Protocol dest_authoritative_open_bundle: dest SSOT + Open fence "
+            "(no data) + dest resume blob + last-op-per-PK + shared-log N-table "
+            "dest txn + dest-owned DDD-3 stream-wins + checksum quarantine + "
+            "bundle min-LSN.",
             "Wired dests: sqlite (native) plus SQLAlchemy dest-txn for "
             "postgresql/mysql/sqlserver/duckdb/generic_sql/oracle/snowflake.",
             "File/Iceberg/Kafka dests stay fail-closed.",

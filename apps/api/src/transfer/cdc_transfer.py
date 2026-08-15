@@ -1192,11 +1192,16 @@ def _run_cdc_shared_multi_table(
     )
     shared_wm = get_watermark(shared_key)
     if eos_active:
-        from connectors.cdc_eos_sql import read_route_dest_lsn
-        from services.cdc_exactly_once import clamp_job_resume_to_dest
+        from connectors.cdc_eos_sql import open_eos_session
 
-        dest_lsn = read_route_dest_lsn(dest_type, dest_cfg, shared_key)
-        shared_wm, _clamp = clamp_job_resume_to_dest(shared_wm, dest_lsn)
+        opened = open_eos_session(
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            stream_key=shared_key,
+            incoming_fence=0,
+            job_resume=shared_wm,
+        )
+        shared_wm = opened.resume
 
     cdc: Any
     ddl_log: list[str] = [
@@ -1207,6 +1212,11 @@ def _run_cdc_shared_multi_table(
             else "(one slot/server_id; at-least-once upsert)"
         )
     ]
+    if eos_active:
+        ddl_log.append(
+            f"CDC EOS Open fence={opened.fence_epoch} dest_lsn={opened.dest_lsn} "
+            f"raised={opened.fence_raised}"
+        )
     if src_type in {"postgresql", "postgres"}:
         from services.dialect_profiles import default_schema_for
 
@@ -1943,11 +1953,16 @@ def _run_cdc_single_stream(
     )
     watermark = get_watermark(cursor_key)
     if eos_active:
-        from connectors.cdc_eos_sql import read_route_dest_lsn
-        from services.cdc_exactly_once import clamp_job_resume_to_dest
+        from connectors.cdc_eos_sql import open_eos_session
 
-        dest_lsn = read_route_dest_lsn(dest_type, dest_cfg, cursor_key)
-        watermark, _clamp_proof = clamp_job_resume_to_dest(watermark, dest_lsn)
+        opened = open_eos_session(
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            stream_key=cursor_key,
+            incoming_fence=0,
+            job_resume=watermark,
+        )
+        watermark = opened.resume
 
     headers = list(schema.keys())
     column_types = {c: schema.get(c, "string") for c in headers}

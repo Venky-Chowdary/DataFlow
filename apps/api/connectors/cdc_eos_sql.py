@@ -21,13 +21,18 @@ from services.cdc_exactly_once import (
     EosApplyResult,
     EosBundleResult,
     EosBundleStream,
+    EosOpenResult,
     ExactlyOnceRouteError,
+    assert_bundle_members_reached,
     batch_apply_checksum,
     combine_change_batch,
     decide_from_view,
+    encode_resume_blob,
     eos_stream_key,
     extract_cdc_phase,
+    is_incremental_snapshot_token,
     next_handoff_phase,
+    plan_open_session,
     require_batch_lsn,
 )
 from services.cdc_engine import ChangeBatch
@@ -43,7 +48,9 @@ CREATE TABLE IF NOT EXISTS {WATERMARK_TABLE} (
   fence_epoch INTEGER NOT NULL DEFAULT 0,
   prev_lsn TEXT,
   phase TEXT,
-  apply_checksum TEXT
+  apply_checksum TEXT,
+  resume_blob TEXT,
+  apply_seq INTEGER NOT NULL DEFAULT 0
 )
 """
 
@@ -52,6 +59,8 @@ _WM_ALTERS = (
     "ALTER TABLE {table} ADD COLUMN prev_lsn TEXT",
     "ALTER TABLE {table} ADD COLUMN phase TEXT",
     "ALTER TABLE {table} ADD COLUMN apply_checksum TEXT",
+    "ALTER TABLE {table} ADD COLUMN resume_blob TEXT",
+    "ALTER TABLE {table} ADD COLUMN apply_seq INTEGER NOT NULL DEFAULT 0",
 )
 
 
@@ -117,7 +126,8 @@ def _ensure_wm_table(cur: sqlite3.Cursor) -> None:
 def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
     try:
         cur.execute(
-            f"SELECT committed_lsn, epoch, fence_epoch, phase, apply_checksum "
+            f"SELECT committed_lsn, epoch, fence_epoch, phase, apply_checksum, "
+            f"resume_blob, apply_seq "
             f"FROM {WATERMARK_TABLE} WHERE stream_key = ?",
             (stream_key,),
         )
@@ -135,6 +145,8 @@ def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
         fence_epoch=int(row[2] or 0) if len(row) > 2 else 0,
         phase=str(row[3] or "") if len(row) > 3 else "",
         apply_checksum=str(row[4] or "") if len(row) > 4 else "",
+        resume_blob=str(row[5] or "") if len(row) > 5 else "",
+        apply_seq=int(row[6] or 0) if len(row) > 6 else 0,
     )
 
 
@@ -150,14 +162,16 @@ def _write_watermark(
     prev_lsn: str | None = None,
     phase: str = "streaming",
     apply_checksum: str = "",
+    resume_blob: str = "",
+    apply_seq: int = 0,
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     cur.execute(
         f"""
         INSERT INTO {WATERMARK_TABLE}
           (stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch,
-           fence_epoch, prev_lsn, phase, apply_checksum)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           fence_epoch, prev_lsn, phase, apply_checksum, resume_blob, apply_seq)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(stream_key) DO UPDATE SET
           committed_lsn = excluded.committed_lsn,
           batch_id = excluded.batch_id,
@@ -167,7 +181,9 @@ def _write_watermark(
           fence_epoch = excluded.fence_epoch,
           prev_lsn = excluded.prev_lsn,
           phase = excluded.phase,
-          apply_checksum = excluded.apply_checksum
+          apply_checksum = excluded.apply_checksum,
+          resume_blob = excluded.resume_blob,
+          apply_seq = excluded.apply_seq
         """,
         (
             stream_key,
@@ -180,6 +196,8 @@ def _write_watermark(
             prev_lsn,
             phase,
             apply_checksum,
+            resume_blob,
+            apply_seq,
         ),
     )
 
@@ -290,11 +308,14 @@ def _sqlite_apply_member(
         incoming_fence=writer_fence,
         incoming_phase=incoming_phase,
         incoming_checksum=incoming_checksum,
+        incremental_snapshot=is_incremental_snapshot_token(change.resume_token),
+        change=change,
     )
     phase = next_handoff_phase(incoming_phase, dest.phase or None)
-    if action == "already_committed":
+    resume_blob = encode_resume_blob(change.resume_token)
+    if action in {"already_committed", "stream_wins_skip"}:
         return EosApplyResult(
-            status="already_committed",
+            status=action,
             committed_lsn=dest.committed_lsn,
             batch_id=batch_id,
             epoch=dest.epoch,
@@ -316,6 +337,8 @@ def _sqlite_apply_member(
             prev_lsn=dest.committed_lsn,
             phase="streaming",
             apply_checksum=incoming_checksum or dest.apply_checksum,
+            resume_blob=resume_blob or dest.resume_blob,
+            apply_seq=dest.apply_seq + 1,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -376,6 +399,8 @@ def _sqlite_apply_member(
         prev_lsn=dest.committed_lsn,
         phase=phase,
         apply_checksum=incoming_checksum,
+        resume_blob=resume_blob,
+        apply_seq=dest.apply_seq + 1,
     )
     if crash_after == "after_watermark_before_commit":
         from services.cdc_exactly_once import EosCrash
@@ -599,6 +624,10 @@ def apply_eos_bundle(
                         writer_fence=writer_fence,
                     )
                 )
+            if incoming_lsn and members:
+                assert_bundle_members_reached(
+                    [m.committed_lsn for m in members], incoming_lsn
+                )
             if bundle_key and incoming_lsn:
                 dest_wm = _read_watermark(cur, bundle_key)
                 action, fence = decide_from_view(
@@ -646,6 +675,64 @@ def apply_eos_bundle(
         fence_epoch=fence,
         bundle_key=bundle_key,
     )
+
+
+def open_eos_session(
+    *,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    stream_key: str,
+    incoming_fence: int = 0,
+    job_resume: Any = None,
+) -> EosOpenResult:
+    """Estuary Open: raise dest fence with no data; return dest resume blob."""
+    dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest != "sqlite":
+        from connectors.cdc_eos_sa import open_eos_sa_session
+
+        return open_eos_sa_session(
+            dest_type=dest,
+            dest_cfg=dest_cfg,
+            stream_key=stream_key,
+            incoming_fence=incoming_fence,
+            job_resume=job_resume,
+        )
+    path = _sqlite_path(dest_cfg)
+    conn = sqlite3.connect(path, timeout=30, isolation_level=None)
+    try:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            _ensure_wm_table(cur)
+            view = _read_watermark(cur, stream_key)
+            opened = plan_open_session(
+                dest=view, incoming_fence=incoming_fence, job_resume=job_resume
+            )
+            if opened.fence_raised and view.committed_lsn:
+                _write_watermark(
+                    cur,
+                    stream_key=stream_key,
+                    lsn=view.committed_lsn,
+                    batch_id="eos-open",
+                    dest_object="",
+                    epoch=view.epoch,
+                    fence_epoch=opened.fence_epoch,
+                    prev_lsn=view.committed_lsn,
+                    phase=view.phase or "streaming",
+                    apply_checksum=view.apply_checksum,
+                    resume_blob=view.resume_blob,
+                    apply_seq=view.apply_seq,
+                )
+            conn.execute("COMMIT")
+            return opened
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+    finally:
+        conn.close()
 
 
 def dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str) -> str | None:
@@ -726,6 +813,30 @@ def read_route_dest_lsn(
         return sa_dest_watermark_lsn(dest_cfg, stream_key, dest)
     except Exception:
         return None
+
+
+def read_route_dest_resume(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    stream_key: str,
+) -> Any:
+    """Dest-stored resume blob (Estuary Opened checkpoint)."""
+    dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest == "sqlite":
+        try:
+            return dest_watermark_view(dest_cfg, stream_key).resume_blob
+        except Exception:
+            return ""
+    from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS
+
+    if dest not in EOS_TXN_WIRED_DESTS:
+        return ""
+    try:
+        from connectors.cdc_eos_sa import sa_dest_resume_blob
+
+        return sa_dest_resume_blob(dest_cfg, stream_key, dest)
+    except Exception:
+        return ""
 
 
 # Imported by proofs — keep algorithm name on the connector surface.
