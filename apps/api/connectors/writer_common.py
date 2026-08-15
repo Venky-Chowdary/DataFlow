@@ -4074,37 +4074,23 @@ def apply_write_quarantine_matrix(
     When ``mappings`` is provided, holdouts dual-stamp ``source_values`` for
     quarantine replay (Wave 34).
 
-    ``source_row_numbers`` (object-store batch materialize) aligns each mapped
-    tuple with its 1-based source row. The matrix still runs the same 12-pass
-    SSOT, one source row at a time, so holdout ``row`` stamps stay global
-    across batches. SQL writers leave this ``None`` and keep the vectorized
-    scan.
+    ``source_row_numbers`` aligns each mapped tuple with its 1-based source
+    row (object-store and SQL write-bundle materialize). The matrix still
+    runs the same 12-pass SSOT, one source row at a time, so holdout ``row``
+    stamps stay global across bundles.
     """
     if source_row_numbers is not None:
-        if len(source_row_numbers) != len(mapped_rows):
-            raise ValueError(
-                "source_row_numbers length must match mapped_rows "
-                "(object-store batch materialize)"
-            )
-        kept: list[tuple] = []
-        for row, src_row in zip(mapped_rows, source_row_numbers):
-            n0 = len(rejected_details)
-            one = apply_write_quarantine_matrix(
-                [row],
-                target_cols,
-                target_types,
-                rejected_details,
-                policy,
-                dialect_label=dialect_label,
-                mappings=mappings,
-                dest_db=dest_db,
-                source_row_numbers=None,
-            )
-            src = int(src_row)
-            for detail in rejected_details[n0:]:
-                if detail.get("row") == 1:
-                    detail["row"] = src
-            kept.extend(one)
+        kept, _nums = apply_write_quarantine_matrix_keeping_numbers(
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=dialect_label,
+            mappings=mappings,
+            dest_db=dest_db,
+            source_row_numbers=source_row_numbers,
+        )
         return kept
 
     token = _active_quarantine_mappings.set(mappings)
@@ -4210,6 +4196,67 @@ def apply_write_quarantine_matrix(
         return mapped_rows
     finally:
         _active_quarantine_mappings.reset(token)
+
+
+def apply_write_quarantine_matrix_keeping_numbers(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    dialect_label: str = "destination",
+    mappings: list[dict[str, Any]] | None = None,
+    dest_db: str = "",
+    source_row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int]]:
+    """Same matrix as :func:`apply_write_quarantine_matrix`; also return survivors.
+
+    Binding / in-bundle dedupe / write-time SAVEPOINT quarantine must name the
+    source row that survived, not the index inside the leftover list. Callers
+    that already hold global 1-based numbers pass ``source_row_numbers``.
+    """
+    if source_row_numbers is None:
+        kept = apply_write_quarantine_matrix(
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=dialect_label,
+            mappings=mappings,
+            dest_db=dest_db,
+            source_row_numbers=None,
+        )
+        return kept, list(range(1, len(kept) + 1))
+    if len(source_row_numbers) != len(mapped_rows):
+        raise ValueError(
+            "source_row_numbers length must match mapped_rows "
+            "(SQL / object-store bundle materialize)"
+        )
+    kept: list[tuple] = []
+    nums: list[int] = []
+    for row, src_row in zip(mapped_rows, source_row_numbers):
+        n0 = len(rejected_details)
+        one = apply_write_quarantine_matrix(
+            [row],
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=dialect_label,
+            mappings=mappings,
+            dest_db=dest_db,
+            source_row_numbers=None,
+        )
+        src = int(src_row)
+        for detail in rejected_details[n0:]:
+            if detail.get("row") == 1:
+                detail["row"] = src
+        if one:
+            kept.extend(one)
+            nums.append(src)
+    return kept, nums
 
 
 def _specialty_column_kind(type_str: str) -> str | None:
@@ -4529,6 +4576,7 @@ def split_dense_sparse_rows_with_numbers(
     mapped_rows: list[tuple],
     *,
     row_offset: int = 0,
+    source_row_numbers: list[int] | None = None,
 ) -> tuple[list[tuple], list[tuple], list[int], list[int]]:
     """Partition rows *and* keep where each came from.
 
@@ -4536,17 +4584,29 @@ def split_dense_sparse_rows_with_numbers(
     numbers are 1-based positions in the source batch, matching every other
     quarantine record.
 
+    ``source_row_numbers`` wins when the caller already holds global numbers
+    (SQL write bundles). Otherwise ``row_offset + index + 1`` is the position
+    in the current list.
+
     Splitting without them meant a rejected sparse row was reported by its index
     inside the sparse list, so an operator replaying the dead-letter queue was
     pointed at a different row than the one that failed — the same misattribution
     that made Airtable name records which never left.
     """
+    if source_row_numbers is not None and len(source_row_numbers) != len(mapped_rows):
+        raise ValueError(
+            "source_row_numbers length must match mapped_rows (dense/sparse split)"
+        )
     dense: list[tuple] = []
     sparse: list[tuple] = []
     dense_rows: list[int] = []
     sparse_rows: list[int] = []
     for index, row in enumerate(mapped_rows):
-        number = row_offset + index + 1
+        number = (
+            int(source_row_numbers[index])
+            if source_row_numbers is not None
+            else row_offset + index + 1
+        )
         if row_has_missing_sentinel(row):
             sparse.append(row)
             sparse_rows.append(number)
@@ -4996,14 +5056,21 @@ def partition_dense_upsert_rows(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
     row_offset: int = 0,
+    source_row_numbers: list[int] | None = None,
 ) -> list[Any]:
     """Hold out null/empty conflict-key rows; return rows safe for MERGE.
 
     Preserves arrival order. When ``rejected_details`` is None, re-raises on the
     first bad row (fail-closed callers without a quarantine sink).
+    ``source_row_numbers`` keeps holdout ``row`` stamps global across write
+    bundles; otherwise ``row_offset + i + 1`` is the position in this list.
     """
     if not rows or not conflict_columns:
         return list(rows)
+    if source_row_numbers is not None and len(source_row_numbers) != len(rows):
+        raise ValueError(
+            "source_row_numbers length must match rows (dense upsert partition)"
+        )
     kept: list[Any] = []
     for i, row in enumerate(rows):
         try:
@@ -5016,7 +5083,11 @@ def partition_dense_upsert_rows(
                 raise
             rejected_details.append(
                 {
-                    "row": row_offset + i + 1,
+                    "row": (
+                        int(source_row_numbers[i])
+                        if source_row_numbers is not None
+                        else row_offset + i + 1
+                    ),
                     "column": "*",
                     "value": "",
                     "reason": str(exc)[:300],

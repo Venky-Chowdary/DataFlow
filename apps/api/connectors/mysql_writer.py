@@ -317,6 +317,212 @@ class _MysqlMaterializedBatch:
     source_row_count: int = 0
 
 
+def _mysql_resolve_carriers(
+    *,
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    allow_logical_fallback: bool = True,
+) -> list[str]:
+    target_types: list[str] = []
+    for i, c in enumerate(target_cols):
+        carrier = str(dest_types.get(c) or "").strip()
+        if not carrier and allow_logical_fallback:
+            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
+        target_types.append(mysql_type(carrier) if carrier else "")
+    return target_types
+
+
+def _mysql_map_kwargs(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    policy: Any,
+    destination_pk_columns: list[str] | None,
+    destination_column_nullability: Any,
+    empty_cells_as_null: bool,
+    records: list[dict[str, Any]] | None,
+    source_spool: Any,
+    extra: dict[str, Any] | None,
+    materialize_batch: int | None,
+) -> dict[str, Any]:
+    return {
+        "headers": headers,
+        "data_rows": data_rows,
+        "mappings": mappings,
+        "target_cols": target_cols,
+        "column_types": column_types,
+        "dest_types": dest_types,
+        "error_policy": policy,
+        "preserve_case": True,
+        "dest_kind": "mysql",
+        "destination_pk_columns": list(destination_pk_columns or []) or None,
+        "destination_column_nullability": destination_column_nullability,
+        "empty_cells_as_null": bool(empty_cells_as_null),
+        "records": records,
+        "source_spool": source_spool,
+        "extra": extra,
+        "batch_size": materialize_batch,
+    }
+
+
+def _mysql_finish_mapped_bundle(
+    bundle: Any,
+    *,
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    mappings: list,
+    allow_logical_fallback: bool = True,
+    target_types: list[str] | None = None,
+    bind: bool = True,
+) -> Any:
+    """Quarantine + in-bundle dedupe + optional bind. Peak RAM is this bundle."""
+    from connectors.sql_write_materialize import finish_sql_mapped_bundle
+    from connectors.writer_common import (
+        combined_mapped_rows_for_checksum,
+        materialize_missing_as_null_for_dense_write,
+    )
+
+    if target_types is None:
+        target_types = _mysql_resolve_carriers(
+            target_cols=target_cols,
+            dest_types=dest_types,
+            logical_types=logical_types,
+            allow_logical_fallback=allow_logical_fallback,
+        )
+    finished = finish_sql_mapped_bundle(
+        bundle,
+        target_cols=target_cols,
+        target_types=target_types,
+        policy=policy,
+        dialect_label="MySQL",
+        dest_db="mysql",
+        mappings=mappings,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+    )
+    if bind:
+        finished.dense_rows = bind_sql_mapped_rows_with_quarantine(
+            finished.dense_rows,
+            target_cols,
+            target_types,
+            finished.rejected_details,
+            policy,
+            engine="mysql",
+            dialect_label="MySQL",
+            mappings=mappings,
+            row_numbers=finished.dense_row_numbers or None,
+        )
+        finished.sparse_rows = bind_sql_mapped_rows_with_quarantine(
+            finished.sparse_rows,
+            target_cols,
+            target_types,
+            finished.rejected_details,
+            policy,
+            engine="mysql",
+            dialect_label="MySQL",
+            mappings=mappings,
+            row_numbers=finished.sparse_row_numbers or None,
+        )
+        finished.dense_rows = materialize_missing_as_null_for_dense_write(
+            finished.dense_rows
+        )
+        finished.checksum_rows = combined_mapped_rows_for_checksum(
+            finished.dense_rows, finished.sparse_rows
+        )
+    finished.target_types = list(target_types)
+    return finished
+
+
+def iter_mysql_finished_bundles(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    allow_logical_fallback: bool = True,
+    empty_cells_as_null: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
+    target_types: list[str] | None = None,
+    bind: bool = True,
+) -> Any:
+    from connectors.sql_write_materialize import iter_finished_sql_bundles
+
+    def _finish(bundle):
+        return _mysql_finish_mapped_bundle(
+            bundle,
+            target_cols=target_cols,
+            dest_types=dest_types,
+            logical_types=logical_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            write_mode=write_mode,
+            mappings=mappings,
+            allow_logical_fallback=allow_logical_fallback,
+            target_types=target_types,
+            bind=bind,
+        )
+
+    yield from iter_finished_sql_bundles(
+        finish=_finish,
+        **_mysql_map_kwargs(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            policy=policy,
+            destination_pk_columns=destination_pk_columns,
+            destination_column_nullability=destination_column_nullability,
+            empty_cells_as_null=empty_cells_as_null,
+            records=records,
+            source_spool=source_spool,
+            extra=extra,
+            materialize_batch=materialize_batch,
+        ),
+    )
+
+
+def _mysql_scan_finished_bundles(**kwargs: Any) -> Any:
+    from connectors.sql_write_materialize import SqlWriteAccumulator
+
+    acc = SqlWriteAccumulator(
+        target_cols=kwargs["target_cols"],
+        dest_db_type="mysql",
+        dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {},
+        dialect_label="MySQL",
+    )
+    source_row_count = 0
+    target_types: list[str] = []
+    for finished in iter_mysql_finished_bundles(**kwargs):
+        acc.note_rejects(finished.rejected_details, finished.transform_errors)
+        source_row_count = finished.source_row_count
+        target_types = finished.target_types
+        del finished
+    acc.stop_writing()
+    return acc, source_row_count, target_types
+
+
 def _mysql_materialize_mapped_batch(
     *,
     headers: list[str],
@@ -340,120 +546,53 @@ def _mysql_materialize_mapped_batch(
 ) -> _MysqlMaterializedBatch:
     """Map + quarantine against ``dest_types`` (call again after live DDL overlay).
 
-    STRUCT flatten/explode streams through ``SourceRowSpool`` — never the
-    list-form ``materialize_struct_policies``.
+    STRUCT flatten/explode streams through ``SourceRowSpool``. Each bundle is
+    finished independently then concatenated for the retain contract. The write
+    loop must call :func:`iter_mysql_finished_bundles` instead of this helper.
+    Bind is deferred so live DDL overlay can stamp physical carriers first.
     """
-    from connectors.sql_write_materialize import build_mapped_rows_from_source
-
-    target_types = []
-    for i, c in enumerate(target_cols):
-        carrier = str(dest_types.get(c) or "").strip()
-        if not carrier and allow_logical_fallback:
-            carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
-        target_types.append(mysql_type(carrier) if carrier else "")
-    _mapped = build_mapped_rows_from_source(
+    mapped_rows: list[tuple] = []
+    sparse_rows: list[tuple] = []
+    transform_errors: list[str] = []
+    rejected_details: list = []
+    rows_for_checksum: list[tuple] = []
+    source_row_count = 0
+    target_types = _mysql_resolve_carriers(
+        target_cols=target_cols,
+        dest_types=dest_types,
+        logical_types=logical_types,
+        allow_logical_fallback=allow_logical_fallback,
+    )
+    for finished in iter_mysql_finished_bundles(
         headers=headers,
         data_rows=data_rows,
-        records=records,
-        source_spool=source_spool,
-        extra=extra,
-        batch_size=materialize_batch,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
         dest_types=dest_types,
-        error_policy=policy,
-        preserve_case=True,
-        dest_kind="mysql",
-        destination_pk_columns=list(destination_pk_columns or []) or None,
+        logical_types=logical_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        destination_pk_columns=destination_pk_columns,
         destination_column_nullability=destination_column_nullability,
-        empty_cells_as_null=bool(empty_cells_as_null),
-    )
-    mapped_rows = _mapped.mapped_rows
-    transform_errors = _mapped.transform_errors
-    rejected_details = _mapped.rejected_details
-    source_row_count = _mapped.source_row_count
-    mapped_rows = quarantine_currency_markers_into_numeric(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_decimals(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL DECIMAL",
-        dest_db="mysql",
-    )
-    mapped_rows = quarantine_unfit_years(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_booleans(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_temporals(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dest_db="mysql",
-    )
-    mapped_rows = quarantine_unfit_specialty_types(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_integers(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL INTEGER",
-        dest_db="mysql",
-    )
-    mapped_rows = quarantine_unfit_bitstrings(
-        mapped_rows, target_cols, target_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_binaries(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL VARBINARY",
-    )
-    mapped_rows = quarantine_unfit_enum_set(
-        mapped_rows, target_cols, logical_types, rejected_details, policy
-    )
-    mapped_rows = quarantine_unfit_strings(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL VARCHAR",
-        dest_db="mysql",
-    )
-    mapped_rows = quarantine_unfit_json(
-        mapped_rows,
-        target_cols,
-        target_types,
-        rejected_details,
-        policy,
-        dialect_label="MySQL JSON",
-    )
-    sparse_rows: list[tuple] = []
-    rows_for_checksum: list[tuple] = list(mapped_rows)
-    if write_mode == "upsert" and conflict_columns:
-        from connectors.writer_common import split_dense_sparse_rows
-
-        mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-        if DF_LSN_COL in target_cols:
-            mapped_rows = dedupe_rows_by_pk_and_lsn(
-                mapped_rows, conflict_columns, target_cols
-            )
-        else:
-            mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
+        allow_logical_fallback=allow_logical_fallback,
+        empty_cells_as_null=empty_cells_as_null,
+        records=records,
+        source_spool=source_spool,
+        extra=extra,
+        materialize_batch=materialize_batch,
+        target_types=target_types,
+        bind=False,
+    ):
+        mapped_rows.extend(finished.dense_rows)
+        sparse_rows.extend(finished.sparse_rows)
+        rows_for_checksum.extend(finished.checksum_rows)
+        transform_errors.extend(finished.transform_errors)
+        rejected_details.extend(finished.rejected_details)
+        source_row_count = finished.source_row_count
+        target_types = finished.target_types
+        del finished
     return _MysqlMaterializedBatch(
         mapped_rows=mapped_rows,
         sparse_rows=sparse_rows,
@@ -521,6 +660,9 @@ def write_mapped_rows(
         )
 
     from connectors.sql_write_materialize import (
+        SqlWriteAccumulator,
+        dest_types_signature,
+        ensure_sql_source_spool,
         sample_sql_source_values,
         sql_source_from_writer,
     )
@@ -589,62 +731,86 @@ def write_mapped_rows(
         dest_db="mysql",
     )
     policy = transform_error_policy(error_policy)
+    extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+    spool, close_spool = ensure_sql_source_spool(
+        headers=headers,
+        data_rows=data_rows,
+        records=_sql_src["records"],
+        mappings=mappings,
+        extra=extra,
+        source_spool=_sql_src.get("source_spool"),
+        spill_max=_sql_src.get("source_spill_max"),
+    )
 
-    # Partial Studio: defer Map + strict abort until live DDL rematerialize
-    # (Map-blank invent must not fail batches that succeed against physical carriers).
-    # Matches generic_sql / BigQuery. Create-new already refused below on studio_err.
-    mapped_rows: list = []
-    sparse_rows: list = []
+    def _cleanup_spool() -> None:
+        nonlocal close_spool
+        if not close_spool:
+            return
+        close_spool = False
+        try:
+            spool.close()
+        except Exception:
+            logger.debug("sql source spool close skipped", exc_info=True)
+
     transform_errors: list[str] = []
     rejected_details: list = []
-    target_types: list[str] = []
-    rows_for_checksum: list = []
+    target_types = _mysql_resolve_carriers(
+        target_cols=target_cols,
+        dest_types=dest_types if isinstance(dest_types, dict) else {},
+        logical_types=logical_types,
+        allow_logical_fallback=True,
+    )
     rejected_rows = 0
     coerced_null_rows = 0
-    source_row_count = 0
-    if not studio_err:
-        # Map before opening a socket so public proxies are not idle during transform.
-        _batch = _mysql_materialize_mapped_batch(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=column_types,
-            dest_types=dest_types,
-            logical_types=logical_types,
-            policy=policy,
-            conflict_columns=conflict_columns,
-            write_mode=write_mode,
-            destination_pk_columns=list(conflict_columns or []) or None,
-            destination_column_nullability=_kwargs.get("destination_column_nullability"),
-            allow_logical_fallback=True,
-            empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
-            records=_sql_src["records"],
-            source_spool=_sql_src.get("source_spool"),
-            extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
-            materialize_batch=_sql_src["materialize_batch"],
+    source_row_count = int(getattr(spool, "row_count", 0) or 0)
+    scanned_dest_sig: tuple[str, ...] | None = None
+    write_acc = SqlWriteAccumulator(
+        target_cols=target_cols,
+        dest_db_type="mysql",
+        dest_types=dest_types if isinstance(dest_types, dict) else {},
+        dialect_label="MySQL",
+    )
+    _mysql_finish_kwargs = dict(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        logical_types=logical_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        allow_logical_fallback=True,
+        empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+        records=None,
+        source_spool=spool,
+        extra=extra,
+        materialize_batch=_sql_src["materialize_batch"],
+        bind=True,
+    )
+    if not studio_err and policy == "fail":
+        scan_acc, source_row_count, target_types = _mysql_scan_finished_bundles(
+            **_mysql_finish_kwargs
         )
-        mapped_rows = _batch.mapped_rows
-        sparse_rows = _batch.sparse_rows
-        transform_errors = _batch.transform_errors
-        rejected_details = _batch.rejected_details
-        target_types = _batch.target_types
-        rows_for_checksum = _batch.rows_for_checksum
-        source_row_count = _batch.source_row_count
-
+        rejected_details = list(scan_acc.rejected_details)
+        transform_errors = list(scan_acc.transform_errors)
+        scanned_dest_sig = dest_types_signature(
+            dest_types if isinstance(dest_types, dict) else {}, target_cols
+        )
         rejected_rows = _rejected_row_count(
             data_rows,
-            mapped_rows,
+            [],
             rejected_details,
             policy,
-            sparse_rows=sparse_rows,
             source_row_count=source_row_count or None,
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-        _map_abort = reject_on_strict_policy(
-            policy, rejected_details, "MySQL", transform_errors
-        )
+        _map_abort = scan_acc.abort_error(policy)
         if _map_abort:
+            _cleanup_spool()
             return WriteResult(
                 ok=False,
                 rows_written=0,
@@ -660,7 +826,7 @@ def write_mapped_rows(
             )
 
     chunk_size = write_chunk_size(host, connection_string=connection_string)
-    total = len(mapped_rows)
+    total = source_row_count
     chunks = max(1, (total + chunk_size - 1) // chunk_size) if total else 0
     written = 0
     chunks_completed = 0
@@ -685,7 +851,6 @@ def write_mapped_rows(
         write_mode == "upsert" and conflict_columns
     )
     conn = None
-    converted_rows: list[tuple] = []
     # Probed before CREATE so fail-closed overlay can distinguish create-new.
     table_existed = False
     additive_refuse: str | None = None
@@ -715,9 +880,10 @@ def write_mapped_rows(
     )
 
     def _run_setup(cursor) -> None:
-        nonlocal target_types, converted_rows, dest_types, additive_refuse
-        nonlocal mapped_rows, sparse_rows, transform_errors, rejected_details, rows_for_checksum
+        nonlocal target_types, dest_types, additive_refuse
+        nonlocal transform_errors, rejected_details
         nonlocal insert_sql
+        nonlocal scanned_dest_sig, source_row_count, rejected_rows, coerced_null_rows
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="mysql")
         if create_table:
@@ -936,7 +1102,6 @@ def write_mapped_rows(
         # Map VARCHAR + live DATE/INT/BOOL/JSON — shared overlay before bind refuse.
         # Empty physical on an existing table → fail closed (never invent NULL).
         from connectors.writer_common import (
-            materialize_missing_as_null_for_dense_write,
             overlay_physical_bind_types,
             require_physical_types_for_existing_table,
         )
@@ -969,65 +1134,46 @@ def write_mapped_rows(
                 != str(live_dest_types.get(c) or "").strip().upper()
                 for c in target_cols
             )
-            need_remap = carriers_differ or (bool(studio_err) and not mapped_rows)
+            need_remap = carriers_differ or bool(studio_err)
             if need_remap:
-                # Rematerialize from source against live DDL (no Map VARCHAR invent).
                 dest_types = live_dest_types
-                _batch = _mysql_materialize_mapped_batch(
-                    headers=headers,
-                    data_rows=data_rows,
-                    mappings=mappings,
+                target_types = _mysql_resolve_carriers(
                     target_cols=target_cols,
-                    column_types=column_types,
                     dest_types=dest_types,
                     logical_types=logical_types,
-                    policy=policy,
-                    conflict_columns=conflict_columns,
-                    write_mode=write_mode,
-                    destination_pk_columns=list(conflict_columns or []) or None,
-                    destination_column_nullability=_kwargs.get(
-                        "destination_column_nullability"
-                    ),
-                    empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
-                    records=_sql_src["records"],
-                    source_spool=_sql_src.get("source_spool"),
-                    extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
-                    materialize_batch=_sql_src["materialize_batch"],
+                    allow_logical_fallback=False,
                 )
-                mapped_rows = _batch.mapped_rows
-                sparse_rows = _batch.sparse_rows
-                transform_errors = _batch.transform_errors
-                rejected_details = _batch.rejected_details
-                target_types = _batch.target_types
-                rows_for_checksum = _batch.rows_for_checksum
-                source_row_count = _batch.source_row_count
+                _mysql_finish_kwargs["dest_types"] = dest_types
+                _mysql_finish_kwargs["allow_logical_fallback"] = False
+                _mysql_finish_kwargs["target_types"] = target_types
             else:
                 target_types = overlay_physical_bind_types(
                     target_cols, target_types, physical
                 )
-
-        bound = bind_sql_mapped_rows_with_quarantine(
-            mapped_rows,
-            target_cols,
-            target_types,
-            rejected_details,
-            policy,
-            engine="mysql",
-            dialect_label="MySQL",
-            mappings=mappings,
-        )
-        converted_rows = materialize_missing_as_null_for_dense_write(bound)
-        if sparse_rows:
-            sparse_rows[:] = bind_sql_mapped_rows_with_quarantine(
-                sparse_rows,
-                target_cols,
-                target_types,
-                rejected_details,
-                policy,
-                engine="mysql",
-                dialect_label="MySQL",
-                mappings=mappings,
+                _mysql_finish_kwargs["target_types"] = target_types
+            write_acc.dest_types = dest_types if isinstance(dest_types, dict) else {}
+            final_sig = dest_types_signature(
+                dest_types if isinstance(dest_types, dict) else {}, target_cols
             )
+            if policy == "fail" and final_sig != scanned_dest_sig:
+                scan_acc, source_row_count, scanned_types = _mysql_scan_finished_bundles(
+                    **_mysql_finish_kwargs
+                )
+                target_types = scanned_types or target_types
+                rejected_details[:] = list(scan_acc.rejected_details)
+                transform_errors[:] = list(scan_acc.transform_errors)
+                rejected_rows = _rejected_row_count(
+                    data_rows,
+                    [],
+                    rejected_details,
+                    policy,
+                    source_row_count=source_row_count or None,
+                )
+                coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
+                _phys_abort = scan_acc.abort_error(policy)
+                if _phys_abort:
+                    raise RuntimeError(_phys_abort)
+
         conn.commit()
 
     try:
@@ -1074,7 +1220,10 @@ def write_mapped_rows(
                     break
                 except RuntimeError as setup_exc:
                     # Fail-closed physical overlay — do not reconnect-retry.
-                    if "refuse silent Map VARCHAR bind" in str(setup_exc):
+                    if (
+                        "refuse silent Map VARCHAR bind" in str(setup_exc)
+                        or "blocks partial write" in str(setup_exc)
+                    ):
                         return WriteResult(
                             ok=False,
                             rows_written=0,
@@ -1116,22 +1265,6 @@ def write_mapped_rows(
             # Setup used short lock waits; INSERT/UPSERT needs write I/O budget.
             _reconnect(purpose="write")
 
-            # Defensive: if setup skipped conversion somehow, coerce with mapping types.
-            if not converted_rows and mapped_rows:
-                from connectors.writer_common import materialize_missing_as_null_for_dense_write
-
-                bound = bind_sql_mapped_rows_with_quarantine(
-                    mapped_rows,
-                    target_cols,
-                    target_types,
-                    rejected_details,
-                    policy,
-                    engine="mysql",
-                    dialect_label="MySQL",
-                    mappings=mappings,
-                )
-                converted_rows = materialize_missing_as_null_for_dense_write(bound)
-
             _bind_abort = reject_on_strict_policy(
                 policy, rejected_details, "MySQL", transform_errors
             )
@@ -1145,8 +1278,7 @@ def write_mapped_rows(
                     chunks_completed=0,
                     error=_bind_abort,
                     rejected_rows=_rejected_row_count(
-                        data_rows, converted_rows or mapped_rows, rejected_details, policy,
-                        sparse_rows=sparse_rows,
+                        data_rows, [], rejected_details, policy,
                         source_row_count=source_row_count or None,
                     ),
                     rejected_details=rejected_details,
@@ -1154,69 +1286,12 @@ def write_mapped_rows(
                 )
 
             rows_skipped = 0
-            sparse_written = 0
-            sparse_checksum_rows: list[tuple] = []
-            if sparse_rows and write_mode == "upsert" and conflict_columns:
-                # Convert sparse with physical types but keep DF_MISSING intact.
-                sparse_converted = [
-                    tuple(_to_mysql_value(v, target_types[i]) for i, v in enumerate(row))
-                    for row in sparse_rows
-                ]
-                sparse_written, sparse_skipped, sparse_checksum = (
-                    _mysql_apply_sparse_upsert(
-                        cur,
-                        table_q=table_q,
-                        target_cols=target_cols,
-                        conflict_columns=conflict_columns,
-                        sparse_rows=sparse_converted,
-                        rejected_details=rejected_details,
-                        policy=policy,
-                    )
-                )
-                conn.commit()
-                written += sparse_written
-                rows_skipped += sparse_skipped
-                sparse_checksum_rows = list(sparse_checksum)
 
-            # Dense empty PK once before chunks — checksum + write + row-retry
-            # share the same holdouts (never mass-touch on ON DUPLICATE).
-            if write_mode == "upsert" and conflict_columns and converted_rows:
-                from connectors.writer_common import partition_dense_upsert_rows
-
-                conflict_cols = [c for c in conflict_columns if c in target_cols]
-                if conflict_cols:
-                    before = len(converted_rows)
-                    converted_rows = partition_dense_upsert_rows(
-                        converted_rows,
-                        conflict_cols,
-                        target_cols=target_cols,
-                        rejected_details=rejected_details,
-                        policy=policy,
-                    )
-                    rows_skipped += before - len(converted_rows)
-
-            # Ack checksum must match rows that land (partitioned dense + sparse).
-            rows_for_checksum = list(converted_rows) + sparse_checksum_rows
-            # Rematerialize under studio_err fills converted_rows after early defer —
-            # recompute chunk count so the write loop covers the full batch.
-            total = len(converted_rows)
-            chunks = max(1, (total + chunk_size - 1) // chunk_size) if total else 0
-            rejected_rows = _rejected_row_count(
-                data_rows,
-                converted_rows or mapped_rows,
-                rejected_details,
-                policy,
-                sparse_rows=sparse_rows,
-                source_row_count=source_row_count or None,
-            )
-            coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-
-            for chunk_idx in range(chunks):
-                start = chunk_idx * chunk_size
-                batch = converted_rows[start : start + chunk_size]
+            def _land_dense_chunk(batch, chunk_idx, row_numbers):
+                nonlocal written, rows_skipped, rejected_details, transform_errors
                 if not batch:
-                    break
-
+                    return 0
+                start = int(row_numbers[0]) if row_numbers else 1
                 attempt = 0
                 chunk_started = time.monotonic()
                 chunk_written = 0
@@ -1295,7 +1370,11 @@ def write_mapped_rows(
                                         logger.debug("Cleanup exception suppressed: %s", exc, exc_info=exc)
                                     if is_connection_lost(row_exc):
                                         raise
-                                    source_row = start + row_i
+                                    source_row = (
+                                        int(row_numbers[row_i])
+                                        if row_numbers and row_i < len(row_numbers)
+                                        else start + row_i
+                                    )
                                     col_name = extract_column_from_sql_error(row_exc) or "*"
                                     sample_val = ""
                                     if col_name != "*" and col_name in target_cols:
@@ -1349,7 +1428,96 @@ def write_mapped_rows(
                 written += chunk_written
                 chunks_completed = chunk_idx + 1
                 if on_checkpoint:
-                    on_checkpoint(chunks_completed, chunks, written)
+                    on_checkpoint(chunks_completed, max(chunks, chunk_idx + 1), written)
+                return chunk_written
+
+            chunk_idx = 0
+            writing = True
+            for finished in iter_mysql_finished_bundles(**_mysql_finish_kwargs):
+                rejected_details.extend(finished.rejected_details)
+                transform_errors.extend(finished.transform_errors)
+                if writing and reject_on_strict_policy(
+                    policy, rejected_details, "MySQL", transform_errors
+                ):
+                    writing = False
+                    write_acc.stop_writing()
+                if writing:
+                    if finished.sparse_rows and write_mode == "upsert" and conflict_columns:
+                        sparse_converted = [
+                            tuple(
+                                _to_mysql_value(v, target_types[i])
+                                for i, v in enumerate(row)
+                            )
+                            for row in finished.sparse_rows
+                        ]
+                        sparse_written, sparse_skipped, sparse_checksum = (
+                            _mysql_apply_sparse_upsert(
+                                cur,
+                                table_q=table_q,
+                                target_cols=target_cols,
+                                conflict_columns=conflict_columns,
+                                sparse_rows=sparse_converted,
+                                rejected_details=rejected_details,
+                                policy=policy,
+                            )
+                        )
+                        conn.commit()
+                        written += sparse_written
+                        rows_skipped += sparse_skipped
+                        write_acc.add_accepted(list(sparse_checksum))
+                    dense = list(finished.dense_rows)
+                    dense_nums = list(finished.dense_row_numbers or [])
+                    if write_mode == "upsert" and conflict_columns and dense:
+                        from connectors.writer_common import (
+                            assert_dense_upsert_keys_present,
+                            partition_dense_upsert_rows,
+                        )
+
+                        conflict_cols = [c for c in conflict_columns if c in target_cols]
+                        if conflict_cols:
+                            before = len(dense)
+                            dense = partition_dense_upsert_rows(
+                                dense,
+                                conflict_cols,
+                                target_cols=target_cols,
+                                rejected_details=rejected_details,
+                                policy=policy,
+                                source_row_numbers=dense_nums or None,
+                            )
+                            rows_skipped += before - len(dense)
+                            if dense_nums and len(dense) != len(dense_nums):
+                                kept_nums: list[int] = []
+                                for i, row in enumerate(finished.dense_rows):
+                                    try:
+                                        assert_dense_upsert_keys_present(
+                                            [row],
+                                            conflict_cols,
+                                            target_cols=target_cols,
+                                        )
+                                        kept_nums.append(finished.dense_row_numbers[i])
+                                    except ValueError:
+                                        continue
+                                dense_nums = kept_nums
+                    for offset in range(0, len(dense), chunk_size) if dense else []:
+                        sub = dense[offset : offset + chunk_size]
+                        sub_nums = (
+                            dense_nums[offset : offset + chunk_size]
+                            if dense_nums
+                            else None
+                        )
+                        _land_dense_chunk(sub, chunk_idx, sub_nums)
+                        chunk_idx += 1
+                    write_acc.add_accepted(dense)
+                del finished
+            chunks = chunk_idx
+            rejected_rows = _rejected_row_count(
+                data_rows,
+                [()] * write_acc.accepted_row_count,
+                rejected_details,
+                policy,
+                source_row_count=source_row_count or None,
+            )
+            coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
 
             # Document → relational child fan-out (normalize/hybrid) after parent land.
             child_flush = flush_normalized_child_batches(
@@ -1417,12 +1585,7 @@ def write_mapped_rows(
             )
         return WriteResult(
             ok=True, rows_written=written, table_name=table_name, target_schema=database,
-            checksum=row_checksum(
-                rows_for_checksum if "rows_for_checksum" in locals() else (converted_rows or mapped_rows),
-                target_cols,
-                dest_db_type="mysql",
-                dest_types={c: target_types[i] for i, c in enumerate(target_cols)},
-            ),
+            checksum=write_acc.digest(),
             chunks_completed=chunks_completed or chunks,
             rejected_rows=max(rejected_rows, (source_row_count or len(data_rows)) - written - rows_skipped),
             rejected_details=rejected_details,
@@ -1442,16 +1605,7 @@ def write_mapped_rows(
             rows_written=written,
             table_name=table_name,
             target_schema=database,
-            checksum=row_checksum(
-                rows_for_checksum if "rows_for_checksum" in locals() else (converted_rows or mapped_rows),
-                target_cols,
-                dest_db_type="mysql",
-                dest_types={c: target_types[i] for i, c in enumerate(target_cols)}
-                if target_types
-                else None,
-            )
-            if written
-            else "",
+            checksum=write_acc.digest() if written else "",
             chunks_completed=chunks_completed,
             error=str(exc),
             rejected_rows=rejected_rows,
@@ -1460,3 +1614,5 @@ def write_mapped_rows(
             rows_skipped=rows_skipped if 'rows_skipped' in locals() else 0,
             warnings=transform_errors,
         )
+    finally:
+        _cleanup_spool()
