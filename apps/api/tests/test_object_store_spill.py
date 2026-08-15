@@ -34,6 +34,7 @@ def test_json_export_matches_dumps_indent_and_omits_missing():
     expected = json.dumps(
         mapped_rows_to_json_records(rows, cols, types),
         indent=2,
+        default=json_default,
         ensure_ascii=False,
         allow_nan=False,
     ).encode("utf-8")
