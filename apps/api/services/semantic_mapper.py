@@ -1637,6 +1637,36 @@ def _alternatives(
 IDENTITY_PASSTHROUGH_CONFIDENCE = 0.84
 
 
+def authority_mappings(
+    source_columns: list[str],
+    target_columns: list[str],
+    **kwargs,
+) -> list[dict]:
+    """Single Map SSOT for RAG / Pilot / LLM / enhanced AI.
+
+    Those layers retrieve evidence and explain. They must not invent a second
+    confidence or assignment. Transfer, Validate, and G4 already consume
+    ``map_columns`` — AI surfaces must too.
+    """
+    return map_columns(source_columns, target_columns, **kwargs)
+
+
+def pair_mapping_authority(source: str, target: str) -> dict:
+    """Single-pair view of the Map SSOT for RAG suggest/retrieve."""
+    rows = map_columns([source], [target])
+    row = rows[0] if rows else {}
+    return {
+        "source": source,
+        "proposed_target": row.get("target"),
+        "confidence": float(row.get("confidence") or 0),
+        "requires_review": bool(row.get("requires_review")),
+        "create_new": bool(row.get("create_new")),
+        "reasoning": str(row.get("reasoning") or ""),
+        "assignment_strategy": str(row.get("assignment_strategy") or ""),
+        "authority": "semantic_mapper.map_columns",
+    }
+
+
 def map_columns(
     source_columns: list[str],
     target_columns: list[str],
