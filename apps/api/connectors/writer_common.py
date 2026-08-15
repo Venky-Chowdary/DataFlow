@@ -1397,6 +1397,8 @@ def build_mapped_rows_with_details(
 
             if is_intentional_omit(m):
                 continue
+            if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
+                continue
         except Exception:
             pass
         src = m["source"]
@@ -1766,6 +1768,9 @@ def flush_normalized_child_batches(
 
             ph = ", ".join([placeholder] * len(cols))
             insert_sql = f"INSERT INTO {table_q} ({col_q}) VALUES ({ph})"  # nosec B608
+            from services.shape_contract import require_name_addressed_insert
+
+            insert_sql = require_name_addressed_insert(insert_sql)
             if cursor is not None:
                 try:
                     cursor.executemany(insert_sql, rows)
@@ -1786,6 +1791,7 @@ def flush_normalized_child_batches(
                     params = {f"p{i}": v for i, v in enumerate(row)}
                     named_ph = ", ".join(f":p{i}" for i in range(len(cols)))
                     sql = f"INSERT INTO {table_q} ({col_q}) VALUES ({named_ph})"  # nosec B608
+                    sql = require_name_addressed_insert(sql)
                     try:
                         sa_conn.execute(sa.text(sql), params)
                     except Exception as row_exc:
@@ -1836,6 +1842,8 @@ def prepare_records_for_vector_write(
             from services.mapping_constraints import is_intentional_omit
 
             if is_intentional_omit(m):
+                continue
+            if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
                 continue
         except Exception:
             pass

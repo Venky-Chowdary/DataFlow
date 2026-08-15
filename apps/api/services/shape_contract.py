@@ -106,6 +106,21 @@ def insert_sql_is_name_addressed(sql: str) -> bool:
     return bool(_INSERT_WITH_COLS.search(text))
 
 
+class PositionalInsertError(ValueError):
+    """Positional ``INSERT INTO t VALUES`` is refuse-closed (dbt-databricks#1289)."""
+
+
+def require_name_addressed_insert(sql: str) -> str:
+    """Return ``sql`` or raise — writers must not ship positional INSERT."""
+    if not insert_sql_is_name_addressed(sql):
+        raise PositionalInsertError(
+            "Refusing positional INSERT INTO t VALUES — a dest ADD COLUMN "
+            "that is not last would shift values (dbt-databricks#1289). "
+            "Name destination columns."
+        )
+    return sql
+
+
 def project_named_write(
     *,
     source_row: dict[str, Any],
@@ -406,6 +421,16 @@ def build_shape_gate(contract: dict[str, Any]) -> dict[str, Any]:
             "write_columns": contract.get("write_columns") or [],
             "counts": counts,
             "primary_action": contract.get("primary_action"),
+            "headline": contract.get("headline"),
+            "detail": contract.get("detail"),
+            "unaccounted_sources": contract.get("unaccounted_sources") or [],
+            "dest_only": contract.get("dest_only") or [],
+            "extra_source_columns": [
+                str(c.get("source") or "")
+                for c in (contract.get("columns") or [])
+                if c.get("kind") in {COL_ADD, COL_PENDING, COL_UNACCOUNTED}
+                and str(c.get("source") or "").strip()
+            ],
             "rule_id": f"{GATE_ID}.{shape}",
             "remediation_kind": contract.get("primary_action") or "review_mappings",
         },

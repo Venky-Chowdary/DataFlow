@@ -9,6 +9,7 @@ class GateStatus(str, Enum):
     PASS = "pass"
     BLOCK = "block"
     SKIP = "skip"
+    WARN = "warn"
 
 
 class GateId(str, Enum):
@@ -21,6 +22,10 @@ class GateId(str, Enum):
     G7_CAPACITY = "g7_capacity"
     G8_RECONCILIATION = "g8_reconciliation"
     G9_DATA_INTEGRITY = "g9_data_integrity"
+    G9_SYNC_CONTRACT = "g9_sync_contract"
+    G13_SOURCE_COVERAGE = "g13_source_coverage"
+    G14_DESTINATION_REQUIREMENTS = "g14_destination_requirements"
+    G15_DEST_EXISTS_SHAPE = "g15_dest_exists_shape"
 
 
 @dataclass
@@ -83,6 +88,9 @@ class ColumnMapping:
     intentional_omit: bool = False
     # Migration Risk Contract (signed dict) — boolean ack alone is incomplete.
     risk_contract: dict[str, Any] | None = None
+    # Dest-exists / Map stamps — G15 must see pending extras and false-friends.
+    assignment_strategy: str | None = None
+    review_kind: str | None = None
 
 
 @dataclass
@@ -95,6 +103,8 @@ class SourceConfig:
     columns: list[ColumnSchema] = field(default_factory=list)
     row_count_estimate: int = 0
     error: str | None = None
+    # table | query | procedure — CDC + callable is refuse-closed.
+    source_read_mode: str = ""
 
 
 @dataclass
@@ -114,6 +124,11 @@ class DestinationConfig:
     # Redshift COPY FROM S3 staging-bucket probe. Missing config is not a block
     # (PostgreSQL-wire insert remains valid). Denied is a G2 block.
     redshift_staging_probe: dict[str, Any] | None = None
+    # Dest-exists contract inputs (G14/G15). Empty when the host did not introspect.
+    column_nullability: dict[str, bool] = field(default_factory=dict)
+    column_defaults: dict[str, str] = field(default_factory=dict)
+    identity_columns: list[str] = field(default_factory=list)
+    generated_columns: list[str] = field(default_factory=list)
 
 
 @dataclass

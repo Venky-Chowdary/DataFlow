@@ -17,9 +17,11 @@ from services.destination_requirements_gate import build_mapping_contract_gates
 from services.shape_contract import (
     GATE_ID,
     WRITE_BY_NAME,
+    PositionalInsertError,
     classify_dest_exists_shape,
     insert_sql_is_name_addressed,
     project_named_write,
+    require_name_addressed_insert,
 )
 
 
@@ -132,6 +134,12 @@ def test_insert_sql_name_addressed_rejects_positional_values() -> None:
     assert insert_sql_is_name_addressed(positional) is False
     mssql_stage = "INSERT INTO #df_mrg_1 ([id], [name]) VALUES (:id, :name)"
     assert insert_sql_is_name_addressed(mssql_stage) is True
+    assert require_name_addressed_insert(named) == named
+    try:
+        require_name_addressed_insert(positional)
+        raise AssertionError("positional INSERT must raise")
+    except PositionalInsertError:
+        pass
 
 
 def test_g15_does_not_duplicate_g13_g14_blockers() -> None:
@@ -156,3 +164,20 @@ def test_g15_does_not_duplicate_g13_g14_blockers() -> None:
     assert GATE_ID not in blocker_ids
     assert "g13_source_coverage" in blocker_ids
     assert "g14_destination_requirements" in blocker_ids
+
+
+def test_explain_gate_g15_uses_primary_action() -> None:
+    from services.preflight_rules import explain_gate
+
+    guidance = explain_gate(
+        GATE_ID,
+        "2 extra source column(s) are unaccounted",
+        {"primary_action": "review_map", "extra_source_columns": ["loyalty_tier"]},
+    )
+    actions = guidance["suggested_actions"]
+    assert len(actions) == 1
+    assert actions[0]["kind"] == "review_mappings"
+    assert actions[0]["column"] == "loyalty_tier"
+
+    reload_g = explain_gate(GATE_ID, "unproven", {"primary_action": "reload_dest_schema"})
+    assert reload_g["suggested_actions"][0]["kind"] == "reload_dest_schema"

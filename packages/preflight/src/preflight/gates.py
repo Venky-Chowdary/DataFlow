@@ -2703,6 +2703,163 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
     )
 
 
+def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float) -> GateResult:
+    """Translate hosted gate dicts (pass/block/skip/warn) onto package GateResult."""
+    raw = str(payload.get("status") or "skip").strip().lower()
+    status = {
+        "pass": GateStatus.PASS,
+        "block": GateStatus.BLOCK,
+        "skip": GateStatus.SKIP,
+        "warn": GateStatus.WARN,
+    }.get(raw, GateStatus.SKIP)
+    return GateResult(
+        gate_id=gate_id,
+        status=status,
+        message=str(payload.get("message") or ""),
+        details=dict(payload.get("details") or {}),
+        duration_ms=(time.perf_counter() - start) * 1000,
+    )
+
+
+def _plan_mapping_dicts(ctx: PreflightContext) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for m in ctx.plan.mappings or []:
+        if isinstance(m, dict):
+            rows.append(dict(m))
+            continue
+        rows.append(
+            {
+                "source": getattr(m, "source", ""),
+                "target": getattr(m, "target", ""),
+                "confidence": getattr(m, "confidence", 0),
+                "create_new": bool(getattr(m, "create_new", False)),
+                "intentional_omit": bool(getattr(m, "intentional_omit", False)),
+                "assignment_strategy": str(getattr(m, "assignment_strategy", "") or ""),
+                "review_kind": str(getattr(m, "review_kind", "") or ""),
+            }
+        )
+    return rows
+
+
+def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
+    """CDC + callable extract is refuse-closed. Hosted policy gate may replace this."""
+    start = time.perf_counter()
+    mode = str(getattr(ctx.plan.source, "source_read_mode", "") or "").strip().lower()
+    sync = str(ctx.plan.sync_mode or "").strip().lower()
+    try:
+        from services.preflight_cursor_gate import build_sync_contract_gate
+
+        payload = build_sync_contract_gate(
+            [],
+            sync=sync,
+            validation=str(ctx.plan.validation_mode or "strict"),
+            dest=str(ctx.plan.destination.db_type or ""),
+            src=str(ctx.plan.source.db_type or ""),
+            kind=str(ctx.plan.source.kind or "file"),
+            source_columns=[c.name for c in (ctx.plan.source.columns or [])],
+            pass_status="pass",
+            block_status="block",
+            source_read_mode=mode,
+        )
+        return _host_gate_to_result(GateId.G9_SYNC_CONTRACT, payload, start)
+    except ImportError:
+        if sync == "cdc" and mode in {"procedure", "query"}:
+            return _block(
+                GateId.G9_SYNC_CONTRACT,
+                "Stored-procedure / custom-SQL extract is a result-set snapshot, "
+                "not a WAL/binlog read — CDC is not available on this source",
+                start,
+                {"source_read_mode": mode, "sync_mode": sync},
+            )
+        return GateResult(
+            gate_id=GateId.G9_SYNC_CONTRACT,
+            status=GateStatus.SKIP,
+            message="Sync contract skipped — hosted cursor gate unavailable",
+            details={"source_read_mode": mode, "sync_mode": sync},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+
+
+def gate_g13_source_coverage(ctx: PreflightContext) -> GateResult:
+    start = time.perf_counter()
+    try:
+        from services.source_coverage_gate import build_source_coverage_gate
+    except ImportError:
+        return GateResult(
+            gate_id=GateId.G13_SOURCE_COVERAGE,
+            status=GateStatus.SKIP,
+            message="Source coverage skipped — hosted G13 unavailable",
+            details={},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    _coverage, gate = build_source_coverage_gate(
+        source_columns=[c.name for c in (ctx.plan.source.columns or [])],
+        mappings=_plan_mapping_dicts(ctx),
+    )
+    return _host_gate_to_result(GateId.G13_SOURCE_COVERAGE, gate, start)
+
+
+def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
+    start = time.perf_counter()
+    dest = ctx.plan.destination
+    try:
+        from services.destination_requirements_gate import build_destination_requirements_gate
+    except ImportError:
+        return GateResult(
+            gate_id=GateId.G14_DESTINATION_REQUIREMENTS,
+            status=GateStatus.SKIP,
+            message="Destination requirements skipped — hosted G14 unavailable",
+            details={},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    gate = build_destination_requirements_gate(
+        destination_table_exists=dest.table_exists,
+        column_nullability=getattr(dest, "column_nullability", None) or {},
+        column_defaults=getattr(dest, "column_defaults", None) or {},
+        identity_columns=getattr(dest, "identity_columns", None) or [],
+        generated_columns=getattr(dest, "generated_columns", None) or [],
+        mappings=_plan_mapping_dicts(ctx),
+    )
+    if not gate:
+        return GateResult(
+            gate_id=GateId.G14_DESTINATION_REQUIREMENTS,
+            status=GateStatus.SKIP,
+            message="Destination requirements not applicable",
+            details={},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    return _host_gate_to_result(GateId.G14_DESTINATION_REQUIREMENTS, gate, start)
+
+
+def gate_g15_dest_exists_shape(ctx: PreflightContext) -> GateResult:
+    start = time.perf_counter()
+    dest = ctx.plan.destination
+    try:
+        from services.shape_contract import build_shape_gate, classify_dest_exists_shape
+    except ImportError:
+        return GateResult(
+            gate_id=GateId.G15_DEST_EXISTS_SHAPE,
+            status=GateStatus.SKIP,
+            message="Dest-exists shape skipped — hosted G15 unavailable",
+            details={},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    dest_cols = [c.name for c in (dest.target_columns or [])]
+    contract = classify_dest_exists_shape(
+        destination_table_exists=dest.table_exists,
+        source_columns=[c.name for c in (ctx.plan.source.columns or [])],
+        dest_columns=dest_cols,
+        mappings=_plan_mapping_dicts(ctx),
+        column_nullability=getattr(dest, "column_nullability", None) or {},
+        column_defaults=getattr(dest, "column_defaults", None) or {},
+        identity_columns=getattr(dest, "identity_columns", None) or [],
+        generated_columns=getattr(dest, "generated_columns", None) or [],
+    )
+    return _host_gate_to_result(
+        GateId.G15_DEST_EXISTS_SHAPE, build_shape_gate(contract), start
+    )
+
+
 PREFLIGHT_GATES: list[tuple[GateId, GateFn]] = [
     (GateId.G1_SOURCE, gate_g1_source),
     (GateId.G2_DESTINATION, gate_g2_destination),
@@ -2713,6 +2870,10 @@ PREFLIGHT_GATES: list[tuple[GateId, GateFn]] = [
     (GateId.G7_CAPACITY, gate_g7_capacity),
     (GateId.G8_RECONCILIATION, gate_g8_reconciliation),
     (GateId.G9_DATA_INTEGRITY, gate_g9_data_integrity),
+    (GateId.G9_SYNC_CONTRACT, gate_g9_sync_contract),
+    (GateId.G13_SOURCE_COVERAGE, gate_g13_source_coverage),
+    (GateId.G14_DESTINATION_REQUIREMENTS, gate_g14_destination_requirements),
+    (GateId.G15_DEST_EXISTS_SHAPE, gate_g15_dest_exists_shape),
 ]
 
 

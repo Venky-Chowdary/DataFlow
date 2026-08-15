@@ -551,7 +551,7 @@ export interface EnhancedAnalysis {
 
 export interface PreflightGate {
   id: string;
-  status: "pass" | "block" | "skip" | "running";
+  status: "pass" | "block" | "skip" | "running" | "warn";
   message: string;
   duration_ms: number;
   details?: Record<string, unknown>;
@@ -978,6 +978,30 @@ export interface PreflightResult {
   }>;
   /** Canonical Kernel ValidationFinding dicts (coercion → findings SSOT). */
   validation_findings?: Array<Record<string, unknown>>;
+  /** G13/G14/G15 mapping contract — extras, dest-only, write_by=name. */
+  source_coverage?: {
+    unaccounted?: string[];
+    omitted?: string[];
+    written?: string[];
+    shape_contract?: {
+      shape?: string;
+      headline?: string;
+      detail?: string;
+      primary_action?: string;
+      unaccounted_sources?: string[];
+      extra_source_columns?: string[];
+      dest_only?: Array<{ target?: string; kind?: string }>;
+      counts?: Record<string, number>;
+      write_by?: string;
+    };
+  };
+  /** Callable extract: FK catalog was not probed against a fake relation. */
+  source_fk_catalog?: {
+    ran?: boolean;
+    skipped?: boolean;
+    reason?: string;
+    note?: string;
+  };
 }
 
 /** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */
@@ -991,7 +1015,11 @@ export type ValidationActionKind =
   | "normalize_control_chars"
   | "quarantine_and_rerun"
   | "open_bad_data_fix"
-  | "fix_source_keys";
+  | "fix_source_keys"
+  | "confirm_or_remap"
+  | "reload_dest_schema"
+  | "confirm_add"
+  | "continue_validate";
 
 export interface ValidationSuggestedAction {
   kind: ValidationActionKind | string;

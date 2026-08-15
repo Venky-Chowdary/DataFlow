@@ -933,6 +933,8 @@ def run_file_preflight(
                 m if isinstance(m, dict) else dict(m or {}),
                 table=str(destination_table or ""),
             ),
+            assignment_strategy=str(m.get("assignment_strategy") or "") or None,
+            review_kind=str(m.get("review_kind") or "") or None,
         )
         for m in mappings
     ]
@@ -1041,6 +1043,17 @@ def run_file_preflight(
             columns=source_cols,
             row_count_estimate=row_count,
             error=source_error,
+            source_read_mode=str(
+                (source_config or {}).get("source_read_mode")
+                or ((source_config or {}).get("extra") or {}).get("source_read_mode")
+                or ""
+            ),
+            db_type=str(
+                (source_config or {}).get("type")
+                or (source_config or {}).get("db_type")
+                or source_format
+                or ""
+            ),
         ),
         destination=DestinationConfig(
             kind="database",
@@ -1053,6 +1066,10 @@ def run_file_preflight(
             error=destination_error,
             privilege_probe=privilege_probe,
             redshift_staging_probe=redshift_staging_probe,
+            column_nullability=dict(destination_column_nullability or {}),
+            column_defaults=dict(destination_column_defaults or {}),
+            identity_columns=list(destination_identity_columns or []),
+            generated_columns=list(destination_generated_columns or []),
         ),
         mappings=plan_mappings,
         dry_run_passed=False,
@@ -1496,7 +1513,11 @@ def run_file_preflight(
     out["source_coverage"] = src_coverage
     if isinstance(out.get("proof_bundle"), dict):
         out["proof_bundle"] = {**out["proof_bundle"], "source_coverage": src_coverage}
-    out["gates"] = [*out["gates"], *contract_gates]
+    # Hosted G13/G14/G15 replace package stubs (full dest nullability / identity).
+    contract_ids = {str(g.get("id") or "") for g in contract_gates}
+    out["gates"] = [
+        g for g in out["gates"] if str(g.get("id") or "") not in contract_ids
+    ] + list(contract_gates)
     if contract_blockers:
         out["blockers"] = [
             *out["blockers"],
@@ -1536,14 +1557,29 @@ def run_file_preflight(
         # Prefer source-introspected FKs for orphan probe (sample is source rows).
         probe_fks = list(destination_foreign_keys or [])
         try:
-            src_fks = load_source_foreign_keys(
-                source_connector_id=source_connector_id or "",
-                source_config=source_config,
-                source_table=source_table or "",
-            )
-            if src_fks:
-                probe_fks = src_fks
-                out["source_foreign_keys"] = src_fks
+            from services.procedure_source import is_callable_source
+
+            if is_callable_source(source_config):
+                src_fks = []
+                out["source_foreign_keys"] = []
+                out["source_fk_catalog"] = {
+                    "ran": False,
+                    "skipped": True,
+                    "reason": "callable_source",
+                    "note": (
+                        "Stored-procedure / SQL extract is a result-set snapshot — "
+                        "no catalog relation to probe for foreign keys."
+                    ),
+                }
+            else:
+                src_fks = load_source_foreign_keys(
+                    source_connector_id=source_connector_id or "",
+                    source_config=source_config,
+                    source_table=source_table or "",
+                )
+                if src_fks:
+                    probe_fks = src_fks
+                    out["source_foreign_keys"] = src_fks
         except Exception as src_fk_exc:
             logger.debug(
                 "source FK introspect skipped: %s", src_fk_exc, exc_info=src_fk_exc

@@ -359,6 +359,37 @@
   color: var(--df2-muted, #64748b);
 }
 
+.df2-vd-shape {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  margin: 0 0 0.85rem;
+  padding: 0.8rem 0.95rem;
+  border-radius: 8px;
+  border: 1px solid #f59e0b55;
+  background: #fef3c740;
+  font-size: 0.875rem;
+}
+
+.df2-vd-shape-copy {
+  flex: 1;
+  min-width: 0;
+}
+
+.df2-vd-shape-copy strong {
+  display: block;
+  margin-bottom: 0.15rem;
+}
+
+.df2-vd-shape-copy p {
+  margin: 0 0 0.35rem;
+  color: var(--df2-muted, #64748b);
+}
+
+.df2-vd-shape-copy p:last-child {
+  margin-bottom: 0;
+}
+
 .df2-map-health-banner {
   display: flex;
   gap: 0.65rem;

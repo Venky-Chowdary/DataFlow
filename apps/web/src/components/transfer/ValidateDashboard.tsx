@@ -33,6 +33,12 @@ import {
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
 import { buildValidateHonestyControls, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
+import {
+  destExistsPrimaryCta,
+  destOnlyPreserveColumns,
+  extraSourceColumnsFromContract,
+  shapeContractFromPreflight,
+} from "../../lib/destExistsShape";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
@@ -200,6 +206,8 @@ interface ValidateDashboardProps {
   cellPreview?: CellPreviewResult | null;
   /** Jump back to Map so the operator can fix coerced / identity column mappings. */
   onReviewMappings?: (opts?: { focusSource?: string }) => void;
+  /** Reload live destination types — G15 pending / dest_unknown. */
+  onReloadDestSchema?: () => void;
   /**
    * Open Destination → Advanced settings where primary key and sync mode live.
    * Used for duplicate-identity blockers (Map alone cannot change the sync contract).
@@ -363,6 +371,10 @@ const ACTION_ICON: Record<string, string> = {
   quarantine_and_rerun: "shield",
   open_bad_data_fix: "shield",
   fix_source_keys: "settings",
+  confirm_or_remap: "layers",
+  reload_dest_schema: "scan",
+  confirm_add: "layers",
+  continue_validate: "check",
 };
 
 /** Encoding remediations collapse to one Fix-bad-data CTA (drawer owns Strip/Quarantine). */
@@ -701,6 +713,7 @@ export function ValidateDashboard({
   onQuarantineAndRerun,
   cellPreview = null,
   onReviewMappings,
+  onReloadDestSchema,
   onOpenIdentitySettings,
   uniqueKeySuggestions = [],
   onApplyPrimaryKey,
@@ -903,6 +916,20 @@ export function ValidateDashboard({
     setExplainError(null);
     setAssistExpanded(true);
   }, [preflight?.run_id]);
+
+  const destShape = useMemo(() => shapeContractFromPreflight(preflight), [preflight]);
+  const destShapeExtras = useMemo(() => extraSourceColumnsFromContract(destShape), [destShape]);
+  const destShapePreserve = useMemo(() => destOnlyPreserveColumns(destShape), [destShape]);
+  const destShapeCta = useMemo(() => destExistsPrimaryCta(destShape), [destShape]);
+  const showDestShape = Boolean(
+    destShape
+    && (
+      destShapeExtras.length
+      || destShapePreserve.length
+      || destShapeCta
+      || (destShape.shape && destShape.shape !== "create_new_table")
+    ),
+  );
 
   // After a remediation re-run, close out "waiting for re-validation" entries.
   useEffect(() => {
@@ -1376,10 +1403,23 @@ export function ValidateDashboard({
       );
       return;
     }
-    if (action.kind === "review_mappings" || action.kind === "rerun_mapping") {
+    if (action.kind === "review_mappings" || action.kind === "rerun_mapping"
+      || action.kind === "confirm_or_remap" || action.kind === "confirm_add") {
       onReviewMappings?.(
         action.column ? { focusSource: action.column } : undefined,
       );
+      return;
+    }
+    if (action.kind === "reload_dest_schema") {
+      if (onReloadDestSchema) {
+        onReloadDestSchema();
+        return;
+      }
+      onRunPreflight?.();
+      return;
+    }
+    if (action.kind === "continue_validate") {
+      onRunPreflight?.();
       return;
     }
     pendingVerifyRef.current = true;
@@ -1628,6 +1668,43 @@ export function ValidateDashboard({
               </ul>
             )}
           </div>
+        </div>
+      )}
+
+      {showDestShape && destShape && !running && (
+        <div className="df2-vd-shape" role="status">
+          <DtIcon name="layers" size={16} />
+          <div className="df2-vd-shape-copy">
+            <strong>{destShape.headline || "Dest-exists shape classified"}</strong>
+            <p>
+              {destShape.detail
+                || "Writes are name-addressed. Dest-only columns stay off SET. CDC remains at-least-once upsert."}
+            </p>
+            {destShapeExtras.length > 0 && (
+              <p>
+                Extra source: {destShapeExtras.join(", ")} — remap or omit, never silent drop.
+              </p>
+            )}
+            {destShapePreserve.length > 0 && (
+              <p>
+                Dest-only preserve: {destShapePreserve.join(", ")} — off SET.
+              </p>
+            )}
+          </div>
+          {destShapeCta && (
+            <Button
+              size="sm"
+              variant="primary"
+              leadingIcon={<DtIcon name={ACTION_ICON[destShapeCta.kind] ?? "layers"} size={14} />}
+              onClick={() => handleSuggestedAction({
+                kind: destShapeCta.kind,
+                label: destShapeCta.label,
+                column: destShapeCta.column,
+              })}
+            >
+              {destShapeCta.label}
+            </Button>
+          )}
         </div>
       )}
 

@@ -233,3 +233,43 @@ def test_query_mode_sqlite_select_roundtrip(tmp_path: Path) -> None:
     from services.procedure_source import close_callable_spool
 
     close_callable_spool()
+
+
+def test_callable_source_skips_fk_catalog_probe() -> None:
+    from services.preflight_source_catalog import load_source_foreign_keys
+
+    fks = load_source_foreign_keys(
+        source_config={
+            "type": "postgresql",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL get_orders()",
+            "extra": {"source_read_mode": "procedure"},
+        },
+        source_table="get_orders",
+    )
+    assert fks == []
+
+
+def test_mapped_rows_skip_pending_dest_schema() -> None:
+    from connectors.writer_common import build_mapped_rows_with_details
+
+    rows, errors, details = build_mapped_rows_with_details(
+        headers=["id", "loyalty_tier"],
+        data_rows=[["1", "gold"]],
+        mappings=[
+            {"source": "id", "target": "id", "transform": "none"},
+            {
+                "source": "loyalty_tier",
+                "target": "loyalty_tier",
+                "assignment_strategy": "pending_dest_schema",
+                "transform": "none",
+            },
+        ],
+        target_cols=["id"],
+        column_types={"id": "INTEGER", "loyalty_tier": "VARCHAR"},
+    )
+    assert errors == []
+    assert details == []
+    assert len(rows) == 1
+    assert rows[0] == (1,) or rows[0] == ("1",) or list(rows[0]) == [1] or list(rows[0]) == ["1"]
+    assert len(rows[0]) == 1

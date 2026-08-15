@@ -3544,7 +3544,24 @@ export function TransferPage({
           connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
           source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
           source_table: isConnectorSource && sourceKind === "database" && sourceConnector?.type !== "mongodb"
+            && sourceReadMode === "table"
             ? (sourceTable || undefined)
+            : undefined,
+          source_config: isConnectorSource && sourceKind === "database"
+            ? {
+                type: sourceConnector?.type,
+                db_type: sourceConnector?.type,
+                source_read_mode: sourceReadMode,
+                procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : undefined,
+                source_query: sourceReadMode === "query" ? procedureCall.trim() : undefined,
+                procedure_params: Object.keys(procedureParams).length ? procedureParams : undefined,
+                extra: {
+                  source_read_mode: sourceReadMode,
+                  procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+                  source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+                  procedure_params: procedureParams,
+                },
+              }
             : undefined,
           source_collection: isConnectorSource && sourceKind === "database" && sourceConnector?.type === "mongodb"
             ? (sourceCollection || undefined)
@@ -5865,6 +5882,7 @@ export function TransferPage({
               }
               setStep(STEP_MAP);
             }}
+            onReloadDestSchema={() => { void loadDestinationSchema(); }}
             onOpenIdentitySettings={openIdentitySettings}
             uniqueKeySuggestions={uniqueKeySuggestions}
             compositeKeySuggestions={compositeKeySuggestions}

@@ -753,6 +753,10 @@ export function rankAndDedupeSuggestedActions(
       case "map_column":
       case "review_mappings":
       case "rerun_mapping":
+      case "confirm_or_remap":
+      case "confirm_add":
+        return 4;
+      case "reload_dest_schema":
         return 4;
       case "check_connection":
         return 5;
