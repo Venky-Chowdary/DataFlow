@@ -77,6 +77,8 @@ import {
   dialectOffersProcedures,
   dialectOffersQuery,
   dialectOffersSqlExtract,
+  destWriteReady,
+  isCallableDestMode,
   isCallableSourceMode,
   procedureHint,
   procedureStreamName,
@@ -84,6 +86,7 @@ import {
   sourceExtractReady,
   type SourceReadMode,
 } from "../lib/sourceReadMode";
+import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
   DATE_LOCALES,
@@ -883,8 +886,9 @@ export function TransferPage({
         sourceKind,
         isMultiStream: isMultiStreamSource,
         sourceReadMode,
+        destWriteMode,
       }),
-    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource, sourceReadMode],
+    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource, sourceReadMode, destWriteMode],
   );
   // Client deploy: never leave an engine-unsupported mode selected after route change.
   useEffect(() => {
@@ -2254,12 +2258,51 @@ export function TransferPage({
 
   const explainDestinationGap = () => {
     if (explainSourceGap()) return true;
-    if (destKindMode === "database" && !targetDb.trim()) {
+    if (destKindMode === "database" && isCallableDestMode(destWriteMode)) {
+      const sql = destWriteMode === "query" ? destQuerySql : destProcedureCall;
+      if (!sql.trim()) {
+        toast({
+          title: destWriteMode === "query" ? "Destination query required" : "Destination procedure required",
+          message: destWriteMode === "query"
+            ? "Paste one INSERT / MERGE / UPDATE with :binds."
+            : "Paste one CALL / EXEC. Each row is one statement; failed rows quarantine.",
+          tone: "warning",
+        });
+        setStep(STEP_DESTINATION);
+        return true;
+      }
+      const boundForDiag = {
+        ...destProcedureParams,
+        ...Object.fromEntries(
+          Object.entries(destProcedureParamMap)
+            .filter(([, col]) => Boolean(col))
+            .map(([name]) => [name, "mapped"]),
+        ),
+      };
+      const diagnosis = diagnoseSql(sql, {
+        mode: destWriteMode === "query" ? "dest_dml" : "procedure",
+        dialect: destDriverType || destType,
+        bound: boundForDiag,
+      });
+      if (!diagnosis.ok) {
+        toast({
+          title: "Destination SQL needs a fix",
+          message: diagnosis.error,
+          tone: "warning",
+        });
+        setStep(STEP_DESTINATION);
+        return true;
+      }
+      if (!targetCollection.trim()) {
+        setTargetCollection(procedureStreamName(sql));
+      }
+    }
+    if (destKindMode === "database" && !isCallableDestMode(destWriteMode) && !targetDb.trim()) {
       toast({ title: "Destination database required", message: "Enter the target database or project.", tone: "warning" });
       setStep(STEP_DESTINATION);
       return true;
     }
-    if (destKindMode === "database" && !targetCollection.trim()) {
+    if (destKindMode === "database" && !isCallableDestMode(destWriteMode) && !targetCollection.trim()) {
       toast({ title: "Destination table required", message: "Enter the target table or collection.", tone: "warning" });
       setStep(STEP_DESTINATION);
       return true;
@@ -3840,6 +3883,7 @@ export function TransferPage({
             confidenceThreshold: threshold,
             destKind: destKindMode,
             sourceReadMode,
+            destWriteMode,
             syncMode,
           });
           toast({
@@ -3903,6 +3947,7 @@ export function TransferPage({
           confidenceThreshold: threshold,
           destKind: destKindMode,
           sourceReadMode,
+          destWriteMode,
           syncMode,
         });
         setPreflight(pf);
@@ -4603,10 +4648,22 @@ export function TransferPage({
           && (analysis?.columns.length || currentSourceColumns.length),
         );
 
+  const destSqlReady = destWriteReady({
+    destWriteMode,
+    destProcedureCall,
+    destQuerySql,
+  });
   const canRunPreflight =
     canConfigureDest &&
     (destKindMode === "file_export" ||
-      (Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
+      (isCallableDestMode(destWriteMode)
+        ? Boolean(
+            destType
+            && destSqlReady
+            && (connectorId || targetDb.trim() || destDriverType === "iceberg")
+            && !destSchemaLoading,
+          )
+        : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
 
   const needsDbPreflight = destKindMode === "database";
   /** Map/sync/PK/dest edits must invalidate a prior green Validate before Execute. */
@@ -6099,7 +6156,7 @@ export function TransferPage({
             </>
           ) : (
             <p className="df2-label-hint df2-dest-right-empty">
-              Select a saved connector or engine on the left to configure the destination.
+              Select a saved connection, or open New connection to pick an engine.
             </p>
           )}
             </>

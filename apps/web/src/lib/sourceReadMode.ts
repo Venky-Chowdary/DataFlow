@@ -106,6 +106,22 @@ export function isCallableSourceMode(mode: SourceReadMode | string | undefined):
   return mode === "procedure" || mode === "query";
 }
 
+export function isCallableDestMode(mode: string | undefined): boolean {
+  return mode === "procedure" || mode === "query";
+}
+
+/** Dest write is ready when table mode, or when query/CALL text is present. */
+export function destWriteReady(input: {
+  destWriteMode?: string;
+  destProcedureCall?: string;
+  destQuerySql?: string;
+}): boolean {
+  const mode = String(input.destWriteMode || "table");
+  if (mode === "procedure") return Boolean(String(input.destProcedureCall || "").trim());
+  if (mode === "query") return Boolean(String(input.destQuerySql || "").trim());
+  return true;
+}
+
 export type SourceExtractReadyInput = {
   sourceKind: string;
   parsed?: boolean;

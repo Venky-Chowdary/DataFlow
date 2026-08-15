@@ -9,6 +9,8 @@ import {
   dialectOffersProcedures,
   dialectOffersDestQuery,
   dialectOffersQuery,
+  destWriteReady,
+  isCallableDestMode,
   isCallableSourceMode,
   procedureStreamName,
   sourceExtractReady,
@@ -45,6 +47,20 @@ describe("sourceReadMode", () => {
     assert.equal(isCallableSourceMode("procedure"), true);
     assert.equal(isCallableSourceMode("query"), true);
     assert.equal(isCallableSourceMode("table"), false);
+    assert.equal(isCallableDestMode("procedure"), true);
+    assert.equal(isCallableDestMode("query"), true);
+    assert.equal(isCallableDestMode("table"), false);
+  });
+
+  it("requires dest CALL/INSERT text before a dest write is ready", () => {
+    assert.equal(destWriteReady({ destWriteMode: "table" }), true);
+    assert.equal(destWriteReady({ destWriteMode: "procedure", destProcedureCall: "" }), false);
+    assert.equal(destWriteReady({ destWriteMode: "procedure", destProcedureCall: "CALL upsert_order(:id)" }), true);
+    assert.equal(destWriteReady({ destWriteMode: "query", destQuerySql: "   " }), false);
+    assert.equal(destWriteReady({
+      destWriteMode: "query",
+      destQuerySql: "INSERT INTO orders (id) VALUES (:id)",
+    }), true);
   });
 
   it("treats query/procedure SQL as the ready extract, not a table name", () => {

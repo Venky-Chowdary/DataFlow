@@ -52,6 +52,7 @@ export interface LocalPreflightInput {
   confidenceThreshold?: number;
   destKind?: "database" | "file_export";
   sourceReadMode?: string;
+  destWriteMode?: string;
   syncMode?: string;
 }
 
@@ -240,10 +241,11 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     note: "Not a full-table integrity probe — do not treat as gate-pass evidence",
   });
 
-  const callable = input.sourceReadMode === "procedure" || input.sourceReadMode === "query";
+  const callable = input.sourceReadMode === "procedure" || input.sourceReadMode === "query"
+    || input.destWriteMode === "procedure" || input.destWriteMode === "query";
   const sync = (input.syncMode || "").toLowerCase();
   if (callable && (sync === "cdc" || sync === "scd2" || sync === "mirror" || sync === "full_refresh_mirror")) {
-    block("g9_sync_contract", "Stored-procedure / SQL extract cannot drive CDC, SCD2, or mirror — use Full refresh or incremental.", {
+    block("g9_sync_contract", "Stored-procedure / SQL extract or dest CALL/query cannot drive CDC, SCD2, or mirror — use Full refresh or incremental.", {
       kind: "sync_contract", coverage: "n/a",
     });
   } else {

@@ -159,11 +159,13 @@ export function availableSyncModes(opts: {
   sourceKind: "file" | "database" | "cloud" | string;
   isMultiStream: boolean;
   sourceReadMode?: string;
+  destWriteMode?: string;
 }): { id: SyncModeId; label: string; detail: string }[] {
   const dest = (opts.destDriver || "").toLowerCase();
   const src = (opts.sourceDriver || "").toLowerCase();
   const fileish = opts.sourceKind === "file" || opts.sourceKind === "cloud";
-  const callable = opts.sourceReadMode === "procedure" || opts.sourceReadMode === "query";
+  const callable = opts.sourceReadMode === "procedure" || opts.sourceReadMode === "query"
+    || opts.destWriteMode === "procedure" || opts.destWriteMode === "query";
   return SYNC_MODES.filter((mode) => {
     if (mode.id === "scd2" || mode.id === "mirror") {
       if (callable) return false;

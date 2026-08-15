@@ -36,6 +36,20 @@ describe("availableSyncModes", () => {
     assert.ok(modes.includes("cdc"));
   });
 
+  it("hides CDC for dest stored-procedure / dest query writes", () => {
+    const modes = availableSyncModes({
+      destDriver: "postgresql",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: false,
+      destWriteMode: "procedure",
+    }).map((m) => m.id);
+    assert.ok(!modes.includes("cdc"));
+    assert.ok(!modes.includes("scd2"));
+    assert.ok(!modes.includes("mirror"));
+    assert.ok(modes.includes("full_refresh_append"));
+  });
+
   it("hides CDC for stored-procedure extracts", () => {
     const modes = availableSyncModes({
       destDriver: "postgresql",

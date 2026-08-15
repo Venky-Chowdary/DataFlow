@@ -249,6 +249,48 @@
 
 .df2-sql-editor-head .df2-label { margin: 0; }
 
+.df2-sql-editor-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.df2-sql-editor-expand {
+  height: 26px !important;
+  min-height: 26px !important;
+  padding: 0 8px !important;
+  font-size: var(--df-fs-xs, 11px) !important;
+  gap: 4px;
+}
+
+.df2-sql-editor.is-fill {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+}
+
+.df2-sql-editor-frame.is-fill,
+.df2-sql-editor.is-fill .df2-sql-editor-frame {
+  flex: 1 1 auto;
+  height: auto !important;
+  min-height: 280px;
+  max-height: none !important;
+}
+
+.df2-sql-editor-dialog .df2-modal-body {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.df2-sql-editor-dialog .df2-sql-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .df2-sql-editor-pill {
   flex: 0 0 auto;
   padding: 2px 8px;
@@ -10231,11 +10273,21 @@ button.df2-vd-assist-toggle:focus-visible {
   border-radius: 999px !important;
 }
 
-.df2-page-transfer-studio .df2-dest-picker.is-custom-engine .df2-dest-connector-list {
-  /* Keep saved connections reachable while Custom + engine panel is open. */
-  min-height: 120px !important;
-  flex: 1 1 48% !important;
-  max-height: none !important;
+.df2-page-transfer-studio .df2-dest-picker.is-custom-engine .df2-dest-connector-list,
+.df2-page-transfer-studio .df2-dest-picker.is-new-connection .df2-dest-connector-list {
+  display: none !important;
+}
+
+.df2-page-transfer-studio .df2-dest-picker > .df2-filter-tabs {
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.df2-page-transfer-studio .df2-dest-engine-lead {
+  margin: 0;
+  font-size: var(--df-fs-sm, 12.5px);
+  line-height: 1.45;
+  color: var(--df-text-secondary, #475569);
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card {
@@ -10322,7 +10374,13 @@ button.df2-vd-assist-toggle:focus-visible {
   flex-shrink: 0 !important;
 }
 
-/* Compact engine panel — never covers the connection list. */
+/* Engine panel — New connection tab owns the left rail. */
+.df2-page-transfer-studio .df2-dest-picker.is-new-connection .df2-dest-engine-panel {
+  flex: 1 1 auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
+}
+
 .df2-page-transfer-studio .df2-dest-engine-panel {
   flex: 0 0 auto !important;
   display: flex !important;
