@@ -168,9 +168,11 @@ def test_database_stream_restores_precount_on_resume(tmp_path: Path) -> None:
     )
     cp = Checkpoint(
         job_id="0" * 24,
-        offset=2,
+        offset=1,
         chunk_index=1,
         target_rows_before=1,
+        cursor_column="id",
+        cursor_value="1",
     )
     _, _, summary, _ = stream_database_transfer(
         source,
@@ -178,6 +180,7 @@ def test_database_stream_restores_precount_on_resume(tmp_path: Path) -> None:
         MAPPINGS,
         SCHEMA,
         sync_mode="full_refresh_append",
+        stream_contracts=[{"selected": True, "primary_key": "id"}],
         job_id="0" * 24,
         checkpoint=cp,
         checkpoint_service=CheckpointService(_FakeMongo()),
