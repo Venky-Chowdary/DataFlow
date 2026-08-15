@@ -59,5 +59,9 @@ describe("destExistsShape", () => {
       "Result-set snapshot — FK catalog skipped.",
     );
     assert.equal(callableExtractNote({}), "");
+    assert.match(
+      callableExtractNote({}, { source_read_mode: "procedure" }),
+      /Result-set snapshot/,
+    );
   });
 });

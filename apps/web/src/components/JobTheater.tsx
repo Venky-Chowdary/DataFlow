@@ -524,7 +524,7 @@ export function JobTheaterView({
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
   const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
-  const callableNote = callableExtractNote(preflight);
+  const callableNote = callableExtractNote(preflight, job);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
   const jobRps = Number(job.records_per_second ?? destinationSummary.records_per_second ?? 0) || 0;
   const displayRps = isComplete && jobRps > 0 ? Math.round(jobRps) : throughput;

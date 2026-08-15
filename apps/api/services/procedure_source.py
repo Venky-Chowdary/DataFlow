@@ -199,6 +199,38 @@ def is_callable_source(source: Any) -> bool:
     return source_read_mode_of(source) in CALLABLE_MODES
 
 
+def callable_identity_token(source: Any) -> str:
+    """Watermark identity for a CALL/SELECT — stream name plus SQL+binds digest.
+
+    Two extracts that share a stream label (``get_orders``) but differ in SQL
+    or bound params must not share a cursor. A colliding physical table name
+    is not part of this token.
+    """
+    spec = parse_callable_source(
+        procedure_text_of(source),
+        dialect=dialect_of(source),
+        mode=source_read_mode_of(source),
+        params=procedure_params_of(source),
+    )
+    payload = json.dumps(
+        {"sql": spec.sql, "params": spec.params},
+        sort_keys=True,
+        default=str,
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return f"{stream_name_for_callable(spec)}:{digest}"
+
+
+def source_object_for_cursor(source: Any, fallback: str = "") -> str:
+    """Cursor-key object: callable identity token, else the table/stream name."""
+    if not is_callable_source(source):
+        return fallback
+    try:
+        return callable_identity_token(source)
+    except ProcedureSourceError:
+        return fallback or "procedure_result"
+
+
 def procedure_text_of(source: Any) -> str:
     extra: Mapping[str, Any] = {}
     if hasattr(source, "extra"):

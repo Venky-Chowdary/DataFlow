@@ -29,6 +29,8 @@ SyncMode = Literal[
     "full_refresh_overwrite",
     "full_refresh_append",
     "incremental",
+    "incremental_append",
+    "incremental_deduped",
     "cdc",
     "scd2",
     "mirror",
@@ -61,6 +63,10 @@ class ScheduleCreate(BaseModel):
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     cursor_column: str = ""
     primary_key: str = ""
+    source_read_mode: str = ""
+    procedure_call: str = ""
+    source_query: str = ""
+    procedure_params: dict[str, Any] = Field(default_factory=dict)
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: Optional[bool] = None
@@ -88,6 +94,10 @@ class ScheduleUpdate(BaseModel):
     stream_contracts: Optional[list[dict[str, Any]]] = None
     cursor_column: Optional[str] = None
     primary_key: Optional[str] = None
+    source_read_mode: Optional[str] = None
+    procedure_call: Optional[str] = None
+    source_query: Optional[str] = None
+    procedure_params: Optional[dict[str, Any]] = None
     workspace_id: Optional[str] = None
     contract_id: Optional[str] = None
     require_signed_contract: Optional[bool] = None
@@ -115,6 +125,10 @@ class ScheduleResponse(BaseModel):
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
+    source_read_mode: str = ""
+    procedure_call: str = ""
+    source_query: str = ""
+    procedure_params: dict[str, Any] = Field(default_factory=dict)
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
@@ -176,6 +190,7 @@ class ScheduleSummaryResponse(BaseModel):
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
+    source_read_mode: str = ""
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False

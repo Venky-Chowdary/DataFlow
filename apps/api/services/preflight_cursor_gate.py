@@ -90,6 +90,7 @@ def resolve_read_scope(
             source_type=source_type,
             source_database=str(src_cfg.get("database") or ""),
             source_object=source_table,
+            source=src_cfg,
             dest_type=(destination_db_type or "").strip().lower(),
             dest_database=str(dst_cfg.get("database") or ""),
             dest_object=destination_table,

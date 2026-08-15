@@ -135,6 +135,27 @@ def _resolve_connector(connector_id: str) -> dict | None:
         return None
 
 
+def _apply_callable_schedule_source(source, sched) -> None:
+    """Stamp CALL/SELECT fields onto the endpoint so the reader is not a table scan."""
+    mode = str(getattr(sched, "source_read_mode", "") or "").strip().lower()
+    call = str(getattr(sched, "procedure_call", "") or "").strip()
+    query = str(getattr(sched, "source_query", "") or "").strip()
+    params = getattr(sched, "procedure_params", None) or {}
+    if mode not in {"procedure", "query"} and not call and not query:
+        return
+    if mode not in {"procedure", "query"}:
+        mode = "procedure" if call else "query"
+    extra = dict(getattr(source, "extra", None) or {})
+    extra["source_read_mode"] = mode
+    if call:
+        extra["procedure_call"] = call
+    if query:
+        extra["source_query"] = query
+    if isinstance(params, dict) and params:
+        extra["procedure_params"] = {str(k): v for k, v in params.items()}
+    source.extra = extra
+
+
 def _endpoint_from_connector(conn: dict, table: str):
     from src.transfer.models import EndpointConfig
 
@@ -181,8 +202,12 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
     source = _endpoint_from_connector(src, sched.source_table)
     destination = _endpoint_from_connector(dst, sched.dest_table)
+    _apply_callable_schedule_source(source, sched)
 
     effective_mode = _normalize_sync_mode(sched.sync_mode, sched.primary_key)
+    from services.procedure_source import assert_callable_sync_allowed
+
+    assert_callable_sync_allowed(effective_mode, source)
     stream_contracts = list(sched.stream_contracts or [])
     if not stream_contracts and effective_mode not in ("full_refresh_overwrite", "full_refresh_append"):
         stream_contracts = [{

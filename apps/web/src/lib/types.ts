@@ -469,6 +469,13 @@ export interface JobProgress extends TransferJob {
   /** Durable operator event lines (phase / message / row milestones). */
   event_log?: string[];
   sync_mode?: string;
+  source_read_mode?: string;
+  transfer_request?: {
+    source?: {
+      source_read_mode?: string;
+      extra?: { source_read_mode?: string };
+    };
+  };
   schema_policy?: string;
   validation_mode?: string;
   /** Operator who started the job. */
@@ -1208,6 +1215,10 @@ export interface ScheduleInput {
   backfill_new_fields: boolean;
   cursor_column: string;
   primary_key: string;
+  source_read_mode?: string;
+  procedure_call?: string;
+  source_query?: string;
+  procedure_params?: Record<string, string>;
   mappings: Record<string, unknown>[];
   stream_contracts: Record<string, unknown>[];
   workspace_id: string;
@@ -1240,6 +1251,10 @@ export interface PipelineSchedule {
   cursor_column: string;
   primary_key: string;
   cursor_value: string;
+  source_read_mode?: string;
+  procedure_call?: string;
+  source_query?: string;
+  procedure_params?: Record<string, string>;
   workspace_id: string;
   max_retries: number;
   retry_backoff_seconds: number;

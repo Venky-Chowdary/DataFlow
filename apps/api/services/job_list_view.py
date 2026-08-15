@@ -38,6 +38,7 @@ _LIST_KEEP_KEYS = frozenset({
     "completed_at",
     "workspace_id",
     "sync_mode",
+    "source_read_mode",
     "records_per_second",
     "chunk_current",
     "chunk_total",

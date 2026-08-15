@@ -4232,6 +4232,19 @@ export function TransferPage({
         dest_table: targetCollection,
         interval: "daily",
         enabled: true,
+        sync_mode: syncMode,
+        cursor_column: cursorField,
+        primary_key: primaryKeyField,
+        source_read_mode: sourceReadMode,
+        procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+        source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+        procedure_params: Object.keys(procedureParams).length ? procedureParams : {},
+        mappings: columnMappings.map((m) => ({
+          source: m.source,
+          target: m.target,
+          confidence: m.confidence,
+          transform: m.transform,
+        })),
       });
       toast({
         title: "Pipeline created",

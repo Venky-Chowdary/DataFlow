@@ -268,6 +268,48 @@ def test_build_request_incremental_append_without_pk():
     assert req.stream_contracts[0]["sync_mode"] == "incremental_append"
 
 
+def test_build_request_procedure_stamps_extra_and_refuses_cdc():
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-proc", "name": "n", "source_connector_id": "src", "source_table": "get_orders",
+        "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "daily",
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL get_orders(:since)",
+        "procedure_params": {"since": "2024-01-01"},
+        "sync_mode": "full_refresh_append",
+    })
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.source.extra.get("source_read_mode") == "procedure"
+    assert req.source.extra.get("procedure_call") == "CALL get_orders(:since)"
+    assert req.source.extra.get("procedure_params") == {"since": "2024-01-01"}
+    from services.procedure_source import is_callable_source
+
+    assert is_callable_source(req.source)
+
+    bad = store.PipelineSchedule.from_dict({
+        "id": "s-cdc", "name": "n", "source_connector_id": "src", "source_table": "get_orders",
+        "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "hourly",
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL get_orders()",
+        "sync_mode": "cdc",
+    })
+    with pytest.raises(ValueError, match="snapshot|CDC"):
+        runner.build_schedule_request(bad, _SRC_CONN, _DST_CONN)
+
+
+def test_create_schedule_refuses_scd2_on_procedure(temp_store):
+    with pytest.raises(ValueError, match="table identity|snapshot|SCD2"):
+        store.create_schedule({
+            "name": "proc",
+            "source_connector_id": "a",
+            "source_table": "get_orders",
+            "dest_connector_id": "b",
+            "dest_table": "u",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL get_orders()",
+            "sync_mode": "scd2",
+        })
+
+
 def test_build_request_cdc():
     sched = store.PipelineSchedule.from_dict({
         "id": "s4", "name": "n", "source_connector_id": "src", "source_table": "orders",

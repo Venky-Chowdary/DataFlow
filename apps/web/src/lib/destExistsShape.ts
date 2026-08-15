@@ -80,14 +80,37 @@ export function destExistsPrimaryCta(
   return cta;
 }
 
-export function callableExtractNote(preflight: {
-  callable_extract?: { note?: string; mode?: string };
-  source_fk_catalog?: { skipped?: boolean; note?: string };
-} | null | undefined): string {
+export function callableExtractNote(
+  preflight: {
+    callable_extract?: { note?: string; mode?: string };
+    source_fk_catalog?: { skipped?: boolean; note?: string };
+  } | null | undefined,
+  job?: {
+    source_read_mode?: string;
+    transfer_request?: {
+      source?: {
+        source_read_mode?: string;
+        extra?: { source_read_mode?: string };
+      };
+    };
+  } | null,
+): string {
   const stamped = String(preflight?.callable_extract?.note || "").trim();
   if (stamped) return stamped;
   if (preflight?.source_fk_catalog?.skipped) {
     return String(preflight.source_fk_catalog.note || "").trim();
+  }
+  const mode = String(
+    job?.source_read_mode
+    || job?.transfer_request?.source?.source_read_mode
+    || job?.transfer_request?.source?.extra?.source_read_mode
+    || "",
+  ).trim().toLowerCase();
+  if (mode === "procedure" || mode === "query") {
+    return (
+      "Result-set snapshot — FK catalog, uniqueness GROUP BY, and "
+      + "population orphan scans are not run against a procedure name."
+    );
   }
   return "";
 }

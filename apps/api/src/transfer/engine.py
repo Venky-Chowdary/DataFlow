@@ -5036,6 +5036,8 @@ class UniversalTransferEngine:
 
             persist_file_source(request)
         mongo = get_mongodb_service()
+        from services.procedure_source import source_read_mode_of
+
         source_name = (
             request.source_filename
             or request.source.table
@@ -5073,6 +5075,7 @@ class UniversalTransferEngine:
             "sync_mode": request.sync_mode,
             "schema_policy": request.schema_policy,
             "validation_mode": request.validation_mode,
+            "source_read_mode": source_read_mode_of(request.source),
             "triggered_by": (request.triggered_by or "").strip(),
             "retry_of": None,
         }

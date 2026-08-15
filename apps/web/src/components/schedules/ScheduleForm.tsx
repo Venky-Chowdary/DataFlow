@@ -9,6 +9,7 @@ import {
   SCHEMA_POLICIES,
   SYNC_MODE_META,
   VALIDATION_MODES,
+  availableSyncModes,
 } from "../../lib/transferConstants";
 import type {
   Connector,
@@ -78,6 +79,10 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const [syncMode, setSyncMode] = useState(initial?.sync_mode ?? "full_refresh_overwrite");
   const [cursorColumn, setCursorColumn] = useState(initial?.cursor_column ?? "");
   const [primaryKey, setPrimaryKey] = useState(initial?.primary_key ?? "");
+  const [sourceReadMode, setSourceReadMode] = useState(initial?.source_read_mode || "table");
+  const [procedureText, setProcedureText] = useState(
+    initial?.procedure_call || initial?.source_query || "",
+  );
   const [validationMode, setValidationMode] = useState(initial?.validation_mode ?? "balanced");
   const [schemaPolicy, setSchemaPolicy] = useState(initial?.schema_policy ?? "manual_review");
   const [backfill, setBackfill] = useState(initial?.backfill_new_fields ?? false);
@@ -96,7 +101,25 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     initial?.require_signed_contract ?? Boolean(initial?.contract_id),
   );
 
-  const syncModes = intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODE_IDS;
+  const sourceConnector = connectors.find((c) => c.id === sourceId);
+  const destConnector = connectors.find((c) => c.id === destId);
+  const callable = sourceReadMode === "procedure" || sourceReadMode === "query";
+  const syncModes = useMemo(() => {
+    const offered = availableSyncModes({
+      destDriver: destConnector?.type || "",
+      sourceDriver: sourceConnector?.type || "",
+      sourceKind: "database",
+      isMultiStream: false,
+      sourceReadMode,
+    });
+    const offeredIds = new Set(offered.map((m) => m.id));
+    return (intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODE_IDS).filter((mode) => {
+      if (mode === "incremental") {
+        return offeredIds.has("incremental_append") || offeredIds.has("incremental_deduped");
+      }
+      return offeredIds.has(mode);
+    });
+  }, [destConnector?.type, intervals?.sync_modes, sourceConnector?.type, sourceReadMode]);
   const showCursor =
     syncMode === "incremental_append" ||
     syncMode === "incremental_deduped" ||
@@ -107,6 +130,12 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     syncMode === "incremental_deduped" ||
     syncMode === "scd2" ||
     syncMode === "mirror";
+
+  useEffect(() => {
+    if (!syncModes.includes(syncMode)) {
+      setSyncMode("full_refresh_overwrite");
+    }
+  }, [syncMode, syncModes]);
 
   useEffect(() => {
     let cancelled = false;
@@ -140,9 +169,9 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     && String(selectedContract.status || "").toUpperCase() !== "SIGNED"
     && requireSigned;
 
-  const sourceConnector = connectors.find((c) => c.id === sourceId);
-  const destConnector = connectors.find((c) => c.id === destId);
-  const sourceStreamLabel = sourceConnector?.type === "mongodb" ? "collection" : "table";
+  const sourceStreamLabel = callable
+    ? (sourceReadMode === "procedure" ? "procedure stream" : "query stream")
+    : sourceConnector?.type === "mongodb" ? "collection" : "table";
   const destStreamLabel = destConnector?.type === "mongodb" ? "collection" : "table";
 
   const timezoneOptions = useMemo(() => {
@@ -164,6 +193,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     && destId
     && sourceTable.trim()
     && destTable.trim()
+    && (!callable || procedureText.trim())
     && (cadenceMode === "preset" || cron.trim())
     && !contractUnsigned
     && !(requireSigned && !contractId.trim()),
@@ -187,6 +217,10 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       backfill_new_fields: backfill,
       cursor_column: showCursor ? cursorColumn.trim() : "",
       primary_key: showPrimaryKey ? primaryKey.trim() : "",
+      source_read_mode: sourceReadMode,
+      procedure_call: sourceReadMode === "procedure" ? procedureText.trim() : "",
+      source_query: sourceReadMode === "query" ? procedureText.trim() : "",
+      procedure_params: initial?.procedure_params || {},
       max_retries: maxRetries,
       retry_backoff_seconds: retryBackoff,
       notify_on_failure: notifyFailure,
@@ -217,6 +251,20 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         <div className="df2-field">
           <label className="df2-label" htmlFor="sched-src-table">Source {sourceStreamLabel}</label>
           <input id="sched-src-table" className="df2-input" value={sourceTable} onChange={(e) => setSourceTable(e.target.value)} placeholder="orders" required />
+          <div className="df2-sched-seg" role="radiogroup" aria-label="Source read mode">
+            {(["table", "query", "procedure"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={sourceReadMode === mode}
+                className={sourceReadMode === mode ? "active" : ""}
+                onClick={() => setSourceReadMode(mode)}
+              >
+                {mode === "table" ? "Table" : mode === "query" ? "SQL query" : "Procedure"}
+              </button>
+            ))}
+          </div>
         </div>
         <ConnectorSelect
           id="sched-dst"
@@ -233,6 +281,27 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           <input id="sched-dst-table" className="df2-input" value={destTable} onChange={(e) => setDestTable(e.target.value)} placeholder="orders_warehouse" required />
         </div>
       </div>
+
+      {callable && (
+        <div className="df2-field">
+          <label className="df2-label" htmlFor="sched-callable-sql">
+            {sourceReadMode === "procedure" ? "CALL / EXEC" : "Read-only SELECT"}
+          </label>
+          <textarea
+            id="sched-callable-sql"
+            className="df2-input df2-input-mono"
+            rows={3}
+            value={procedureText}
+            onChange={(e) => setProcedureText(e.target.value)}
+            placeholder={sourceReadMode === "procedure" ? "CALL get_orders(:since)" : "SELECT id, updated_at FROM orders"}
+            required
+          />
+          <p className="df2-field-hint">
+            Result-set snapshot — scheduled runs execute this statement once and page the spool.
+            CDC, SCD2, and mirror are not available. Incremental filters cursor &gt; watermark (at-least-once).
+          </p>
+        </div>
+      )}
 
       {/* Panel: Cadence */}
       <section className="df2-sched-panel">

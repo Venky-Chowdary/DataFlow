@@ -964,41 +964,23 @@ def _stream_database_transfer_impl(
         job_id=job_id,
         has_primary_key=bool(pk_target_cols),
     )
-    watermark = None
-    cursor_key = ""
-    if incremental and cursor_source_col:
-        # One resolver for the whole product: Validate's gates read this route's
-        # watermark through the same call, so what they judge is what this run
-        # will read.
-        scope = resolve_incremental_read_scope(
-            sync_mode=effective_sync,
-            stream_contracts=stream_contracts,
-            source_type=src_type,
-            source_database=source.database or src_cfg.get("database", ""),
-            source_object=_source_name(source),
-            dest_type=dest_type,
-            dest_database=destination.database or dest_cfg.get("database", ""),
-            dest_object=resolve_dest_table(dest_type, destination, _source_name(source)),
-        )
-        cursor_key = scope.cursor_key
-        watermark = scope.watermark
-
     if src_type not in _STREAMING_TYPES:
         raise ValueError(f"Streaming source '{src_type}' not supported")
     if dest_type not in _STREAMING_TYPES:
         raise ValueError(f"Streaming destination '{dest_type}' not supported")
 
     table = _source_name(source)
-    if not table:
+    if is_callable_source(source) or is_callable_source(src_cfg):
         from services.procedure_source import (
             parse_callable_source,
             procedure_params_of,
             procedure_text_of,
+            source_object_for_cursor,
             source_read_mode_of,
             stream_name_for_callable,
         )
 
-        if is_callable_source(source) or is_callable_source(src_cfg):
+        if not table:
             try:
                 spec = parse_callable_source(
                     procedure_text_of(source) or procedure_text_of(src_cfg),
@@ -1009,8 +991,35 @@ def _stream_database_transfer_impl(
                 table = stream_name_for_callable(spec)
             except Exception:
                 table = "procedure_result"
-        if not table:
-            raise ValueError("Source table/collection name required for streaming transfer")
+        cursor_source_object = (
+            source_object_for_cursor(source)
+            or source_object_for_cursor(src_cfg)
+            or table
+        )
+    else:
+        cursor_source_object = table
+    if not table:
+        raise ValueError("Source table/collection name required for streaming transfer")
+
+    watermark = None
+    cursor_key = ""
+    if incremental and cursor_source_col:
+        # One resolver for the whole product: Validate's gates read this route's
+        # watermark through the same call, so what they judge is what this run
+        # will read. Callable identity includes SQL+binds, not just the stream label.
+        scope = resolve_incremental_read_scope(
+            sync_mode=effective_sync,
+            stream_contracts=stream_contracts,
+            source_type=src_type,
+            source_database=source.database or src_cfg.get("database", ""),
+            source_object=cursor_source_object,
+            dest_type=dest_type,
+            dest_database=destination.database or dest_cfg.get("database", ""),
+            dest_object=resolve_dest_table(dest_type, destination, table),
+            source=source if is_callable_source(source) or is_callable_source(src_cfg) else src_cfg,
+        )
+        cursor_key = scope.cursor_key
+        watermark = scope.watermark
 
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
 
@@ -1571,6 +1580,8 @@ def _stream_database_transfer_impl(
             and not incremental
             and not source_filter
             and not limit
+            and not is_callable_source(source)
+            and not is_callable_source(src_cfg)
         ):
             try:
                 bulk_export_iter = iter_postgresql_copy_batches(

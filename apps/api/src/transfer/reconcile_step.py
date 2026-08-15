@@ -325,6 +325,12 @@ def _maybe_engine_profile_ladder(
     """
     if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
         return None
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_endpoint):
+        # CALL/SELECT is not a physical table — profiling get_orders would
+        # read a colliding relation and publish false Gate-8 proof.
+        return None
     from services.sync_cursor import is_overwrite_sync
 
     # Whole-table aggregates are not the batch that an append/upsert wrote.
@@ -518,34 +524,37 @@ def _maybe_attach_verification_ladder(
         return report
 
     if source_endpoint is not None and not source_rows:
-        src_type = resolve_driver_type(source_endpoint.format)
-        src_cfg = resolve_connector_config(source_endpoint)
-        try:
-            if src_type == "sqlite":
-                source_rows = read_sqlite_rows(
-                    database=str(src_cfg.get("database") or ""),
-                    table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                    columns=target_cols,
-                    connection_string=str(src_cfg.get("connection_string") or ""),
-                    host=str(src_cfg.get("host") or ""),
-                )
-            elif src_type in {"postgresql", "redshift"}:
-                source_rows = read_postgres_rows(
-                    host=str(src_cfg.get("host") or ""),
-                    port=int(src_cfg.get("port") or 5432),
-                    database=str(src_cfg.get("database") or ""),
-                    username=str(src_cfg.get("username") or ""),
-                    password=str(src_cfg.get("password") or ""),
-                    schema=str(src_cfg.get("schema") or "public"),
-                    table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                    columns=target_cols,
-                    connection_string=str(src_cfg.get("connection_string") or ""),
-                    ssl=bool(src_cfg.get("ssl", False)),
-                )
-        except PopulationTooLarge as exc:
-            return _ladder_declined(report, exc.rows_read, exc.budget)
-        except Exception as exc:
-            logging.getLogger(__name__).debug("ladder source load failed: %s", exc)
+        from services.procedure_source import is_callable_source
+
+        if not is_callable_source(source_endpoint):
+            src_type = resolve_driver_type(source_endpoint.format)
+            src_cfg = resolve_connector_config(source_endpoint)
+            try:
+                if src_type == "sqlite":
+                    source_rows = read_sqlite_rows(
+                        database=str(src_cfg.get("database") or ""),
+                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        columns=target_cols,
+                        connection_string=str(src_cfg.get("connection_string") or ""),
+                        host=str(src_cfg.get("host") or ""),
+                    )
+                elif src_type in {"postgresql", "redshift"}:
+                    source_rows = read_postgres_rows(
+                        host=str(src_cfg.get("host") or ""),
+                        port=int(src_cfg.get("port") or 5432),
+                        database=str(src_cfg.get("database") or ""),
+                        username=str(src_cfg.get("username") or ""),
+                        password=str(src_cfg.get("password") or ""),
+                        schema=str(src_cfg.get("schema") or "public"),
+                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        columns=target_cols,
+                        connection_string=str(src_cfg.get("connection_string") or ""),
+                        ssl=bool(src_cfg.get("ssl", False)),
+                    )
+            except PopulationTooLarge as exc:
+                return _ladder_declined(report, exc.rows_read, exc.budget)
+            except Exception as exc:
+                logging.getLogger(__name__).debug("ladder source load failed: %s", exc)
 
     if not source_rows or not target_rows:
         return report
@@ -667,6 +676,16 @@ def _schema_state_evidence(
     src_table = str(source_endpoint.table or src_cfg.get("table") or "")
     if not src_table:
         return {}
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_endpoint) or is_callable_source(src_cfg):
+        return {
+            "skipped": True,
+            "reason": "callable_source",
+            "note": (
+                "Physical catalog compare is not run against a CALL/SELECT stream name."
+            ),
+        }
 
     from services.dialect_profiles import schema_from_cfg
     from services.physical_state_diff import verify_physical_state

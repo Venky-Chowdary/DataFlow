@@ -12,7 +12,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
@@ -32,6 +32,8 @@ SYNC_MODES = {
     "full_refresh_overwrite",
     "full_refresh_append",
     "incremental",
+    "incremental_append",
+    "incremental_deduped",
     "cdc",
     "scd2",
     "mirror",
@@ -125,6 +127,11 @@ class PipelineSchedule:
     stream_contracts: list[dict] = field(default_factory=list)
     cursor_column: str = ""  # watermark column for incremental syncs
     primary_key: str = ""  # key for idempotent incremental/cdc upserts
+    #: Callable extract — persist the CALL/SELECT, not just the stream label.
+    source_read_mode: str = ""
+    procedure_call: str = ""
+    source_query: str = ""
+    procedure_params: dict[str, Any] = field(default_factory=dict)
     cursor_value: str = ""  # last observed watermark (advances each run)
     workspace_id: str = ""
     # Data contract — when set, scheduled runs enforce the signed contract.
@@ -198,6 +205,12 @@ class PipelineSchedule:
             stream_contracts=list(data.get("stream_contracts") or []),
             cursor_column=(data.get("cursor_column") or "").strip(),
             primary_key=(data.get("primary_key") or "").strip(),
+            source_read_mode=str(data.get("source_read_mode") or "").strip().lower(),
+            procedure_call=str(data.get("procedure_call") or "").strip(),
+            source_query=str(data.get("source_query") or "").strip(),
+            procedure_params=dict(data.get("procedure_params") or {})
+            if isinstance(data.get("procedure_params"), dict)
+            else {},
             cursor_value=str(data.get("cursor_value") or ""),
             workspace_id=(data.get("workspace_id") or "").strip(),
             contract_id=(data.get("contract_id") or "").strip(),
@@ -454,6 +467,15 @@ def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
         )
 
 
+def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: str) -> None:
+    """Refuse CDC/SCD2/mirror on a persisted CALL/SELECT extract."""
+    from services.procedure_source import callable_sync_refusal, source_read_mode_of
+
+    reason = callable_sync_refusal(sync_mode, source_read_mode=source_read_mode_of(data or {}))
+    if reason:
+        raise ValueError(reason)
+
+
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     schedules = _load_all()
     interval = data.get("interval", "daily")
@@ -465,6 +487,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     require_signed = bool(data.get("require_signed_contract", bool(contract_id)))
     if contract_id or require_signed:
         assert_signed_contract(contract_id, require_signed=require_signed)
+    _assert_callable_schedule_sync(data, sync_mode)
     sched = PipelineSchedule.from_dict({
         **data,
         "id": str(uuid.uuid4()),
@@ -504,6 +527,7 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         )
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
+        _assert_callable_schedule_sync(merged, sync_mode)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
         updated = PipelineSchedule.from_dict(merged)

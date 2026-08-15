@@ -144,6 +144,59 @@ def test_history_sync_refused_on_procedure_source() -> None:
     assert "snapshot" in str(blockers[0]["details"]).lower() or "SCD2" in str(blockers[0]["details"])
 
 
+def test_callable_identity_token_differs_by_params() -> None:
+    from services.procedure_source import callable_identity_token
+    from services.sync_cursor import build_cursor_key, resolve_incremental_read_scope
+
+    a = {
+        "type": "postgresql",
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL get_orders(:since)",
+        "procedure_params": {"since": "2024-01-01"},
+    }
+    b = {
+        "type": "postgresql",
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL get_orders(:since)",
+        "procedure_params": {"since": "2024-06-01"},
+    }
+    assert callable_identity_token(a) != callable_identity_token(b)
+    assert callable_identity_token(a).startswith("get_orders:")
+    scope_a = resolve_incremental_read_scope(
+        sync_mode="incremental_append",
+        stream_contracts=[{"selected": True, "name": "get_orders", "cursor_field": "updated_at"}],
+        source_type="postgresql",
+        source_database="db",
+        source_object="get_orders",
+        dest_type="postgresql",
+        dest_database="wh",
+        dest_object="orders",
+        source=a,
+    )
+    scope_b = resolve_incremental_read_scope(
+        sync_mode="incremental_append",
+        stream_contracts=[{"selected": True, "name": "get_orders", "cursor_field": "updated_at"}],
+        source_type="postgresql",
+        source_database="db",
+        source_object="get_orders",
+        dest_type="postgresql",
+        dest_database="wh",
+        dest_object="orders",
+        source=b,
+    )
+    assert scope_a.cursor_key != scope_b.cursor_key
+    table_key = build_cursor_key(
+        source_type="postgresql",
+        source_database="db",
+        source_object="get_orders",
+        dest_type="postgresql",
+        dest_database="wh",
+        dest_object="orders",
+        stream_name="get_orders",
+    )
+    assert scope_a.cursor_key != table_key
+
+
 def test_copy_fast_path_declines_callable_without_pg() -> None:
     """Colliding table name must not COPY the wrong population — no live PG."""
     from src.transfer.copy_route import _try_copy_fast_path
@@ -411,6 +464,31 @@ def test_callable_spool_is_job_scoped(tmp_path: Path) -> None:
     assert stamped["extra"]["job_id"] == "job-abc"
     close_callable_spool(job_id="job-abc")
     close_callable_spool()
+
+
+def test_reconcile_skips_physical_state_for_callable() -> None:
+    from src.transfer.models import EndpointConfig
+    from src.transfer.reconcile_step import _schema_state_evidence
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "table": "get_orders",
+            "schema": "public",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL get_orders()",
+        },
+    )
+    evidence = _schema_state_evidence(
+        source_endpoint=source,
+        db_type="postgresql",
+        cfg={"type": "postgresql", "schema": "public"},
+        schema="public",
+        table="orders",
+    )
+    assert evidence.get("skipped") is True
+    assert evidence.get("reason") == "callable_source"
 
 
 def test_callable_source_skips_fk_catalog_probe() -> None:
