@@ -45,6 +45,7 @@ DELIVERY_SEMANTICS_EOS = "exactly_once_dest_owned_watermark_txn"
 DELIVERY_SEMANTICS_ALO = "at_least_once_idempotent_apply"
 
 # Destinations that can host a transactional watermark table in principle.
+# Aliases stay listed so classify never invents a miss on catalog ids.
 EOS_TRANSACTIONAL_DESTS = frozenset({
     "sqlite",
     "postgresql",
@@ -54,15 +55,35 @@ EOS_TRANSACTIONAL_DESTS = frozenset({
     "sqlserver",
     "mssql",
     "azure_sql",
+    "azure_sql_database",
+    "amazon_rds_sql_server",
     "oracle",
     "oracle_db",
+    "oracle_autonomous_warehouse",
     "duckdb",
     "generic_sql",
     "snowflake",
 })
 
-# Destinations whose writer actually shares one dest transaction today.
-EOS_TXN_WIRED_DESTS = frozenset({"sqlite"})
+# Destinations whose writer shares one dest transaction (native sqlite or SQLAlchemy).
+EOS_TXN_WIRED_DESTS = frozenset({
+    "sqlite",
+    "postgresql",
+    "postgres",
+    "mysql",
+    "mariadb",
+    "sqlserver",
+    "mssql",
+    "azure_sql",
+    "azure_sql_database",
+    "amazon_rds_sql_server",
+    "duckdb",
+    "generic_sql",
+    "oracle",
+    "oracle_db",
+    "oracle_autonomous_warehouse",
+    "snowflake",
+})
 
 REASON_NOT_CDC = "exactly_once_requires_cdc_sync"
 REASON_APPEND = "exactly_once_refuses_append_only"
@@ -204,6 +225,16 @@ def classify_exactly_once_route(
     dest = (dest_type or "").strip().lower().replace("-", "_")
     if dest == "postgres":
         dest = "postgresql"
+    _SINK_ALIASES = {
+        "mariadb": "mysql",
+        "mssql": "sqlserver",
+        "azure_sql": "sqlserver",
+        "azure_sql_database": "sqlserver",
+        "amazon_rds_sql_server": "sqlserver",
+        "oracle_db": "oracle",
+        "oracle_autonomous_warehouse": "oracle",
+    }
+    sink_dest = _SINK_ALIASES.get(dest, dest)
     mode = (sync_mode or "").strip().lower().replace("-", "_")
     notes: list[str] = [
         "Algorithm: dest-owned watermark in the same dest transaction as apply.",
@@ -231,7 +262,7 @@ def classify_exactly_once_route(
             False, REASON_DEST_NOT_TXN, dest, None, False, tuple(notes)
         )
     sink = classify_sink_delivery(
-        dest_type=dest,
+        dest_type=sink_dest,
         has_primary_key=has_primary_key,
         write_mode=write_mode or "upsert",
         has_lsn_column=has_lsn_column,
@@ -500,3 +531,67 @@ def dest_allow_append_only(destination: Any) -> bool:
     if isinstance(cfg, dict) and cfg.get("allow_append_only"):
         return True
     return False
+
+
+def preflight_delivery_gate(
+    *,
+    sync_mode: str,
+    dest_type: str,
+    delivery_guarantee: str | None = None,
+    has_primary_key: bool = False,
+    allow_append_only: bool = False,
+    callable_source: bool = False,
+    source_type: str = "",
+) -> dict[str, Any] | None:
+    """Validate-time EOS gate. Absent when the route is not CDC and did not opt in."""
+    requested = normalize_delivery_guarantee(delivery_guarantee)
+    mode = (sync_mode or "").strip().lower().replace("-", "_")
+    is_cdc = mode in {"cdc", "cdc_incremental"}
+    if requested != DELIVERY_CLASS_EXACTLY_ONCE and not is_cdc:
+        return None
+    if requested != DELIVERY_CLASS_EXACTLY_ONCE:
+        return {
+            "id": "g16_cdc_delivery",
+            "status": "pass",
+            "message": (
+                "CDC delivery default is at-least-once upsert — "
+                "exactly-once is opt-in dest-owned watermark, not platform-wide"
+            ),
+            "duration_ms": 0,
+            "details": {
+                "delivery_guarantee": DELIVERY_CLASS_AT_LEAST_ONCE,
+                "platform_claimed": PLATFORM_EXACTLY_ONCE_CLAIMED,
+                "algorithm": ALGORITHM,
+            },
+        }
+    eligibility = classify_exactly_once_route(
+        dest_type=dest_type,
+        sync_mode=sync_mode,
+        has_primary_key=has_primary_key,
+        allow_append_only=allow_append_only,
+        callable_source=callable_source,
+        source_type=source_type,
+    )
+    details = eligibility.to_dict()
+    details["delivery_guarantee"] = DELIVERY_CLASS_EXACTLY_ONCE
+    if eligibility.eligible:
+        return {
+            "id": "g16_cdc_delivery",
+            "status": "pass",
+            "message": (
+                "exactly_once dest-owned watermark is eligible on this route "
+                "(not platform-wide)"
+            ),
+            "duration_ms": 0,
+            "details": details,
+        }
+    return {
+        "id": "g16_cdc_delivery",
+        "status": "block",
+        "message": (
+            f"exactly_once refused ({eligibility.reason}) — "
+            "default remains at-least-once upsert"
+        ),
+        "duration_ms": 0,
+        "details": details,
+    }

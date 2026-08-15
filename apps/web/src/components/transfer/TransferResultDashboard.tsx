@@ -24,6 +24,7 @@ import { PhaseProfileCard } from "./PhaseProfileCard";
 import { ReplaySafetyCard } from "./ReplaySafetyCard";
 import { TransformationsCard } from "./TransformationsCard";
 import { hashForScreen } from "../../lib/appNavigation";
+import { cdcDeliveryResultCopy } from "../../lib/cdcExactlyOnce";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -522,7 +523,13 @@ export function TransferResultDashboard({
           <header>
             <DtIcon name="activity" size={14} />
             <strong>CDC</strong>
-            <span>{result.cdc_delivery || "at-least-once"} · not platform exactly-once</span>
+            <span>{cdcDeliveryResultCopy({
+              cdcDelivery: result.cdc_delivery,
+              exactlyOnceActive: Boolean(
+                (result as { exactly_once_active?: boolean }).exactly_once_active
+                || result.cdc_delivery === "exactly_once",
+              ),
+            })}</span>
           </header>
           <dl>
             {result.cdc_plugin && <div><dt>Plugin</dt><dd>{result.cdc_plugin}</dd></div>}

@@ -105,6 +105,8 @@ import {
 import {
   CDC_DELIVERY_AT_LEAST_ONCE,
   exactlyOnceWiredDest,
+  jobStudioDeliveryGuarantee,
+  namedCdcDeliveryGuarantee,
   studioDeliveryGuarantee,
   type CdcDeliveryGuarantee,
 } from "../lib/cdcExactlyOnce";
@@ -1777,6 +1779,11 @@ export function TransferPage({
             setSchemaPolicy(rules.schemaPolicy);
             setBackfillNewFields(schemaPolicyBackfills(rules.schemaPolicy));
           }
+          const delivery = jobStudioDeliveryGuarantee(job as {
+            delivery_guarantee?: string;
+            transfer_request?: { delivery_guarantee?: string };
+          });
+          setDeliveryGuarantee(delivery);
         })
         .catch(() => {
           /* keep null — operator can Re-run */
@@ -1791,6 +1798,9 @@ export function TransferPage({
     if (seededPolicy) {
       setSchemaPolicy(seededPolicy);
       setBackfillNewFields(schemaPolicyBackfills(seededPolicy));
+    }
+    if (seedStudioIntent.deliveryGuarantee) {
+      setDeliveryGuarantee(namedCdcDeliveryGuarantee(seedStudioIntent.deliveryGuarantee));
     }
 
     const maps = seedStudioIntent.mappings;
@@ -3740,6 +3750,13 @@ export function TransferPage({
           sample_rows: sampleRows,
           estimated_bytes: estimatedBytes,
           sync_mode: syncMode,
+          delivery_guarantee: studioDeliveryGuarantee({
+            syncMode,
+            deliveryGuarantee,
+            allowAppendOnly,
+            callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
+          }),
+          dest_extra: { allow_append_only: allowAppendOnly },
           schema_policy: schemaPolicy,
           validation_mode: validationOverride ?? validationMode,
           date_locale: dateLocale,
@@ -4159,6 +4176,7 @@ export function TransferPage({
           syncMode,
           deliveryGuarantee,
           allowAppendOnly,
+          callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
         }),
         dateLocale,
         backfillNewFields,
@@ -4469,6 +4487,7 @@ export function TransferPage({
           syncMode,
           deliveryGuarantee,
           allowAppendOnly,
+          callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
         }),
         contract_id: boundContractId.trim(),
         require_signed_contract: Boolean(boundContractId.trim() && requireSignedContract),

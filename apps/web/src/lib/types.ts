@@ -208,6 +208,11 @@ export interface TransferJob {
   cdc_plugin?: string | null;
   cdc_slot_name?: string | null;
   cdc_delivery?: string | null;
+  /** Route-scoped dest-owned watermark EOS — never a platform-wide claim. */
+  exactly_once_active?: boolean | null;
+  exactly_once_claimed_platform?: boolean | null;
+  exactly_once_algorithm?: string | null;
+  delivery_semantics?: string | null;
   /** SQL Server CDC TVF row_filter_option actually used (all / all update old / net). */
   cdc_row_filter?: string | null;
   replication_lag_bytes?: number | null;

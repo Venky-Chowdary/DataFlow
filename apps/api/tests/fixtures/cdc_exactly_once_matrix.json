@@ -4,7 +4,7 @@
   "platform_exactly_once_claimed": false,
   "delivery_default": "at_least_once",
   "measured_floor": 1.0,
-  "pass": 8,
+  "pass": 10,
   "fail": 0,
   "skip": 0,
   "cases": [
@@ -18,21 +18,39 @@
       "pass": true
     },
     {
-      "id": "postgres_cdc_not_wired",
+      "id": "postgres_cdc_wired",
       "dest": "postgresql",
       "sync_mode": "cdc",
-      "eligible": false,
-      "reason": "exactly_once_dest_txn_not_wired",
-      "wired": false,
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
       "pass": true
     },
     {
-      "id": "mysql_cdc_not_wired",
+      "id": "mysql_cdc_wired",
       "dest": "mysql",
       "sync_mode": "cdc",
-      "eligible": false,
-      "reason": "exactly_once_dest_txn_not_wired",
-      "wired": false,
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "sqlserver_cdc_wired",
+      "dest": "sqlserver",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "generic_sql_cdc_wired",
+      "dest": "generic_sql",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
       "pass": true
     },
     {
@@ -83,7 +101,7 @@
   ],
   "notes": [
     "100% means this named fixture only \u2014 not live warehouse CDC.",
-    "sqlite dest-owned watermark txn is the wired EOS path.",
-    "postgresql/mysql/sqlserver remain fail-closed until shared-conn apply is wired."
+    "Wired dests: sqlite (native) plus SQLAlchemy dest-txn for postgresql/mysql/sqlserver/duckdb/generic_sql/oracle/snowflake.",
+    "File/Iceberg/Kafka dests stay fail-closed."
   ]
 }

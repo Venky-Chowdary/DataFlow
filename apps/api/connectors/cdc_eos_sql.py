@@ -1,8 +1,7 @@
-"""Dest-owned CDC exactly-once apply — SQLite transactional watermark.
+"""Dest-owned CDC exactly-once apply.
 
-Apply + ``_df_cdc_eos_watermarks`` share one ``BEGIN IMMEDIATE`` transaction.
-Other SQL engines are classified transactional but stay fail-closed until a
-shared-connection writer is wired (see ``EOS_TXN_WIRED_DESTS``).
+SQLite uses a native ``BEGIN IMMEDIATE`` path. Other transactional SQL
+engines use :mod:`connectors.cdc_eos_sa` (one dest transaction).
 """
 
 from __future__ import annotations
@@ -179,13 +178,7 @@ def apply_change_batch_exactly_once(
     Returns ``(rows_written, checksum, dest_summary, deleted)`` to match
     ``_apply_change_batch``.
     """
-    dest = (dest_type or "").strip().lower()
-    if dest != "sqlite":
-        raise ExactlyOnceRouteError(
-            f"exactly_once dest-owned watermark apply is wired for sqlite only "
-            f"(got {dest_type!r}). Refuse inventing EOS on an unwired writer.",
-            reason="exactly_once_dest_txn_not_wired",
-        )
+    dest = (dest_type or "").strip().lower().replace("-", "_")
     incoming = require_batch_lsn(change.resume_token)
     stream_key = eos_stream_key(
         dest_type=dest,
@@ -195,6 +188,46 @@ def apply_change_batch_exactly_once(
         stream_name=stream_name,
     )
     batch_id = f"eos-{uuid.uuid4().hex[:12]}"
+    if dest != "sqlite":
+        from services.cdc_exactly_once import (
+            EOS_TRANSACTIONAL_DESTS,
+            EOS_TXN_WIRED_DESTS,
+            REASON_DEST_NOT_TXN,
+            REASON_DEST_NOT_WIRED,
+        )
+
+        if dest not in EOS_TXN_WIRED_DESTS:
+            reason = (
+                REASON_DEST_NOT_TXN
+                if dest not in EOS_TRANSACTIONAL_DESTS
+                else REASON_DEST_NOT_WIRED
+            )
+            raise ExactlyOnceRouteError(
+                f"exactly_once dest-owned watermark apply is not wired for "
+                f"{dest_type!r}. Refuse inventing EOS on an unwired writer.",
+                reason=reason,
+            )
+        from connectors.cdc_eos_sa import apply_eos_sqlalchemy
+
+        result = apply_eos_sqlalchemy(
+            dest_type=dest,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            change=change,
+            mappings=mappings,
+            column_types=column_types,
+            pk_target_cols=pk_target_cols,
+            stream_key=stream_key,
+            incoming_lsn=incoming,
+            batch_id=batch_id,
+            crash_after=crash_after,
+        )
+        return (
+            result.rows_written,
+            "",
+            result.to_dest_summary(),
+            result.deleted,
+        )
     result = _apply_eos_sqlite(
         dest_cfg=dest_cfg,
         dest_table=dest_table,

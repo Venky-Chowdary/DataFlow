@@ -21,6 +21,7 @@ export interface TransferPageProps {
     preflight?: PreflightResult;
     validationMode?: string;
     schemaPolicy?: string;
+    deliveryGuarantee?: string;
     mappings?: Array<{
       source?: string;
       destination?: string;

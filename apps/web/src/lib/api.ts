@@ -324,6 +324,8 @@ export async function runPreflight(payload: {
   sample_rows?: Record<string, unknown>[];
   estimated_bytes?: number;
   sync_mode?: string;
+  /** CDC delivery — default at_least_once; exactly_once is opt-in. */
+  delivery_guarantee?: "at_least_once" | "exactly_once";
   schema_policy?: string;
   validation_mode?: string;
   backfill_new_fields?: boolean;

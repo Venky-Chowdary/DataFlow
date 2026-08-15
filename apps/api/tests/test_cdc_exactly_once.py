@@ -27,9 +27,9 @@ from services.cdc_engine import ChangeBatch  # noqa: E402
 from services.cdc_exactly_once import (  # noqa: E402
     ALGORITHM,
     PLATFORM_EXACTLY_ONCE_CLAIMED,
+    WATERMARK_TABLE,
     REASON_APPEND,
     REASON_DEST_NOT_TXN,
-    REASON_DEST_NOT_WIRED,
     REASON_NOT_CDC,
     REASON_OK,
     EosCrash,
@@ -82,8 +82,9 @@ def test_classify_fail_closed_ineligible_routes() -> None:
     pg = classify_exactly_once_route(
         dest_type="postgresql", sync_mode="cdc", has_primary_key=True
     )
-    assert pg.eligible is False
-    assert pg.reason == REASON_DEST_NOT_WIRED
+    assert pg.eligible is True
+    assert pg.reason == REASON_OK
+    assert pg.wired is True
     assert pg.algorithm == ALGORITHM
 
     append = classify_exactly_once_route(
@@ -106,6 +107,18 @@ def test_classify_fail_closed_ineligible_routes() -> None:
     assert ok.reason == REASON_OK
     assert ok.wired is True
 
+    azure = classify_exactly_once_route(
+        dest_type="azure_sql_database", sync_mode="cdc", has_primary_key=True
+    )
+    assert azure.eligible is True
+    assert azure.wired is True
+
+    duck = classify_exactly_once_route(
+        dest_type="duckdb", sync_mode="cdc", has_primary_key=True
+    )
+    assert duck.eligible is True
+    assert duck.wired is True
+
 
 def test_assert_requested_refuses_ineligible_exactly_once() -> None:
     assert (
@@ -116,10 +129,10 @@ def test_assert_requested_refuses_ineligible_exactly_once() -> None:
         assert_requested_cdc_delivery(
             "exactly_once",
             sync_mode="cdc",
-            dest_type="postgresql",
+            dest_type="csv",
             has_primary_key=True,
         )
-    assert exc.value.reason == REASON_DEST_NOT_WIRED
+    assert exc.value.reason == REASON_DEST_NOT_TXN
     assert (
         assert_requested_cdc_delivery(
             "exactly_once",
@@ -258,10 +271,10 @@ def test_sqlite_eos_crash_before_watermark_then_retry() -> None:
         assert dest_watermark_lsn(dest_cfg, "k") == "0/150"
 
 
-def test_sqlite_eos_refuses_unwired_dest() -> None:
+def test_eos_refuses_unwired_file_dest() -> None:
     with pytest.raises(ExactlyOnceRouteError) as exc:
         apply_change_batch_exactly_once(
-            dest_type="postgresql",
+            dest_type="csv",
             dest_cfg={},
             dest_table="t",
             change=_batch("0/1", inserts=[{"id": "1"}]),
@@ -270,7 +283,94 @@ def test_sqlite_eos_refuses_unwired_dest() -> None:
             headers=["id"],
             pk_target_cols=["id"],
         )
-    assert exc.value.reason == "exactly_once_dest_txn_not_wired"
+    assert exc.value.reason == REASON_DEST_NOT_TXN
+
+
+def test_sqlalchemy_sqlite_eos_apply_and_redelivery() -> None:
+    """Prove the portable SQLAlchemy coordinator on a sqlite file (no network)."""
+    from connectors.cdc_eos_sa import sa_dest_engine_count, sa_dest_watermark_lsn
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_sa.db")
+        dest_cfg = {"type": "sqlite", "database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string"}
+        first = _batch("0/300", inserts=[{"id": "2", "v": "sa"}])
+        rows, _ck, summary, _del = apply_change_batch_exactly_once(
+            dest_type="generic_sql",
+            dest_cfg=dest_cfg,
+            dest_table="lines",
+            change=first,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="sa|eos|lines",
+        )
+        assert summary["exactly_once_active"] is True
+        assert rows == 1
+        assert sa_dest_engine_count(dest_cfg, "lines", "generic_sql") == 1
+        assert sa_dest_watermark_lsn(dest_cfg, "sa|eos|lines", "generic_sql") == "0/300"
+        rows2, _ck2, summary2, _del2 = apply_change_batch_exactly_once(
+            dest_type="generic_sql",
+            dest_cfg=dest_cfg,
+            dest_table="lines",
+            change=_batch("0/300", inserts=[{"id": "2", "v": "dup"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="sa|eos|lines",
+        )
+        assert summary2["eos_already_committed"] is True
+        assert rows2 == 0
+        assert sa_dest_engine_count(dest_cfg, "lines", "generic_sql") == 1
+
+
+def test_sqlalchemy_eos_crash_before_watermark_then_retry() -> None:
+    """SA dest txn must roll back apply when watermark is not committed."""
+    from connectors.cdc_eos_sa import sa_dest_engine_count, sa_dest_watermark_lsn
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_sa_crash.db")
+        dest_cfg = {"type": "sqlite", "database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string"}
+        change = _batch("0/350", inserts=[{"id": "3", "v": "x"}])
+        with pytest.raises(EosCrash):
+            apply_change_batch_exactly_once(
+                dest_type="generic_sql",
+                dest_cfg=dest_cfg,
+                dest_table="crash",
+                change=change,
+                mappings=mappings,
+                column_types=types,
+                headers=["id", "v"],
+                pk_target_cols=["id"],
+                cursor_key="sa|eos|crash",
+                crash_after="after_apply_before_watermark",
+            )
+        assert sa_dest_engine_count(dest_cfg, "crash", "generic_sql") == 0
+        assert sa_dest_watermark_lsn(dest_cfg, "sa|eos|crash", "generic_sql") is None
+        apply_change_batch_exactly_once(
+            dest_type="generic_sql",
+            dest_cfg=dest_cfg,
+            dest_table="crash",
+            change=change,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="sa|eos|crash",
+        )
+        assert sa_dest_engine_count(dest_cfg, "crash", "generic_sql") == 1
+        assert sa_dest_watermark_lsn(dest_cfg, "sa|eos|crash", "generic_sql") == "0/350"
 
 
 def test_named_matrix_artifact_matches_measured() -> None:
@@ -284,20 +384,69 @@ def test_named_matrix_artifact_matches_measured() -> None:
             "expect_eligible": True,
         },
         {
-            "id": "postgres_cdc_not_wired",
+            "id": "postgres_cdc_wired",
             "dest": "postgresql",
             "sync_mode": "cdc",
             "has_pk": True,
-            "expect_eligible": False,
-            "expect_reason": REASON_DEST_NOT_WIRED,
+            "expect_eligible": True,
         },
         {
-            "id": "mysql_cdc_not_wired",
+            "id": "mysql_cdc_wired",
             "dest": "mysql",
             "sync_mode": "cdc",
             "has_pk": True,
+            "expect_eligible": True,
+        },
+        {
+            "id": "sqlserver_cdc_wired",
+            "dest": "sqlserver",
+            "sync_mode": "cdc",
+            "has_pk": True,
+            "expect_eligible": True,
+        },
+        {
+            "id": "generic_sql_cdc_wired",
+            "dest": "generic_sql",
+            "sync_mode": "cdc",
+            "has_pk": True,
+            "expect_eligible": True,
+        },
+        {
+            "id": "duckdb_cdc_wired",
+            "dest": "duckdb",
+            "sync_mode": "cdc",
+            "has_pk": True,
+            "expect_eligible": True,
+        },
+        {
+            "id": "oracle_cdc_wired",
+            "dest": "oracle",
+            "sync_mode": "cdc",
+            "has_pk": True,
+            "expect_eligible": True,
+        },
+        {
+            "id": "snowflake_cdc_wired",
+            "dest": "snowflake",
+            "sync_mode": "cdc",
+            "has_pk": True,
+            "expect_eligible": True,
+        },
+        {
+            "id": "azure_sql_alias_wired",
+            "dest": "azure_sql_database",
+            "sync_mode": "cdc",
+            "has_pk": True,
+            "expect_eligible": True,
+        },
+        {
+            "id": "sqlite_callable_refused",
+            "dest": "sqlite",
+            "sync_mode": "cdc",
+            "has_pk": True,
+            "callable_source": True,
             "expect_eligible": False,
-            "expect_reason": REASON_DEST_NOT_WIRED,
+            "expect_reason": "exactly_once_refuses_callable_source",
         },
         {
             "id": "csv_append_not_txn",
@@ -348,6 +497,7 @@ def test_named_matrix_artifact_matches_measured() -> None:
             sync_mode=case["sync_mode"],
             has_primary_key=case["has_pk"],
             allow_append_only=bool(case.get("allow_append_only")),
+            callable_source=bool(case.get("callable_source")),
         )
         assert elig.eligible is case["expect_eligible"], case["id"]
         if "expect_reason" in case:
@@ -375,14 +525,15 @@ def test_named_matrix_artifact_matches_measured() -> None:
         "cases": results,
         "notes": [
             "100% means this named fixture only — not live warehouse CDC.",
-            "sqlite dest-owned watermark txn is the wired EOS path.",
-            "postgresql/mysql/sqlserver remain fail-closed until shared-conn apply is wired.",
+            "Wired dests: sqlite (native) plus SQLAlchemy dest-txn for "
+            "postgresql/mysql/sqlserver/duckdb/generic_sql/oracle/snowflake.",
+            "File/Iceberg/Kafka dests stay fail-closed.",
         ],
     }
     MATRIX_PATH.parent.mkdir(parents=True, exist_ok=True)
     MATRIX_PATH.write_text(json.dumps(payload, indent=2) + "\n")
     loaded = json.loads(MATRIX_PATH.read_text())
-    assert loaded["pass"] == 8
+    assert loaded["pass"] == 15
     assert loaded["fail"] == 0
     assert loaded["measured_floor"] == 1.0
     assert loaded["platform_exactly_once_claimed"] is False
@@ -398,3 +549,102 @@ def test_eos_stream_key_prefers_cursor() -> None:
         )
         == "job-cursor"
     )
+
+
+def _pg_ready() -> bool:
+    import socket
+
+    try:
+        with socket.create_connection(("localhost", 5432), timeout=1):
+            pass
+    except OSError:
+        return False
+    try:
+        from connectors.postgresql_conn import get_connection
+
+        with get_connection(
+            host="localhost",
+            port=5432,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            connection_string="",
+            ssl=False,
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                return bool(cur.fetchone())
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _pg_ready(), reason="PostgreSQL not reachable on localhost:5432")
+def test_postgres_eos_apply_and_redelivery_live() -> None:
+    import uuid as _uuid
+
+    from connectors.cdc_eos_sa import sa_dest_engine_count, sa_dest_watermark_lsn
+
+    table = f"eos_pg_{_uuid.uuid4().hex[:8]}"
+    dest_cfg = {
+        "type": "postgresql",
+        "host": "localhost",
+        "port": 5432,
+        "database": "dataflow",
+        "username": "dataflow",
+        "password": "dataflow",
+    }
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 1.0},
+        {"source": "v", "target": "v", "confidence": 1.0},
+    ]
+    types = {"id": "string", "v": "string"}
+    key = f"pg|{table}"
+    try:
+        rows, _ck, summary, _del = apply_change_batch_exactly_once(
+            dest_type="postgresql",
+            dest_cfg=dest_cfg,
+            dest_table=table,
+            change=_batch("0/400", inserts=[{"id": "1", "v": "pg"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key=key,
+        )
+        assert summary["exactly_once_active"] is True
+        assert rows == 1
+        assert sa_dest_engine_count(dest_cfg, table, "postgresql") == 1
+        rows2, _ck2, summary2, _del2 = apply_change_batch_exactly_once(
+            dest_type="postgresql",
+            dest_cfg=dest_cfg,
+            dest_table=table,
+            change=_batch("0/400", inserts=[{"id": "1", "v": "dup"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key=key,
+        )
+        assert summary2["eos_already_committed"] is True
+        assert rows2 == 0
+        assert sa_dest_watermark_lsn(dest_cfg, key, "postgresql") == "0/400"
+    finally:
+        try:
+            from connectors.postgresql_conn import get_connection
+            from psycopg2 import sql
+
+            with get_connection(
+                host="localhost",
+                port=5432,
+                database="dataflow",
+                username="dataflow",
+                password="dataflow",
+                connection_string="",
+                ssl=False,
+            ) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(table)))
+                    cur.execute(f"DELETE FROM {WATERMARK_TABLE} WHERE stream_key = %s", (key,))
+                conn.commit()
+        except Exception:
+            pass

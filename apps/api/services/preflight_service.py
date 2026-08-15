@@ -417,6 +417,8 @@ def run_transfer_policy_gates(
     source_kind: str = "file",
     write_via_staging: bool = False,
     source_read_mode: str = "",
+    delivery_guarantee: str = "at_least_once",
+    allow_append_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
@@ -571,6 +573,20 @@ def run_transfer_policy_gates(
             }
         )
 
+
+    from services.cdc_exactly_once import preflight_delivery_gate, route_has_cdc_pk
+
+    eos_gate = preflight_delivery_gate(
+        sync_mode=sync,
+        dest_type=dest,
+        source_type=src,
+        delivery_guarantee=delivery_guarantee,
+        has_primary_key=route_has_cdc_pk(contracts),
+        allow_append_only=allow_append_only,
+        callable_source=(source_read_mode or "").strip().lower() in {"procedure", "query"},
+    )
+    if eos_gate:
+        gates.append(eos_gate)
 
     # Redis KV TTL/EXPIRE is not a first-class transfer guarantee (soft warning).
     if dest in {"redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis"} or src in {

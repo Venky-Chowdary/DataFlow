@@ -107,6 +107,8 @@ class PreflightRequest(BaseModel):
     write_via_staging: bool = False
     # Connector-specific dest settings (Redshift staging_bucket / iam_role, etc.).
     dest_extra: dict[str, Any] | None = None
+    # CDC delivery — default at_least_once; exactly_once is opt-in and fail-closed.
+    delivery_guarantee: str = "at_least_once"
 
 
 def _schema_default(db_type: str) -> str:
@@ -437,6 +439,8 @@ async def run_preflight(body: PreflightRequest):
                  or ((body.source_config or {}).get("extra") or {}).get("source_read_mode")
                  or "")
             ),
+            delivery_guarantee=body.delivery_guarantee or "at_least_once",
+            allow_append_only=bool((body.dest_extra or {}).get("allow_append_only")),
         ),
         validation_mode=body.validation_mode,
     )

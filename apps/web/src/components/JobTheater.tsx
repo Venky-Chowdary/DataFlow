@@ -35,6 +35,7 @@ import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
+import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -1055,7 +1056,10 @@ export function JobTheaterView({
             <DtIcon name="database" size={16} />
             <div>
               <strong>{job.cdc_plugin || "CDC"}</strong>
-              <span>{job.cdc_delivery || "at-least-once"}{job.cdc_slot_name ? ` · ${job.cdc_slot_name}` : ""}</span>
+              <span>{cdcDeliveryResultCopy({
+                cdcDelivery: job.cdc_delivery,
+                exactlyOnceActive: Boolean(job.exactly_once_active),
+              })}{job.cdc_slot_name ? ` · ${job.cdc_slot_name}` : ""}</span>
             </div>
           </article>
         )}
@@ -1394,7 +1398,12 @@ export function JobTheaterView({
             </span>
           )}
           {job.cdc_delivery && (
-            <span className="df2-theater-cdc-chip">{job.cdc_delivery} delivery</span>
+            <span className="df2-theater-cdc-chip">
+              {cdcDeliveryResultCopy({
+                cdcDelivery: job.cdc_delivery,
+                exactlyOnceActive: Boolean(job.exactly_once_active),
+              })}
+            </span>
           )}
           {job.cdc_row_filter && (
             <span className="df2-theater-cdc-chip" title="SQL Server CDC row_filter_option">

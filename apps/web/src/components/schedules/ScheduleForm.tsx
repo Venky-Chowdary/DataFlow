@@ -17,6 +17,13 @@ import type {
   ScheduleInput,
   ScheduleIntervals,
 } from "../../lib/types";
+import {
+  CDC_DELIVERY_AT_LEAST_ONCE,
+  exactlyOnceWiredDest,
+  namedCdcDeliveryGuarantee,
+  studioDeliveryGuarantee,
+  type CdcDeliveryGuarantee,
+} from "../../lib/cdcExactlyOnce";
 
 interface ScheduleFormProps {
   connectors: Connector[];
@@ -86,6 +93,9 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const [validationMode, setValidationMode] = useState(initial?.validation_mode ?? "balanced");
   const [schemaPolicy, setSchemaPolicy] = useState(initial?.schema_policy ?? "manual_review");
   const [backfill, setBackfill] = useState(initial?.backfill_new_fields ?? false);
+  const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
+    namedCdcDeliveryGuarantee(initial?.delivery_guarantee),
+  );
 
   // Retry & notifications
   const [maxRetries, setMaxRetries] = useState(initial?.max_retries ?? 2);
@@ -182,6 +192,11 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       validation_mode: validationMode,
       schema_policy: schemaPolicy,
       backfill_new_fields: backfill,
+      delivery_guarantee: studioDeliveryGuarantee({
+        syncMode,
+        deliveryGuarantee,
+        callableSource: callable,
+      }),
       cursor_column: showCursor ? cursorColumn.trim() : "",
       primary_key: showPrimaryKey ? primaryKey.trim() : "",
       source_read_mode: sourceReadMode,
@@ -381,6 +396,32 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                 </span>
               </div>
             )}
+          </div>
+        )}
+
+        {syncMode === "cdc" && (
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="sched-delivery">CDC delivery guarantee</label>
+            <select
+              id="sched-delivery"
+              className="df2-input"
+              value={deliveryGuarantee}
+              onChange={(e) => setDeliveryGuarantee(
+                e.target.value === "exactly_once" ? "exactly_once" : CDC_DELIVERY_AT_LEAST_ONCE,
+              )}
+            >
+              <option value="at_least_once">at_least_once — default PK upsert</option>
+              <option value="exactly_once" disabled={callable}>
+                exactly_once — dest-owned watermark transaction
+              </option>
+            </select>
+            <span className="df2-field-hint">
+              {callable
+                ? "Procedure/query sources stay at-least-once — CALL is not a dest-owned watermark log."
+                : exactlyOnceWiredDest(destConnector?.type)
+                  ? "Default stays at-least-once. Exactly-once commits apply and a dest watermark in one transaction."
+                  : "Default stays at-least-once. Exactly-once fails closed on this destination."}
+            </span>
           </div>
         )}
 

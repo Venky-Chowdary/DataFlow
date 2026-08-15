@@ -33,6 +33,7 @@ import {
   formatValidationModeLabel,
 } from "../lib/transferConstants";
 import { jobStudioDataRules } from "../lib/studioDataRules";
+import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
@@ -67,6 +68,7 @@ export type JobsStudioIntent = {
   preflight?: import("../lib/types").PreflightResult;
   validationMode?: string;
   schemaPolicy?: string;
+  deliveryGuarantee?: string;
 };
 
 function asMappingProof(raw: unknown): MappingProof | null {
@@ -106,6 +108,7 @@ interface JobDetailRecord extends JobProgress {
     sync_mode?: string;
     validation_mode?: string;
     schema_policy?: string;
+    delivery_guarantee?: string;
   };
   phases?: { name: string; status: "pending" | "active" | "done" | "failed" | "skipped"; message?: string }[];
   ddl_log?: string[];
@@ -573,6 +576,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       preflight: liveJob?.preflight,
       validationMode: rules.validationMode || undefined,
       schemaPolicy: rules.schemaPolicy || undefined,
+      deliveryGuarantee: jobStudioDeliveryGuarantee(liveJob) || undefined,
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
@@ -585,6 +589,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       preflight: liveJob?.preflight,
       validationMode: rules.validationMode || undefined,
       schemaPolicy: rules.schemaPolicy || undefined,
+      deliveryGuarantee: jobStudioDeliveryGuarantee(liveJob) || undefined,
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);

@@ -7,7 +7,9 @@ import { describe, it } from "node:test";
 import {
   CDC_DELIVERY_AT_LEAST_ONCE,
   CDC_DELIVERY_EXACTLY_ONCE,
+  cdcDeliveryResultCopy,
   exactlyOnceWiredDest,
+  jobStudioDeliveryGuarantee,
   namedCdcDeliveryGuarantee,
   studioDeliveryGuarantee,
 } from "./cdcExactlyOnce.ts";
@@ -20,10 +22,14 @@ describe("cdcExactlyOnce", () => {
     assert.equal(namedCdcDeliveryGuarantee("eos"), CDC_DELIVERY_EXACTLY_ONCE);
   });
 
-  it("only sqlite is wired for dest-owned watermark EOS", () => {
+  it("transactional SQL dests are wired; files are not", () => {
     assert.equal(exactlyOnceWiredDest("sqlite"), true);
-    assert.equal(exactlyOnceWiredDest("postgresql"), false);
+    assert.equal(exactlyOnceWiredDest("postgresql"), true);
+    assert.equal(exactlyOnceWiredDest("mysql"), true);
+    assert.equal(exactlyOnceWiredDest("sqlserver"), true);
+    assert.equal(exactlyOnceWiredDest("amazon_rds_sql_server"), true);
     assert.equal(exactlyOnceWiredDest("csv"), false);
+    assert.equal(exactlyOnceWiredDest("iceberg"), false);
   });
 
   it("refuses to persist exactly_once on non-CDC or append-only", () => {
@@ -46,8 +52,31 @@ describe("cdcExactlyOnce", () => {
       studioDeliveryGuarantee({
         syncMode: "cdc",
         deliveryGuarantee: "exactly_once",
+        callableSource: true,
+      }),
+      CDC_DELIVERY_AT_LEAST_ONCE,
+    );
+    assert.equal(
+      studioDeliveryGuarantee({
+        syncMode: "cdc",
+        deliveryGuarantee: "exactly_once",
       }),
       CDC_DELIVERY_EXACTLY_ONCE,
+    );
+  });
+
+  it("restores job delivery without inventing exactly_once", () => {
+    assert.equal(jobStudioDeliveryGuarantee({}), CDC_DELIVERY_AT_LEAST_ONCE);
+    assert.equal(
+      jobStudioDeliveryGuarantee({
+        delivery_guarantee: "at_least_once",
+        transfer_request: { delivery_guarantee: "exactly_once" },
+      }),
+      CDC_DELIVERY_EXACTLY_ONCE,
+    );
+    assert.equal(
+      cdcDeliveryResultCopy({ cdcDelivery: "exactly_once", exactlyOnceActive: true }),
+      "exactly_once dest-owned watermark · not platform-wide",
     );
   });
 });
