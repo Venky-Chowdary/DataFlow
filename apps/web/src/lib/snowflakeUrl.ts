@@ -16,6 +16,24 @@ export interface SnowflakeUrlParts {
 export const SNOWFLAKE_HOST_ONLY_URL_MSG =
   "That is a Snowflake account host, not a login. Use snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH or switch to Username & password. If the password contains @, encode it as %40.";
 
+const PLACEHOLDER_ACCOUNTS = new Set([
+  "account",
+  "xy12345",
+  "xy12345.us-east-1",
+  "myorg-acctname",
+  "myorg-acct",
+  "org-account",
+  "org-acctname",
+]);
+
+export const SNOWFLAKE_PLACEHOLDER_HOST_MSG =
+  "That Account host is a form placeholder, not your Snowflake account. Paste the Snowsight org-account (myorg-acctname), not account.snowflakecomputing.com.";
+
+export function isPlaceholderSnowflakeAccount(host: string): boolean {
+  const acct = normalizeSnowflakeAccount(host).toLowerCase();
+  return Boolean(acct) && PLACEHOLDER_ACCOUNTS.has(acct);
+}
+
 const HOST_SUFFIXES = [".privatelink.snowflakecomputing.com", ".snowflakecomputing.com"];
 
 export function normalizeSnowflakeAccount(host: string): string {
@@ -127,6 +145,9 @@ export function validateSnowflakeConnectionString(raw: string): string | null {
   if (!text) return "Connection string is required.";
   const parsed = parseSnowflakeUrl(text);
   if (isSnowflakeAccountHostOnly(parsed)) return SNOWFLAKE_HOST_ONLY_URL_MSG;
+  if (parsed.account && isPlaceholderSnowflakeAccount(parsed.account)) {
+    return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
+  }
   if (!parsed.account) {
     return "Could not read a Snowflake account from this URL. Expected snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH.";
   }

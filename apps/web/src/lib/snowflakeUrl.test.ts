@@ -6,6 +6,8 @@ import { describe, it } from "node:test";
 import { validateConnectorPayload } from "./connectorFormConfig.js";
 import {
   SNOWFLAKE_HOST_ONLY_URL_MSG,
+  SNOWFLAKE_PLACEHOLDER_HOST_MSG,
+  isPlaceholderSnowflakeAccount,
   isSnowflakeAccountHostOnly,
   normalizeSnowflakeAccount,
   parseSnowflakeUrl,
@@ -58,5 +60,23 @@ describe("snowflakeUrl", () => {
       "connection_string",
     );
     assert.equal(msg, SNOWFLAKE_HOST_ONLY_URL_MSG);
+  });
+
+  it("rejects the form placeholder account host before Test", () => {
+    assert.equal(isPlaceholderSnowflakeAccount("account.snowflakecomputing.com"), true);
+    assert.equal(isPlaceholderSnowflakeAccount("tmjdswz-kz40681"), false);
+    assert.equal(
+      validateConnectorPayload(
+        "snowflake",
+        {
+          host: "account.snowflakecomputing.com",
+          username: "VENKATESH1117",
+          password: "secret",
+          database: "SNOWFLAKE_SAMPLE_DATA",
+        },
+        "user_pass",
+      ),
+      SNOWFLAKE_PLACEHOLDER_HOST_MSG,
+    );
   });
 });

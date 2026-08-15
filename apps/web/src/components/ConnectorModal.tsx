@@ -24,6 +24,7 @@ import {
 import { ConnectorIcon } from "../app/brand-icons";
 import { CONNECTOR_CATALOG } from "../lib/types";
 import {
+  isPlaceholderSnowflakeAccount,
   isSnowflakeAccountHostOnly,
   parseSnowflakeUrl,
 } from "../lib/snowflakeUrl";
@@ -117,7 +118,10 @@ export function ConnectorModal({
 
   const [name, setName] = useState(editing?.name ?? "");
   const [type, setType] = useState(startType || "mongodb");
-  const [host, setHost] = useState(editing?.host ?? defaults.host);
+  const [host, setHost] = useState(() => {
+    const raw = editing?.host ?? defaults.host;
+    return isPlaceholderSnowflakeAccount(raw) ? "" : raw;
+  });
   const [port, setPort] = useState<number>(editing?.port ?? defaults.port);
   const [database, setDatabase] = useState(editing?.database ?? "");
   const [username, setUsername] = useState(editing?.username ?? "");
@@ -156,7 +160,7 @@ export function ConnectorModal({
     if (authMode !== "connection_string" || !connectionString.trim()) return;
     if (isSnowflake) {
       const parsedSf = parseSnowflakeUrl(connectionString);
-      if (parsedSf.account && (!host || host === "account.snowflakecomputing.com")) {
+      if (parsedSf.account && (!host || isPlaceholderSnowflakeAccount(host))) {
         setHost(parsedSf.account);
       }
       if (parsedSf.user && !username) setUsername(parsedSf.user);
@@ -566,7 +570,7 @@ export function ConnectorModal({
 
   const authDetail = (mode: { value: AuthMode; description?: string }) => {
     if (isSnowflake && mode.value === "user_pass") {
-      return "Prefer the Snowsight org-account host. Password-only often fails MFA — use PAT or key-pair.";
+      return "Paste the Snowsight org-account. A 250001 is a bad password — MFA uses a different code, then use PAT.";
     }
     if (isSnowflake && mode.value === "connection_string") {
       return "snowflake://user:password@account/DB/SCHEMA?warehouse=… — not a browser URL.";

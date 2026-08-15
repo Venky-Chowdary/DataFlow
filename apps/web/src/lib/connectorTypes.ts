@@ -154,7 +154,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   postgresql: { host: "localhost", port: 5432 },
   mysql: { host: "localhost", port: 3306 },
   mongodb: { host: "localhost", port: 27017 },
-  snowflake: { host: "account.snowflakecomputing.com", port: 443 },
+  snowflake: { host: "", port: 443 },
   bigquery: { host: "bigquery.googleapis.com", port: 443 },
   redshift: { host: "localhost", port: 5439 },
   dynamodb: { host: "us-east-1", port: 443 },

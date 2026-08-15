@@ -4,8 +4,11 @@ from __future__ import annotations
 
 from connectors.snowflake_conn import (
     SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG,
+    SNOWFLAKE_BAD_PASSWORD_MSG,
     SNOWFLAKE_HOST_ONLY_URL_MSG,
+    SNOWFLAKE_PLACEHOLDER_HOST_MSG,
     classify_snowflake_connect_error,
+    is_placeholder_snowflake_account,
     normalize_account,
     parse_snowflake_url,
     snowflake_connect_kwargs,
@@ -87,9 +90,15 @@ def test_mfa_is_honest_not_wrong_password():
 
 
 def test_real_bad_password_stays_auth():
-    raw = "250001 (08001): Failed to connect to DB. Incorrect username or password was specified."
+    raw = (
+        "250001 (08001): Failed to connect to DB: tmjdswz-kz40681.snowflakecomputing.com:443. "
+        "Incorrect username or password was specified."
+    )
     msg = humanize_connection_error("snowflake", raw)
-    assert "username or password" in msg.lower() or "rejected" in msg.lower()
+    assert msg == SNOWFLAKE_BAD_PASSWORD_MSG
+    assert humanize_connection_error("snowflake", msg) == msg
+    assert "snowflake refused this login. snowflake rejected" not in msg.lower()
+    assert "250001" in msg
 
 
 def test_http_404_login_request_is_account_host_not_password():
@@ -313,6 +322,29 @@ def test_unknown_auth_mode_is_rejected():
         username="u",
         password="p",
     ) == "Unknown authentication mode 'oauth_magic'."
+
+
+def test_placeholder_account_host_is_rejected_before_driver():
+    assert is_placeholder_snowflake_account("account.snowflakecomputing.com")
+    assert is_placeholder_snowflake_account("https://account.snowflakecomputing.com")
+    assert not is_placeholder_snowflake_account("tmjdswz-kz40681")
+    assert validate_probe_auth(
+        driver="snowflake",
+        auth_mode="user_pass",
+        host="account.snowflakecomputing.com",
+        username="VENKATESH1117",
+        password="secret",
+    ) == SNOWFLAKE_PLACEHOLDER_HOST_MSG
+    try:
+        snowflake_connect_kwargs(
+            account="account.snowflakecomputing.com",
+            username="VENKATESH1117",
+            password="secret",
+        )
+    except ValueError as exc:
+        assert str(exc) == SNOWFLAKE_PLACEHOLDER_HOST_MSG
+    else:
+        raise AssertionError("expected placeholder host to fail before connect")
 
 
 def test_infer_auth_mode_from_private_key():

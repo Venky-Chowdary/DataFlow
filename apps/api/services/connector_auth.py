@@ -24,6 +24,17 @@ _KNOWN_AUTH_MODES = frozenset({
 })
 
 
+def _snowflake_placeholder_host(host: str) -> str | None:
+    from connectors.snowflake_conn import (
+        SNOWFLAKE_PLACEHOLDER_HOST_MSG,
+        is_placeholder_snowflake_account,
+    )
+
+    if is_placeholder_snowflake_account(host):
+        return SNOWFLAKE_PLACEHOLDER_HOST_MSG
+    return None
+
+
 def infer_auth_mode(
     *,
     auth_mode: str = "",
@@ -122,6 +133,9 @@ def validate_probe_auth(
 
     if mode == "key_pair":
         if driver == "snowflake":
+            placeholder = _snowflake_placeholder_host(host)
+            if placeholder:
+                return placeholder
             if not host:
                 return "Account host is required for Snowflake key-pair."
             if not username or not private_key:
@@ -138,6 +152,9 @@ def validate_probe_auth(
     if mode == "pat":
         if driver != "snowflake":
             return "Programmatic access tokens are a Snowflake authentication mode."
+        placeholder = _snowflake_placeholder_host(host)
+        if placeholder:
+            return placeholder
         if not host:
             return "Account host is required."
         if not username or not password.strip():
@@ -145,6 +162,10 @@ def validate_probe_auth(
         return None
 
     if mode == "user_pass":
+        if driver == "snowflake":
+            placeholder = _snowflake_placeholder_host(host)
+            if placeholder:
+                return placeholder
         path_based = driver in _PATH_BASED
         has_path = bool(host or database)
         if path_based and not has_path:

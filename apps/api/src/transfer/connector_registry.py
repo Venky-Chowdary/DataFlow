@@ -374,14 +374,13 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
                 "Use admin if the user is defined in the admin database, or the database name if the user is defined there."
             )
         if driver == "snowflake":
-            # Never hide the driver code. "login-request" in a 404 URL is not
-            # a bad password — classify_snowflake_connect_error owns that case.
+            # Already-classified copy contains "password" / "login" — do not wrap
+            # a 250001 as MFA. Keep the raw driver text.
             return (
                 f"Snowflake refused this login. {raw_s.strip()} "
-                "If the host is locator-only (xy12345.snowflakecomputing.com), "
-                "replace it with the Snowsight org-account. "
-                "Human users often need a Programmatic access token or Key-pair — "
-                "password-only Test cannot complete MFA."
+                "If this is a 250001, the host was reached — check username and password. "
+                "Use Programmatic access token or Key-pair only when Snowflake returns "
+                "an MFA / authentication-policy code (390195, 394508, 394504)."
             )
         if driver == "bigquery":
             return "Authentication failed. Check the service account JSON, project ID, and that the account has BigQuery permissions."

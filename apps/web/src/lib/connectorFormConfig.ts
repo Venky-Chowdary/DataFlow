@@ -1,5 +1,5 @@
 import { GENERIC_SQL_INFO } from "./genericSqlMap";
-import { validateSnowflakeConnectionString } from "./snowflakeUrl";
+import { isPlaceholderSnowflakeAccount, SNOWFLAKE_PLACEHOLDER_HOST_MSG, validateSnowflakeConnectionString } from "./snowflakeUrl";
 import {
   getConnectorDefaults,
   getRestApiDefaultObject,
@@ -603,6 +603,9 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         if (!isGcp && !isAws && !isElastic && !isRedis && !isSQLite && !isDuckDB && !fmt(values, "host")) {
           return "Host is required.";
         }
+        if (isSnowflake && isPlaceholderSnowflakeAccount(fmt(values, "host"))) {
+          return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
+        }
         if (
           !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb", "snowflake"].includes(resolved) &&
           (values.port as number) <= 0
@@ -649,6 +652,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         text("authRole", "Role", { placeholder: "Leave blank for default role", optional: true }),
       ], (values) => {
         if (!fmt(values, "host")) return "Account host is required.";
+        if (isPlaceholderSnowflakeAccount(fmt(values, "host"))) return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
         if (!fmt(values, "username")) return "Username is required.";
         if (!fmt(values, "password")) return "Programmatic access token is required.";
         return null;
@@ -673,6 +677,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         text("authRole", "Role", { placeholder: "Leave blank for default role", optional: true }),
       ], (values) => {
         if (!fmt(values, "host")) return "Account host is required.";
+        if (isPlaceholderSnowflakeAccount(fmt(values, "host"))) return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
         if (!fmt(values, "username")) return "Username is required.";
         if (!fmt(values, "privateKey")) return "PKCS#8 private key is required.";
         return null;

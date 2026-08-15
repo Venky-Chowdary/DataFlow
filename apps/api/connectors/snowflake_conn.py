@@ -71,6 +71,14 @@ def normalize_account(host: str) -> str:
     return raw
 
 
+def is_placeholder_snowflake_account(host: str) -> bool:
+    """True for the form default ``account.snowflakecomputing.com`` and docs examples."""
+    acct = normalize_account(host).lower()
+    if not acct:
+        return False
+    return acct in SNOWFLAKE_PLACEHOLDER_ACCOUNTS
+
+
 # Operator-facing copy when they paste a browser host instead of a login URL.
 SNOWFLAKE_HOST_ONLY_URL_MSG = (
     "That is a Snowflake account host, not a login. "
@@ -105,6 +113,32 @@ SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG = (
     "Locator-only hosts like xy12345.snowflakecomputing.com return 404 when the "
     "account is not in the default region or the locator is wrong. "
     "You can also use locator.region or locator.region.cloud."
+)
+
+# Form default / docs examples — not a real account. Live probe of
+# account.snowflakecomputing.com returns the same 290404 as a bad locator.
+SNOWFLAKE_PLACEHOLDER_ACCOUNTS = frozenset({
+    "account",
+    "xy12345",
+    "xy12345.us-east-1",
+    "myorg-acctname",
+    "myorg-acct",
+    "org-account",
+    "org-acctname",
+})
+
+SNOWFLAKE_PLACEHOLDER_HOST_MSG = (
+    "That Account host is a form placeholder, not your Snowflake account. "
+    "Paste the Snowsight org-account (myorg-acctname), not "
+    "account.snowflakecomputing.com."
+)
+
+SNOWFLAKE_BAD_PASSWORD_MSG = (
+    "Snowflake rejected the username or password (250001). "
+    "The account host was reached — this is not a 404. "
+    "Check the username and password for this account. "
+    "A 250001 is not an MFA challenge. If the password works in Snowsight "
+    "but Test still returns 250001, switch to Programmatic access token or Key-pair."
 )
 
 
@@ -225,6 +259,8 @@ def snowflake_connect_kwargs(
 
     if not normalize_account(merged_account):
         raise ValueError(SNOWFLAKE_MISSING_ACCOUNT_MSG)
+    if is_placeholder_snowflake_account(merged_account):
+        raise ValueError(SNOWFLAKE_PLACEHOLDER_HOST_MSG)
     if not (merged_user or "").strip():
         if parsed.get("account") and not parsed.get("user"):
             raise ValueError(SNOWFLAKE_HOST_ONLY_URL_MSG)
@@ -276,9 +312,19 @@ def load_snowflake_private_key(pem: str, passphrase: str = "") -> bytes:
 
 def classify_snowflake_connect_error(raw: str) -> str | None:
     """Honest operator copy — do not call an invalid role a bad password."""
-    text = (raw or "").lower()
+    stripped = (raw or "").strip()
+    text = stripped.lower()
     if not text:
         return None
+    if stripped in {
+        SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG,
+        SNOWFLAKE_HOST_ONLY_URL_MSG,
+        SNOWFLAKE_PLACEHOLDER_HOST_MSG,
+        SNOWFLAKE_BAD_PASSWORD_MSG,
+    }:
+        return stripped
+    if "form placeholder" in text or is_placeholder_snowflake_account(stripped):
+        return SNOWFLAKE_PLACEHOLDER_HOST_MSG
     # 404 / 290404 / 513 on login-request is a missing account host, not auth.
     # The path contains "login" and used to be humanized as a bad password.
     if re.search(r"290404|\b513\b", text) or (
@@ -334,13 +380,11 @@ def classify_snowflake_connect_error(raw: str) -> str | None:
             "and privileges."
         )
     if re.search(
-        r"250001|incorrect username|incorrect password|invalid username or password",
+        r"250001|incorrect username|incorrect password|invalid username or password|"
+        r"rejected the username or password",
         text,
     ):
-        return (
-            "Snowflake rejected the username or password. Check the account host "
-            "(org-account or locator.region), username, and password."
-        )
+        return SNOWFLAKE_BAD_PASSWORD_MSG
     if re.search(
         r"takes 0 positional arguments|snowflakeconnection\.__init__",
         text,
