@@ -231,6 +231,111 @@ def test_buffered_mirror_census_is_dest_engine_staging_count(
         ]
     assert rows == {"1": 0, "2": 1, "3": 0}
     assert leftovers == []
+    assert summary["source_key_rows"] == 3
+
+
+def test_buffered_mirror_census_from_key_spool_with_empty_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After engine spill+clear, inferred-delete streams the keys-only spool."""
+    import sqlite3
+
+    from connectors.engine_record_spill import spill_engine_write_records
+    from src.transfer.models import EndpointConfig
+    from services.mirror_engine import apply_inferred_soft_deletes
+
+    db = tmp_path / "spool_mirror.db"
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute(
+            "CREATE TABLE dst (id TEXT, name TEXT, _deleted INTEGER DEFAULT 0)"
+        )
+        conn.execute(
+            "INSERT INTO dst (id, name, _deleted) VALUES "
+            "('1','a',0),('2','b',0),('3','c',1)"
+        )
+        conn.commit()
+
+    def _no_scan(*_a, **_k):
+        raise AssertionError("buffered mirror census must not scan dest rows")
+
+    monkeypatch.setattr(
+        "services.reconciliation_api.iter_select_row_dicts", _no_scan
+    )
+    dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        connection_string=str(db),
+        table="dst",
+    )
+    records = [
+        {"id": "1", "name": "a"},
+        {"id": "3", "name": "c"},
+        {"id": "4", "name": "d"},
+    ]
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "name", "target": "name", "transform": "direct"},
+    ]
+    spill = spill_engine_write_records(
+        records,
+        ["id", "name"],
+        mappings,
+        extra={},
+        collect_pk_sources=["id"],
+        clear_records=True,
+    )
+    try:
+        assert records == []
+        summary = apply_inferred_soft_deletes(
+            dest,
+            records,
+            ["id", "name"],
+            {"id": "string", "name": "string"},
+            mappings,
+            ["id"],
+            source_spool=spill.spool,
+            source_key_spool=spill.key_spool,
+            pk_sources=spill.pk_sources,
+        )
+    finally:
+        spill.close()
+    assert summary["reactivated"] == 1
+    assert summary["soft_deleted"] == 1
+    assert summary["physical_rows"] == 3
+    assert summary["source_key_rows"] == 3
+    with sqlite3.connect(str(db)) as conn:
+        rows = {
+            str(r[0]): int(r[1])
+            for r in conn.execute("SELECT id, _deleted FROM dst").fetchall()
+        }
+    assert rows == {"1": 0, "2": 1, "3": 0}
+
+
+def test_mirror_fail_closed_on_empty_key_set(tmp_path: Path) -> None:
+    import sqlite3
+
+    from src.transfer.models import EndpointConfig
+    from services.mirror_engine import apply_inferred_soft_deletes
+
+    db = tmp_path / "empty_keys.db"
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute("CREATE TABLE dst (id TEXT, name TEXT)")
+        conn.commit()
+    dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        connection_string=str(db),
+        table="dst",
+    )
+    with pytest.raises(ValueError, match="non-empty source key set"):
+        apply_inferred_soft_deletes(
+            dest,
+            [{"id": None, "name": "x"}],
+            ["id", "name"],
+            {"id": "string", "name": "string"},
+            [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}],
+            ["id"],
+        )
 
 
 def test_lattice_probe_uses_physical_table_not_mapped_write_table(

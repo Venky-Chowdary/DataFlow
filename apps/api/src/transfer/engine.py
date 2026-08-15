@@ -3134,8 +3134,21 @@ class UniversalTransferEngine:
                         effective_sync_lower in ("full_refresh_mirror", "mirror")
                         and conflict_columns
                     ):
-                        from connectors.engine_record_spill import MIRROR_PK_SUMMARY_KEY
+                        from connectors.engine_record_spill import (
+                            ENGINE_SPILL_SUMMARY_KEY,
+                            MIRROR_PK_SUMMARY_KEY,
+                        )
 
+                        spill_holder = (
+                            dest_summary.get(ENGINE_SPILL_SUMMARY_KEY)
+                            if isinstance(dest_summary, dict)
+                            else None
+                        )
+                        legacy_keys = (
+                            dest_summary.pop(MIRROR_PK_SUMMARY_KEY, None)
+                            if isinstance(dest_summary, dict)
+                            else None
+                        )
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,
                             records,
@@ -3143,10 +3156,12 @@ class UniversalTransferEngine:
                             schema,
                             mappings,
                             conflict_columns,
-                            source_pk_tuples=dest_summary.pop(
-                                MIRROR_PK_SUMMARY_KEY, None
-                            )
-                            if isinstance(dest_summary, dict)
+                            source_spool=getattr(spill_holder, "spool", None),
+                            source_key_spool=getattr(spill_holder, "key_spool", None),
+                            pk_sources=getattr(spill_holder, "pk_sources", None),
+                            source_pk_tuples=legacy_keys
+                            if getattr(spill_holder, "key_spool", None) is None
+                            and getattr(spill_holder, "spool", None) is None
                             else None,
                         )
                         dest_summary["mirror"] = mirror_summary

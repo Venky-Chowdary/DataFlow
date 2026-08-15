@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 from services.engine_pool import release_engine
@@ -436,18 +437,99 @@ def apply_inferred_deletes_via_staging(
     }
 
 
-def _source_pk_tuples(
-    records: list[dict[str, Any]], pk_sources: list[str]
-) -> list[tuple[Any, ...]]:
-    """Unique complete PK tuples from source records. Incomplete identity is skip."""
-    seen: set[tuple[Any, ...]] = set()
-    out: list[tuple[Any, ...]] = []
+def mirror_pk_sources(
+    conflict_columns: list[str], mappings: list[dict[str, Any]] | None
+) -> list[str]:
+    """Map destination PK columns back to source names.
+
+    Same identity the buffered writer and the engine spill use. One owner —
+    adapters and ``engine_record_spill`` must not copy this loop.
+    """
+    pk_sources: list[str] = []
+    for pk_target in conflict_columns:
+        if not pk_target:
+            continue
+        pk_source = pk_target
+        for m in mappings or []:
+            if (m.get("target") or m.get("source")) == pk_target:
+                src = m.get("source")
+                if src:
+                    pk_source = str(src)
+                    break
+        pk_sources.append(str(pk_source))
+    return pk_sources
+
+
+def complete_mirror_pk_tuple(values: Iterable[Any]) -> tuple[Any, ...] | None:
+    """Return the PK tuple, or None when identity is incomplete.
+
+    Incomplete is skip, not invent: None, empty string, or ``DF_MISSING``.
+    A missing CDC field is not a key. Do not coerce it to NULL or ``""``.
+    """
+    from services.value_serializer import is_missing_sentinel
+
+    out: list[Any] = []
+    for value in values:
+        if value is None or value == "" or is_missing_sentinel(value):
+            return None
+        out.append(value)
+    if not out:
+        return None
+    return tuple(out)
+
+
+def iter_mirror_pk_tuples_from_records(
+    records: Iterable[dict[str, Any]], pk_sources: list[str]
+) -> Iterator[tuple[Any, ...]]:
+    """Complete PK tuples from unexpanded source records. Duplicates are kept.
+
+    EXISTS/NOT EXISTS on dest staging is set-based — a second copy of the
+    same key does not change the inferred-delete census. Callers that need
+    a unique list (tests, small fixtures) use ``unique_mirror_pk_tuples``.
+    """
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        tup = tuple(rec.get(c) for c in pk_sources)
-        if any(v is None or v == "" for v in tup):
-            continue
+        tup = complete_mirror_pk_tuple(rec.get(c) for c in pk_sources)
+        if tup is not None:
+            yield tup
+
+
+def iter_mirror_pk_tuples_from_spool(
+    source_spool: Any, pk_sources: list[str]
+) -> Iterator[tuple[Any, ...]]:
+    """Complete PK tuples from a JSONL spool (payload or keys-only).
+
+    Header lookup is exact source-name match. A PK column absent from the
+    spool headers is incomplete identity — skip, not invent.
+    """
+    headers = list(getattr(source_spool, "headers", None) or [])
+    index = {name: i for i, name in enumerate(headers)}
+    for row in source_spool.iter_rows():
+        values: list[Any] = []
+        for col in pk_sources:
+            pos = index.get(col)
+            if pos is None or pos >= len(row):
+                values.append(None)
+            else:
+                values.append(row[pos])
+        tup = complete_mirror_pk_tuple(values)
+        if tup is not None:
+            yield tup
+
+
+def unique_mirror_pk_tuples(
+    tuples: Iterable[tuple[Any, ...]],
+) -> list[tuple[Any, ...]]:
+    """Unique complete keys for tests and small fixtures. Not the write path.
+
+    Unhashable key parts are kept (same as the historical seen-set). This
+    materializes the unique set — ``apply_inferred_soft_deletes`` must not
+    call it. Peak RAM is keys-only, not payloads.
+    """
+    seen: set[tuple[Any, ...]] = set()
+    out: list[tuple[Any, ...]] = []
+    for tup in tuples:
         try:
             if tup in seen:
                 continue
@@ -456,6 +538,70 @@ def _source_pk_tuples(
             pass
         out.append(tup)
     return out
+
+
+def _source_pk_tuples(
+    records: list[dict[str, Any]], pk_sources: list[str]
+) -> list[tuple[Any, ...]]:
+    """Unique complete PK tuples from source records. Incomplete identity is skip."""
+    return unique_mirror_pk_tuples(
+        iter_mirror_pk_tuples_from_records(records, pk_sources)
+    )
+
+
+def _iter_mirror_census_keys(
+    *,
+    records: list[dict[str, Any]] | None,
+    pk_sources: list[str],
+    source_pk_tuples: Iterable[tuple[Any, ...]] | None,
+    source_spool: Any,
+    source_key_spool: Any,
+) -> Iterator[tuple[Any, ...]]:
+    """Prefer keys-only spool, then payload spool, then an iterator, then records.
+
+    The keys-only spool is written from *unexpanded* records during the same
+    ingest pass as the payload spool — raw PK types, one key per source row,
+    STRUCT explode does not invent a second parent key. The payload spool is
+    the write image (exploded); use it only when no key spool was retained.
+    """
+    if source_key_spool is not None:
+        yield from iter_mirror_pk_tuples_from_spool(source_key_spool, pk_sources)
+        return
+    if source_spool is not None:
+        yield from iter_mirror_pk_tuples_from_spool(source_spool, pk_sources)
+        return
+    if source_pk_tuples is not None:
+        yield from source_pk_tuples
+        return
+    yield from iter_mirror_pk_tuples_from_records(records or [], pk_sources)
+
+
+def _stream_insert_pk_staging(
+    conn: Any,
+    insert_stmt: Any,
+    tuples: Iterable[tuple[Any, ...]],
+    pk_width: int,
+    batch_size: int,
+) -> int:
+    """Chunk-INSERT keys into dest staging. Peak RAM is one insert chunk."""
+    chunk_n = max(int(batch_size), 1)
+    batch: list[dict[str, Any]] = []
+    inserted = 0
+
+    def _flush() -> None:
+        nonlocal inserted
+        if not batch:
+            return
+        conn.execute(insert_stmt, batch)
+        inserted += len(batch)
+        batch.clear()
+
+    for tup in tuples:
+        batch.append({f"p{i}": val for i, val in enumerate(tup[:pk_width])})
+        if len(batch) >= chunk_n:
+            _flush()
+    _flush()
+    return inserted
 
 
 def _create_pk_staging(
@@ -515,9 +661,12 @@ def apply_inferred_soft_deletes(
     *,
     soft_delete_column: str = SOFT_DELETE_COLUMN,
     batch_size: int = 10_000,
-    source_pk_tuples: list[tuple[Any, ...]] | None = None,
+    source_pk_tuples: Iterable[tuple[Any, ...]] | None = None,
+    source_spool: Any = None,
+    source_key_spool: Any = None,
+    pk_sources: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Soft-delete destination rows that are no longer in ``records``.
+    """Soft-delete destination rows that are no longer in the source snapshot.
 
     ``endpoint`` must be a database ``EndpointConfig`` for an SQLAlchemy-backed
     destination. ``conflict_columns`` is the destination primary key. Source
@@ -527,6 +676,14 @@ def apply_inferred_soft_deletes(
     census. Physical dest COUNT is dest-engine ``COUNT(*)`` of the table
     (tombstones included). Active checksum is still a streamed dest read
     for Gate-8.
+
+    Key census prefers ``source_key_spool`` (keys-only, unexpanded, written
+    during payload ingest) then ``source_spool`` (write image) then an
+    iterator of tuples then ``records``. Keys stream into dest staging in
+    ``batch_size`` chunks — the full unique PK set is not a Python list.
+    Duplicate keys in staging do not change EXISTS. Empty key set after a
+    non-empty source is fail-closed. File-stream is disabled for mirror so
+    this census always sees the full snapshot, not the last chunk.
     """
     if not conflict_columns:
         raise ValueError("mirror sync requires a primary key / conflict column")
@@ -535,28 +692,11 @@ def apply_inferred_soft_deletes(
     if not pk_columns:
         raise ValueError("mirror sync requires a primary key / conflict column")
 
-    # Map each destination PK column back to the source column used in mappings.
-    pk_sources: list[str] = []
-    for pk_target in pk_columns:
-        pk_source = pk_target
-        if mappings:
-            for m in mappings:
-                if (m.get("target") or m.get("source")) == pk_target:
-                    src = m.get("source")
-                    if src:
-                        pk_source = src
-                        break
-        pk_sources.append(pk_source)
-
-    tuples = (
-        list(source_pk_tuples)
-        if source_pk_tuples is not None
-        else _source_pk_tuples(records, pk_sources)
+    resolved_pk_sources = list(pk_sources) if pk_sources else mirror_pk_sources(
+        pk_columns, mappings
     )
-    if not tuples:
-        raise ValueError(
-            "mirror sync could not build a non-empty source key set from the primary key"
-        )
+    if not resolved_pk_sources:
+        raise ValueError("mirror sync requires a primary key / conflict column")
 
     from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
     from src.transfer.adapters import resolve_connector_config
@@ -581,20 +721,31 @@ def apply_inferred_soft_deletes(
     census: dict[str, Any] = {}
     active_rows = 0
     active_checksum = ""
+    source_key_rows = 0
     try:
         with engine.connect() as conn:
             _ensure_soft_delete_column(conn, qualified, soft_delete_column)
             dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "")
             _create_pk_staging(conn, stg_qualified, qualified, pk_quoted, dialect_name)
             conn.commit()
-            insert_stmt = sa.text(insert_sql)
-            chunk = max(int(batch_size), 1)
-            for offset in range(0, len(tuples), chunk):
-                batch = tuples[offset : offset + chunk]
-                params = [
-                    {f"p{i}": val for i, val in enumerate(tup)} for tup in batch
-                ]
-                conn.execute(insert_stmt, params)
+            source_key_rows = _stream_insert_pk_staging(
+                conn,
+                sa.text(insert_sql),
+                _iter_mirror_census_keys(
+                    records=records,
+                    pk_sources=resolved_pk_sources,
+                    source_pk_tuples=source_pk_tuples,
+                    source_spool=source_spool,
+                    source_key_spool=source_key_spool,
+                ),
+                len(pk_columns),
+                batch_size,
+            )
+            if source_key_rows <= 0:
+                raise ValueError(
+                    "mirror sync could not build a non-empty source key set "
+                    "from the primary key"
+                )
             conn.commit()
             census = apply_inferred_deletes_via_staging(
                 conn,
@@ -635,6 +786,7 @@ def apply_inferred_soft_deletes(
         "target_columns": target_cols,
         "primary_key_columns": pk_columns,
         "soft_delete_column": census.get("soft_delete_column") or soft_delete_column,
+        "source_key_rows": source_key_rows,
         "mode": "mirror",
     }
 

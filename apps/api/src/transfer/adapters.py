@@ -1390,7 +1390,6 @@ def write_destination_database(
 
     from connectors.engine_record_spill import (
         ENGINE_SPILL_SUMMARY_KEY,
-        MIRROR_PK_SUMMARY_KEY,
         mirror_pk_sources,
         spill_engine_write_records,
         spool_write_kinds,
@@ -1452,8 +1451,6 @@ def write_destination_database(
             "source_row_count": spill.source_row_count,
             "unexpanded_row_count": spill.unexpanded_row_count,
         }
-        if spill.mirror_pk_tuples is not None:
-            summary[MIRROR_PK_SUMMARY_KEY] = spill.mirror_pk_tuples
         if retain_engine_spill:
             summary[ENGINE_SPILL_SUMMARY_KEY] = spill
         else:

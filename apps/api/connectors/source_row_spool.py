@@ -126,17 +126,23 @@ class SourceRowSpool:
         header_list, row_iter = iter_struct_materialized_rows(headers, rows, mappings)
         self.headers = list(header_list)
         for row in row_iter:
-            payload = [_spool_cell(c) for c in row]
-            self._spool.write(
-                json.dumps(
-                    payload,
-                    default=json_default,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ).encode("utf-8")
-            )
-            self._spool.write(b"\n")
-            self.row_count += 1
+            self.append_row(row)
+
+    def append_row(self, row: list[Any]) -> None:
+        """Write one matrix row. Keys-only census uses this without STRUCT explode."""
+        if self._closed or self._spool is None:
+            raise RuntimeError("source-row spool is closed")
+        payload = [_spool_cell(c) for c in row]
+        self._spool.write(
+            json.dumps(
+                payload,
+                default=json_default,
+                ensure_ascii=False,
+                allow_nan=False,
+            ).encode("utf-8")
+        )
+        self._spool.write(b"\n")
+        self.row_count += 1
         self.size = int(self._spool.tell())
         self.spilled = self.size > self.spill_max_size
 
@@ -156,20 +162,24 @@ class SourceRowSpool:
     ) -> None:
         self.ingest(headers, data_rows, mappings)
 
-    def iter_bundles(self, batch_size: int) -> Iterator[tuple[int, list[list[Any]]]]:
-        """Yield ``(1-based start_row, bundle)`` after rewind. ``start_row`` is global."""
+    def iter_rows(self) -> Iterator[list[Any]]:
+        """Rewind and yield one matrix row at a time. Starts are already 1-based."""
         if self._closed or self._spool is None:
             return
         self._spool.seek(0)
-        bundle_n = max(1, int(batch_size))
-        bundle: list[list[Any]] = []
-        start = 1
-        seen = 0
         for raw in self._spool:
             line = raw.decode("utf-8").rstrip("\n")
             if not line:
                 continue
-            row = [_load_cell(c) for c in json.loads(line)]
+            yield [_load_cell(c) for c in json.loads(line)]
+
+    def iter_bundles(self, batch_size: int) -> Iterator[tuple[int, list[list[Any]]]]:
+        """Yield ``(1-based start_row, bundle)`` after rewind. ``start_row`` is global."""
+        bundle_n = max(1, int(batch_size))
+        bundle: list[list[Any]] = []
+        start = 1
+        seen = 0
+        for row in self.iter_rows():
             if not bundle:
                 start = seen + 1
             bundle.append(row)

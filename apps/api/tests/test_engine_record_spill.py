@@ -231,9 +231,122 @@ def test_mirror_keys_collected_when_requested():
     )
     try:
         assert spill.mirror_pk_tuples == [("10",), ("11",)]
+        assert spill.key_spool is not None
+        assert spill.key_spool.row_count == 2
         assert MIRROR_PK_SUMMARY_KEY  # constant exists for engine handoff
     finally:
         spill.close()
+
+
+def test_spill_does_not_walk_records_for_keys_before_ingest(monkeypatch):
+    """Keys are written during ingest — not a pre-pass that holds records + key set."""
+    from connectors import engine_record_spill as spill_mod
+
+    calls = {"n": 0}
+    real = spill_mod.collect_mirror_pk_tuples
+
+    def _counted(records, pk_sources):
+        calls["n"] += 1
+        return real(records, pk_sources)
+
+    monkeypatch.setattr(spill_mod, "collect_mirror_pk_tuples", _counted)
+    records = [{"id": "1"}, {"id": "2"}]
+    spill = spill_mod.spill_engine_write_records(
+        records,
+        ["id"],
+        [{"source": "id", "target": "id"}],
+        extra={},
+        collect_pk_sources=["id"],
+    )
+    try:
+        assert calls["n"] == 0
+        assert spill.mirror_pk_tuples == [("1",), ("2",)]
+    finally:
+        spill.close()
+
+
+def test_spill_key_spool_matches_record_census():
+    from services.mirror_engine import (
+        _source_pk_tuples,
+        iter_mirror_pk_tuples_from_spool,
+        unique_mirror_pk_tuples,
+    )
+
+    records = [
+        {"id": "1", "note": "a"},
+        {"id": "1", "note": "dup"},
+        {"id": "2", "note": "b"},
+        {"id": None, "note": "skip"},
+        {"id": "", "note": "skip2"},
+    ]
+    expected = _source_pk_tuples(records, ["id"])
+    spill = spill_engine_write_records(
+        list(records),
+        ["id", "note"],
+        [{"source": "id", "target": "id"}],
+        extra={},
+        collect_pk_sources=["id"],
+    )
+    try:
+        streamed = unique_mirror_pk_tuples(
+            iter_mirror_pk_tuples_from_spool(spill.key_spool, ["id"])
+        )
+        assert streamed == expected == [("1",), ("2",)]
+        assert spill.key_spool.row_count == 3  # duplicate id kept; incomplete skipped
+    finally:
+        spill.close()
+
+
+def test_df_missing_pk_is_incomplete_identity():
+    from services.mirror_engine import complete_mirror_pk_tuple, _source_pk_tuples
+
+    assert complete_mirror_pk_tuple([DF_MISSING_SENTINEL]) is None
+    assert complete_mirror_pk_tuple([None]) is None
+    assert complete_mirror_pk_tuple([""]) is None
+    assert complete_mirror_pk_tuple(["1"]) == ("1",)
+    assert _source_pk_tuples(
+        [{"id": DF_MISSING_SENTINEL}, {"id": "9"}], ["id"]
+    ) == [("9",)]
+
+
+def test_write_destination_does_not_stash_unique_pk_list(tmp_path):
+    from src.transfer.adapters import write_destination_database
+    from src.transfer.models import EndpointConfig
+
+    db_path = str(tmp_path / "mirror_keys.db")
+    endpoint = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        database=db_path,
+        table="t_mirror_keys",
+    )
+    records = [{"id": "1", "note": "a"}, {"id": "2", "note": "b"}]
+    mappings = [
+        {"source": "id", "target": "id"},
+        {"source": "note", "target": "note"},
+    ]
+    written, _ddl, summary = write_destination_database(
+        endpoint,
+        records,
+        ["id", "note"],
+        {"id": "TEXT", "note": "TEXT"},
+        mappings,
+        write_mode="insert",
+        conflict_columns=["id"],
+        collect_mirror_keys=True,
+        release_records=True,
+        retain_engine_spill=True,
+    )
+    spill = summary.pop(ENGINE_SPILL_SUMMARY_KEY, None)
+    try:
+        assert written == 2
+        assert MIRROR_PK_SUMMARY_KEY not in summary
+        assert spill is not None
+        assert spill.key_spool is not None
+        assert spill.mirror_pk_tuples == [("1",), ("2",)]
+    finally:
+        if spill is not None:
+            spill.close()
 
 
 def test_object_store_materialize_uses_engine_spool(monkeypatch):

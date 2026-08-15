@@ -11,23 +11,25 @@ Algorithm (Spark external spill / Beam bundle):
 
 1. Ingest one record at a time through ``SourceRowSpool`` (streaming
    STRUCT flatten/explode; ``DF_MISSING`` survives JSONL).
-2. Optionally collect mirror PK tuples while iterating (keys only — not
-   full rows). Fivetran-class inferred-delete needs the key set, not the
-   payload.
+2. When mirror keys are requested, write complete PK tuples onto a
+   keys-only spool in the *same* pass — raw values, unexpanded. Incomplete
+   identity is skip, not invent. EXISTS on dest staging is set-based, so
+   this spool does not hold a Python unique-key set.
 3. Caller clears the ``records`` list so peak RAM after ingest is the
-   spool + one writer bundle, not the dict chunk.
+   payload spool + keys-only spool + one writer bundle, not the dict chunk.
 4. Writers receive ``source_spool`` and must not re-ingest (no second
    explode-to-disk).
-5. Post-write Gate-8 remaps from the spool in bundles
-   (``FingerprintAccumulator``). Mirror uses the key set.
+5. Post-write Gate-8 remaps from the payload spool in bundles
+   (``FingerprintAccumulator``). Mirror streams the keys-only spool into
+   dest staging.
 
-Honesty: SQL/warehouse writers still hold the mapped image until
-COPY/INSERT/MERGE returns unless they iterate finished bundles.
-File-stream spool destinations reuse this spill so the chunk never
-becomes a second ``records_to_matrix`` copy. SCD2 history merge uses
-the same ``SourceRowSpool`` (fail-scan, then per-bundle expire/insert).
-This is not exactly-once. CDC default remains at-least-once upsert.
-Catalog tiles ≠ transfer-live.
+Honesty: SQL/warehouse writers iterate finished bundles (peak mapped RAM
+is one bundle). File-stream spool destinations reuse this spill so the
+chunk never becomes a second ``records_to_matrix`` copy. SCD2 history
+merge uses the same payload ``SourceRowSpool``. File-stream is disabled
+for mirror/SCD2 so inferred-delete always sees the full snapshot. This is
+not exactly-once. CDC default remains at-least-once upsert. Catalog tiles
+≠ transfer-live.
 """
 
 from __future__ import annotations
@@ -36,10 +38,15 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from connectors.source_row_spool import SourceRowSpool
+from connectors.source_row_spool import SourceRowSpool, resolve_source_spill_max
 from connectors.sql_write_materialize import (
     SQL_SPOOL_WRITE_KINDS,
     ingest_sql_source_spool,
+)
+from services.mirror_engine import (
+    complete_mirror_pk_tuple,
+    iter_mirror_pk_tuples_from_spool,
+    unique_mirror_pk_tuples,
 )
 
 # dest_summary handoff — engine MUST pop before persisting the summary.
@@ -65,44 +72,64 @@ def collect_mirror_pk_tuples(
 def mirror_pk_sources(
     conflict_columns: list[str], mappings: list[dict[str, Any]] | None
 ) -> list[str]:
-    """Map destination PK columns back to source names (same as mirror_engine)."""
-    pk_sources: list[str] = []
-    for pk_target in conflict_columns:
-        if not pk_target:
-            continue
-        pk_source = pk_target
-        for m in mappings or []:
-            if (m.get("target") or m.get("source")) == pk_target:
-                src = m.get("source")
-                if src:
-                    pk_source = str(src)
-                    break
-        pk_sources.append(str(pk_source))
-    return pk_sources
+    """Map destination PK columns back to source names (canonical: mirror_engine)."""
+    from services.mirror_engine import mirror_pk_sources as _impl
+
+    return _impl(conflict_columns, mappings)
+
+
+def _iter_records_collecting_keys(
+    records: list[dict[str, Any]],
+    pk_sources: list[str],
+    key_spool: SourceRowSpool,
+) -> Iterator[dict[str, Any]]:
+    """One pass: append complete unexpanded keys, then yield the record."""
+    for rec in records:
+        if isinstance(rec, dict):
+            tup = complete_mirror_pk_tuple(rec.get(c) for c in pk_sources)
+            if tup is not None:
+                key_spool.append_row(list(tup))
+        yield rec
 
 
 @dataclass
 class EngineRecordSpill:
-    """Live spool plus optional mirror keys. Close after Gate-8 / mirror."""
+    """Live payload spool plus optional keys-only mirror census. Close after Gate-8."""
 
     spool: SourceRowSpool
     unexpanded_row_count: int
-    mirror_pk_tuples: list[tuple[Any, ...]] | None = None
+    pk_sources: list[str] | None = None
+    key_spool: SourceRowSpool | None = None
     _closed: bool = field(default=False, init=False, repr=False)
 
     @property
     def spilled(self) -> bool:
-        return bool(self.spool.spilled)
+        return bool(self.spool.spilled or (self.key_spool is not None and self.key_spool.spilled))
 
     @property
     def source_row_count(self) -> int:
         return int(self.spool.row_count)
+
+    @property
+    def mirror_pk_tuples(self) -> list[tuple[Any, ...]] | None:
+        """Unique keys for tests and small fixtures. Apply must stream, not call this."""
+        if self.pk_sources is None:
+            return None
+        if self.key_spool is not None:
+            return unique_mirror_pk_tuples(
+                iter_mirror_pk_tuples_from_spool(self.key_spool, self.pk_sources)
+            )
+        return unique_mirror_pk_tuples(
+            iter_mirror_pk_tuples_from_spool(self.spool, self.pk_sources)
+        )
 
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
         self.spool.close()
+        if self.key_spool is not None:
+            self.key_spool.close()
 
 
 def spill_engine_write_records(
@@ -118,24 +145,36 @@ def spill_engine_write_records(
 
     ``clear_records`` is the engine-level contract: every alias of this list
     drops the dict payload. Direct adapter callers keep their list unless
-    they opt in. The spool is the durable source for write + remap.
+    they opt in. The spool is the durable source for write + remap. Mirror
+    keys are written in this same pass — the dict list is not walked first.
     """
     unexpanded = len(records)
-    mirror_keys = None
+    key_spool = None
+    ingest_records: Any = records
     if collect_pk_sources:
-        mirror_keys = collect_mirror_pk_tuples(records, collect_pk_sources)
-    spool = ingest_sql_source_spool(
-        headers=columns,
-        records=records,
-        mappings=mappings,
-        extra=extra,
-    )
+        key_spool = SourceRowSpool(spill_max_size=resolve_source_spill_max(extra))
+        key_spool.headers = list(collect_pk_sources)
+        ingest_records = _iter_records_collecting_keys(
+            records, collect_pk_sources, key_spool
+        )
+    try:
+        spool = ingest_sql_source_spool(
+            headers=columns,
+            records=ingest_records,
+            mappings=mappings,
+            extra=extra,
+        )
+    except Exception:
+        if key_spool is not None:
+            key_spool.close()
+        raise
     if clear_records:
         records.clear()
     return EngineRecordSpill(
         spool=spool,
         unexpanded_row_count=unexpanded,
-        mirror_pk_tuples=mirror_keys,
+        pk_sources=list(collect_pk_sources) if collect_pk_sources else None,
+        key_spool=key_spool,
     )
 
 

@@ -36,7 +36,7 @@ transfer-live.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -124,7 +124,7 @@ def ingest_sql_source_spool(
     *,
     headers: list[str],
     data_rows: list[list[Any]] | None = None,
-    records: list[dict[str, Any]] | None = None,
+    records: Iterable[dict[str, Any]] | None = None,
     mappings: list[dict[str, Any]] | None = None,
     extra: dict[str, Any] | None = None,
     spill_max: int | None = None,

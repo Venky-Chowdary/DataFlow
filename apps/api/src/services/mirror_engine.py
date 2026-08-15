@@ -11,10 +11,15 @@ from services.mirror_engine import (
     _update_deleted_batch,
     apply_inferred_deletes_via_staging,
     apply_inferred_soft_deletes,
+    complete_mirror_pk_tuple,
+    iter_mirror_pk_tuples_from_records,
+    iter_mirror_pk_tuples_from_spool,
     lattice_column_names,
     lattice_columns_on_table,
+    mirror_pk_sources,
     quote_sql_identifier,
     strip_lattice_from_upsert,
+    unique_mirror_pk_tuples,
 )
 
 __all__ = [
@@ -27,8 +32,13 @@ __all__ = [
     "_compute_active_checksum",
     "apply_inferred_deletes_via_staging",
     "apply_inferred_soft_deletes",
+    "complete_mirror_pk_tuple",
+    "iter_mirror_pk_tuples_from_records",
+    "iter_mirror_pk_tuples_from_spool",
     "lattice_column_names",
     "lattice_columns_on_table",
+    "mirror_pk_sources",
     "quote_sql_identifier",
     "strip_lattice_from_upsert",
+    "unique_mirror_pk_tuples",
 ]
