@@ -19,7 +19,7 @@ from services.cdc_exactly_once import (
     EosApplyResult,
     EosCrash,
     ExactlyOnceRouteError,
-    already_committed,
+    decide_eos_apply,
 )
 from services.cdc_effectively_once import should_apply_pk_delete, should_apply_pk_row
 from services.cdc_engine import ChangeBatch
@@ -82,7 +82,10 @@ def _wm_ddl(dialect: str) -> str:
             f"batch_id NVARCHAR(64) NOT NULL, "
             f"committed_at NVARCHAR(64) NOT NULL, "
             f"dest_object NVARCHAR(256) NULL, "
-            f"epoch INT NOT NULL DEFAULT 1)"
+            f"epoch INT NOT NULL DEFAULT 1, "
+            f"fence_epoch INT NOT NULL DEFAULT 0, "
+            f"prev_lsn NVARCHAR(512) NULL, "
+            f"phase NVARCHAR(32) NULL)"
         )
     if dialect in _MYSQL_LIKE:
         return (
@@ -92,7 +95,10 @@ def _wm_ddl(dialect: str) -> str:
             f"batch_id VARCHAR(64) NOT NULL, "
             f"committed_at VARCHAR(64) NOT NULL, "
             f"dest_object VARCHAR(256) NULL, "
-            f"epoch INT NOT NULL DEFAULT 1)"
+            f"epoch INT NOT NULL DEFAULT 1, "
+            f"fence_epoch INT NOT NULL DEFAULT 0, "
+            f"prev_lsn VARCHAR(512) NULL, "
+            f"phase VARCHAR(32) NULL)"
         )
     if dialect in _ORACLE_LIKE:
         return (
@@ -102,7 +108,10 @@ def _wm_ddl(dialect: str) -> str:
             f"batch_id VARCHAR2(64) NOT NULL, "
             f"committed_at VARCHAR2(64) NOT NULL, "
             f"dest_object VARCHAR2(256), "
-            f"epoch NUMBER DEFAULT 1 NOT NULL)'; "
+            f"epoch NUMBER DEFAULT 1 NOT NULL, "
+            f"fence_epoch NUMBER DEFAULT 0 NOT NULL, "
+            f"prev_lsn VARCHAR2(512), "
+            f"phase VARCHAR2(32))'; "
             f"EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
         )
     return (
@@ -112,85 +121,129 @@ def _wm_ddl(dialect: str) -> str:
         f"batch_id TEXT NOT NULL, "
         f"committed_at TEXT NOT NULL, "
         f"dest_object TEXT, "
-        f"epoch INTEGER NOT NULL DEFAULT 1)"
+        f"epoch INTEGER NOT NULL DEFAULT 1, "
+        f"fence_epoch INTEGER NOT NULL DEFAULT 0, "
+        f"prev_lsn TEXT, "
+        f"phase TEXT)"
     )
 
 
 def _lock_watermark_sql(dialect: str) -> str:
     if dialect in _FOR_UPDATE_LIKE:
         return (
-            f"SELECT committed_lsn, epoch FROM {WATERMARK_TABLE} "
+            f"SELECT committed_lsn, epoch, fence_epoch FROM {WATERMARK_TABLE} "
             f"WHERE stream_key = :k FOR UPDATE"
         )
     if dialect in _MSSQL_LIKE:
         return (
-            f"SELECT committed_lsn, epoch FROM {WATERMARK_TABLE} "
+            f"SELECT committed_lsn, epoch, fence_epoch FROM {WATERMARK_TABLE} "
             f"WITH (UPDLOCK, ROWLOCK) WHERE stream_key = :k"
         )
-    return f"SELECT committed_lsn, epoch FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+    return (
+        f"SELECT committed_lsn, epoch, fence_epoch FROM {WATERMARK_TABLE} "
+        f"WHERE stream_key = :k"
+    )
 
 
 def _upsert_watermark_sql(dialect: str) -> str:
+    cols = (
+        "stream_key, committed_lsn, batch_id, committed_at, dest_object, "
+        "epoch, fence_epoch, prev_lsn, phase"
+    )
     if dialect in _MYSQL_LIKE:
         return (
-            f"INSERT INTO {WATERMARK_TABLE} "
-            f"(stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch) "
-            f"VALUES (:k, :lsn, :bid, :at, :obj, :ep) "
+            f"INSERT INTO {WATERMARK_TABLE} ({cols}) "
+            f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph) "
             f"ON DUPLICATE KEY UPDATE committed_lsn = VALUES(committed_lsn), "
             f"batch_id = VALUES(batch_id), committed_at = VALUES(committed_at), "
-            f"dest_object = VALUES(dest_object), epoch = VALUES(epoch)"
+            f"dest_object = VALUES(dest_object), epoch = VALUES(epoch), "
+            f"fence_epoch = VALUES(fence_epoch), prev_lsn = VALUES(prev_lsn), "
+            f"phase = VALUES(phase)"
         )
     if dialect in _MSSQL_LIKE:
         return (
             f"MERGE {WATERMARK_TABLE} WITH (HOLDLOCK) AS t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
-            f":at AS committed_at, :obj AS dest_object, :ep AS epoch) AS s "
+            f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
+            f":prev AS prev_lsn, :ph AS phase) AS s "
             f"ON t.stream_key = s.stream_key "
             f"WHEN MATCHED THEN UPDATE SET committed_lsn = s.committed_lsn, "
             f"batch_id = s.batch_id, committed_at = s.committed_at, "
-            f"dest_object = s.dest_object, epoch = s.epoch "
-            f"WHEN NOT MATCHED THEN INSERT "
-            f"(stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch) "
+            f"dest_object = s.dest_object, epoch = s.epoch, "
+            f"fence_epoch = s.fence_epoch, prev_lsn = s.prev_lsn, phase = s.phase "
+            f"WHEN NOT MATCHED THEN INSERT ({cols}) "
             f"VALUES (s.stream_key, s.committed_lsn, s.batch_id, s.committed_at, "
-            f"s.dest_object, s.epoch);"
+            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase);"
         )
     if dialect in _ORACLE_LIKE:
         return (
             f"MERGE INTO {WATERMARK_TABLE} t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
-            f":at AS committed_at, :obj AS dest_object, :ep AS epoch FROM dual) s "
+            f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
+            f":prev AS prev_lsn, :ph AS phase FROM dual) s "
             f"ON (t.stream_key = s.stream_key) "
             f"WHEN MATCHED THEN UPDATE SET t.committed_lsn = s.committed_lsn, "
             f"t.batch_id = s.batch_id, t.committed_at = s.committed_at, "
-            f"t.dest_object = s.dest_object, t.epoch = s.epoch "
-            f"WHEN NOT MATCHED THEN INSERT "
-            f"(stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch) "
+            f"t.dest_object = s.dest_object, t.epoch = s.epoch, "
+            f"t.fence_epoch = s.fence_epoch, t.prev_lsn = s.prev_lsn, t.phase = s.phase "
+            f"WHEN NOT MATCHED THEN INSERT ({cols}) "
             f"VALUES (s.stream_key, s.committed_lsn, s.batch_id, s.committed_at, "
-            f"s.dest_object, s.epoch)"
+            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase)"
         )
     if dialect in _SNOW_LIKE:
         return (
             f"MERGE INTO {WATERMARK_TABLE} t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
-            f":at AS committed_at, :obj AS dest_object, :ep AS epoch) s "
+            f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
+            f":prev AS prev_lsn, :ph AS phase) s "
             f"ON t.stream_key = s.stream_key "
             f"WHEN MATCHED THEN UPDATE SET t.committed_lsn = s.committed_lsn, "
             f"t.batch_id = s.batch_id, t.committed_at = s.committed_at, "
-            f"t.dest_object = s.dest_object, t.epoch = s.epoch "
-            f"WHEN NOT MATCHED THEN INSERT "
-            f"(stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch) "
+            f"t.dest_object = s.dest_object, t.epoch = s.epoch, "
+            f"t.fence_epoch = s.fence_epoch, t.prev_lsn = s.prev_lsn, t.phase = s.phase "
+            f"WHEN NOT MATCHED THEN INSERT ({cols}) "
             f"VALUES (s.stream_key, s.committed_lsn, s.batch_id, s.committed_at, "
-            f"s.dest_object, s.epoch)"
+            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase)"
         )
     return (
-        f"INSERT INTO {WATERMARK_TABLE} "
-        f"(stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch) "
-        f"VALUES (:k, :lsn, :bid, :at, :obj, :ep) "
+        f"INSERT INTO {WATERMARK_TABLE} ({cols}) "
+        f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph) "
         f"ON CONFLICT (stream_key) DO UPDATE SET "
         f"committed_lsn = excluded.committed_lsn, batch_id = excluded.batch_id, "
         f"committed_at = excluded.committed_at, dest_object = excluded.dest_object, "
-        f"epoch = excluded.epoch"
+        f"epoch = excluded.epoch, fence_epoch = excluded.fence_epoch, "
+        f"prev_lsn = excluded.prev_lsn, phase = excluded.phase"
     )
+
+
+def _ensure_wm_columns(conn: Any, dialect: str) -> None:
+    """Additive fence/prev/phase on existing watermark tables."""
+    adds = [
+        ("fence_epoch", "INTEGER" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
+            "INT" if dialect in _MSSQL_LIKE | _MYSQL_LIKE else "NUMBER"
+        )),
+        ("prev_lsn", "TEXT" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
+            "NVARCHAR(512)" if dialect in _MSSQL_LIKE else (
+                "VARCHAR(512)" if dialect in _MYSQL_LIKE else "VARCHAR2(512)"
+            )
+        )),
+        ("phase", "TEXT" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
+            "NVARCHAR(32)" if dialect in _MSSQL_LIKE else (
+                "VARCHAR(32)" if dialect in _MYSQL_LIKE else "VARCHAR2(32)"
+            )
+        )),
+    ]
+    table_q = WATERMARK_TABLE
+    for col, typ in adds:
+        try:
+            if dialect in _ORACLE_LIKE:
+                conn.execute(text(f"ALTER TABLE {table_q} ADD ({col} {typ})"))
+            elif dialect in _MSSQL_LIKE:
+                conn.execute(text(f"ALTER TABLE {table_q} ADD {col} {typ}"))
+            else:
+                conn.execute(text(f"ALTER TABLE {table_q} ADD COLUMN {col} {typ}"))
+        except Exception:
+            pass
 
 
 def _col_sql_type(dialect: str, col: str, pk_cols: list[str]) -> str:
@@ -309,6 +362,7 @@ def apply_eos_sqlalchemy(
     incoming_lsn: str,
     batch_id: str,
     crash_after: str | None = None,
+    writer_fence: int = 0,
 ) -> EosApplyResult:
     from connectors.generic_sql import _engine
     from connectors.writer_common import resolve_target_columns
@@ -348,17 +402,27 @@ def apply_eos_sqlalchemy(
     try:
         with engine.begin() as conn:
             conn.execute(text(_wm_ddl(dialect)))
+            _ensure_wm_columns(conn, dialect)
             _ensure_dest_table(conn, dialect, dest_table, target_cols, pk_target_cols)
             locked = conn.execute(text(_lock_watermark_sql(dialect)), {"k": stream_key}).fetchone()
             dest_lsn = str(locked[0]) if locked and locked[0] else None
             epoch = int(locked[1] or 0) if locked else 0
-            if already_committed(incoming_lsn, dest_lsn):
+            dest_fence = int(locked[2] or 0) if locked and len(locked) > 2 else 0
+            action, fence = decide_eos_apply(
+                incoming_lsn=incoming_lsn,
+                dest_lsn=dest_lsn,
+                incoming_fence=writer_fence,
+                dest_fence=dest_fence,
+                dest_epoch=epoch,
+            )
+            if action == "already_committed":
                 return EosApplyResult(
                     status="already_committed",
                     committed_lsn=dest_lsn,
                     batch_id=batch_id,
                     epoch=epoch,
                     already_committed=True,
+                    fence_epoch=fence,
                 )
             table_q = _q(dest_table)
             rows_written = 0
@@ -399,6 +463,9 @@ def apply_eos_sqlalchemy(
                     "at": datetime.now(timezone.utc).isoformat(),
                     "obj": dest_table,
                     "ep": new_epoch,
+                    "fe": fence,
+                    "prev": dest_lsn,
+                    "ph": "streaming",
                 },
             )
             if crash_after == "after_watermark_before_commit":
@@ -410,6 +477,7 @@ def apply_eos_sqlalchemy(
                 committed_lsn=incoming_lsn,
                 batch_id=batch_id,
                 epoch=new_epoch,
+                fence_epoch=fence,
             )
         if crash_after == "after_commit_before_ack":
             raise EosCrash(crash_after)

@@ -85,10 +85,15 @@ export function jobStudioDeliveryGuarantee(
 export function cdcDeliveryResultCopy(input: {
   cdcDelivery?: string | null;
   exactlyOnceActive?: boolean;
+  destLsn?: string | null;
+  fenceEpoch?: number | null;
 }): string {
   const delivery = namedCdcDeliveryGuarantee(input.cdcDelivery);
   if (input.exactlyOnceActive || delivery === CDC_DELIVERY_EXACTLY_ONCE) {
-    return "exactly_once dest-owned watermark · not platform-wide";
+    const parts = ["exactly_once dest-owned watermark · dest authoritative · not platform-wide"];
+    if (input.destLsn) parts.push(`dest LSN ${input.destLsn}`);
+    if (input.fenceEpoch) parts.push(`fence ${input.fenceEpoch}`);
+    return parts.join(" · ");
   }
   return "at-least-once · not platform exactly-once";
 }

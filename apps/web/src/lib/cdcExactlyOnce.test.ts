@@ -80,7 +80,7 @@ describe("cdcExactlyOnce", () => {
     );
     assert.equal(
       cdcDeliveryResultCopy({ cdcDelivery: "exactly_once", exactlyOnceActive: true }),
-      "exactly_once dest-owned watermark · not platform-wide",
+      "exactly_once dest-owned watermark · dest authoritative · not platform-wide",
     );
   });
 });

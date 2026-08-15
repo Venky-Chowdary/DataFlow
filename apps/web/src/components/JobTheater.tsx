@@ -1059,6 +1059,8 @@ export function JobTheaterView({
               <span>{cdcDeliveryResultCopy({
                 cdcDelivery: job.cdc_delivery,
                 exactlyOnceActive: Boolean(job.exactly_once_active),
+                destLsn: job.eos_committed_lsn,
+                fenceEpoch: job.eos_fence_epoch,
               })}{job.cdc_slot_name ? ` · ${job.cdc_slot_name}` : ""}</span>
             </div>
           </article>
@@ -1402,6 +1404,8 @@ export function JobTheaterView({
               {cdcDeliveryResultCopy({
                 cdcDelivery: job.cdc_delivery,
                 exactlyOnceActive: Boolean(job.exactly_once_active),
+                destLsn: job.eos_committed_lsn,
+                fenceEpoch: job.eos_fence_epoch,
               })}
             </span>
           )}

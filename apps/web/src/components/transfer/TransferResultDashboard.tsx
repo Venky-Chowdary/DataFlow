@@ -529,6 +529,8 @@ export function TransferResultDashboard({
                 (result as { exactly_once_active?: boolean }).exactly_once_active
                 || result.cdc_delivery === "exactly_once",
               ),
+              destLsn: (result as { eos_committed_lsn?: string }).eos_committed_lsn,
+              fenceEpoch: (result as { eos_fence_epoch?: number }).eos_fence_epoch,
             })}</span>
           </header>
           <dl>

@@ -19,7 +19,8 @@ from services.cdc_exactly_once import (
     WATERMARK_TABLE,
     EosApplyResult,
     ExactlyOnceRouteError,
-    already_committed,
+    combine_change_batch,
+    decide_eos_apply,
     eos_stream_key,
     require_batch_lsn,
 )
@@ -32,9 +33,18 @@ CREATE TABLE IF NOT EXISTS {WATERMARK_TABLE} (
   batch_id TEXT NOT NULL,
   committed_at TEXT NOT NULL,
   dest_object TEXT,
-  epoch INTEGER NOT NULL DEFAULT 1
+  epoch INTEGER NOT NULL DEFAULT 1,
+  fence_epoch INTEGER NOT NULL DEFAULT 0,
+  prev_lsn TEXT,
+  phase TEXT
 )
 """
+
+_WM_ALTERS = (
+    "ALTER TABLE {table} ADD COLUMN fence_epoch INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE {table} ADD COLUMN prev_lsn TEXT",
+    "ALTER TABLE {table} ADD COLUMN phase TEXT",
+)
 
 
 def _sqlite_path(dest_cfg: dict[str, Any]) -> str:
@@ -87,15 +97,32 @@ def _ensure_dest_table(
         )
 
 
-def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> tuple[str | None, int]:
-    cur.execute(
-        f"SELECT committed_lsn, epoch FROM {WATERMARK_TABLE} WHERE stream_key = ?",
-        (stream_key,),
-    )
+def _ensure_wm_table(cur: sqlite3.Cursor) -> None:
+    cur.execute(_WM_DDL)
+    for stmt in _WM_ALTERS:
+        try:
+            cur.execute(stmt.format(table=WATERMARK_TABLE))
+        except Exception:
+            pass
+
+
+def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> tuple[str | None, int, int]:
+    try:
+        cur.execute(
+            f"SELECT committed_lsn, epoch, fence_epoch FROM {WATERMARK_TABLE} "
+            "WHERE stream_key = ?",
+            (stream_key,),
+        )
+    except Exception:
+        cur.execute(
+            f"SELECT committed_lsn, epoch FROM {WATERMARK_TABLE} WHERE stream_key = ?",
+            (stream_key,),
+        )
     row = cur.fetchone()
     if not row:
-        return None, 0
-    return str(row[0] or "") or None, int(row[1] or 0)
+        return None, 0, 0
+    fence = int(row[2] or 0) if len(row) > 2 else 0
+    return str(row[0] or "") or None, int(row[1] or 0), fence
 
 
 def _write_watermark(
@@ -106,21 +133,28 @@ def _write_watermark(
     batch_id: str,
     dest_object: str,
     epoch: int,
+    fence_epoch: int = 0,
+    prev_lsn: str | None = None,
+    phase: str = "streaming",
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     cur.execute(
         f"""
         INSERT INTO {WATERMARK_TABLE}
-          (stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch)
-        VALUES (?, ?, ?, ?, ?, ?)
+          (stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch,
+           fence_epoch, prev_lsn, phase)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(stream_key) DO UPDATE SET
           committed_lsn = excluded.committed_lsn,
           batch_id = excluded.batch_id,
           committed_at = excluded.committed_at,
           dest_object = excluded.dest_object,
-          epoch = excluded.epoch
+          epoch = excluded.epoch,
+          fence_epoch = excluded.fence_epoch,
+          prev_lsn = excluded.prev_lsn,
+          phase = excluded.phase
         """,
-        (stream_key, lsn, batch_id, now, dest_object, epoch),
+        (stream_key, lsn, batch_id, now, dest_object, epoch, fence_epoch, prev_lsn, phase),
     )
 
 
@@ -172,6 +206,7 @@ def apply_change_batch_exactly_once(
     cursor_key: str = "",
     stream_name: str = "",
     crash_after: str | None = None,
+    writer_fence: int = 0,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply one CDC batch under dest-owned watermark EOS.
 
@@ -180,6 +215,7 @@ def apply_change_batch_exactly_once(
     """
     dest = (dest_type or "").strip().lower().replace("-", "_")
     incoming = require_batch_lsn(change.resume_token)
+    change = combine_change_batch(change, pk_cols=pk_target_cols)
     stream_key = eos_stream_key(
         dest_type=dest,
         dest_database=str(dest_cfg.get("database") or ""),
@@ -221,6 +257,7 @@ def apply_change_batch_exactly_once(
             incoming_lsn=incoming,
             batch_id=batch_id,
             crash_after=crash_after,
+            writer_fence=writer_fence,
         )
         return (
             result.rows_written,
@@ -240,6 +277,7 @@ def apply_change_batch_exactly_once(
         incoming_lsn=incoming,
         batch_id=batch_id,
         crash_after=crash_after,
+        writer_fence=writer_fence,
     )
     return (
         result.rows_written,
@@ -262,6 +300,7 @@ def _apply_eos_sqlite(
     incoming_lsn: str,
     batch_id: str,
     crash_after: str | None = None,
+    writer_fence: int = 0,
 ) -> EosApplyResult:
     from connectors.sqlite_writer import _sqlite_upsert_batch
     from connectors.writer_common import resolve_target_columns
@@ -295,10 +334,17 @@ def _apply_eos_sqlite(
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
         try:
-            cur.execute(_WM_DDL)
+            _ensure_wm_table(cur)
             _ensure_dest_table(cur, dest_table, target_cols, pk_target_cols)
-            dest_lsn, epoch = _read_watermark(cur, stream_key)
-            if already_committed(incoming_lsn, dest_lsn):
+            dest_lsn, epoch, dest_fence = _read_watermark(cur, stream_key)
+            action, fence = decide_eos_apply(
+                incoming_lsn=incoming_lsn,
+                dest_lsn=dest_lsn,
+                incoming_fence=writer_fence,
+                dest_fence=dest_fence,
+                dest_epoch=epoch,
+            )
+            if action == "already_committed":
                 conn.execute("COMMIT")
                 return EosApplyResult(
                     status="already_committed",
@@ -306,6 +352,7 @@ def _apply_eos_sqlite(
                     batch_id=batch_id,
                     epoch=epoch,
                     already_committed=True,
+                    fence_epoch=fence,
                 )
 
             rows_written = 0
@@ -361,6 +408,8 @@ def _apply_eos_sqlite(
                 batch_id=batch_id,
                 dest_object=dest_table,
                 epoch=new_epoch,
+                fence_epoch=fence,
+                prev_lsn=dest_lsn,
             )
             if crash_after == "after_watermark_before_commit":
                 conn.execute("ROLLBACK")
@@ -375,6 +424,7 @@ def _apply_eos_sqlite(
                 committed_lsn=incoming_lsn,
                 batch_id=batch_id,
                 epoch=new_epoch,
+                fence_epoch=fence,
             )
         except Exception:
             try:
@@ -398,7 +448,7 @@ def dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str) -> str | None:
         )
         if cur.fetchone() is None:
             return None
-        lsn, _epoch = _read_watermark(cur, stream_key)
+        lsn, _epoch, _fence = _read_watermark(cur, stream_key)
         return lsn
     finally:
         conn.close()
@@ -424,6 +474,30 @@ def dest_engine_count(dest_cfg: dict[str, Any], table_name: str) -> int:
         return int(row[0] or 0) if row else 0
     finally:
         conn.close()
+
+
+def read_route_dest_lsn(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    stream_key: str,
+) -> str | None:
+    """Dest-authoritative watermark read (resume Open)."""
+    dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest == "sqlite":
+        try:
+            return dest_watermark_lsn(dest_cfg, stream_key)
+        except Exception:
+            return None
+    from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS
+
+    if dest not in EOS_TXN_WIRED_DESTS:
+        return None
+    try:
+        from connectors.cdc_eos_sa import sa_dest_watermark_lsn
+
+        return sa_dest_watermark_lsn(dest_cfg, stream_key, dest)
+    except Exception:
+        return None
 
 
 # Imported by proofs — keep algorithm name on the connector surface.

@@ -747,6 +747,7 @@ def _apply_change_batch(
     delivery_guarantee: str = "at_least_once",
     cursor_key: str = "",
     stream_name: str = "",
+    writer_fence: int = 0,
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
     from services.cdc_exactly_once import normalize_delivery_guarantee
@@ -766,6 +767,7 @@ def _apply_change_batch(
             pk_target_cols=_pk_columns(pk_target_col) if pk_target_col else [],
             cursor_key=cursor_key,
             stream_name=stream_name,
+            writer_fence=writer_fence,
         )
 
     # Normalize once so every writer and the delete path see a real column list.
@@ -1858,6 +1860,12 @@ def _run_cdc_single_stream(
         stream_name=contract.name if contract else "stream",
     )
     watermark = get_watermark(cursor_key)
+    if eos_active:
+        from connectors.cdc_eos_sql import read_route_dest_lsn
+        from services.cdc_exactly_once import clamp_job_resume_to_dest
+
+        dest_lsn = read_route_dest_lsn(dest_type, dest_cfg, cursor_key)
+        watermark, _clamp_proof = clamp_job_resume_to_dest(watermark, dest_lsn)
 
     headers = list(schema.keys())
     column_types = {c: schema.get(c, "string") for c in headers}
@@ -2227,6 +2235,9 @@ def _run_cdc_single_stream(
                 delivery_guarantee=eos_guarantee,
                 cursor_key=cursor_key,
                 stream_name=str(table_name or dest_table or ""),
+                writer_fence=int(
+                    getattr(getattr(cdc, "_lease", None), "generation", 0) or 0
+                ),
             )
         state.rows_written += rows_written
         state.inserts += len(change.inserts)
@@ -2455,8 +2466,10 @@ def _run_cdc_single_stream(
         summary["cdc_delivery"] = "exactly_once"
         summary["delivery_semantics"] = DELIVERY_SEMANTICS_EOS
         summary["exactly_once_algorithm"] = "dest_owned_watermark_txn"
+        summary["exactly_once_protocol"] = "dest_authoritative_fenced_reduce"
         summary["exactly_once_active"] = True
         summary["exactly_once_claimed_platform"] = False
+        summary["eos_dest_authoritative"] = True
     else:
         summary["cdc_delivery"] = lag_fields.get("cdc_delivery") or "at-least-once"
         summary.setdefault("delivery_semantics", DELIVERY_SEMANTICS_ALO)

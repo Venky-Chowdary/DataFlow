@@ -476,9 +476,9 @@ export function DestinationAdvancedDrawer({
               Default stays <strong>at_least_once</strong>. Exactly-once commits apply and a dest
               watermark in one transaction
               {exactlyOnceWired
-                ? " on this destination"
+                ? " on this destination. Dest LSN is source of truth on resume; a stolen-lease writer cannot commit."
                 : " — this destination is not transactional and fails closed"}
-              . At-most-once is not offered. Append-only below is incompatible with exactly-once.
+              {" "}At-most-once is not offered. Append-only below is incompatible with exactly-once.
             </small>
             {onAllowAppendOnlyChange && (
               <label className="df2-policy-toggle" style={{ marginTop: "0.75rem" }}>

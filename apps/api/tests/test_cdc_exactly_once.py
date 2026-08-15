@@ -34,8 +34,12 @@ from services.cdc_exactly_once import (  # noqa: E402
     REASON_OK,
     EosCrash,
     ExactlyOnceRouteError,
+    REASON_STALE_FENCE,
     already_committed,
     assert_requested_cdc_delivery,
+    assert_writer_fence,
+    clamp_job_resume_to_dest,
+    combine_change_batch,
     chaos_crash_after_commit_redelivery,
     chaos_crash_before_commit_then_retry,
     classify_exactly_once_route,
@@ -149,6 +153,84 @@ def test_already_committed_compare() -> None:
     assert already_committed("0/200", "0/200") is True
     assert already_committed("0/300", "0/200") is False
     assert already_committed("0/100", None) is False
+
+
+def test_dest_authoritative_resume_rewinds_job_ahead() -> None:
+    """Honoring a job cursor ahead of dest would skip uncommitted LSNs."""
+    resume, proof = clamp_job_resume_to_dest({"lsn": "0/500"}, "0/200")
+    assert proof["clamped"] is True
+    assert proof["reason"] == "job_ahead_rewound_to_dest"
+    assert resume["lsn"] == "0/200"
+
+
+def test_dest_authoritative_resume_fast_forwards_job_behind() -> None:
+    resume, proof = clamp_job_resume_to_dest("0/100", "0/300")
+    assert proof["clamped"] is True
+    assert proof["reason"] == "job_behind_fast_forward_to_dest"
+    assert resume == "0/300"
+
+
+def test_stale_writer_fence_refuses_zombie() -> None:
+    assert_writer_fence(5, 5)
+    assert_writer_fence(6, 5)
+    assert_writer_fence(0, 0)
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        assert_writer_fence(3, 5)
+    assert exc.value.reason == REASON_STALE_FENCE
+
+
+def test_combine_batch_last_op_per_pk_wins() -> None:
+    combined = combine_change_batch(
+        _batch(
+            "0/9",
+            inserts=[{"id": "1", "v": "a"}, {"id": "2", "v": "keep"}],
+            updates=[{"id": "1", "v": "b"}],
+            deletes=["1"],
+        ),
+        pk_cols=["id"],
+    )
+    assert combined.deletes == ["1"]
+    assert [r["id"] for r in combined.updates] == ["2"]
+    assert combined.inserts == []
+
+
+def test_sqlite_eos_stale_fence_does_not_commit() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_fence.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string"}
+        apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=_batch("0/10", inserts=[{"id": "1", "v": "first"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="fence|orders",
+            writer_fence=4,
+        )
+        with pytest.raises(ExactlyOnceRouteError) as exc:
+            apply_change_batch_exactly_once(
+                dest_type="sqlite",
+                dest_cfg=dest_cfg,
+                dest_table="orders",
+                change=_batch("0/20", inserts=[{"id": "1", "v": "zombie"}]),
+                mappings=mappings,
+                column_types=types,
+                headers=["id", "v"],
+                pk_target_cols=["id"],
+                cursor_key="fence|orders",
+                writer_fence=2,
+            )
+        assert exc.value.reason == REASON_STALE_FENCE
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        assert dest_watermark_lsn(dest_cfg, "fence|orders") == "0/10"
 
 
 def test_chaos_crash_before_commit_retries_once() -> None:

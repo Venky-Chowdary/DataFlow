@@ -212,7 +212,11 @@ export interface TransferJob {
   exactly_once_active?: boolean | null;
   exactly_once_claimed_platform?: boolean | null;
   exactly_once_algorithm?: string | null;
+  exactly_once_protocol?: string | null;
   delivery_semantics?: string | null;
+  eos_committed_lsn?: string | null;
+  eos_fence_epoch?: number | null;
+  eos_dest_authoritative?: boolean | null;
   /** SQL Server CDC TVF row_filter_option actually used (all / all update old / net). */
   cdc_row_filter?: string | null;
   replication_lag_bytes?: number | null;

@@ -6,15 +6,22 @@ Platform-wide CDC remains **at-least-once upsert** until a route opts in
 *and* the dest can commit apply + watermark in one transaction.
 
 This is not Kafka transactional-id EOS and not XA across heterogeneous
-sinks. It is the Estuary materialization / Flink two-phase sink pattern:
+sinks. It is dest-authoritative fenced materialization — Estuary Open
+fence + remote-store-authoritative checkpoint, plus Flink idempotent
+commit-on-restore, plus Debezium-class snapshot/stream LSN compare:
 
-1. BEGIN dest transaction (SELECT … FOR UPDATE on the watermark row).
-2. Drop events with LSN ``<=`` dest-committed watermark (crash after
-   dest commit, before source ack).
-3. Apply upserts/deletes with ``_df_lsn`` guards on the same connection.
-4. UPSERT ``_df_cdc_eos_watermarks`` in the same transaction.
-5. COMMIT dest.
-6. Persist job watermark and ack the source **after** dest commit.
+1. Open: dest watermark is SSOT. Job cursor ahead of dest is rewound
+   (honoring job would skip uncommitted LSNs — silent loss). Job behind
+   dest fast-forwards (redelivery is already_committed).
+2. BEGIN dest transaction (SELECT … FOR UPDATE on the watermark row).
+3. Fence: incoming lease generation must be ``>=`` dest ``fence_epoch``.
+   A stolen-lease zombie cannot commit (Estuary Open fence, persisted
+   in the apply transaction so the lease check cannot race).
+4. Reduce: last op per PK in the batch wins (Estuary load-reduce-store).
+5. Drop events with LSN ``<=`` dest-committed watermark.
+6. Apply upserts/deletes with ``_df_lsn`` guards on the same connection.
+7. UPSERT ``_df_cdc_eos_watermarks`` (LSN + fence + epoch) in the same txn.
+8. COMMIT dest. Persist job watermark and ack the source **after**.
 
 Crash before dest COMMIT → dest rolls back; source not acked; retry.
 Crash after dest COMMIT → dest watermark wins; redelivery is a no-op.
@@ -93,7 +100,9 @@ REASON_DEST_NOT_WIRED = "exactly_once_dest_txn_not_wired"
 REASON_NO_LSN = "exactly_once_requires_durable_lsn"
 REASON_CALLABLE = "exactly_once_refuses_callable_source"
 REASON_AT_MOST = "at_most_once_not_offered"
+REASON_STALE_FENCE = "exactly_once_stale_writer_fence"
 REASON_OK = "dest_owned_watermark_txn"
+PROTOCOL = "dest_authoritative_fenced_reduce"
 
 
 class ExactlyOnceRouteError(ValueError):
@@ -127,6 +136,7 @@ class EosEligibility:
             "reason": self.reason,
             "dest_type": self.dest_type,
             "algorithm": self.algorithm,
+            "protocol": PROTOCOL,
             "wired": self.wired,
             "notes": list(self.notes),
             "platform_claimed": PLATFORM_EXACTLY_ONCE_CLAIMED,
@@ -140,6 +150,9 @@ class EosWatermark:
     batch_id: str
     committed_at: str
     epoch: int = 1
+    fence_epoch: int = 0
+    prev_lsn: str | None = None
+    phase: str = "streaming"
 
 
 @dataclass
@@ -152,6 +165,9 @@ class EosApplyResult:
     epoch: int = 0
     delivery_semantics: str = DELIVERY_SEMANTICS_EOS
     already_committed: bool = False
+    fence_epoch: int = 0
+    dest_authoritative: bool = True
+    protocol: str = PROTOCOL
 
     def to_dest_summary(self) -> dict[str, Any]:
         return {
@@ -159,6 +175,7 @@ class EosApplyResult:
             "delivery_semantics": self.delivery_semantics,
             "cdc_delivery": "exactly_once",
             "exactly_once_algorithm": ALGORITHM,
+            "exactly_once_protocol": self.protocol,
             "exactly_once_active": True,
             "exactly_once_claimed_platform": PLATFORM_EXACTLY_ONCE_CLAIMED,
             "eos_status": self.status,
@@ -166,6 +183,8 @@ class EosApplyResult:
             "eos_committed_lsn": self.committed_lsn,
             "eos_batch_id": self.batch_id,
             "eos_epoch": self.epoch,
+            "eos_fence_epoch": self.fence_epoch,
+            "eos_dest_authoritative": self.dest_authoritative,
             "rows_written": self.rows_written,
         }
 
@@ -210,6 +229,132 @@ def already_committed(incoming_lsn: str | None, dest_lsn: str | None) -> bool:
     return compare_lsn(incoming_lsn, dest_lsn) <= 0
 
 
+def assert_writer_fence(incoming_fence: int, dest_fence: int) -> None:
+    """Estuary Open fence — a stolen-lease zombie cannot commit dest EOS.
+
+    Fence 0 means unleased / single-writer tests. A positive dest fence
+    refuses a lower incoming generation.
+    """
+    incoming = int(incoming_fence or 0)
+    dest = int(dest_fence or 0)
+    if dest > 0 and incoming < dest:
+        raise ExactlyOnceRouteError(
+            "exactly_once dest fence refused a stale writer "
+            f"(incoming={incoming} dest={dest}). "
+            "Zombie after lease steal cannot commit.",
+            reason=REASON_STALE_FENCE,
+        )
+
+
+def next_dest_fence(incoming_fence: int, dest_fence: int) -> int:
+    return max(int(incoming_fence or 0), int(dest_fence or 0))
+
+
+def clamp_job_resume_to_dest(
+    job_resume: Any,
+    dest_lsn: str | None,
+) -> tuple[Any, dict[str, Any]]:
+    """Dest watermark is SSOT (Estuary remote-store-authoritative).
+
+    Job cursor ahead of dest would skip uncommitted LSNs — rewind.
+    Job cursor behind dest is already committed — fast-forward.
+    """
+    proof: dict[str, Any] = {
+        "dest_authoritative": True,
+        "protocol": PROTOCOL,
+        "clamped": False,
+        "reason": "no_dest_watermark",
+        "dest_lsn": dest_lsn,
+        "job_lsn": extract_cdc_lsn(job_resume),
+    }
+    if not dest_lsn or not str(dest_lsn).strip():
+        return job_resume, proof
+    job_lsn = proof["job_lsn"]
+    if not job_lsn:
+        proof["clamped"] = True
+        proof["reason"] = "job_resume_missing"
+        return _resume_with_lsn(job_resume, dest_lsn), proof
+    cmp = compare_lsn(job_lsn, dest_lsn)
+    if cmp == 0:
+        proof["reason"] = "aligned"
+        return job_resume, proof
+    if cmp > 0:
+        proof["clamped"] = True
+        proof["reason"] = "job_ahead_rewound_to_dest"
+        return _resume_with_lsn(job_resume, dest_lsn), proof
+    proof["clamped"] = True
+    proof["reason"] = "job_behind_fast_forward_to_dest"
+    return _resume_with_lsn(job_resume, dest_lsn), proof
+
+
+def _resume_with_lsn(job_resume: Any, dest_lsn: str) -> Any:
+    if isinstance(job_resume, dict):
+        out = dict(job_resume)
+        out["lsn"] = dest_lsn
+        return out
+    return dest_lsn
+
+
+def combine_change_batch(change: Any, *, pk_cols: list[str]) -> Any:
+    """Estuary load-reduce-store: last op per PK in this batch wins.
+
+    Unkeyed rows are kept (never silently dropped). Deletes after upserts
+    on the same PK tombstone the row for this LSN.
+    """
+    from services.cdc_engine import ChangeBatch
+    from services.cdc_snapshot_window import _pk_value
+
+    if not pk_cols:
+        return change
+    last: dict[str, tuple[str, dict[str, Any] | None]] = {}
+    orphans: list[dict[str, Any]] = []
+    for rec in list(getattr(change, "inserts", None) or []) + list(
+        getattr(change, "updates", None) or []
+    ):
+        if not isinstance(rec, dict):
+            continue
+        key = _pk_value(rec, pk_cols)
+        if not key:
+            orphans.append(rec)
+            continue
+        last[str(key)] = ("u", rec)
+    for raw_key in list(getattr(change, "deletes", None) or []):
+        last[str(raw_key)] = ("d", None)
+    updates: list[dict[str, Any]] = []
+    deletes: list[str] = []
+    for key, (op, rec) in last.items():
+        if op == "d":
+            deletes.append(key)
+        elif rec is not None:
+            updates.append(rec)
+    return ChangeBatch(
+        inserts=orphans,
+        updates=updates,
+        deletes=deletes,
+        unchanged=int(getattr(change, "unchanged", 0) or 0),
+        resume_token=getattr(change, "resume_token", None),
+        table=getattr(change, "table", None),
+        ack_barrier=bool(getattr(change, "ack_barrier", True)),
+    )
+
+
+def decide_eos_apply(
+    *,
+    incoming_lsn: str,
+    dest_lsn: str | None,
+    incoming_fence: int = 0,
+    dest_fence: int = 0,
+    dest_epoch: int = 0,
+) -> tuple[str, int]:
+    """Return ``(action, next_fence)`` — apply | already_committed."""
+    assert_writer_fence(incoming_fence, dest_fence)
+    fence = next_dest_fence(incoming_fence, dest_fence)
+    if already_committed(incoming_lsn, dest_lsn):
+        return "already_committed", fence
+    _ = dest_epoch
+    return "apply", fence
+
+
 def classify_exactly_once_route(
     *,
     dest_type: str,
@@ -238,6 +383,9 @@ def classify_exactly_once_route(
     mode = (sync_mode or "").strip().lower().replace("-", "_")
     notes: list[str] = [
         "Algorithm: dest-owned watermark in the same dest transaction as apply.",
+        "Dest watermark is SSOT on resume (job cursor cannot invent ahead).",
+        "Writer fence (lease generation) is persisted in the dest txn.",
+        "Batch is reduced last-op-per-PK before apply.",
         "Platform never claims all CDC is exactly-once.",
         "At-most-once is not offered (silent loss).",
     ]
@@ -379,17 +527,28 @@ class InMemoryEosStore:
         batch_id: str,
         apply_fn: Callable[[], None],
         crash_after: str | None = None,
+        writer_fence: int = 0,
     ) -> EosApplyResult:
-        """BEGIN → filter → apply → watermark → COMMIT, with optional crash."""
+        """BEGIN → fence → filter → apply → watermark → COMMIT, with optional crash."""
         current = self.watermarks.get(stream_key)
         dest_lsn = current.committed_lsn if current else None
-        if already_committed(incoming_lsn, dest_lsn):
+        dest_fence = current.fence_epoch if current else 0
+        dest_epoch = current.epoch if current else 0
+        action, fence = decide_eos_apply(
+            incoming_lsn=incoming_lsn,
+            dest_lsn=dest_lsn,
+            incoming_fence=writer_fence,
+            dest_fence=dest_fence,
+            dest_epoch=dest_epoch,
+        )
+        if action == "already_committed":
             return EosApplyResult(
                 status="already_committed",
                 committed_lsn=dest_lsn,
                 batch_id=current.batch_id if current else batch_id,
-                epoch=current.epoch if current else 0,
+                epoch=dest_epoch,
                 already_committed=True,
+                fence_epoch=fence,
             )
         staged_rows: dict[str, dict[str, Any]] | None = None
         try:
@@ -405,6 +564,8 @@ class InMemoryEosStore:
                 batch_id=batch_id,
                 committed_at=datetime.now(timezone.utc).isoformat(),
                 epoch=prior_epoch + 1,
+                fence_epoch=fence,
+                prev_lsn=dest_lsn,
             )
             if crash_after == "after_watermark_before_commit":
                 raise EosCrash(crash_after)
@@ -417,6 +578,7 @@ class InMemoryEosStore:
                 committed_lsn=incoming_lsn,
                 batch_id=batch_id,
                 epoch=watermark.epoch,
+                fence_epoch=fence,
             )
         except EosCrash:
             if crash_after in {
