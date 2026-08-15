@@ -68,6 +68,10 @@ describe("cdcExactlyOnce", () => {
   it("restores job delivery without inventing exactly_once", () => {
     assert.equal(jobStudioDeliveryGuarantee({}), CDC_DELIVERY_AT_LEAST_ONCE);
     assert.equal(
+      jobStudioDeliveryGuarantee({ cdc_delivery: null, exactly_once_active: null }),
+      CDC_DELIVERY_AT_LEAST_ONCE,
+    );
+    assert.equal(
       jobStudioDeliveryGuarantee({
         delivery_guarantee: "at_least_once",
         transfer_request: { delivery_guarantee: "exactly_once" },

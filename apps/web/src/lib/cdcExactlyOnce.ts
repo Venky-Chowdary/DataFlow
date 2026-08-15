@@ -53,16 +53,28 @@ export function exactlyOnceWiredDest(destType?: string | null): boolean {
   return EOS_WIRED_DESTS.has(dest);
 }
 
-export function jobStudioDeliveryGuarantee(job: {
-  delivery_guarantee?: string;
-  cdc_delivery?: string;
-  transfer_request?: { delivery_guarantee?: string };
-  destination_summary?: { exactly_once_active?: boolean; cdc_delivery?: string };
-} | null | undefined): CdcDeliveryGuarantee {
+/** Job / Theater payload — API fields are string | null, never invent EOS. */
+export type JobStudioDeliverySource = {
+  delivery_guarantee?: string | null;
+  cdc_delivery?: string | null;
+  exactly_once_active?: boolean | null;
+  transfer_request?: { delivery_guarantee?: string | null } | null;
+  destination_summary?: Record<string, unknown> | null;
+} | null | undefined;
+
+export function jobStudioDeliveryGuarantee(
+  job: JobStudioDeliverySource,
+): CdcDeliveryGuarantee {
   const req = job?.transfer_request?.delivery_guarantee;
   const summary = job?.destination_summary;
+  const summaryActive = Boolean(summary?.exactly_once_active);
+  const summaryDelivery = typeof summary?.cdc_delivery === "string"
+    ? summary.cdc_delivery
+    : "";
   const fromSummary =
-    summary?.exactly_once_active || summary?.cdc_delivery === "exactly_once"
+    summaryActive
+    || job?.exactly_once_active
+    || summaryDelivery === "exactly_once"
       ? CDC_DELIVERY_EXACTLY_ONCE
       : "";
   return namedCdcDeliveryGuarantee(
