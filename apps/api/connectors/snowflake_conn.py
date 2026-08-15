@@ -551,6 +551,15 @@ def _fakesnow_rollback_product_patch() -> None:
             _fakesnow_refcount = 0
 
 
+def _snowflake_connector_module() -> Any:
+    try:
+        import snowflake.connector
+    except ImportError as exc:
+        from connectors.driver_guard import require_driver
+        raise RuntimeError(require_driver("snowflake.connector", "snowflake-connector-python")) from exc
+    return snowflake.connector
+
+
 def get_connection(
     *,
     account: str,
@@ -564,12 +573,6 @@ def get_connection(
     private_key: str = "",
     private_key_passphrase: str = "",
 ) -> Any:
-    try:
-        import snowflake.connector
-    except ImportError as exc:
-        from connectors.driver_guard import require_driver
-        raise RuntimeError(require_driver("snowflake.connector", "snowflake-connector-python")) from exc
-
     kwargs = snowflake_connect_kwargs(
         account=account,
         username=username,
@@ -582,6 +585,8 @@ def get_connection(
         private_key=private_key,
         private_key_passphrase=private_key_passphrase,
     )
+
+    snowflake_connector = _snowflake_connector_module()
 
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.
@@ -596,8 +601,8 @@ def get_connection(
         while True:
             product_managed = False
             with _fakesnow_lock:
-                already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)
-                connect_mod = getattr(snowflake.connector.connect, "__module__", "") or ""
+                already_patched = isinstance(snowflake_connector.connect, unittest.mock.MagicMock)
+                connect_mod = getattr(snowflake_connector.connect, "__module__", "") or ""
                 if not already_patched and connect_mod.startswith("fakesnow"):
                     already_patched = True
                 if _fakesnow_refcount > 0:
@@ -625,7 +630,7 @@ def get_connection(
                     product_managed = False
 
             try:
-                conn = snowflake.connector.connect(**kwargs)
+                conn = snowflake_connector.connect(**kwargs)
             except Exception as exc:
                 # If we installed a patch for this connect attempt, roll it back so a
                 # failed local connection cannot leak the patch into later tests.
@@ -653,4 +658,4 @@ def get_connection(
             conn.close = _close  # type: ignore[assignment]
             return conn
 
-    return snowflake.connector.connect(**kwargs)
+    return snowflake_connector.connect(**kwargs)

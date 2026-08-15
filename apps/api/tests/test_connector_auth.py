@@ -168,25 +168,24 @@ def test_browser_host_url_fails_before_connect():
 
 
 def test_get_connection_never_passes_url_positionally(monkeypatch):
-    import pytest
+    import connectors.snowflake_conn as sc
 
-    snowflake = pytest.importorskip("snowflake.connector")
     seen: dict = {}
 
-    def fake_connect(*args, **kwargs):
-        assert args == ()
-        seen.update(kwargs)
+    class _FakeMod:
+        @staticmethod
+        def connect(*args, **kwargs):
+            assert args == ()
+            seen.update(kwargs)
 
-        class _Conn:
-            def close(self) -> None:
-                return None
+            class _Conn:
+                def close(self) -> None:
+                    return None
 
-        return _Conn()
+            return _Conn()
 
-    monkeypatch.setattr(snowflake, "connect", fake_connect)
-    from connectors.snowflake_conn import get_connection
-
-    get_connection(
+    monkeypatch.setattr(sc, "_snowflake_connector_module", lambda: _FakeMod)
+    sc.get_connection(
         account="account.snowflakecomputing.com",
         username="",
         password="",
@@ -204,10 +203,30 @@ def test_get_connection_never_passes_url_positionally(monkeypatch):
     assert seen["role"] == "ACCOUNTADMIN"
 
 
+def test_get_connection_rejects_browser_host_before_driver():
+    from connectors.snowflake_conn import get_connection
+
+    try:
+        get_connection(
+            account="",
+            username="",
+            password="",
+            database="",
+            schema="",
+            warehouse="",
+            connection_string="https://bq73198.snowflakecomputing.com",
+        )
+    except ValueError as exc:
+        assert str(exc) == SNOWFLAKE_HOST_ONLY_URL_MSG
+    else:
+        raise AssertionError("expected host-only URL to fail before the driver loads")
+
+
 def test_positional_init_error_is_classified():
     raw = "SnowflakeConnection.__init__() takes 0 positional arguments but 1 was given"
     msg = classify_snowflake_connect_error(raw)
     assert msg == SNOWFLAKE_HOST_ONLY_URL_MSG
     human = humanize_connection_error("snowflake", raw)
-    assert "password" not in human.lower()
-    assert "account host" in human.lower() or "login" in human.lower()
+    assert "authentication failed" not in human.lower()
+    assert "incorrect username" not in human.lower()
+    assert "account host" in human.lower()
