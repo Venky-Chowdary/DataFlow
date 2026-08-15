@@ -976,16 +976,13 @@ def _stage_bound_contract(
         require = require_signed_contract.strip().lower() in {"1", "true", "yes", "on"}
     else:
         require = bool(require_signed_contract)
+    from services.contract_store import assert_contract_breaker_allows, bound_contract_preview
     from services.schedule_store import assert_signed_contract
 
     assert_signed_contract(cid, require_signed=require)
-    if not cid:
-        return {}
-    return {
-        "contract_id": cid,
-        "enforce_contract": True,
-        "require_signed_contract": require,
-    }
+    if cid:
+        assert_contract_breaker_allows(cid)
+    return bound_contract_preview(cid, require_signed=require)
 
 
 def start_transfer(
@@ -1125,6 +1122,8 @@ def start_transfer(
         preview["contract_id"] = bound["contract_id"]
         preview["require_signed_contract"] = bound["require_signed_contract"]
         preview["enforce_contract"] = True
+        if bound.get("breaker_state"):
+            preview["breaker_state"] = bound["breaker_state"]
 
     from .ack_ledger import get_ack_ledger
 

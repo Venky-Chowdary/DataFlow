@@ -473,25 +473,15 @@ def schedule_bind_summary(sched: Any) -> dict[str, Any]:
     OPEN / unsigned binds still appear so the operator can see why Run is
     refused. Cron and Confirm use ``assert_schedule_run_allowed`` instead.
     """
-    cid = (getattr(sched, "contract_id", None) or "").strip()
-    require = bool(getattr(sched, "require_signed_contract", False))
-    if not cid and not require:
-        return {}
-    out: dict[str, Any] = {}
-    if require:
-        out["require_signed_contract"] = True
-    if not cid:
-        return out
-    out["contract_id"] = cid
-    out["require_signed_contract"] = require
-    out["enforce_contract"] = True
     try:
-        from services.contract_store import get_contract_store
+        from services.contract_store import bound_contract_preview
     except ImportError:  # pragma: no cover
-        from src.services.contract_store import get_contract_store
-    breaker = get_contract_store().get_breaker(cid)
-    out["breaker_state"] = getattr(breaker.state, "value", str(breaker.state))
-    return out
+        from src.services.contract_store import bound_contract_preview
+
+    return bound_contract_preview(
+        getattr(sched, "contract_id", None) or "",
+        require_signed=bool(getattr(sched, "require_signed_contract", False)),
+    )
 
 
 def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:

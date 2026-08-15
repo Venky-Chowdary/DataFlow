@@ -195,3 +195,27 @@ def assert_contract_breaker_allows(contract_id: str) -> None:
             f"reset it after you fix the violation, then re-run "
             f"(current state: {breaker.state.value})"
         )
+
+
+def bound_contract_preview(contract_id: str, *, require_signed: bool = False) -> dict[str, Any]:
+    """Read-only bind fields for Pilot Confirm / list. Never invents. Never raises.
+
+    OPEN / unsigned still appear so the operator can see why Run is refused.
+    Staging and enqueue call ``assert_signed_contract`` +
+    ``assert_contract_breaker_allows`` before offering Confirm.
+    """
+    cid = (contract_id or "").strip()
+    require = bool(require_signed)
+    if not cid and not require:
+        return {}
+    out: dict[str, Any] = {}
+    if require:
+        out["require_signed_contract"] = True
+    if not cid:
+        return out
+    out["contract_id"] = cid
+    out["require_signed_contract"] = require
+    out["enforce_contract"] = True
+    breaker = get_contract_store().get_breaker(cid)
+    out["breaker_state"] = getattr(breaker.state, "value", str(breaker.state))
+    return out

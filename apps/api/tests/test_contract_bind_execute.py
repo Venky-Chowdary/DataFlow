@@ -248,7 +248,39 @@ def test_start_transfer_stamps_signed_bind_on_ack(monkeypatch):
     assert payload["contract_id"] == signed.id
     assert payload["enforce_contract"] is True
     assert payload["require_signed_contract"] is True
-    assert (res.output or {}).get("preview", {}).get("contract_id") == signed.id
+    preview = (res.output or {}).get("preview") or {}
+    assert preview.get("contract_id") == signed.id
+    assert preview.get("breaker_state") == "closed"
+
+
+def test_start_transfer_refuses_open_breaker(monkeypatch):
+    from services.data_contract import BreakerState
+    from src.ai.copilot import transfer_tools as tt
+    from src.ai.copilot.query_tools import _tool_result
+
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    signed = DataContract(name="open-bind", status=ContractStatus.SIGNED)
+    backend.save_contract(signed)
+    breaker = backend.get_breaker(signed.id)
+    breaker.state = BreakerState.OPEN
+    backend.save_breaker(breaker)
+
+    monkeypatch.setattr(
+        tt,
+        "plan_transfer",
+        lambda **_kw: _tool_result("plan_transfer", success=True, output=_approve_plan()),
+    )
+
+    res = tt.start_transfer(
+        source_connector_name="Source",
+        source_table="orders",
+        dest_connector_name="Dest",
+        dest_table="orders_wh",
+        contract_id=signed.id,
+    )
+    assert not res.success
+    assert "is OPEN" in (res.error or "")
+    assert "ack_id" not in (res.output or {})
 
 
 def test_start_transfer_without_contract_does_not_set_enforce(monkeypatch):
@@ -275,6 +307,27 @@ def test_start_transfer_without_contract_does_not_set_enforce(monkeypatch):
     assert "contract_id" not in payload
     assert "enforce_contract" not in payload
     assert "require_signed_contract" not in payload
+
+
+def test_render_transfer_names_breaker():
+    from src.ai.copilot.pilot_agent import _render_transfer
+
+    text = _render_transfer("start_transfer", {
+        "requires_confirm": True,
+        "preview": {
+            "contract_id": "dfc-1",
+            "require_signed_contract": True,
+            "breaker_state": "closed",
+        },
+        "source": {"connector_name": "Src", "table": "orders"},
+        "destination": {"connector_name": "Dst", "table": "orders_wh"},
+        "sync_mode": "incremental",
+        "mapped_count": 1,
+        "preflight": {},
+    })
+    assert "dfc-1" in text
+    assert "SIGNED" in text
+    assert "closed" in text
 
 
 def test_start_transfer_tool_schema_and_wrapper_accept_contract():

@@ -57,13 +57,9 @@ export function scheduleConfirmBind(preview: PilotSchedulePreview): {
   requireSigned: boolean;
   breakerState: string;
 } {
-  const bind = contractBindFromPreview({
+  return contractBindFromPreview({
     contract_id: preview.contract_id,
     require_signed_contract: preview.require_signed_contract,
+    breaker_state: preview.breaker_state,
   });
-  return {
-    contractId: bind.contractId,
-    requireSigned: bind.requireSigned,
-    breakerState: String(preview.breaker_state || ""),
-  };
 }

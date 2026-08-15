@@ -38,11 +38,16 @@ export function contractBindFromPreview(
   preview: {
     contract_id?: string;
     require_signed_contract?: boolean;
+    breaker_state?: string;
   } | null | undefined,
-): { contractId: string; requireSigned: boolean } {
-  if (!preview) return { contractId: "", requireSigned: false };
-  return contractBindFromPolicies({
+): { contractId: string; requireSigned: boolean; breakerState: string } {
+  if (!preview) return { contractId: "", requireSigned: false, breakerState: "" };
+  const bind = contractBindFromPolicies({
     contract_id: preview.contract_id,
     require_signed_contract: preview.require_signed_contract,
   });
+  return {
+    ...bind,
+    breakerState: String(preview.breaker_state || "").trim(),
+  };
 }

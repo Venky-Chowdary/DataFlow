@@ -11,7 +11,7 @@
 
 import { Button } from "../ui/Button";
 import { contractBindFromPreview } from "../../lib/contractBind";
-import { breakerLabel } from "../../lib/contractBreakerUi";
+import { breakerLabel, contractBreakerBlocksRun } from "../../lib/contractBreakerUi";
 import {
   isDestructiveSchedulePreview,
   scheduleConfirmBind,
@@ -128,6 +128,7 @@ function TransferBody({
     || plan?.unmapped_source_columns
     || [];
   const contractBind = contractBindFromPreview(preview);
+  const bindBlock = contractBreakerBlocksRun(preview?.breaker_state);
   const gates = plan?.preflight?.gates || [];
   const destructive = Boolean(
     action.destructive
@@ -192,6 +193,12 @@ function TransferBody({
               {contractBind.requireSigned
                 ? " · Confirm fails closed unless SIGNED"
                 : null}
+              {contractBind.breakerState ? (
+                <>
+                  {" · "}
+                  {breakerLabel(contractBind.breakerState) || contractBind.breakerState}
+                </>
+              ) : null}
             </dd>
           </div>
         ) : null}
@@ -225,7 +232,9 @@ function TransferBody({
         </div>
       ) : null}
 
-      {destructive ? (
+      {bindBlock ? (
+        <p className="df2-pilot-confirm-danger" role="alert">{bindBlock}</p>
+      ) : destructive ? (
         <p className="df2-pilot-confirm-danger" role="alert">
           This overwrites the destination table. Nothing moves until you confirm.
         </p>
@@ -363,6 +372,8 @@ export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
   const preview = isTransfer ? asPreview(action.payload) : null;
   const schedulePreview = isSchedule ? schedulePreviewFromPayload(action.payload) : null;
   const scheduleBlock = schedulePreview ? scheduleConfirmBlocksRun(schedulePreview) : "";
+  const transferBlock = isTransfer ? contractBreakerBlocksRun(preview?.breaker_state) : "";
+  const confirmBlock = scheduleBlock || transferBlock;
   const destructive = Boolean(
     action.destructive
     || (isTransfer && (
@@ -409,7 +420,7 @@ export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
           size="sm"
           loading={busy}
           loadingLabel="Starting…"
-          disabled={Boolean(scheduleBlock)}
+          disabled={Boolean(confirmBlock)}
           onClick={onConfirm}
         >
           {destructive

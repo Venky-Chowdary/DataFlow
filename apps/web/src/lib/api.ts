@@ -598,6 +598,7 @@ export interface PilotTransferPreview {
   contract_id?: string;
   require_signed_contract?: boolean;
   enforce_contract?: boolean;
+  breaker_state?: string;
 }
 
 export interface CopilotChatResponse {

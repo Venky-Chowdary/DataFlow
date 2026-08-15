@@ -68,13 +68,15 @@ describe("contractBind", () => {
     assert.deepEqual(contractBindFromPreview(null), {
       contractId: "",
       requireSigned: false,
+      breakerState: "",
     });
     assert.deepEqual(
       contractBindFromPreview({
         contract_id: "dfc-1",
         require_signed_contract: true,
+        breaker_state: "closed",
       }),
-      { contractId: "dfc-1", requireSigned: true },
+      { contractId: "dfc-1", requireSigned: true, breakerState: "closed" },
     );
   });
 });

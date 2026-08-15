@@ -224,6 +224,9 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
         lines.append(
             f"• Bound contract `{bound_id}` — Confirm fails closed unless it is SIGNED."
         )
+        breaker = str((preview or {}).get("breaker_state") or "").strip()
+        if breaker:
+            lines.append(f"• Circuit breaker is **{breaker}**.")
 
     if tool == "start_transfer" and o.get("requires_confirm"):
         if o.get("destructive"):
