@@ -31,6 +31,10 @@ ETL developer, CDC engineer, data analyst, data scientist, platform/UI).
 3. **One algorithm owner per concern.** AI / RAG / Pilot / LLM must not run a
    weaker parallel mapper. `services.semantic_mapper.map_columns` is Map SSOT.
    RAG retrieves evidence; it does not invent a second confidence.
+   Dest-exists is `services.shape_contract.classify_dest_exists_shape` —
+   write by dest column **name**, never source position (dbt-databricks#1289 /
+   Informatica Snowflake jumble). Extra source columns are G13; dest-only
+   NOT NULL is G14; G15 names the shape and does not invent a second blocker.
 4. **High-efficiency algorithms** — Hungarian assignment, fail-fast preflight,
    dest-engine COUNT, snapshot+LSN, idempotent MERGE, quarantine+replay.
    No mocks-as-product. No “looks fine.”

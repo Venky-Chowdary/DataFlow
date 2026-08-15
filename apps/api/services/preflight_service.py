@@ -1489,6 +1489,7 @@ def run_file_preflight(
         column_defaults=destination_column_defaults,
         identity_columns=destination_identity_columns,
         generated_columns=destination_generated_columns,
+        dest_columns=list((destination_column_types or destination_column_nullability or {}).keys()),
     )
     out["source_coverage"] = src_coverage
     if isinstance(out.get("proof_bundle"), dict):

@@ -247,6 +247,10 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   skip("g11_validation_posture", "Browser-only — validation posture skipped; requires API.", {
     kind: "validation_posture", coverage: "n/a",
   });
+  skip("g15_dest_exists_shape", "Browser-only — dest-exists shape requires API table introspect.", {
+    kind: "dest_exists_shape", coverage: "n/a",
+    note: "Writes stay name-addressed on the API path — not a local invent",
+  });
 
   const passedCount = gates.filter((g) => g.status === "pass").length;
   const skippedCount = gates.filter((g) => g.status === "skip").length;

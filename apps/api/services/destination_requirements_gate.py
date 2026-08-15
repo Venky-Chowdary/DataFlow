@@ -150,11 +150,11 @@ def build_mapping_contract_gates(
     column_defaults: dict[str, str] | None,
     identity_columns: list[str] | None,
     generated_columns: list[str] | None,
+    dest_columns: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
-    """Both halves of the mapping contract: every source accounted for (G13), every
-    required destination column filled (G14).
+    """Source coverage (G13), dest requirements (G14), dest-exists shape (G15).
 
-    Returns ``(source_coverage, gates, blockers)``.
+    Returns ``(source_coverage, gates, blockers)``. G15 does not add blockers.
     """
     coverage, cov_gate = build_source_coverage_gate(
         source_columns=list(source_columns or []), mappings=list(mappings or [])
@@ -167,7 +167,21 @@ def build_mapping_contract_gates(
         generated_columns=generated_columns,
         mappings=list(mappings or []),
     )
-    gates = [g for g in (cov_gate, req_gate) if g]
+    from services.shape_contract import build_shape_gate, classify_dest_exists_shape
+
+    shape = classify_dest_exists_shape(
+        destination_table_exists=destination_table_exists,
+        source_columns=list(source_columns or []),
+        dest_columns=list(dest_columns or (column_nullability or {}).keys()),
+        mappings=list(mappings or []),
+        column_nullability=column_nullability,
+        column_defaults=column_defaults,
+        identity_columns=identity_columns,
+        generated_columns=generated_columns,
+    )
+    coverage = {**coverage, "shape_contract": shape}
+    shape_gate = build_shape_gate(shape)
+    gates = [g for g in (cov_gate, req_gate, shape_gate) if g]
     blockers = [
         {"id": g["id"], "message": g["message"], "details": g["details"]}
         for g in gates
