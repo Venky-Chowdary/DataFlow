@@ -31,6 +31,14 @@ describe("connector auth modes", () => {
     );
   });
 
+  it("tells operators to prefer Snowsight org-account over locator-only hosts", () => {
+    const host = getAuthModes("snowflake")
+      .find((m) => m.value === "user_pass")
+      ?.fields.find((f) => f.key === "host");
+    assert.match(String(host?.hint || ""), /org-account/i);
+    assert.match(String(host?.hint || ""), /404/i);
+  });
+
   it("rejects empty required secrets instead of sending them to the driver", () => {
     assert.equal(
       validateConnectorPayload("postgresql", { host: "db.example", port: 5432, username: "u" }, "user_pass"),

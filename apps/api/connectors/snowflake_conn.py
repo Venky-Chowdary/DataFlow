@@ -94,6 +94,19 @@ SNOWFLAKE_MISSING_SECRET_MSG = (
     "include credentials."
 )
 
+# Official driver: 290404 (08001) when POST /session/v1/login-request is 404.
+# That is an account-identifier miss — Snowflake never checked the password.
+# Preferred identifier is org-account (docs: admin-account-identifier).
+SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG = (
+    "Snowflake account host was not found (HTTP 404 / 290404). "
+    "Username and password were not checked — that host is not a login endpoint. "
+    "In Snowsight, open the account menu and copy the account identifier "
+    "(preferred: org-account such as myorg-acctname). "
+    "Locator-only hosts like xy12345.snowflakecomputing.com return 404 when the "
+    "account is not in the default region or the locator is wrong. "
+    "You can also use locator.region or locator.region.cloud."
+)
+
 
 def parse_snowflake_url(raw: str) -> dict[str, str]:
     """Parse operator-pasted Snowflake URLs into connector kwargs.
@@ -266,15 +279,32 @@ def classify_snowflake_connect_error(raw: str) -> str | None:
     text = (raw or "").lower()
     if not text:
         return None
+    # 404 / 290404 / 513 on login-request is a missing account host, not auth.
+    # The path contains "login" and used to be humanized as a bad password.
+    if re.search(r"290404|\b513\b", text) or (
+        "login-request" in text and re.search(r"\b404\b|not found", text)
+    ) or re.search(r"verify the account name|account name is correct", text):
+        return SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG
     if re.search(r"network policy|not allowed to access|390403|390422", text):
         return (
             "Snowflake blocked this IP (network policy). Allow the DataFlow egress "
             "address or ask your Snowflake admin to update the policy."
         )
+    if re.search(
+        r"password.{0,40}(not allowed|disabled|not enabled|deprecated)|"
+        r"single-factor password|authentication policy|394400|394504|"
+        r"authentication_method",
+        text,
+    ):
+        return (
+            "Snowflake refused password-only login (authentication policy / MFA "
+            "rollout). Use Programmatic access token or Key-pair (JWT). "
+            "Password-only Test cannot complete MFA."
+        )
     if re.search(r"mfa|duo|ext_auth|390195|394508|multi-factor", text):
         return (
             "Snowflake requires MFA or key-pair for this user. Password-only login "
-            "is refused. Use Key-pair on Connectors, or a programmatic user."
+            "is refused. Use Programmatic access token or Key-pair on Connectors."
         )
     if re.search(r"jwt|private.?key|390144|invalid token", text):
         return (

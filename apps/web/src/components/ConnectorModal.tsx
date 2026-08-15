@@ -566,7 +566,7 @@ export function ConnectorModal({
 
   const authDetail = (mode: { value: AuthMode; description?: string }) => {
     if (isSnowflake && mode.value === "user_pass") {
-      return "Account locator or https:// host, username, and password.";
+      return "Prefer the Snowsight org-account host. Password-only often fails MFA — use PAT or key-pair.";
     }
     if (isSnowflake && mode.value === "connection_string") {
       return "snowflake://user:password@account/DB/SCHEMA?warehouse=… — not a browser URL.";
@@ -768,9 +768,15 @@ export function ConnectorModal({
                     )}
                     {!testResult.success && isSnowflake && /account host|snowflake:\/\//i.test(testResult.message) && (
                       <p className="df2-conn-probe-hint">
-                        Use <strong>Username &amp; password</strong> with the account host
-                        (for example <code>bq73198</code>), or a login URL
-                        {" "}<code>snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH</code>.
+                        Use <strong>Username &amp; password</strong> with the Snowsight
+                        org-account (for example <code>myorg-acctname</code>), or a login URL
+                        {" "}<code>snowflake://user:password@org-account/DATABASE/SCHEMA?warehouse=COMPUTE_WH</code>.
+                      </p>
+                    )}
+                    {!testResult.success && isSnowflake && /290404|http 404|org-account/i.test(testResult.message) && (
+                      <p className="df2-conn-probe-hint">
+                        In Snowsight, open the account menu → copy the <strong>account identifier</strong>
+                        {" "}(<code>org-account</code>). Locator-only hosts are not a login.
                       </p>
                     )}
                   </div>

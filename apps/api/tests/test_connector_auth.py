@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from connectors.snowflake_conn import (
+    SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG,
     SNOWFLAKE_HOST_ONLY_URL_MSG,
     classify_snowflake_connect_error,
     normalize_account,
@@ -89,6 +90,38 @@ def test_real_bad_password_stays_auth():
     raw = "250001 (08001): Failed to connect to DB. Incorrect username or password was specified."
     msg = humanize_connection_error("snowflake", raw)
     assert "username or password" in msg.lower() or "rejected" in msg.lower()
+
+
+def test_http_404_login_request_is_account_host_not_password():
+    """Live bq73198.snowflakecomputing.com returns this — not a bad password."""
+    raw = (
+        "290404 (08001): 404 Not Found: post "
+        "bq73198.snowflakecomputing.com:443/session/v1/login-request"
+    )
+    classified = classify_snowflake_connect_error(raw)
+    assert classified == SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG
+    msg = humanize_connection_error("snowflake", raw)
+    assert msg == SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG
+    assert "authentication failed" not in msg.lower()
+    assert "check account name, username, password" not in msg.lower()
+    assert "org-account" in msg.lower()
+
+
+def test_unclassified_snowflake_auth_keeps_raw_driver_text():
+    raw = "Authentication token has expired for user VENKY170259"
+    msg = humanize_connection_error("snowflake", raw)
+    assert "Authentication token has expired" in msg
+    assert msg != (
+        "Authentication failed. Check account name, username, password, role, "
+        "and that the account is active."
+    )
+
+
+def test_password_policy_is_not_wrong_password():
+    raw = "394504: PASSWORD authentication is not allowed by the authentication policy."
+    msg = humanize_connection_error("snowflake", raw)
+    assert "programmatic access token" in msg.lower() or "key-pair" in msg.lower()
+    assert "incorrect username" not in msg.lower()
 
 
 def test_parse_browser_host_is_account_only():

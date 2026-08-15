@@ -255,7 +255,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     userPassFields.push(
       text("host", "Account host", {
         placeholder: "xy12345.us-east-1.snowflakecomputing.com",
-        hint: "Account locator or org-account. A browser URL (https://….snowflakecomputing.com) is accepted — that is the host, not a login. Leave Role blank to use the user's default.",
+        hint: "Preferred: org-account from Snowsight (myorg-acctname). Locator-only xy12345.snowflakecomputing.com returns HTTP 404 when the account is not in the default region. A browser URL is the host, not a login. Leave Role blank for the user's default.",
       }),
       text("username", "Username"),
       password("password", "Password"),
@@ -637,7 +637,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       auth("pat", "Programmatic access token", [
         text("host", "Account host", {
           placeholder: "xy12345.us-east-1.snowflakecomputing.com",
-          hint: "Same account host as Username & password. Snowflake PAT is the MFA-safe password replacement Fivetran/Airbyte recommend for service users.",
+          hint: "Same host as Username & password — prefer the Snowsight org-account. Snowflake PAT is the MFA-safe password replacement Fivetran/Airbyte recommend for service users.",
         }),
         text("username", "Username"),
         password("password", "Programmatic access token", {
@@ -658,7 +658,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       auth("key_pair", "Key-pair (JWT)", [
         text("host", "Account host", {
           placeholder: "xy12345.us-east-1.snowflakecomputing.com",
-          hint: "Same account host as the Snowflake URL. Required when the user has MFA — password-only is refused.",
+          hint: "Same host as Username & password — prefer the Snowsight org-account. Required when the user has MFA — password-only is refused.",
         }),
         text("username", "Username"),
         textarea("privateKey", "PKCS#8 private key", {
