@@ -332,6 +332,34 @@ def _physical_carriers_from_arrow(arrow_schema: Any, pa_mod: Any) -> dict[str, s
     return physical
 
 
+def _iceberg_map_rows(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> tuple[list[tuple], list[str], list[dict]]:
+    """One Map pass against settled dest types. Callers must not Map twice."""
+    return build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=policy,
+        dest_types=dest_types,
+        preserve_case=True,
+        dest_kind="iceberg",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+
+
 def _iceberg_rematerialize_if_physical_differs(
     *,
     physical: dict[str, str],
@@ -413,17 +441,15 @@ def _iceberg_rematerialize_if_physical_differs(
             if not stamp:
                 return None
             live_dest_types[col] = stamp
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+    mapped_rows, transform_errors, rejected_details = _iceberg_map_rows(
         headers=headers,
         data_rows=data_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
-        error_policy=policy,
         dest_types=live_dest_types,
-        preserve_case=True,
-        dest_kind="iceberg",
-        destination_pk_columns=list(conflict_columns or []) or None,
+        policy=policy,
+        conflict_columns=conflict_columns,
         destination_column_nullability=destination_column_nullability,
     )
     return (
@@ -1219,25 +1245,13 @@ def _write_mapped_rows_pyiceberg(
         dest_db="iceberg",
     )
     policy = transform_error_policy(error_policy)
-    # Partial Studio: defer Map until create-new refuse / live Arrow rematerialize
-    # (Map-blank invent must not run before physical carriers — PG/SQLite parity).
+    # Map once after live overlay — never Map-then-remap a second concatenated
+    # image (SQL warehouse order). Partial Studio defers Map until create-new
+    # refuse / live Arrow rematerialize. Honesty: this write still holds the
+    # mapped image until Arrow returns; it does not stream finished bundles.
     mapped_rows: list[tuple] = []
     transform_errors: list[str] = []
     rejected_details: list[dict] = []
-    if not studio_err:
-        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=column_types,
-            error_policy=policy,
-            dest_types=dest_types,
-            preserve_case=True,
-            dest_kind="iceberg",
-            destination_pk_columns=list(conflict_columns or []) or None,
-            destination_column_nullability=destination_column_nullability,
-        )
     # Defer empty / strict abort until after physical load + rematerialize —
     # Map INT/BOOL stamps can empty the batch while live STRING would keep rows.
 
@@ -1345,7 +1359,7 @@ def _write_mapped_rows_pyiceberg(
                         driver="iceberg",
                     )
                 physical = effective
-            _force_remap = bool(studio_err) and not mapped_rows
+            _force_remap = bool(studio_err)
             remat = _iceberg_rematerialize_if_physical_differs(
                 physical=physical,
                 dest_types=dest_types,
@@ -1378,6 +1392,19 @@ def _write_mapped_rows_pyiceberg(
                     rejected_details=rejected_details,
                     driver="iceberg",
                 )
+
+        if not mapped_rows:
+            mapped_rows, transform_errors, rejected_details = _iceberg_map_rows(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                dest_types=dest_types,
+                policy=policy,
+                conflict_columns=conflict_columns,
+                destination_column_nullability=destination_column_nullability,
+            )
 
         _map_abort = reject_on_strict_policy(
             policy, rejected_details, "Iceberg", transform_errors
@@ -2005,24 +2032,11 @@ def _write_mapped_rows_filesystem(
         dest_db="iceberg",
     )
     policy = transform_error_policy(error_policy)
-    # Partial Studio: defer Map until create-new refuse / committed rematerialize.
+    # Map once after committed overlay — never Map-then-remap. Honesty: this
+    # filesystem path still holds the mapped image until the snapshot write.
     mapped_rows: list[tuple] = []
     transform_errors: list[str] = []
     rejected_details: list[dict] = []
-    if not studio_err:
-        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-            headers=headers,
-            data_rows=data_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=column_types,
-            error_policy=policy,
-            dest_types=dest_types,
-            preserve_case=True,
-            dest_kind="iceberg",
-            destination_pk_columns=list(conflict_columns or []) or None,
-            destination_column_nullability=_kwargs.get("destination_column_nullability"),
-        )
     # Defer strict abort until after committed-schema rematerialize.
 
     # Find current metadata version
@@ -2093,7 +2107,7 @@ def _write_mapped_rows_filesystem(
                     rejected_details=rejected_details,
                     driver="iceberg",
                 )
-        _force_remap = bool(studio_err) and not mapped_rows
+        _force_remap = bool(studio_err)
         remat = _iceberg_rematerialize_if_physical_differs(
             physical=effective if effective else committed_physical,
             dest_types=dest_types,
@@ -2126,6 +2140,19 @@ def _write_mapped_rows_filesystem(
                 rejected_details=rejected_details,
                 driver="iceberg",
             )
+
+    if not mapped_rows:
+        mapped_rows, transform_errors, rejected_details = _iceberg_map_rows(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        )
 
     try:
         schema_json, evolve_notes = _evolve_schema(
