@@ -42,13 +42,12 @@ _SAMPLE_LIMIT = 50
 def resolve_materialize_batch(extra: dict[str, Any] | None = None) -> int:
     """Accepted-row bundle size before encode. Peak mapped RAM is this many tuples."""
     extra = extra if isinstance(extra, dict) else {}
-    raw = (
-        extra.get("materialize_batch")
-        or extra.get("object_store_materialize_batch")
-        or getenv_brand("DATAFLOW_OBJECT_STORE_MATERIALIZE_BATCH", "")
-        or ""
-    )
-    if raw:
+    raw = extra.get("materialize_batch")
+    if raw is None:
+        raw = extra.get("object_store_materialize_batch")
+    if raw is None or raw == "":
+        raw = getenv_brand("DATAFLOW_OBJECT_STORE_MATERIALIZE_BATCH", "") or ""
+    if raw != "" and raw is not None:
         return max(1, int(raw))
     return DEFAULT_MATERIALIZE_BATCH
 

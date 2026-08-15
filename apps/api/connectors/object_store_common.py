@@ -438,36 +438,6 @@ class ObjectStoreExport:
         return written
 
 
-def _write_json_array(spool: Any, records) -> None:
-    import json
-
-    from services.value_serializer import json_default
-
-    it = iter(records)
-    try:
-        first = next(it)
-    except StopIteration:
-        spool.write(b"[]")
-        return
-
-    def _emit(rec: dict, *, comma: bool) -> None:
-        dumped = json.dumps(
-            rec, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
-        )
-        indented = "\n".join(
-            (f"  {line}" if line else line) for line in dumped.split("\n")
-        )
-        if comma:
-            spool.write(b",\n")
-        spool.write(indented.encode("utf-8"))
-
-    spool.write(b"[\n")
-    _emit(first, comma=False)
-    for rec in it:
-        _emit(rec, comma=True)
-    spool.write(b"\n]")
-
-
 def serialize_object_store_export(
     *,
     key: str,

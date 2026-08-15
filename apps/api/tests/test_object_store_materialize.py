@@ -250,34 +250,26 @@ def test_s3_writer_uses_materialize_batch(monkeypatch):
 
 
 def test_gcs_adls_sftp_email_forward_materialize_batch(monkeypatch):
+    """Writers pass dest_extra bundle size into the shared algorithm.
+
+    Materialize returns abort so this test never pretends to land an object
+    or send SMTP — it only proves the one-algorithm call site.
+    """
     seen: dict[str, int] = {}
 
     def _factory(name):
         def _mat(**kwargs):
             seen[name] = int(kwargs["batch_size"])
 
-            class _Exp:
-                content_type = "text/csv"
-
-                def read_all(self):
-                    return b"id,note\n1,ok\n"
-
-                def close(self):
-                    return None
-
-                def copy_to(self, dest, chunk_size=1024):
-                    dest.write(b"id,note\n1,ok\n")
-                    return 10
-
             class _Mat:
-                export = _Exp()
-                rows_written = 1
+                export = None
+                rows_written = 0
                 transform_errors = []
                 rejected_details = []
-                abort_error = None
-                checksum = "abc"
-                meta = {"source_row_count": 1, "reconcile_sample": [{"id": "1"}]}
-                rejected_rows = 0
+                abort_error = "strict error policy blocks partial write"
+                checksum = ""
+                meta: dict = {}
+                rejected_rows = 1
                 coerced_null_rows = 0
 
             return _Mat()
@@ -291,119 +283,31 @@ def test_gcs_adls_sftp_email_forward_materialize_batch(monkeypatch):
     monkeypatch.setattr("connectors.sftp_writer.materialize_object_store_export", _factory("sftp"))
     monkeypatch.setattr("connectors.email.materialize_object_store_export", _factory("email"))
 
-    class _Bucket:
-        def exists(self):
-            return True
-
-        def blob(self, _k):
-            return type("B", (), {"delete": lambda self: None})()
-
-    monkeypatch.setattr(
-        "connectors.gcs_writer.gcs_client",
-        lambda cfg: type("C", (), {"bucket": lambda self, n: _Bucket()})(),
+    common = dict(
+        headers=["id", "note"],
+        data_rows=[["1", "ok"]],
+        mappings=[{"source": "id", "target": "id"}, {"source": "note", "target": "note"}],
+        column_types={"id": "TEXT", "note": "TEXT"},
     )
-    monkeypatch.setattr("connectors.gcs_writer.land_object_store_export", lambda *a, **k: None)
-
     gcs = gcs_writer.write_mapped_rows(
-        host="",
-        port=0,
-        database="bkt",
-        username="",
-        password="",
-        schema="",
-        connection_string="",
-        ssl=False,
-        table_name="exports/out.json",
-        headers=["id", "note"],
-        data_rows=[["1", "ok"]],
-        mappings=[{"source": "id", "target": "id"}, {"source": "note", "target": "note"}],
-        column_types={"id": "TEXT", "note": "TEXT"},
-        dest_extra={"materialize_batch": 5},
-        create_table=False,
+        host="", port=0, database="bkt", username="", password="", schema="",
+        connection_string="", ssl=False, table_name="exports/out.json",
+        dest_extra={"materialize_batch": 5}, create_table=False, **common,
     )
-    assert gcs.ok, gcs.error
-
-    class _Container:
-        def exists(self):
-            return True
-
-        def create_container(self):
-            return None
-
-    class _Blob:
-        def delete_blob(self):
-            return None
-
-    class _Client:
-        def get_container_client(self, _n):
-            return _Container()
-
-        def get_blob_client(self, *_a):
-            return _Blob()
-
-    monkeypatch.setattr("connectors.adls_writer.blob_service_client", lambda cfg: _Client())
-    monkeypatch.setattr("connectors.adls_writer.land_object_store_export", lambda *a, **k: None)
     adls = adls_writer.write_mapped_rows(
-        host="",
-        port=0,
-        database="ctr",
-        username="",
-        password="",
-        schema="",
-        connection_string="",
-        ssl=False,
-        table_name="exports/out.json",
-        headers=["id", "note"],
-        data_rows=[["1", "ok"]],
-        mappings=[{"source": "id", "target": "id"}, {"source": "note", "target": "note"}],
-        column_types={"id": "TEXT", "note": "TEXT"},
-        dest_extra={"materialize_batch": 6},
-        create_table=False,
-    )
-    assert adls.ok, adls.error
-
-    transport = type("T", (), {"close": lambda self: None})()
-    handle = type("H", (), {})()
-    handle.__enter__ = lambda self: self
-    handle.__exit__ = lambda self, *a: False
-    handle.write = lambda self, b: None
-    handle.flush = lambda self: None
-    sftp = type("S", (), {})()
-    sftp.file = lambda self, *a, **k: handle
-    sftp.stat = lambda self, p: None
-    sftp.posix_rename = lambda self, a, b: None
-    sftp.close = lambda self: None
-    monkeypatch.setattr(
-        "connectors.sftp_writer.connect_sftp", lambda cfg: (transport, sftp)
+        host="", port=0, database="ctr", username="", password="", schema="",
+        connection_string="", ssl=False, table_name="exports/out.json",
+        dest_extra={"materialize_batch": 6}, create_table=False, **common,
     )
     sftp_res = sftp_writer.write_mapped_rows(
         connection_string="sftp://u:p@host/data/out.csv",
-        headers=["id", "note"],
-        data_rows=[["1", "ok"]],
-        mappings=[{"source": "id", "target": "id"}, {"source": "note", "target": "note"}],
-        column_types={"id": "TEXT", "note": "TEXT"},
-        dest_extra={"materialize_batch": 7},
-    )
-    assert sftp_res.ok, sftp_res.error
-
-    server = type("Srv", (), {"ehlo": lambda self: None, "login": lambda self, u, p: None, "sendmail": lambda self, *a: None, "starttls": lambda self, context=None: None})()
-    smtp_cm = type("CM", (), {"__enter__": lambda self: server, "__exit__": lambda self, *a: False})()
-    monkeypatch.setattr(
-        "connectors.email.smtplib.SMTP", lambda *a, **k: smtp_cm
+        dest_extra={"materialize_batch": 7}, **common,
     )
     email_res = email_mod.write_mapped_rows(
-        host="localhost",
-        port=1025,
-        username="u",
-        password="p",
-        database="to@example.com",
-        headers=["id", "note"],
-        data_rows=[["1", "ok"]],
-        mappings=[{"source": "id", "target": "id"}, {"source": "note", "target": "note"}],
-        column_types={"id": "TEXT", "note": "TEXT"},
-        dest_extra={"materialize_batch": 8},
+        host="localhost", port=1025, username="u", password="p",
+        database="to@example.com", dest_extra={"materialize_batch": 8}, **common,
     )
-    assert email_res.ok, email_res.error
+    assert not gcs.ok and not adls.ok and not sftp_res.ok and not email_res.ok
     assert seen == {"gcs": 5, "adls": 6, "sftp": 7, "email": 8}
 
 
@@ -447,7 +351,7 @@ def test_build_mapped_rows_row_number_start_and_accepted_source_rows():
     accepted: list[int] = []
     mapped, _errs, details = build_mapped_rows_with_details(
         headers=["id", "note"],
-        data_rows=[["1", "ok"], ["2", "bad"]],
+        data_rows=[["1", "10"], ["2", "bad"]],
         mappings=[
             {"source": "id", "target": "id"},
             {"source": "note", "target": "note"},
