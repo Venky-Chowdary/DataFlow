@@ -48,7 +48,12 @@ commit-on-restore, plus Debezium-class snapshot/stream LSN compare:
 16. Post-commit dest verify: re-read dest watermark after COMMIT. If dest
     does not show the LSN/seq/fence, refuse success so the source is not
     acked (stronger than Flink heuristic recoverAndCommit).
-17. COMMIT dest. Persist job watermark and ack the source **after** verify.
+17. Dest-owned incremental-snapshot ``window_id``: a closed window is
+    persisted on dest. Crash re-emit of the same Debezium DDD-3 window
+    is ``window_closed_skip`` — Debezium's buffer is in-memory and lost.
+18. Quarantine replay is dest-LSN gated. Dest already at or past the
+    quarantined LSN refuses overwrite (checksum conflict is inspect-only).
+19. COMMIT dest. Persist job watermark and ack the source **after** verify.
 
 Crash before dest COMMIT → dest rolls back; source not acked; retry.
 Crash after dest COMMIT → dest watermark wins; redelivery is a no-op.
@@ -132,8 +137,9 @@ REASON_CHECKSUM = "exactly_once_checksum_mismatch"
 REASON_BUNDLE_LSN = "exactly_once_bundle_lsn_divergence"
 REASON_UNVERIFIED = "exactly_once_dest_commit_unverified"
 REASON_STALE_SEQ = "exactly_once_stale_apply_seq"
+REASON_STALE_REPLAY = "exactly_once_quarantine_replay_stale_dest"
 REASON_OK = "dest_owned_watermark_txn"
-PROTOCOL = "dest_authoritative_verified_bundle"
+PROTOCOL = "dest_authoritative_windowed_bundle"
 
 
 class ExactlyOnceRouteError(ValueError):
@@ -209,6 +215,7 @@ class EosApplyResult:
     phase: str = "streaming"
     apply_checksum: str = ""
     apply_seq: int = 0
+    window_id: str = ""
 
     def to_dest_summary(self) -> dict[str, Any]:
         return {
@@ -229,6 +236,7 @@ class EosApplyResult:
             "eos_phase": self.phase,
             "eos_apply_checksum": self.apply_checksum,
             "eos_apply_seq": self.apply_seq,
+            "eos_window_id": self.window_id,
             "rows_written": self.rows_written,
         }
 
@@ -625,6 +633,99 @@ def verify_dest_commit(
         )
 
 
+def dest_view_from_job_summary(job: dict[str, Any] | None) -> DestWmView:
+    """Dest watermark fields from a job summary — never invent a dest LSN."""
+    summary = job.get("destination_summary") if isinstance(job, dict) else {}
+    if not isinstance(summary, dict):
+        summary = {}
+    lsn = str(summary.get("eos_committed_lsn") or "").strip()
+    return DestWmView(
+        committed_lsn=lsn or None,
+        apply_checksum=str(summary.get("eos_apply_checksum") or ""),
+        apply_seq=int(summary.get("eos_apply_seq") or 0),
+        window_id=str(summary.get("eos_window_id") or ""),
+        fence_epoch=int(summary.get("eos_fence_epoch") or 0),
+        phase=str(summary.get("eos_phase") or ""),
+    )
+
+
+def quarantined_lsn_from_row(row: dict[str, Any]) -> str:
+    if not isinstance(row, dict):
+        return ""
+    raw = str(row.get("lsn") or "").strip()
+    if raw:
+        return raw
+    rec = row.get("source_record") or row.get("original_value") or {}
+    if isinstance(rec, dict):
+        rec_lsn = extract_cdc_lsn(rec) or str(rec.get("lsn") or "").strip()
+        if rec_lsn:
+            return rec_lsn
+    err = str(row.get("error") or "")
+    if err.startswith("LSN "):
+        parts = err.split()
+        if len(parts) >= 2:
+            return parts[1]
+    return ""
+
+
+def is_cdc_eos_checksum_row(row: dict[str, Any]) -> bool:
+    if not isinstance(row, dict):
+        return False
+    reason = str(row.get("failure_reason") or row.get("reason") or "")
+    stage = str(row.get("stage") or "")
+    return reason == REASON_CHECKSUM or stage == "cdc_exactly_once"
+
+
+def assert_quarantine_replay_allowed(
+    *,
+    dest: DestWmView,
+    quarantined_lsn: str,
+) -> None:
+    """Replay only when dest has not committed this LSN or a newer one.
+
+    Dest equal or ahead → refuse overwrite (checksum conflict is inspect-only).
+    Dest behind or empty → dest never committed; replay may land.
+    """
+    if not quarantined_lsn:
+        raise ExactlyOnceRouteError(
+            "exactly_once quarantine replay refused — row has no LSN. "
+            "Refuse inventing dest overwrite.",
+            reason=REASON_STALE_REPLAY,
+        )
+    dest_lsn = dest.committed_lsn
+    if not dest_lsn:
+        return
+    if compare_lsn(dest_lsn, quarantined_lsn) >= 0:
+        raise ExactlyOnceRouteError(
+            "exactly_once quarantine replay refused — dest LSN "
+            f"{dest_lsn} is at or past quarantined {quarantined_lsn}. "
+            "Inspect dest; do not overwrite.",
+            reason=REASON_STALE_REPLAY,
+        )
+
+
+def assert_cdc_eos_quarantine_replay(
+    *,
+    details: list[dict[str, Any]],
+    dest: DestWmView,
+) -> None:
+    """Fail-closed gate for CDC EOS checksum quarantine replay."""
+    rows = [d for d in details if is_cdc_eos_checksum_row(d)]
+    if not rows:
+        return
+    if not dest.committed_lsn:
+        raise ExactlyOnceRouteError(
+            "exactly_once quarantine replay refused — dest LSN is unknown. "
+            "Refuse inventing overwrite of a dest-owned watermark.",
+            reason=REASON_STALE_REPLAY,
+        )
+    for row in rows:
+        assert_quarantine_replay_allowed(
+            dest=dest,
+            quarantined_lsn=quarantined_lsn_from_row(row),
+        )
+
+
 def extract_cdc_phase(resume_token: Any) -> str:
     """Snapshot vs streaming phase — Debezium handoff token, dest-owned."""
     if isinstance(resume_token, dict):
@@ -656,6 +757,46 @@ def is_incremental_snapshot_token(resume_token: Any) -> bool:
             return is_incremental_snapshot_token(nested)
         return False
     return "incremental_snapshot" in str(resume_token or "").lower()
+
+
+def extract_snapshot_window_id(resume_token: Any) -> str:
+    """Debezium DDD-3 window id from the incremental-snapshot resume token."""
+    if isinstance(resume_token, dict):
+        nested = resume_token.get("snapshot_window")
+        if isinstance(nested, dict) and nested.get("window_id"):
+            return str(nested.get("window_id") or "").strip()
+        if resume_token.get("window_id"):
+            return str(resume_token.get("window_id") or "").strip()
+        token = resume_token.get("token")
+        if isinstance(token, (dict, str)) and token:
+            return extract_snapshot_window_id(token)
+        return ""
+    text = str(resume_token or "")
+    if "window_id=" in text.lower():
+        for part in text.replace("|", " ").split():
+            if part.lower().startswith("window_id="):
+                return part.split("=", 1)[-1].strip()
+    return ""
+
+
+def dest_owned_window_closed(
+    *,
+    incoming_window_id: str,
+    dest_window_id: str,
+) -> bool:
+    """True when dest already closed this incremental-snapshot window.
+
+    Debezium stream-wins lives in an in-memory buffer (lost on crash;
+    the same window_id is re-emitted). Dest-owned window_id makes
+    redelivery a no-op after dest COMMIT.
+    """
+    incoming = (incoming_window_id or "").strip()
+    dest = (dest_window_id or "").strip()
+    return bool(incoming and dest and incoming == dest)
+
+
+def next_dest_window_id(incoming_window_id: str, dest_window_id: str) -> str:
+    return (incoming_window_id or "").strip() or (dest_window_id or "").strip()
 
 
 def dest_owned_stream_wins(
@@ -746,6 +887,7 @@ def checksum_conflict_quarantine(
                     ),
                     "retry_status": "open",
                     "connector": "cdc_exactly_once",
+                    "lsn": incoming_lsn,
                 }
             )
         )
@@ -839,6 +981,7 @@ class DestWmView:
     apply_checksum: str = ""
     resume_blob: str = ""
     apply_seq: int = 0
+    window_id: str = ""
 
 
 def decide_eos_apply(
@@ -853,14 +996,22 @@ def decide_eos_apply(
     incoming_checksum: str = "",
     dest_checksum: str = "",
     incremental_snapshot: bool = False,
+    incoming_window_id: str = "",
+    dest_window_id: str = "",
     change: Any = None,
 ) -> tuple[str, int]:
     """Return ``(action, next_fence)``.
 
     Actions: apply | already_committed | handoff_phase | stream_wins_skip
+    | window_closed_skip
     """
     assert_writer_fence(incoming_fence, dest_fence)
     fence = next_dest_fence(incoming_fence, dest_fence)
+    if dest_owned_window_closed(
+        incoming_window_id=incoming_window_id,
+        dest_window_id=dest_window_id,
+    ):
+        return "window_closed_skip", fence
     if dest_owned_stream_wins(
         incoming_phase=incoming_phase,
         dest_phase=dest_phase,
@@ -907,6 +1058,10 @@ def decide_from_view(
         incoming_checksum=incoming_checksum,
         dest_checksum=dest.apply_checksum,
         incremental_snapshot=incremental_snapshot,
+        incoming_window_id=extract_snapshot_window_id(
+            getattr(change, "resume_token", None)
+        ),
+        dest_window_id=dest.window_id,
         change=change,
     )
 
@@ -951,6 +1106,8 @@ def classify_exactly_once_route(
         "Dest load-reduce-store merges incoming into dest rows in the apply txn.",
         "Post-commit dest verify before source ack — dest must show the LSN.",
         "apply_seq is dest-monotonic.",
+        "Dest-owned incremental-snapshot window_id: closed windows are not re-applied.",
+        "Quarantine replay is dest-LSN gated — dest at or past that LSN refuses overwrite.",
         "Platform never claims all CDC is exactly-once.",
         "At-most-once is not offered (silent loss).",
     ]

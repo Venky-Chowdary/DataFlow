@@ -29,9 +29,11 @@ from services.cdc_exactly_once import (
     decide_from_view,
     encode_resume_blob,
     extract_cdc_phase,
+    extract_snapshot_window_id,
     incoming_pk_keys,
     is_incremental_snapshot_token,
     load_reduce_into_dest,
+    next_dest_window_id,
     next_handoff_phase,
     plan_open_session,
     planned_apply_seq,
@@ -151,7 +153,7 @@ def _wm_ddl(dialect: str) -> str:
 def _lock_watermark_sql(dialect: str, *, with_seq: bool = True) -> str:
     cols = "committed_lsn, epoch, fence_epoch, phase, apply_checksum"
     if with_seq:
-        cols = f"{cols}, resume_blob, apply_seq"
+        cols = f"{cols}, resume_blob, apply_seq, window_id"
     if dialect in _FOR_UPDATE_LIKE:
         return (
             f"SELECT {cols} FROM {WATERMARK_TABLE} "
@@ -188,6 +190,7 @@ def _row_to_wm(locked: Any) -> DestWmView:
         apply_checksum=str(locked[4] or "") if len(locked) > 4 else "",
         resume_blob=str(locked[5] or "") if len(locked) > 5 else "",
         apply_seq=int(locked[6] or 0) if len(locked) > 6 else 0,
+        window_id=str(locked[7] or "") if len(locked) > 7 else "",
     )
 
 
@@ -297,6 +300,11 @@ def _ensure_wm_columns(conn: Any, dialect: str) -> None:
         )),
         ("apply_seq", "INTEGER" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
             "INT" if dialect in _MSSQL_LIKE | _MYSQL_LIKE else "NUMBER"
+        )),
+        ("window_id", "TEXT" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
+            "NVARCHAR(256)" if dialect in _MSSQL_LIKE else (
+                "VARCHAR(256)" if dialect in _MYSQL_LIKE else "VARCHAR2(256)"
+            )
         )),
     ]
     table_q = WATERMARK_TABLE
@@ -462,6 +470,7 @@ def _sa_write_watermark(
     apply_checksum: str,
     resume_blob: str = "",
     apply_seq: int = 0,
+    window_id: str = "",
 ) -> None:
     conn.execute(
         text(_upsert_watermark_sql(dialect)),
@@ -478,13 +487,13 @@ def _sa_write_watermark(
             "ck": apply_checksum,
         },
     )
-    if resume_blob or apply_seq:
+    if resume_blob or apply_seq or window_id:
         conn.execute(
             text(
-                f"UPDATE {WATERMARK_TABLE} SET resume_blob = :rb, apply_seq = :seq "
-                f"WHERE stream_key = :k"
+                f"UPDATE {WATERMARK_TABLE} SET resume_blob = :rb, apply_seq = :seq, "
+                f"window_id = :wid WHERE stream_key = :k"
             ),
-            {"rb": resume_blob, "seq": apply_seq, "k": stream_key},
+            {"rb": resume_blob, "seq": apply_seq, "wid": window_id, "k": stream_key},
         )
 
 
@@ -549,7 +558,10 @@ def _sa_apply_member(
     )
     phase = next_handoff_phase(incoming_phase, dest.phase or None)
     resume_blob = encode_resume_blob(change.resume_token)
-    if action in {"already_committed", "stream_wins_skip"}:
+    window_id = next_dest_window_id(
+        extract_snapshot_window_id(change.resume_token), dest.window_id
+    )
+    if action in {"already_committed", "stream_wins_skip", "window_closed_skip"}:
         return EosApplyResult(
             status=action,
             committed_lsn=dest.committed_lsn,
@@ -560,6 +572,7 @@ def _sa_apply_member(
             phase=dest.phase or "streaming",
             apply_checksum=dest.apply_checksum,
             apply_seq=dest.apply_seq,
+            window_id=dest.window_id,
         )
     dest_seq = planned_apply_seq(dest.apply_seq)
     if action == "handoff_phase":
@@ -578,6 +591,7 @@ def _sa_apply_member(
             apply_checksum=incoming_checksum or dest.apply_checksum,
             resume_blob=resume_blob or dest.resume_blob,
             apply_seq=dest_seq,
+            window_id=window_id,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -589,6 +603,7 @@ def _sa_apply_member(
             phase="streaming",
             apply_checksum=incoming_checksum or dest.apply_checksum,
             apply_seq=dest_seq,
+            window_id=window_id,
         )
     table_q = _q(dest_table)
     rows_written = 0
@@ -649,6 +664,7 @@ def _sa_apply_member(
         apply_checksum=incoming_checksum,
         resume_blob=resume_blob,
         apply_seq=dest_seq,
+        window_id=window_id,
     )
     if crash_after == "after_watermark_before_commit":
         raise EosCrash(crash_after)
@@ -663,6 +679,7 @@ def _sa_apply_member(
         phase=phase,
         apply_checksum=incoming_checksum,
         apply_seq=dest_seq,
+        window_id=window_id,
     )
 
 
@@ -877,6 +894,7 @@ def open_eos_sa_session(
                     apply_checksum=view.apply_checksum,
                     resume_blob=view.resume_blob,
                     apply_seq=view.apply_seq,
+                    window_id=view.window_id,
                 )
             return opened
     finally:
@@ -900,7 +918,7 @@ def sa_dest_watermark_view(
                 row = conn.execute(
                     text(
                         f"SELECT committed_lsn, epoch, fence_epoch, phase, "
-                        f"apply_checksum, resume_blob, apply_seq "
+                        f"apply_checksum, resume_blob, apply_seq, window_id "
                         f"FROM {WATERMARK_TABLE} WHERE stream_key = :k"
                     ),
                     {"k": stream_key},

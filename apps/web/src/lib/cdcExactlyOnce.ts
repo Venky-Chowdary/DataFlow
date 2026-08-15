@@ -96,18 +96,26 @@ export function cdcDeliveryResultCopy(input: {
       input.protocol === "dest_authoritative_fenced_bundle"
       || input.protocol === "dest_authoritative_open_bundle"
       || input.protocol === "dest_authoritative_verified_bundle"
+      || input.protocol === "dest_authoritative_windowed_bundle"
     ) {
       parts.push("shared-log bundle");
     }
     if (
       input.protocol === "dest_authoritative_open_bundle"
       || input.protocol === "dest_authoritative_verified_bundle"
+      || input.protocol === "dest_authoritative_windowed_bundle"
     ) {
       parts.push("dest Open");
     }
-    if (input.protocol === "dest_authoritative_verified_bundle") {
+    if (
+      input.protocol === "dest_authoritative_verified_bundle"
+      || input.protocol === "dest_authoritative_windowed_bundle"
+    ) {
       parts.push("dest load-reduce");
       parts.push("dest verified");
+    }
+    if (input.protocol === "dest_authoritative_windowed_bundle") {
+      parts.push("dest window");
     }
     if (input.destLsn) parts.push(`dest LSN ${input.destLsn}`);
     if (input.fenceEpoch) parts.push(`fence ${input.fenceEpoch}`);

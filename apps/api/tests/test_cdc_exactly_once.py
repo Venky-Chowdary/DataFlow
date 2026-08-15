@@ -39,6 +39,7 @@ from services.cdc_exactly_once import (  # noqa: E402
     REASON_DEST_NOT_TXN,
     REASON_NOT_CDC,
     REASON_OK,
+    REASON_STALE_REPLAY,
     REASON_STALE_SEQ,
     REASON_UNVERIFIED,
     EosBundleStream,
@@ -55,7 +56,11 @@ from services.cdc_exactly_once import (  # noqa: E402
     classify_exactly_once_route,
     assert_bundle_members_reached,
     dest_owned_stream_wins,
+    dest_owned_window_closed,
     decide_eos_apply,
+    extract_snapshot_window_id,
+    assert_cdc_eos_quarantine_replay,
+    assert_quarantine_replay_allowed,
     DestWmView,
     eos_stream_key,
     assert_apply_seq_monotonic,
@@ -230,6 +235,50 @@ def test_dest_owned_stream_wins_skips_incremental_after_stream() -> None:
         dest_checksum="stream",
     )
     assert action == "stream_wins_skip"
+
+
+def test_dest_owned_window_closed_skips_same_window_id() -> None:
+    assert dest_owned_window_closed(
+        incoming_window_id="sig:aaaa", dest_window_id="sig:aaaa"
+    )
+    assert not dest_owned_window_closed(
+        incoming_window_id="sig:bbbb", dest_window_id="sig:aaaa"
+    )
+    token = {
+        "lsn": "0/50",
+        "incremental_snapshot": True,
+        "snapshot_window": {"window_id": "sig:aaaa"},
+    }
+    assert extract_snapshot_window_id(token) == "sig:aaaa"
+    action, _fence = decide_eos_apply(
+        incoming_lsn="0/50",
+        dest_lsn="0/40",
+        incoming_phase="snapshot",
+        dest_phase="snapshot",
+        incremental_snapshot=True,
+        incoming_window_id="sig:aaaa",
+        dest_window_id="sig:aaaa",
+    )
+    assert action == "window_closed_skip"
+
+
+def test_quarantine_replay_refuses_dest_at_or_past_lsn() -> None:
+    dest = DestWmView(committed_lsn="0/20")
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        assert_quarantine_replay_allowed(dest=dest, quarantined_lsn="0/20")
+    assert exc.value.reason == REASON_STALE_REPLAY
+    with pytest.raises(ExactlyOnceRouteError) as exc2:
+        assert_quarantine_replay_allowed(dest=dest, quarantined_lsn="0/10")
+    assert exc2.value.reason == REASON_STALE_REPLAY
+    assert_quarantine_replay_allowed(
+        dest=DestWmView(committed_lsn="0/10"), quarantined_lsn="0/20"
+    )
+    with pytest.raises(ExactlyOnceRouteError) as exc3:
+        assert_cdc_eos_quarantine_replay(
+            details=[{"stage": "cdc_exactly_once", "lsn": "0/20"}],
+            dest=DestWmView(),
+        )
+    assert exc3.value.reason == REASON_STALE_REPLAY
 
 
 def test_bundle_coordinator_refuses_member_behind() -> None:
@@ -1142,6 +1191,66 @@ def test_sqlite_eos_incremental_snapshot_stream_wins() -> None:
         assert v == "stream"
 
 
+def test_sqlite_eos_closed_window_redelivery_is_noop() -> None:
+    """Dest-owned window_id: crash re-emit of the same DDD-3 window does not apply."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_window.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string"}
+        token = {
+            "lsn": "0/50",
+            "phase": "snapshot",
+            "incremental_snapshot": True,
+            "snapshot_window": {"window_id": "sig:w1"},
+        }
+        first = ChangeBatch(
+            inserts=[{"id": "1", "v": "snap"}],
+            resume_token=token,
+        )
+        rows, _ck, summary, _del = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=first,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="win|orders",
+        )
+        assert rows == 1
+        assert summary.get("eos_window_id") == "sig:w1"
+        assert dest_watermark_view(dest_cfg, "win|orders").window_id == "sig:w1"
+        replay = ChangeBatch(
+            inserts=[{"id": "1", "v": "snap-again"}],
+            resume_token=token,
+        )
+        rows2, _ck2, summary2, _del2 = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=replay,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="win|orders",
+        )
+        assert summary2["eos_status"] == "window_closed_skip"
+        assert rows2 == 0
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        conn = sqlite3.connect(path)
+        try:
+            v = conn.execute("SELECT v FROM orders WHERE id = ?", ("1",)).fetchone()[0]
+        finally:
+            conn.close()
+        assert v == "snap"
+
+
 def test_named_matrix_artifact_matches_measured() -> None:
     """Write / verify the named fixture. Floor is 1.0 on this matrix only."""
     cases = [
@@ -1295,10 +1404,11 @@ def test_named_matrix_artifact_matches_measured() -> None:
         "cases": results,
         "notes": [
             "100% means this named fixture only — not live warehouse CDC.",
-            "Protocol dest_authoritative_verified_bundle: dest SSOT + Open fence "
+            "Protocol dest_authoritative_windowed_bundle: dest SSOT + Open fence "
             "(no data) + dest resume blob + last-op-per-PK + dest load-reduce-store "
             "+ shared-log N-table dest txn + dest-owned DDD-3 stream-wins + "
-            "checksum quarantine + bundle min-LSN + dest-monotonic apply_seq + "
+            "dest-owned snapshot window_id + checksum quarantine + dest-LSN-gated "
+            "quarantine replay + bundle min-LSN + dest-monotonic apply_seq + "
             "post-commit dest verify before source ack.",
             "Wired dests: sqlite (native) plus SQLAlchemy dest-txn for "
             "postgresql/mysql/sqlserver/duckdb/generic_sql/oracle/snowflake.",

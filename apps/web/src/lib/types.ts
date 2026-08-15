@@ -219,6 +219,8 @@ export interface TransferJob {
   eos_dest_authoritative?: boolean | null;
   /** Dest-monotonic apply sequence after post-commit verify. */
   eos_apply_seq?: number | null;
+  /** Dest-owned incremental-snapshot window id (Debezium DDD-3, dest-persisted). */
+  eos_window_id?: string | null;
   /** SQL Server CDC TVF row_filter_option actually used (all / all update old / net). */
   cdc_row_filter?: string | null;
   replication_lag_bytes?: number | null;

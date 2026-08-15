@@ -1270,6 +1270,19 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
     _refuse_incomplete_quarantine_replay(records, mappings)
+    from services.cdc_exactly_once import (
+        ExactlyOnceRouteError,
+        assert_cdc_eos_quarantine_replay,
+        dest_view_from_job_summary,
+    )
+
+    try:
+        assert_cdc_eos_quarantine_replay(
+            details=list(details),
+            dest=dest_view_from_job_summary(job),
+        )
+    except ExactlyOnceRouteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     records, columns = _canonicalize_quarantine_records_to_source(records, mappings)
 
     schema = dict(transfer_req.column_types or {})

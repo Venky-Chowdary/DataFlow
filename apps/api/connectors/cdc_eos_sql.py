@@ -28,6 +28,7 @@ from services.cdc_exactly_once import (
     combine_change_batch,
     decide_from_view,
     encode_resume_blob,
+    extract_snapshot_window_id,
     incoming_pk_keys,
     load_reduce_into_dest,
     planned_apply_seq,
@@ -35,6 +36,7 @@ from services.cdc_exactly_once import (
     eos_stream_key,
     extract_cdc_phase,
     is_incremental_snapshot_token,
+    next_dest_window_id,
     next_handoff_phase,
     plan_open_session,
     require_batch_lsn,
@@ -54,7 +56,8 @@ CREATE TABLE IF NOT EXISTS {WATERMARK_TABLE} (
   phase TEXT,
   apply_checksum TEXT,
   resume_blob TEXT,
-  apply_seq INTEGER NOT NULL DEFAULT 0
+  apply_seq INTEGER NOT NULL DEFAULT 0,
+  window_id TEXT
 )
 """
 
@@ -65,6 +68,7 @@ _WM_ALTERS = (
     "ALTER TABLE {table} ADD COLUMN apply_checksum TEXT",
     "ALTER TABLE {table} ADD COLUMN resume_blob TEXT",
     "ALTER TABLE {table} ADD COLUMN apply_seq INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE {table} ADD COLUMN window_id TEXT",
 )
 
 
@@ -131,7 +135,7 @@ def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
     try:
         cur.execute(
             f"SELECT committed_lsn, epoch, fence_epoch, phase, apply_checksum, "
-            f"resume_blob, apply_seq "
+            f"resume_blob, apply_seq, window_id "
             f"FROM {WATERMARK_TABLE} WHERE stream_key = ?",
             (stream_key,),
         )
@@ -151,6 +155,7 @@ def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
         apply_checksum=str(row[4] or "") if len(row) > 4 else "",
         resume_blob=str(row[5] or "") if len(row) > 5 else "",
         apply_seq=int(row[6] or 0) if len(row) > 6 else 0,
+        window_id=str(row[7] or "") if len(row) > 7 else "",
     )
 
 
@@ -168,14 +173,16 @@ def _write_watermark(
     apply_checksum: str = "",
     resume_blob: str = "",
     apply_seq: int = 0,
+    window_id: str = "",
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     cur.execute(
         f"""
         INSERT INTO {WATERMARK_TABLE}
           (stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch,
-           fence_epoch, prev_lsn, phase, apply_checksum, resume_blob, apply_seq)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           fence_epoch, prev_lsn, phase, apply_checksum, resume_blob, apply_seq,
+           window_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(stream_key) DO UPDATE SET
           committed_lsn = excluded.committed_lsn,
           batch_id = excluded.batch_id,
@@ -187,7 +194,8 @@ def _write_watermark(
           phase = excluded.phase,
           apply_checksum = excluded.apply_checksum,
           resume_blob = excluded.resume_blob,
-          apply_seq = excluded.apply_seq
+          apply_seq = excluded.apply_seq,
+          window_id = excluded.window_id
         """,
         (
             stream_key,
@@ -202,6 +210,7 @@ def _write_watermark(
             apply_checksum,
             resume_blob,
             apply_seq,
+            window_id,
         ),
     )
 
@@ -350,7 +359,10 @@ def _sqlite_apply_member(
     )
     phase = next_handoff_phase(incoming_phase, dest.phase or None)
     resume_blob = encode_resume_blob(change.resume_token)
-    if action in {"already_committed", "stream_wins_skip"}:
+    window_id = next_dest_window_id(
+        extract_snapshot_window_id(change.resume_token), dest.window_id
+    )
+    if action in {"already_committed", "stream_wins_skip", "window_closed_skip"}:
         return EosApplyResult(
             status=action,
             committed_lsn=dest.committed_lsn,
@@ -361,6 +373,7 @@ def _sqlite_apply_member(
             phase=dest.phase or "streaming",
             apply_checksum=dest.apply_checksum,
             apply_seq=dest.apply_seq,
+            window_id=dest.window_id,
         )
     dest_seq = planned_apply_seq(dest.apply_seq)
     if action == "handoff_phase":
@@ -378,6 +391,7 @@ def _sqlite_apply_member(
             apply_checksum=incoming_checksum or dest.apply_checksum,
             resume_blob=resume_blob or dest.resume_blob,
             apply_seq=dest_seq,
+            window_id=window_id,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -389,6 +403,7 @@ def _sqlite_apply_member(
             phase="streaming",
             apply_checksum=incoming_checksum or dest.apply_checksum,
             apply_seq=dest_seq,
+            window_id=window_id,
         )
 
     rows_written = 0
@@ -454,6 +469,7 @@ def _sqlite_apply_member(
         apply_checksum=incoming_checksum,
         resume_blob=resume_blob,
         apply_seq=dest_seq,
+        window_id=window_id,
     )
     if crash_after == "after_watermark_before_commit":
         from services.cdc_exactly_once import EosCrash
@@ -470,6 +486,7 @@ def _sqlite_apply_member(
         phase=phase,
         apply_checksum=incoming_checksum,
         apply_seq=dest_seq,
+        window_id=window_id,
     )
 
 
@@ -802,6 +819,7 @@ def open_eos_session(
                     apply_checksum=view.apply_checksum,
                     resume_blob=view.resume_blob,
                     apply_seq=view.apply_seq,
+                    window_id=view.window_id,
                 )
             conn.execute("COMMIT")
             return opened
