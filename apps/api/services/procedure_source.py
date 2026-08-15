@@ -162,7 +162,7 @@ def source_read_mode_of(source: Any) -> str:
         extra = root
     else:
         return MODE_TABLE
-    raw = str(extra.get("source_read_mode") or MODE_TABLE).strip().lower()
+    raw = str(extra.get("source_read_mode") or "").strip().lower()
     if raw in {MODE_TABLE, MODE_QUERY, MODE_PROCEDURE}:
         return raw
     if extra.get("procedure_call") or extra.get("source_procedure"):
@@ -320,23 +320,29 @@ def map_callable_result(
 ) -> dict[str, Any]:
     """Map SP/query result columns through Map SSOT + dest-exists shape."""
     from services.semantic_mapper import map_columns
-    from services.shape_contract import classify_dest_exists_shape
+    from services.shape_contract import (
+        COL_ADD,
+        COL_PENDING,
+        COL_UNACCOUNTED,
+        classify_dest_exists_shape,
+    )
 
-    src_schemas = [
-        {"name": c, "inferred_type": str((source_types or {}).get(c) or "VARCHAR")}
-        for c in source_columns
-    ]
-    tgt_schemas = [
-        {"name": c, "inferred_type": str((dest_types or {}).get(c) or "VARCHAR")}
-        for c in dest_columns
-    ]
+    # Dest-exists must be True when dest columns are known — names-only
+    # Hungarian without that flag pins order_id→order_amt (false friend).
+    # Do not pass source_schemas here: typed schemas currently derail the
+    # same pair. map_columns is Map SSOT; types refine later on Validate.
     mappings = map_columns(
         list(source_columns),
         list(dest_columns),
-        source_schemas=src_schemas or None,
-        target_schemas=tgt_schemas or None,
         destination_table_exists=bool(dest_columns),
     )
+    for m in mappings:
+        src = str(m.get("source") or "")
+        tgt = str(m.get("target") or "")
+        if source_types and src in source_types:
+            m.setdefault("source_type", source_types[src])
+        if dest_types and tgt in dest_types:
+            m.setdefault("target_type", dest_types[tgt])
     table_exists = bool(dest_columns)
     contract = classify_dest_exists_shape(
         destination_table_exists=table_exists if dest_columns else False,
@@ -344,20 +350,15 @@ def map_callable_result(
         dest_columns=list(dest_columns),
         mappings=list(mappings),
     )
+    extra_kinds = {COL_ADD, COL_PENDING, COL_UNACCOUNTED}
     extra = [
-        c
-        for c in source_columns
-        if c in (contract.get("unaccounted_sources") or [])
-        or any(
-            str(m.get("source")) == c
-            and (
-                m.get("create_new")
-                or str(m.get("assignment_strategy") or "")
-                in {"create_compatible_new", "identity_passthrough"}
-            )
-            for m in mappings
-        )
+        str(col.get("source"))
+        for col in (contract.get("columns") or [])
+        if col.get("kind") in extra_kinds and col.get("source")
     ]
+    for name in contract.get("unaccounted_sources") or []:
+        if name not in extra:
+            extra.append(str(name))
     return {
         "mappings": mappings,
         "shape_contract": contract,
@@ -482,10 +483,29 @@ def _deny_dangerous_identifier(ident: str) -> None:
             )
 
 
-def _parse_query(text: str, dialect: str, params: Mapping[str, Any]) -> CallableSpec:
-    from src.routers.query_router import _is_safe_sql
+def _query_is_safe(text: str) -> bool:
+    """Read-only SELECT-class gate — same deny set as Query Playground fallback.
 
-    if not _is_safe_sql(text):
+    Imported ``query_router._is_safe_sql`` pulls FastAPI via ``src.routers``
+    package init; keep the extract path import-light and fail closed.
+    """
+    if not re.match(
+        r"^\s*(SELECT|WITH|EXPLAIN|SHOW|DESCRIBE|DESC|ANALYZE|PRAGMA|VALUES)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return False
+    if _DENIED_TOKENS.search(text):
+        return False
+    if re.search(r"\bINTO\s+(OUTFILE|DUMPFILE)\b", text, re.IGNORECASE):
+        return False
+    if re.search(r"\bSELECT\b[\s\S]*\bINTO\b", text, re.IGNORECASE):
+        return False
+    return True
+
+
+def _parse_query(text: str, dialect: str, params: Mapping[str, Any]) -> CallableSpec:
+    if not _query_is_safe(text):
         raise ProcedureSourceError(
             "Query source allows one read-only SELECT/WITH — CALL/EXEC belong in Stored procedure mode."
         )
