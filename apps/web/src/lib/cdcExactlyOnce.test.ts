@@ -86,10 +86,10 @@ describe("cdcExactlyOnce", () => {
       cdcDeliveryResultCopy({
         cdcDelivery: "exactly_once",
         exactlyOnceActive: true,
-        protocol: "dest_authoritative_windowed_bundle",
+        protocol: "dest_authoritative_keyset_bundle",
         destLsn: "0/20",
       }),
-      "exactly_once dest-owned watermark · dest authoritative · not platform-wide · shared-log bundle · dest Open · dest load-reduce · dest verified · dest window · dest LSN 0/20",
+      "exactly_once dest-owned watermark · dest authoritative · not platform-wide · shared-log bundle · dest Open · dest load-reduce · dest verified · dest window · dest keyset · dest LSN 0/20",
     );
   });
 });

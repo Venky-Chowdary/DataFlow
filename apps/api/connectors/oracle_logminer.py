@@ -865,6 +865,7 @@ class OracleLogMinerCdc:
             fetch_chunk=self._fetch_incremental_chunk,
             stream_events_during_chunk=self._peek_stream_events_during_chunk,
             max_chunks_per_poll=1,
+            dest_resume=self.resume_token,
         )
 
         inserts: list[dict[str, Any]] = []

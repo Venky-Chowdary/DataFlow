@@ -56,9 +56,15 @@ from services.cdc_exactly_once import (  # noqa: E402
     classify_exactly_once_route,
     assert_bundle_members_reached,
     dest_owned_stream_wins,
+    dest_owned_chunk_closed,
     dest_owned_window_closed,
     decide_eos_apply,
     extract_snapshot_window_id,
+    filter_snapshot_rows_after_dest_hi,
+    apply_dest_keyset_to_signal,
+    merge_dest_snapshot_progress,
+    persist_dest_keyset_on_signal,
+    plan_open_session,
     assert_cdc_eos_quarantine_replay,
     assert_quarantine_replay_allowed,
     DestWmView,
@@ -260,6 +266,83 @@ def test_dest_owned_window_closed_skips_same_window_id() -> None:
         dest_window_id="sig:aaaa",
     )
     assert action == "window_closed_skip"
+
+
+def test_dest_owned_chunk_closed_same_signal_new_window_id() -> None:
+    from services.keyset_pagination import compare_keyset_bookmark
+
+    assert compare_keyset_bookmark("99", "200") == -1
+    assert dest_owned_chunk_closed(
+        incoming_signal_id="sig-1",
+        dest_signal_id="sig-1",
+        incoming_last_pk="m",
+        dest_last_pk="m",
+    )
+    assert dest_owned_chunk_closed(
+        incoming_signal_id="sig-1",
+        dest_signal_id="sig-1",
+        incoming_last_pk="99",
+        dest_last_pk="200",
+    )
+    assert not dest_owned_chunk_closed(
+        incoming_signal_id="sig-1",
+        dest_signal_id="sig-1",
+        incoming_last_pk="z",
+        dest_last_pk="m",
+    )
+    assert not dest_owned_chunk_closed(
+        incoming_signal_id="sig-2",
+        dest_signal_id="sig-1",
+        incoming_last_pk="m",
+        dest_last_pk="m",
+    )
+    action, _fence = decide_eos_apply(
+        incoming_lsn="0/60",
+        dest_lsn="0/50",
+        incoming_phase="snapshot",
+        dest_phase="snapshot",
+        incremental_snapshot=True,
+        incoming_window_id="sig-1:bbbb",
+        dest_window_id="sig-1:aaaa",
+        incoming_signal_id="sig-1",
+        dest_signal_id="sig-1",
+        incoming_last_pk="m",
+        dest_last_pk="m",
+    )
+    assert action == "chunk_closed_skip"
+    kept = filter_snapshot_rows_after_dest_hi(
+        [{"id": "a"}, {"id": "m"}, {"id": "z"}],
+        pk_cols=["id"],
+        dest_last_pk="m",
+    )
+    assert [r["id"] for r in kept] == ["z"]
+    kept_incomparable = filter_snapshot_rows_after_dest_hi(
+        [{"id": "a"}],
+        pk_cols=["id"],
+        dest_last_pk="a\x1fz",
+    )
+    assert [r["id"] for r in kept_incomparable] == ["a"]
+    assert not dest_owned_chunk_closed(
+        incoming_signal_id="sig-1",
+        dest_signal_id="sig-1",
+        incoming_last_pk="a\x1fb",
+        dest_last_pk="m",
+    )
+
+
+def test_open_merges_dest_keyset_hi_into_resume() -> None:
+    dest = DestWmView(
+        committed_lsn="0/50",
+        snapshot_signal_id="sig-1",
+        window_hi_pk="m",
+        resume_blob='{"lsn":"0/50","signal_id":"sig-1","last_pk":"m"}',
+    )
+    opened = plan_open_session(dest=dest, incoming_fence=1, job_resume={"lsn": "0/40"})
+    merged = merge_dest_snapshot_progress({"lsn": "0/50", "signal_id": "sig-1"}, dest)
+    assert merged["last_pk"] == "m"
+    assert opened.resume["last_pk"] == "m" or (
+        isinstance(opened.resume, dict) and opened.resume.get("last_pk") == "m"
+    )
 
 
 def test_quarantine_replay_refuses_dest_at_or_past_lsn() -> None:
@@ -1251,6 +1334,131 @@ def test_sqlite_eos_closed_window_redelivery_is_noop() -> None:
         assert v == "snap"
 
 
+def test_sqlite_eos_keyset_closed_new_window_id_does_not_overwrite() -> None:
+    """Dest-owned signal_id + last_pk: new window_id cannot re-apply closed keys."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_keyset.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string"}
+
+        def _token(window_id: str, last_pk: str, lsn: str) -> dict:
+            return {
+                "lsn": lsn,
+                "phase": "snapshot",
+                "incremental_snapshot": True,
+                "signal_id": "sig-1",
+                "last_pk": last_pk,
+                "snapshot_window": {"window_id": window_id, "signal_id": "sig-1"},
+            }
+
+        first = ChangeBatch(
+            inserts=[{"id": "a", "v": "keep"}, {"id": "m", "v": "keep"}],
+            resume_token=_token("sig-1:aaaa", "m", "0/50"),
+        )
+        rows, _ck, summary, _del = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=first,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="keyset|orders",
+        )
+        assert rows == 2
+        assert summary.get("eos_snapshot_signal_id") == "sig-1"
+        assert summary.get("eos_window_hi_pk") == "m"
+        view = dest_watermark_view(dest_cfg, "keyset|orders")
+        assert view.snapshot_signal_id == "sig-1"
+        assert view.window_hi_pk == "m"
+
+        replay = ChangeBatch(
+            inserts=[{"id": "a", "v": "overwrite"}, {"id": "m", "v": "overwrite"}],
+            resume_token=_token("sig-1:bbbb", "m", "0/60"),
+        )
+        rows2, _ck2, summary2, _del2 = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=replay,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="keyset|orders",
+        )
+        assert summary2["eos_status"] == "chunk_closed_skip"
+        assert rows2 == 0
+        assert dest_engine_count(dest_cfg, "orders") == 2
+
+        advance = ChangeBatch(
+            inserts=[
+                {"id": "a", "v": "overwrite"},
+                {"id": "m", "v": "overwrite"},
+                {"id": "z", "v": "new"},
+            ],
+            resume_token=_token("sig-1:cccc", "z", "0/70"),
+        )
+        rows3, _ck3, summary3, _del3 = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=advance,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="keyset|orders",
+        )
+        assert summary3["eos_status"] == "applied"
+        assert rows3 == 1
+        assert dest_engine_count(dest_cfg, "orders") == 3
+        conn = sqlite3.connect(path)
+        try:
+            rows_out = {
+                r[0]: r[1]
+                for r in conn.execute("SELECT id, v FROM orders ORDER BY id").fetchall()
+            }
+        finally:
+            conn.close()
+        assert rows_out == {"a": "keep", "m": "keep", "z": "new"}
+        assert dest_watermark_view(dest_cfg, "keyset|orders").window_hi_pk == "z"
+
+        opened = open_eos_session(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            stream_key="keyset|orders",
+            incoming_fence=1,
+            job_resume={"lsn": "0/40", "signal_id": "sig-1"},
+        )
+        assert isinstance(opened.resume, dict)
+        assert opened.resume.get("last_pk") == "z"
+        assert opened.resume.get("signal_id") == "sig-1"
+
+
+def test_apply_dest_keyset_to_signal_never_regresses() -> None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class _Sig:
+        id: str
+        last_pk: str = ""
+
+    dest = {"signal_id": "sig-1", "last_pk": "200"}
+    assert apply_dest_keyset_to_signal(_Sig("sig-1", last_pk="99"), dest).last_pk == "200"
+    assert apply_dest_keyset_to_signal(_Sig("sig-1", last_pk="300"), dest).last_pk == "300"
+    assert apply_dest_keyset_to_signal(_Sig("sig-2", last_pk=""), dest).last_pk == ""
+    assert apply_dest_keyset_to_signal(
+        _Sig("sig-1", last_pk="a\x1fb"), dest
+    ).last_pk == "a\x1fb"
+    assert persist_dest_keyset_on_signal({"signal_id": "missing", "last_pk": "m"}) is None
+
+
 def test_named_matrix_artifact_matches_measured() -> None:
     """Write / verify the named fixture. Floor is 1.0 on this matrix only."""
     cases = [
@@ -1404,12 +1612,14 @@ def test_named_matrix_artifact_matches_measured() -> None:
         "cases": results,
         "notes": [
             "100% means this named fixture only — not live warehouse CDC.",
-            "Protocol dest_authoritative_windowed_bundle: dest SSOT + Open fence "
+            "Protocol dest_authoritative_keyset_bundle: dest SSOT + Open fence "
             "(no data) + dest resume blob + last-op-per-PK + dest load-reduce-store "
             "+ shared-log N-table dest txn + dest-owned DDD-3 stream-wins + "
-            "dest-owned snapshot window_id + checksum quarantine + dest-LSN-gated "
-            "quarantine replay + bundle min-LSN + dest-monotonic apply_seq + "
-            "post-commit dest verify before source ack.",
+            "dest-owned snapshot window_id + dest-owned signal_id/keyset last_pk + "
+            "Open fast-forward of snapshot signal last_pk + "
+            "checksum quarantine + dest-LSN-gated quarantine replay + bundle "
+            "min-LSN + dest-monotonic apply_seq + post-commit dest verify "
+            "before source ack.",
             "Wired dests: sqlite (native) plus SQLAlchemy dest-txn for "
             "postgresql/mysql/sqlserver/duckdb/generic_sql/oracle/snowflake.",
             "File/Iceberg/Kafka dests stay fail-closed.",

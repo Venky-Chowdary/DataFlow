@@ -1202,6 +1202,9 @@ def _run_cdc_shared_multi_table(
             job_resume=shared_wm,
         )
         shared_wm = opened.resume
+        from services.cdc_exactly_once import persist_dest_keyset_on_signal
+
+        persist_dest_keyset_on_signal(opened.resume)
 
     cdc: Any
     ddl_log: list[str] = [
@@ -1963,6 +1966,9 @@ def _run_cdc_single_stream(
             job_resume=watermark,
         )
         watermark = opened.resume
+        from services.cdc_exactly_once import persist_dest_keyset_on_signal
+
+        persist_dest_keyset_on_signal(opened.resume)
 
     headers = list(schema.keys())
     column_types = {c: schema.get(c, "string") for c in headers}

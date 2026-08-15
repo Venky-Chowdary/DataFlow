@@ -35,6 +35,34 @@ def test_incremental_snapshot_lifecycle(tmp_path, monkeypatch) -> None:
     assert any(s.id == sig.id for s in listed)
 
 
+def test_interleave_fast_forwards_signal_from_dest_open(tmp_path, monkeypatch) -> None:
+    """Dest Open last_pk seeks the chunk SELECT past dest-closed keys."""
+    from services.cdc_incremental_runner import interleave_incremental_snapshot
+
+    monkeypatch.setattr(snap_mod, "_PATH", str(tmp_path / "signals.json"))
+    monkeypatch.setattr(snap_mod, "_DATA_DIR", str(tmp_path))
+    sig = request_incremental_snapshot("src:pg", "orders", primary_key="id", chunk_size=10)
+    seen: list[str] = []
+
+    def fetch(signal):
+        seen.append(str(signal.last_pk or ""))
+        return [{"id": "z", "v": "new"}], "z", True
+
+    batches = list(
+        interleave_incremental_snapshot(
+            "src:pg",
+            table="orders",
+            fetch_chunk=fetch,
+            dest_resume={"signal_id": sig.id, "last_pk": "m"},
+        )
+    )
+    assert seen == ["m"]
+    assert len(batches) == 1
+    assert batches[0].inserts[0]["id"] == "z"
+    claimed = claim_next_signal("src:pg", table="orders")
+    assert claimed is None or claimed.last_pk == "z"
+
+
 def test_debezium_envelope_parse() -> None:
     from connectors.kafka_debezium_bridge import debezium_to_row, parse_debezium_envelope
 

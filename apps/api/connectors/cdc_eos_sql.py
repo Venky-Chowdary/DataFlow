@@ -28,7 +28,10 @@ from services.cdc_exactly_once import (
     combine_change_batch,
     decide_from_view,
     encode_resume_blob,
+    extract_snapshot_last_pk,
+    extract_snapshot_signal_id,
     extract_snapshot_window_id,
+    filter_snapshot_rows_after_dest_hi,
     incoming_pk_keys,
     load_reduce_into_dest,
     planned_apply_seq,
@@ -36,6 +39,7 @@ from services.cdc_exactly_once import (
     eos_stream_key,
     extract_cdc_phase,
     is_incremental_snapshot_token,
+    next_dest_snapshot_progress,
     next_dest_window_id,
     next_handoff_phase,
     plan_open_session,
@@ -57,7 +61,9 @@ CREATE TABLE IF NOT EXISTS {WATERMARK_TABLE} (
   apply_checksum TEXT,
   resume_blob TEXT,
   apply_seq INTEGER NOT NULL DEFAULT 0,
-  window_id TEXT
+  window_id TEXT,
+  snapshot_signal_id TEXT,
+  window_hi_pk TEXT
 )
 """
 
@@ -69,6 +75,8 @@ _WM_ALTERS = (
     "ALTER TABLE {table} ADD COLUMN resume_blob TEXT",
     "ALTER TABLE {table} ADD COLUMN apply_seq INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE {table} ADD COLUMN window_id TEXT",
+    "ALTER TABLE {table} ADD COLUMN snapshot_signal_id TEXT",
+    "ALTER TABLE {table} ADD COLUMN window_hi_pk TEXT",
 )
 
 
@@ -135,7 +143,7 @@ def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
     try:
         cur.execute(
             f"SELECT committed_lsn, epoch, fence_epoch, phase, apply_checksum, "
-            f"resume_blob, apply_seq, window_id "
+            f"resume_blob, apply_seq, window_id, snapshot_signal_id, window_hi_pk "
             f"FROM {WATERMARK_TABLE} WHERE stream_key = ?",
             (stream_key,),
         )
@@ -156,6 +164,8 @@ def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
         resume_blob=str(row[5] or "") if len(row) > 5 else "",
         apply_seq=int(row[6] or 0) if len(row) > 6 else 0,
         window_id=str(row[7] or "") if len(row) > 7 else "",
+        snapshot_signal_id=str(row[8] or "") if len(row) > 8 else "",
+        window_hi_pk=str(row[9] or "") if len(row) > 9 else "",
     )
 
 
@@ -174,6 +184,8 @@ def _write_watermark(
     resume_blob: str = "",
     apply_seq: int = 0,
     window_id: str = "",
+    snapshot_signal_id: str = "",
+    window_hi_pk: str = "",
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     cur.execute(
@@ -181,8 +193,8 @@ def _write_watermark(
         INSERT INTO {WATERMARK_TABLE}
           (stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch,
            fence_epoch, prev_lsn, phase, apply_checksum, resume_blob, apply_seq,
-           window_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           window_id, snapshot_signal_id, window_hi_pk)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(stream_key) DO UPDATE SET
           committed_lsn = excluded.committed_lsn,
           batch_id = excluded.batch_id,
@@ -195,7 +207,9 @@ def _write_watermark(
           apply_checksum = excluded.apply_checksum,
           resume_blob = excluded.resume_blob,
           apply_seq = excluded.apply_seq,
-          window_id = excluded.window_id
+          window_id = excluded.window_id,
+          snapshot_signal_id = excluded.snapshot_signal_id,
+          window_hi_pk = excluded.window_hi_pk
         """,
         (
             stream_key,
@@ -211,6 +225,8 @@ def _write_watermark(
             resume_blob,
             apply_seq,
             window_id,
+            snapshot_signal_id,
+            window_hi_pk,
         ),
     )
 
@@ -362,7 +378,18 @@ def _sqlite_apply_member(
     window_id = next_dest_window_id(
         extract_snapshot_window_id(change.resume_token), dest.window_id
     )
-    if action in {"already_committed", "stream_wins_skip", "window_closed_skip"}:
+    signal_id, hi_pk = next_dest_snapshot_progress(
+        incoming_signal_id=extract_snapshot_signal_id(change.resume_token),
+        dest_signal_id=dest.snapshot_signal_id,
+        incoming_last_pk=extract_snapshot_last_pk(change.resume_token),
+        dest_last_pk=dest.window_hi_pk,
+    )
+    if action in {
+        "already_committed",
+        "stream_wins_skip",
+        "window_closed_skip",
+        "chunk_closed_skip",
+    }:
         return EosApplyResult(
             status=action,
             committed_lsn=dest.committed_lsn,
@@ -374,6 +401,8 @@ def _sqlite_apply_member(
             apply_checksum=dest.apply_checksum,
             apply_seq=dest.apply_seq,
             window_id=dest.window_id,
+            snapshot_signal_id=dest.snapshot_signal_id,
+            window_hi_pk=dest.window_hi_pk,
         )
     dest_seq = planned_apply_seq(dest.apply_seq)
     if action == "handoff_phase":
@@ -392,6 +421,8 @@ def _sqlite_apply_member(
             resume_blob=resume_blob or dest.resume_blob,
             apply_seq=dest_seq,
             window_id=window_id,
+            snapshot_signal_id=signal_id,
+            window_hi_pk=hi_pk,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -404,10 +435,23 @@ def _sqlite_apply_member(
             apply_checksum=incoming_checksum or dest.apply_checksum,
             apply_seq=dest_seq,
             window_id=window_id,
+            snapshot_signal_id=signal_id,
+            window_hi_pk=hi_pk,
         )
 
     rows_written = 0
     records = list(change.inserts or []) + list(change.updates or [])
+    inc_sig = extract_snapshot_signal_id(change.resume_token)
+    if (
+        records
+        and dest.snapshot_signal_id
+        and dest.window_hi_pk
+        and inc_sig
+        and inc_sig == dest.snapshot_signal_id
+    ):
+        records = filter_snapshot_rows_after_dest_hi(
+            records, pk_cols=pk_target_cols, dest_last_pk=dest.window_hi_pk
+        )
     if records:
         dest_docs = _sqlite_load_dest_rows(
             cur,
@@ -470,6 +514,8 @@ def _sqlite_apply_member(
         resume_blob=resume_blob,
         apply_seq=dest_seq,
         window_id=window_id,
+        snapshot_signal_id=signal_id,
+        window_hi_pk=hi_pk,
     )
     if crash_after == "after_watermark_before_commit":
         from services.cdc_exactly_once import EosCrash
@@ -487,6 +533,8 @@ def _sqlite_apply_member(
         apply_checksum=incoming_checksum,
         apply_seq=dest_seq,
         window_id=window_id,
+        snapshot_signal_id=signal_id,
+        window_hi_pk=hi_pk,
     )
 
 
@@ -820,6 +868,8 @@ def open_eos_session(
                     resume_blob=view.resume_blob,
                     apply_seq=view.apply_seq,
                     window_id=view.window_id,
+                    snapshot_signal_id=view.snapshot_signal_id,
+                    window_hi_pk=view.window_hi_pk,
                 )
             conn.execute("COMMIT")
             return opened

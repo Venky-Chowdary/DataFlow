@@ -134,6 +134,30 @@ def _column_order_keys(values: list[str]) -> list[Any]:
         return list(values)
 
 
+def compare_keyset_bookmark(left: str, right: str) -> int | None:
+    """Compare two keyset bookmarks in column order.
+
+    Numeric parts use Decimal (so ``99`` < ``200``). Mixed/non-numeric parts
+    use text. Returns ``None`` when arity differs or either side is empty —
+    callers must not invent ``<=`` / skip from incomparable bookmarks.
+    """
+    a = "" if left is None else str(left)
+    b = "" if right is None else str(right)
+    if not a or not b:
+        return None
+    left_parts = a.split(KEYSET_SEP) if KEYSET_SEP in a else [a]
+    right_parts = b.split(KEYSET_SEP) if KEYSET_SEP in b else [b]
+    if len(left_parts) != len(right_parts):
+        return None
+    for lp, rp in zip(left_parts, right_parts):
+        keys = _column_order_keys([lp, rp])
+        if keys[0] < keys[1]:
+            return -1
+        if keys[0] > keys[1]:
+            return 1
+    return 0
+
+
 def max_keyset_bookmark(
     rows: list[list[Any]],
     headers: list[str],

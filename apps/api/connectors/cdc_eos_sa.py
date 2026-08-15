@@ -29,10 +29,14 @@ from services.cdc_exactly_once import (
     decide_from_view,
     encode_resume_blob,
     extract_cdc_phase,
+    extract_snapshot_last_pk,
+    extract_snapshot_signal_id,
     extract_snapshot_window_id,
+    filter_snapshot_rows_after_dest_hi,
     incoming_pk_keys,
     is_incremental_snapshot_token,
     load_reduce_into_dest,
+    next_dest_snapshot_progress,
     next_dest_window_id,
     next_handoff_phase,
     plan_open_session,
@@ -153,7 +157,7 @@ def _wm_ddl(dialect: str) -> str:
 def _lock_watermark_sql(dialect: str, *, with_seq: bool = True) -> str:
     cols = "committed_lsn, epoch, fence_epoch, phase, apply_checksum"
     if with_seq:
-        cols = f"{cols}, resume_blob, apply_seq, window_id"
+        cols = f"{cols}, resume_blob, apply_seq, window_id, snapshot_signal_id, window_hi_pk"
     if dialect in _FOR_UPDATE_LIKE:
         return (
             f"SELECT {cols} FROM {WATERMARK_TABLE} "
@@ -191,6 +195,8 @@ def _row_to_wm(locked: Any) -> DestWmView:
         resume_blob=str(locked[5] or "") if len(locked) > 5 else "",
         apply_seq=int(locked[6] or 0) if len(locked) > 6 else 0,
         window_id=str(locked[7] or "") if len(locked) > 7 else "",
+        snapshot_signal_id=str(locked[8] or "") if len(locked) > 8 else "",
+        window_hi_pk=str(locked[9] or "") if len(locked) > 9 else "",
     )
 
 
@@ -304,6 +310,16 @@ def _ensure_wm_columns(conn: Any, dialect: str) -> None:
         ("window_id", "TEXT" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
             "NVARCHAR(256)" if dialect in _MSSQL_LIKE else (
                 "VARCHAR(256)" if dialect in _MYSQL_LIKE else "VARCHAR2(256)"
+            )
+        )),
+        ("snapshot_signal_id", "TEXT" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
+            "NVARCHAR(256)" if dialect in _MSSQL_LIKE else (
+                "VARCHAR(256)" if dialect in _MYSQL_LIKE else "VARCHAR2(256)"
+            )
+        )),
+        ("window_hi_pk", "TEXT" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
+            "NVARCHAR(512)" if dialect in _MSSQL_LIKE else (
+                "VARCHAR(512)" if dialect in _MYSQL_LIKE else "VARCHAR2(512)"
             )
         )),
     ]
@@ -471,6 +487,8 @@ def _sa_write_watermark(
     resume_blob: str = "",
     apply_seq: int = 0,
     window_id: str = "",
+    snapshot_signal_id: str = "",
+    window_hi_pk: str = "",
 ) -> None:
     conn.execute(
         text(_upsert_watermark_sql(dialect)),
@@ -487,13 +505,21 @@ def _sa_write_watermark(
             "ck": apply_checksum,
         },
     )
-    if resume_blob or apply_seq or window_id:
+    if resume_blob or apply_seq or window_id or snapshot_signal_id or window_hi_pk:
         conn.execute(
             text(
                 f"UPDATE {WATERMARK_TABLE} SET resume_blob = :rb, apply_seq = :seq, "
-                f"window_id = :wid WHERE stream_key = :k"
+                f"window_id = :wid, snapshot_signal_id = :sid, window_hi_pk = :hi "
+                f"WHERE stream_key = :k"
             ),
-            {"rb": resume_blob, "seq": apply_seq, "wid": window_id, "k": stream_key},
+            {
+                "rb": resume_blob,
+                "seq": apply_seq,
+                "wid": window_id,
+                "sid": snapshot_signal_id,
+                "hi": window_hi_pk,
+                "k": stream_key,
+            },
         )
 
 
@@ -561,7 +587,18 @@ def _sa_apply_member(
     window_id = next_dest_window_id(
         extract_snapshot_window_id(change.resume_token), dest.window_id
     )
-    if action in {"already_committed", "stream_wins_skip", "window_closed_skip"}:
+    signal_id, hi_pk = next_dest_snapshot_progress(
+        incoming_signal_id=extract_snapshot_signal_id(change.resume_token),
+        dest_signal_id=dest.snapshot_signal_id,
+        incoming_last_pk=extract_snapshot_last_pk(change.resume_token),
+        dest_last_pk=dest.window_hi_pk,
+    )
+    if action in {
+        "already_committed",
+        "stream_wins_skip",
+        "window_closed_skip",
+        "chunk_closed_skip",
+    }:
         return EosApplyResult(
             status=action,
             committed_lsn=dest.committed_lsn,
@@ -573,6 +610,8 @@ def _sa_apply_member(
             apply_checksum=dest.apply_checksum,
             apply_seq=dest.apply_seq,
             window_id=dest.window_id,
+            snapshot_signal_id=dest.snapshot_signal_id,
+            window_hi_pk=dest.window_hi_pk,
         )
     dest_seq = planned_apply_seq(dest.apply_seq)
     if action == "handoff_phase":
@@ -592,6 +631,8 @@ def _sa_apply_member(
             resume_blob=resume_blob or dest.resume_blob,
             apply_seq=dest_seq,
             window_id=window_id,
+            snapshot_signal_id=signal_id,
+            window_hi_pk=hi_pk,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -604,10 +645,23 @@ def _sa_apply_member(
             apply_checksum=incoming_checksum or dest.apply_checksum,
             apply_seq=dest_seq,
             window_id=window_id,
+            snapshot_signal_id=signal_id,
+            window_hi_pk=hi_pk,
         )
     table_q = _q(dest_table)
     rows_written = 0
     records = list(change.inserts or []) + list(change.updates or [])
+    inc_sig = extract_snapshot_signal_id(change.resume_token)
+    if (
+        records
+        and dest.snapshot_signal_id
+        and dest.window_hi_pk
+        and inc_sig
+        and inc_sig == dest.snapshot_signal_id
+    ):
+        records = filter_snapshot_rows_after_dest_hi(
+            records, pk_cols=pk_target_cols, dest_last_pk=dest.window_hi_pk
+        )
     if records:
         dest_docs = _sa_load_dest_rows(
             conn,
@@ -665,6 +719,8 @@ def _sa_apply_member(
         resume_blob=resume_blob,
         apply_seq=dest_seq,
         window_id=window_id,
+        snapshot_signal_id=signal_id,
+        window_hi_pk=hi_pk,
     )
     if crash_after == "after_watermark_before_commit":
         raise EosCrash(crash_after)
@@ -680,6 +736,8 @@ def _sa_apply_member(
         apply_checksum=incoming_checksum,
         apply_seq=dest_seq,
         window_id=window_id,
+        snapshot_signal_id=signal_id,
+        window_hi_pk=hi_pk,
     )
 
 
@@ -895,6 +953,8 @@ def open_eos_sa_session(
                     resume_blob=view.resume_blob,
                     apply_seq=view.apply_seq,
                     window_id=view.window_id,
+                    snapshot_signal_id=view.snapshot_signal_id,
+                    window_hi_pk=view.window_hi_pk,
                 )
             return opened
     finally:
@@ -918,7 +978,8 @@ def sa_dest_watermark_view(
                 row = conn.execute(
                     text(
                         f"SELECT committed_lsn, epoch, fence_epoch, phase, "
-                        f"apply_checksum, resume_blob, apply_seq, window_id "
+                        f"apply_checksum, resume_blob, apply_seq, window_id, "
+                        f"snapshot_signal_id, window_hi_pk "
                         f"FROM {WATERMARK_TABLE} WHERE stream_key = :k"
                     ),
                     {"k": stream_key},

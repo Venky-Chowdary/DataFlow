@@ -53,7 +53,14 @@ commit-on-restore, plus Debezium-class snapshot/stream LSN compare:
     is ``window_closed_skip`` — Debezium's buffer is in-memory and lost.
 18. Quarantine replay is dest-LSN gated. Dest already at or past the
     quarantined LSN refuses overwrite (checksum conflict is inspect-only).
-19. COMMIT dest. Persist job watermark and ack the source **after** verify.
+19. Dest-owned snapshot ``signal_id`` + keyset ``last_pk``: a closed PK
+    range is dest SSOT. Crash re-SELECT of the same signal with a **new**
+    window_id cannot re-apply dest-closed keys. Debezium stores last_pk
+    in connector offsets (job wipe re-snapshots). We never regress dest hi.
+20. Dest Open injects dest ``signal_id`` + ``last_pk`` into the job resume
+    and fast-forwards the incremental-snapshot signal store so the next
+    chunk SELECT seeks past dest hi (Debezium last_pk is offset-only).
+21. COMMIT dest. Persist job watermark and ack the source **after** verify.
 
 Crash before dest COMMIT → dest rolls back; source not acked; retry.
 Crash after dest COMMIT → dest watermark wins; redelivery is a no-op.
@@ -139,7 +146,7 @@ REASON_UNVERIFIED = "exactly_once_dest_commit_unverified"
 REASON_STALE_SEQ = "exactly_once_stale_apply_seq"
 REASON_STALE_REPLAY = "exactly_once_quarantine_replay_stale_dest"
 REASON_OK = "dest_owned_watermark_txn"
-PROTOCOL = "dest_authoritative_windowed_bundle"
+PROTOCOL = "dest_authoritative_keyset_bundle"
 
 
 class ExactlyOnceRouteError(ValueError):
@@ -216,6 +223,8 @@ class EosApplyResult:
     apply_checksum: str = ""
     apply_seq: int = 0
     window_id: str = ""
+    snapshot_signal_id: str = ""
+    window_hi_pk: str = ""
 
     def to_dest_summary(self) -> dict[str, Any]:
         return {
@@ -237,6 +246,8 @@ class EosApplyResult:
             "eos_apply_checksum": self.apply_checksum,
             "eos_apply_seq": self.apply_seq,
             "eos_window_id": self.window_id,
+            "eos_snapshot_signal_id": self.snapshot_signal_id,
+            "eos_window_hi_pk": self.window_hi_pk,
             "rows_written": self.rows_written,
         }
 
@@ -463,6 +474,7 @@ def plan_open_session(
     resume, _proof = clamp_job_resume_to_dest(
         job_resume, dest.committed_lsn, dest.resume_blob or None
     )
+    resume = merge_dest_snapshot_progress(resume, dest)
     return EosOpenResult(
         resume=resume,
         dest_lsn=dest.committed_lsn,
@@ -644,6 +656,8 @@ def dest_view_from_job_summary(job: dict[str, Any] | None) -> DestWmView:
         apply_checksum=str(summary.get("eos_apply_checksum") or ""),
         apply_seq=int(summary.get("eos_apply_seq") or 0),
         window_id=str(summary.get("eos_window_id") or ""),
+        snapshot_signal_id=str(summary.get("eos_snapshot_signal_id") or ""),
+        window_hi_pk=str(summary.get("eos_window_hi_pk") or ""),
         fence_epoch=int(summary.get("eos_fence_epoch") or 0),
         phase=str(summary.get("eos_phase") or ""),
     )
@@ -797,6 +811,188 @@ def dest_owned_window_closed(
 
 def next_dest_window_id(incoming_window_id: str, dest_window_id: str) -> str:
     return (incoming_window_id or "").strip() or (dest_window_id or "").strip()
+
+
+def extract_snapshot_signal_id(resume_token: Any) -> str:
+    if isinstance(resume_token, dict):
+        if resume_token.get("signal_id"):
+            return str(resume_token.get("signal_id") or "").strip()
+        nested = resume_token.get("snapshot_window")
+        if isinstance(nested, dict) and nested.get("signal_id"):
+            return str(nested.get("signal_id") or "").strip()
+        token = resume_token.get("token")
+        if isinstance(token, (dict, str)) and token:
+            return extract_snapshot_signal_id(token)
+        return ""
+    text = str(resume_token or "")
+    if "signal_id=" in text.lower():
+        for part in text.replace("|", " ").split():
+            if part.lower().startswith("signal_id="):
+                return part.split("=", 1)[-1].strip()
+    return ""
+
+
+def extract_snapshot_last_pk(resume_token: Any) -> str:
+    if isinstance(resume_token, dict):
+        if resume_token.get("last_pk") not in (None, ""):
+            return str(resume_token.get("last_pk") or "").strip()
+        nested = resume_token.get("snapshot_window")
+        if isinstance(nested, dict) and nested.get("last_pk") not in (None, ""):
+            return str(nested.get("last_pk") or "").strip()
+        token = resume_token.get("token")
+        if isinstance(token, (dict, str)) and token:
+            return extract_snapshot_last_pk(token)
+        return ""
+    text = str(resume_token or "")
+    if "last_pk=" in text.lower():
+        for part in text.replace("|", " ").split():
+            if part.lower().startswith("last_pk="):
+                return part.split("=", 1)[-1].strip()
+    return ""
+
+
+def dest_owned_chunk_closed(
+    *,
+    incoming_signal_id: str,
+    dest_signal_id: str,
+    incoming_last_pk: str,
+    dest_last_pk: str,
+) -> bool:
+    """True when dest already closed this signal through incoming last_pk.
+
+    ``window_id`` is unique per chunk attempt. A crash re-SELECTs the same
+    PK range with a new window_id. Dest ``signal_id`` + keyset hi is SSOT
+    (Debezium last_pk lives in connector offsets — job wipe re-snapshots).
+    Incomparable bookmarks do not invent skip.
+    """
+    from services.keyset_pagination import compare_keyset_bookmark
+
+    inc_s = (incoming_signal_id or "").strip()
+    dest_s = (dest_signal_id or "").strip()
+    if not inc_s or not dest_s or inc_s != dest_s:
+        return False
+    cmp = compare_keyset_bookmark(incoming_last_pk, dest_last_pk)
+    return cmp is not None and cmp <= 0
+
+
+def next_dest_snapshot_progress(
+    *,
+    incoming_signal_id: str,
+    dest_signal_id: str,
+    incoming_last_pk: str,
+    dest_last_pk: str,
+) -> tuple[str, str]:
+    """Advance dest keyset hi. Never regress. New signal replaces dest progress."""
+    from services.keyset_pagination import compare_keyset_bookmark
+
+    inc_s = (incoming_signal_id or "").strip()
+    dest_s = (dest_signal_id or "").strip()
+    inc_pk = (incoming_last_pk or "").strip()
+    dest_pk = (dest_last_pk or "").strip()
+    if inc_s and dest_s and inc_s != dest_s:
+        return inc_s, inc_pk
+    sig = inc_s or dest_s
+    if inc_pk and dest_pk:
+        cmp = compare_keyset_bookmark(inc_pk, dest_pk)
+        if cmp is None:
+            return sig, dest_pk
+        return sig, inc_pk if cmp >= 0 else dest_pk
+    return sig, inc_pk or dest_pk
+
+
+def filter_snapshot_rows_after_dest_hi(
+    rows: list[dict[str, Any]],
+    *,
+    pk_cols: list[str],
+    dest_last_pk: str,
+) -> list[dict[str, Any]]:
+    """Keep rows with PK ``>`` dest hi. Unkeyed and incomparable rows are kept."""
+    from services.cdc_snapshot_window import _pk_value
+    from services.keyset_pagination import compare_keyset_bookmark
+
+    hi = (dest_last_pk or "").strip()
+    if not hi or not pk_cols:
+        return list(rows)
+    out: list[dict[str, Any]] = []
+    for rec in rows:
+        if not isinstance(rec, dict):
+            continue
+        key = _pk_value(rec, pk_cols)
+        if not key:
+            out.append(rec)
+            continue
+        cmp = compare_keyset_bookmark(str(key), hi)
+        if cmp is None or cmp > 0:
+            out.append(rec)
+    return out
+
+
+def merge_dest_snapshot_progress(job_resume: Any, dest: DestWmView) -> Any:
+    """Open: dest keyset hi wins over a job signal that is behind dest."""
+    if not dest.snapshot_signal_id or not dest.window_hi_pk:
+        return job_resume
+    if not isinstance(job_resume, dict):
+        return {
+            "signal_id": dest.snapshot_signal_id,
+            "last_pk": dest.window_hi_pk,
+            "lsn": dest.committed_lsn,
+        }
+    job_sig = extract_snapshot_signal_id(job_resume)
+    if job_sig and job_sig != dest.snapshot_signal_id:
+        return job_resume
+    out = dict(job_resume)
+    out["signal_id"] = dest.snapshot_signal_id
+    out["last_pk"] = dest.window_hi_pk
+    return out
+
+
+def apply_dest_keyset_to_signal(sig: Any, dest_resume: Any) -> Any:
+    """Fast-forward signal ``last_pk`` from dest Open. Never regress or invent.
+
+    Same signal only. Incomparable bookmarks leave the signal unchanged
+    so a composite/text mismatch cannot skip unread keys.
+    """
+    dest_sig = extract_snapshot_signal_id(dest_resume)
+    dest_pk = extract_snapshot_last_pk(dest_resume)
+    if not dest_sig or not dest_pk:
+        return sig
+    sig_id = str(getattr(sig, "id", "") or "")
+    if dest_sig != sig_id:
+        return sig
+    job_pk = str(getattr(sig, "last_pk", "") or "")
+    if job_pk:
+        from services.keyset_pagination import compare_keyset_bookmark
+
+        cmp = compare_keyset_bookmark(job_pk, dest_pk)
+        if cmp is None or cmp >= 0:
+            return sig
+    from dataclasses import replace
+
+    try:
+        return replace(sig, last_pk=dest_pk)
+    except TypeError:
+        try:
+            setattr(sig, "last_pk", dest_pk)
+        except Exception:
+            return sig
+        return sig
+
+
+def persist_dest_keyset_on_signal(dest_resume: Any) -> Any:
+    """Write dest Open keyset onto the matching snapshot signal (reader SSOT)."""
+    sig_id = extract_snapshot_signal_id(dest_resume)
+    dest_pk = extract_snapshot_last_pk(dest_resume)
+    if not sig_id or not dest_pk:
+        return None
+    from services.cdc_incremental_snapshot import get_signal, update_signal
+
+    sig = get_signal(sig_id)
+    if sig is None:
+        return None
+    advanced = apply_dest_keyset_to_signal(sig, dest_resume)
+    if (advanced.last_pk or "") != (sig.last_pk or ""):
+        return update_signal(sig.id, last_pk=advanced.last_pk)
+    return sig
 
 
 def dest_owned_stream_wins(
@@ -982,6 +1178,8 @@ class DestWmView:
     resume_blob: str = ""
     apply_seq: int = 0
     window_id: str = ""
+    snapshot_signal_id: str = ""
+    window_hi_pk: str = ""
 
 
 def decide_eos_apply(
@@ -998,12 +1196,16 @@ def decide_eos_apply(
     incremental_snapshot: bool = False,
     incoming_window_id: str = "",
     dest_window_id: str = "",
+    incoming_signal_id: str = "",
+    dest_signal_id: str = "",
+    incoming_last_pk: str = "",
+    dest_last_pk: str = "",
     change: Any = None,
 ) -> tuple[str, int]:
     """Return ``(action, next_fence)``.
 
     Actions: apply | already_committed | handoff_phase | stream_wins_skip
-    | window_closed_skip
+    | window_closed_skip | chunk_closed_skip
     """
     assert_writer_fence(incoming_fence, dest_fence)
     fence = next_dest_fence(incoming_fence, dest_fence)
@@ -1012,6 +1214,13 @@ def decide_eos_apply(
         dest_window_id=dest_window_id,
     ):
         return "window_closed_skip", fence
+    if dest_owned_chunk_closed(
+        incoming_signal_id=incoming_signal_id,
+        dest_signal_id=dest_signal_id,
+        incoming_last_pk=incoming_last_pk,
+        dest_last_pk=dest_last_pk,
+    ):
+        return "chunk_closed_skip", fence
     if dest_owned_stream_wins(
         incoming_phase=incoming_phase,
         dest_phase=dest_phase,
@@ -1062,6 +1271,14 @@ def decide_from_view(
             getattr(change, "resume_token", None)
         ),
         dest_window_id=dest.window_id,
+        incoming_signal_id=extract_snapshot_signal_id(
+            getattr(change, "resume_token", None)
+        ),
+        dest_signal_id=dest.snapshot_signal_id,
+        incoming_last_pk=extract_snapshot_last_pk(
+            getattr(change, "resume_token", None)
+        ),
+        dest_last_pk=dest.window_hi_pk,
         change=change,
     )
 
@@ -1107,6 +1324,8 @@ def classify_exactly_once_route(
         "Post-commit dest verify before source ack — dest must show the LSN.",
         "apply_seq is dest-monotonic.",
         "Dest-owned incremental-snapshot window_id: closed windows are not re-applied.",
+        "Dest-owned snapshot signal_id + keyset last_pk: dest-closed PK ranges are not re-applied.",
+        "Dest Open fast-forwards the incremental-snapshot signal last_pk so the reader does not re-SELECT dest-closed keys.",
         "Quarantine replay is dest-LSN gated — dest at or past that LSN refuses overwrite.",
         "Platform never claims all CDC is exactly-once.",
         "At-most-once is not offered (silent loss).",

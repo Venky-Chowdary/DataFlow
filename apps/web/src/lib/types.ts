@@ -221,6 +221,8 @@ export interface TransferJob {
   eos_apply_seq?: number | null;
   /** Dest-owned incremental-snapshot window id (Debezium DDD-3, dest-persisted). */
   eos_window_id?: string | null;
+  eos_snapshot_signal_id?: string | null;
+  eos_window_hi_pk?: string | null;
   /** SQL Server CDC TVF row_filter_option actually used (all / all update old / net). */
   cdc_row_filter?: string | null;
   replication_lag_bytes?: number | null;
