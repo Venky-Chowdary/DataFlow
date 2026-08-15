@@ -318,6 +318,7 @@ class SqlServerNativeCdc:
         self.snapshot_offset = int(state.get("offset") or 0)
         self.snapshot_last_pk = str(state.get("last_pk") or "")
         self.snapshot_table = str(state.get("table") or "")
+        self.resume_token = resume_token
         self._last_event_at: datetime | None = None
         self._last_schema_fingerprint: str = ""
         from services.cdc_schema_history import connection_fingerprint
@@ -834,8 +835,9 @@ class SqlServerNativeCdc:
         self.phase = "streaming"
         self.snapshot_offset = 0
         self.snapshot_last_pk = ""
+        self.resume_token = self._token(lsn=self.start_lsn, phase="streaming")
         yield ChangeBatch(
-            resume_token=self._token(lsn=self.start_lsn, phase="streaming"),
+            resume_token=self.resume_token,
             table=self.table,
         )
 
@@ -887,8 +889,9 @@ class SqlServerNativeCdc:
         self.phase = "streaming"
         self.snapshot_offset = 0
         self.snapshot_last_pk = ""
+        self.resume_token = self._token(lsn=self.start_lsn, phase="streaming")
         yield ChangeBatch(
-            resume_token=self._token(lsn=self.start_lsn, phase="streaming"),
+            resume_token=self.resume_token,
             ack_barrier=True,
         )
 

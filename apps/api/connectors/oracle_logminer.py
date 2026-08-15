@@ -461,6 +461,7 @@ class OracleLogMinerCdc:
         self.rs_id = str(state.get("rs_id") or "")
         self.ssn = int(state.get("ssn") or 0)
         self.phase = str(state.get("phase") or "initial")
+        self.resume_token = resume_token
         self._last_event_at: datetime | None = None
         from services.cdc_schema_history import connection_fingerprint
 

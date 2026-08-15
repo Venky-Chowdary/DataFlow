@@ -306,6 +306,7 @@ class PostgreSqlChangeStreamCdc:
         )
         self._resume_snapshot = phase == "snapshot"
         self.phase = phase if phase != "initial" else "snapshot"
+        self.resume_token = resume_token
         # Streaming resume must never recreate a missing/lost slot (silent WAL skip).
         self._resume_expected = bool(lsn) or phase == "streaming"
         self.output_plugin = output_plugin or self._select_plugin()
@@ -1174,8 +1175,9 @@ class PostgreSqlChangeStreamCdc:
         self.snapshot_last_pk = ""
         self.snapshot_table = ""
         self._resume_snapshot = False
+        self.resume_token = self._resume_token(phase="streaming")
         yield ChangeBatch(
-            resume_token=self._resume_token(phase="streaming"),
+            resume_token=self.resume_token,
             ack_barrier=True,
         )
 
