@@ -97,14 +97,9 @@ def stamp_bound_contract(
 
 def _assert_breaker_allows(contract_id: str) -> None:
     """Fail-fast OPEN breaker at enqueue — same rule as enforce_or_create_contract."""
-    store = get_contract_store()
-    breaker = store.get_breaker(contract_id)
-    if not breaker.allow():
-        raise ValueError(
-            f"Circuit breaker for contract {contract_id} is OPEN; "
-            f"reset it after you fix the violation, then re-run "
-            f"(current state: {breaker.state.value})"
-        )
+    from services.contract_store import assert_contract_breaker_allows
+
+    assert_contract_breaker_allows(contract_id)
 
 
 def enforce_bound_contract(

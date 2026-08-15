@@ -1844,7 +1844,15 @@ class DataPilotTools:
                 error="Which pipeline should I run? Give a schedule name or id.",
             )
         from .ack_ledger import get_ack_ledger
+        from services.schedule_store import assert_schedule_run_allowed
 
+        try:
+            bind = assert_schedule_run_allowed(sched)
+        except ValueError as exc:
+            return ToolResult(name="run_schedule_now", success=False, output=None, error=str(exc))
+
+        sync_mode = str(getattr(sched, "sync_mode", "") or "")
+        overwrite = sync_mode == "full_refresh_overwrite"
         preview = {
             "schedule_id": sched.id,
             "name": sched.name,
@@ -1852,7 +1860,8 @@ class DataPilotTools:
             "dest_connector_id": getattr(sched, "dest_connector_id", "") or "",
             "source_table": getattr(sched, "source_table", "") or "",
             "dest_table": getattr(sched, "dest_table", "") or "",
-            "sync_mode": getattr(sched, "sync_mode", "") or "",
+            "sync_mode": sync_mode,
+            **bind,
         }
         ack_id = get_ack_ledger().put(
             kind="run_schedule",
@@ -1868,6 +1877,7 @@ class DataPilotTools:
                 "name": sched.name,
                 "label": f"Run pipeline “{sched.name}” now",
                 "risk": "mutate",
+                "destructive": overwrite,
                 "requires_confirm": True,
                 "ack_id": ack_id,
                 "preview": preview,

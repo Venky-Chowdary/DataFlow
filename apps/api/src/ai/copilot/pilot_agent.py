@@ -236,6 +236,34 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_schedule_run(o: dict[str, Any]) -> str:
+    """Show the pipeline an operator has to sign off on: route, bind, breaker."""
+    preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
+    name = o.get("name") or preview.get("name") or "pipeline"
+    src = preview.get("source_table") or "?"
+    dst = preview.get("dest_table") or "?"
+    sync = preview.get("sync_mode") or ""
+    lines = [
+        f"Ready to run pipeline **{name}** — `{src}` → `{dst}`"
+        + (f" · sync `{sync}`" if sync else "")
+        + "."
+    ]
+    bound_id = str(preview.get("contract_id") or "").strip()
+    if bound_id:
+        lines.append(
+            f"• Bound contract `{bound_id}` — Confirm fails closed unless it is SIGNED."
+        )
+        breaker = str(preview.get("breaker_state") or "").strip()
+        if breaker:
+            lines.append(f"• Circuit breaker is **{breaker}**.")
+    if o.get("destructive") or sync == "full_refresh_overwrite":
+        lines.append("• **This overwrites the destination table.**")
+    lines.append(
+        "Confirm below to start an immediate run (does not change the regular cadence)."
+    )
+    return "\n".join(lines)
+
+
 def _render_aggregate(o: dict[str, Any]) -> str:
     """Report an exact aggregate: the number first, then the SQL that produced it."""
     metric = str(o.get("metric") or "count")
@@ -958,6 +986,7 @@ class DataPilotAgent:
                 "type": "run_schedule",
                 "label": out.get("label") or "Run pipeline now",
                 "risk": "mutate",
+                "destructive": bool(out.get("destructive")),
                 "payload": {
                     "ack_id": out.get("ack_id"),
                     "schedule_id": out.get("schedule_id"),
@@ -1772,10 +1801,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     f"last **{s.get('last_status') or 'never'}**."
                 )
             elif tr.name == "run_schedule_now" and tr.success:
-                parts.append(
-                    f"Ready to run pipeline **{tr.output.get('name')}**. "
-                    "Confirm below to start an immediate run (does not change the regular cadence)."
-                )
+                parts.append(_render_schedule_run(tr.output or {}))
             elif tr.name == "list_contracts" and tr.success:
                 rows = tr.output.get("contracts", [])
                 if rows:

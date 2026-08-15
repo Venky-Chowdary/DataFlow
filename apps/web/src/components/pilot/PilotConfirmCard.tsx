@@ -11,6 +11,13 @@
 
 import { Button } from "../ui/Button";
 import { contractBindFromPreview } from "../../lib/contractBind";
+import { breakerLabel } from "../../lib/contractBreakerUi";
+import {
+  isDestructiveSchedulePreview,
+  scheduleConfirmBind,
+  scheduleConfirmBlocksRun,
+  schedulePreviewFromPayload,
+} from "../../lib/pilotScheduleConfirm";
 import type {
   CopilotPendingAction,
   PilotGate,
@@ -238,6 +245,82 @@ function payloadDestructive(payload: Record<string, unknown> | undefined): boole
   return preview?.sync_mode === "full_refresh_overwrite";
 }
 
+function ScheduleBody({
+  action,
+  payload,
+}: {
+  action: CopilotPendingAction;
+  payload: Record<string, unknown> | undefined;
+}) {
+  const preview = schedulePreviewFromPayload(payload);
+  const bind = scheduleConfirmBind(preview);
+  const block = scheduleConfirmBlocksRun(preview);
+  const destructive = Boolean(
+    action.destructive || isDestructiveSchedulePreview(preview),
+  );
+  const source = preview.source_table || "—";
+  const destination = preview.dest_table || "—";
+
+  return (
+    <>
+      <div className="df2-pilot-confirm-route" aria-label="Pipeline route">
+        <div className="df2-pilot-confirm-end">
+          <span className="df2-pilot-confirm-end-label">From</span>
+          <strong>{source}</strong>
+        </div>
+        <span className="df2-pilot-confirm-arrow" aria-hidden>→</span>
+        <div className="df2-pilot-confirm-end">
+          <span className="df2-pilot-confirm-end-label">To</span>
+          <strong>{destination}</strong>
+        </div>
+      </div>
+
+      <dl className="df2-pilot-confirm-meta">
+        {preview.sync_mode ? (
+          <div>
+            <dt>Sync</dt>
+            <dd>
+              <code>{preview.sync_mode}</code>
+              {destructive ? (
+                <span className="df2-pilot-confirm-badge is-danger">overwrites destination</span>
+              ) : null}
+            </dd>
+          </div>
+        ) : null}
+        {bind.contractId ? (
+          <div>
+            <dt>Contract</dt>
+            <dd>
+              <code>{bind.contractId}</code>
+              {bind.requireSigned
+                ? " · Confirm fails closed unless SIGNED"
+                : null}
+              {bind.breakerState ? (
+                <>
+                  {" · "}
+                  {breakerLabel(bind.breakerState) || bind.breakerState}
+                </>
+              ) : null}
+            </dd>
+          </div>
+        ) : null}
+      </dl>
+
+      {block ? (
+        <p className="df2-pilot-confirm-danger" role="alert">{block}</p>
+      ) : destructive ? (
+        <p className="df2-pilot-confirm-danger" role="alert">
+          This overwrites the destination table. Nothing moves until you confirm.
+        </p>
+      ) : (
+        <p className="df2-pilot-confirm-muted">
+          Immediate run only — the regular cadence does not change. Nothing moves until you confirm.
+        </p>
+      )}
+    </>
+  );
+}
+
 function ConnectorBody({ payload }: { payload: Record<string, unknown> | undefined }) {
   const preview = (payload?.preview && typeof payload.preview === "object"
     ? payload.preview
@@ -275,14 +358,18 @@ function ConnectorBody({ payload }: { payload: Record<string, unknown> | undefin
 export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
   const isTransfer = action.type === "start_transfer";
   const isConnector = action.type === "create_connector";
+  const isSchedule = action.type === "run_schedule";
   const plan = isTransfer ? asPlan(action.payload) : null;
   const preview = isTransfer ? asPreview(action.payload) : null;
+  const schedulePreview = isSchedule ? schedulePreviewFromPayload(action.payload) : null;
+  const scheduleBlock = schedulePreview ? scheduleConfirmBlocksRun(schedulePreview) : "";
   const destructive = Boolean(
     action.destructive
     || (isTransfer && (
       preview?.sync_mode === "full_refresh_overwrite"
       || payloadDestructive(action.payload)
-    )),
+    ))
+    || (isSchedule && schedulePreview && isDestructiveSchedulePreview(schedulePreview)),
   );
 
   return (
@@ -293,13 +380,21 @@ export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
     >
       <div className="df2-pilot-confirm-head">
         <span className="df2-pilot-confirm-kicker">
-          {isTransfer ? "Transfer ready to run" : isConnector ? "Save connector" : "Needs your confirmation"}
+          {isTransfer
+            ? "Transfer ready to run"
+            : isSchedule
+              ? "Pipeline ready to run"
+              : isConnector
+                ? "Save connector"
+                : "Needs your confirmation"}
         </span>
         <strong className="df2-pilot-confirm-title">{action.label || action.type}</strong>
       </div>
 
       {isTransfer ? (
         <TransferBody action={action} plan={plan} preview={preview} />
+      ) : isSchedule ? (
+        <ScheduleBody action={action} payload={action.payload} />
       ) : isConnector ? (
         <ConnectorBody payload={action.payload} />
       ) : (
@@ -314,9 +409,16 @@ export function PilotConfirmCard({ action, busy, onConfirm, onCancel }: Props) {
           size="sm"
           loading={busy}
           loadingLabel="Starting…"
+          disabled={Boolean(scheduleBlock)}
           onClick={onConfirm}
         >
-          {destructive ? "Overwrite & run" : isTransfer ? "Run transfer" : "Confirm"}
+          {destructive
+            ? "Overwrite & run"
+            : isTransfer
+              ? "Run transfer"
+              : isSchedule
+                ? "Run pipeline"
+                : "Confirm"}
         </Button>
         <Button variant="ghost" size="sm" disabled={busy} onClick={onCancel}>
           Cancel

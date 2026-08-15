@@ -467,6 +467,33 @@ def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
         )
 
 
+def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
+    """Fail-closed SIGNED + breaker for a scheduled run. Returns bind preview.
+
+    Cron, Pilot staging, and Pilot Confirm share this check. An unbound
+    schedule returns ``{}`` so enforce stays unset (same as Studio).
+    """
+    cid = (getattr(sched, "contract_id", None) or "").strip()
+    require = bool(getattr(sched, "require_signed_contract", False))
+    if cid or require:
+        assert_signed_contract(cid, require_signed=require)
+    if not cid:
+        return {}
+    try:
+        from services.contract_store import assert_contract_breaker_allows, get_contract_store
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import assert_contract_breaker_allows, get_contract_store
+
+    assert_contract_breaker_allows(cid)
+    breaker = get_contract_store().get_breaker(cid)
+    return {
+        "contract_id": cid,
+        "require_signed_contract": require,
+        "enforce_contract": True,
+        "breaker_state": getattr(breaker.state, "value", str(breaker.state)),
+    }
+
+
 def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: str) -> None:
     """Refuse CDC/SCD2/mirror on a persisted CALL/SELECT extract."""
     from services.procedure_source import callable_sync_refusal, source_read_mode_of

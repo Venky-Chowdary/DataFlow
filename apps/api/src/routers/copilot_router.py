@@ -252,6 +252,13 @@ async def copilot_confirm(request: ConfirmActionRequest):
             if not sched:
                 ledger.release_claim(ack_id)
                 raise HTTPException(status_code=404, detail="Schedule not found")
+            try:
+                from services.schedule_store import assert_schedule_run_allowed
+
+                assert_schedule_run_allowed(sched)
+            except ValueError as exc:
+                ledger.release_claim(ack_id)
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             job_id = _run_schedule(schedule_id)
             if not job_id:
                 ledger.release_claim(ack_id)

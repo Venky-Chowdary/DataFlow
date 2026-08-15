@@ -181,3 +181,17 @@ def reset_contract_store() -> None:
     """Reset the singleton store (useful in tests)."""
     global _store_instance
     _store_instance = None
+
+
+def assert_contract_breaker_allows(contract_id: str) -> None:
+    """Fail-fast OPEN breaker — same rule as enqueue ``stamp_bound_contract``."""
+    cid = (contract_id or "").strip()
+    if not cid:
+        return
+    breaker = get_contract_store().get_breaker(cid)
+    if not breaker.allow():
+        raise ValueError(
+            f"Circuit breaker for contract {cid} is OPEN; "
+            f"reset it after you fix the violation, then re-run "
+            f"(current state: {breaker.state.value})"
+        )

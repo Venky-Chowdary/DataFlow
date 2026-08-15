@@ -256,12 +256,11 @@ def build_schedule_request(sched, src: dict, dst: dict):
             "validation_mode": sched.validation_mode,
         }]
 
-    contract_id = (getattr(sched, "contract_id", None) or "").strip()
-    require_signed = bool(getattr(sched, "require_signed_contract", False))
-    if contract_id or require_signed:
-        from services.schedule_store import assert_signed_contract
+    from services.schedule_store import assert_schedule_run_allowed
 
-        assert_signed_contract(contract_id, require_signed=require_signed)
+    bind = assert_schedule_run_allowed(sched)
+    contract_id = str(bind.get("contract_id") or "").strip()
+    require_signed = bool(bind.get("require_signed_contract", False))
 
     # Fail-closed: open CDC Map-review for this source pauses scheduled runs.
     sync_l = str(getattr(sched, "sync_mode", "") or "").strip().lower()
