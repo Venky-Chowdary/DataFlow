@@ -176,6 +176,15 @@ def test_oracle_resume_token_and_snapshot() -> None:
     assert "DF_RN" not in batches[0].inserts[0]
     assert decode_oracle_resume_token(batches[-1].resume_token)["scn"] == 9000
     assert decode_oracle_resume_token(batches[-1].resume_token)["phase"] == "streaming"
+    select_sql = [
+        str(c.args[0])
+        for c in cur.execute.call_args_list
+        if c.args and "SELECT" in str(c.args[0]).upper() and "FROM" in str(c.args[0]).upper()
+    ]
+    dump_sql = [s for s in select_sql if "V$DATABASE" not in s.upper()]
+    assert dump_sql
+    assert all("ROW_NUMBER" not in s.upper() for s in dump_sql)
+    assert all("OFFSET" not in s.upper() for s in dump_sql)
 
 
 def test_cdc_transfer_sqlserver_branch_end_to_end() -> None:

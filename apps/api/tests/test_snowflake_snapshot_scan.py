@@ -162,6 +162,7 @@ def test_warehouse_batch_readers_use_scan_when_state_provided():
         ("sqlserver", "connectors.sqlserver_reader.read_table_scan_batch"),
         ("oracle", "connectors.oracle_reader.read_table_scan_batch"),
         ("databricks", "connectors.generic_sql.read_table_scan_batch"),
+        ("sqlite", "connectors.sqlite_reader.read_table_scan_batch"),
     ):
         state: dict = {"marker": src}
         with patch(

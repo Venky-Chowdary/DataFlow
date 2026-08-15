@@ -428,6 +428,25 @@ def _read_batch_impl(
                 cursor_primary_key=cursor_primary_key,
                 cursor_key_columns=cursor_key_columns,
             )
+        if scan_state is not None and not cursor_column:
+            from connectors.sqlite_reader import read_table_scan_batch
+
+            return read_table_scan_batch(
+                host=cfg["host"],
+                port=0,
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", ""),
+                connection_string=cfg.get("connection_string", ""),
+                ssl=False,
+                table=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                scan_state=scan_state,
+            )
         from connectors.sqlite_reader import read_table_batch
 
         return read_table_batch(

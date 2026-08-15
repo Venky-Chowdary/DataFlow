@@ -152,3 +152,35 @@ def test_database_stream_stamps_precount(tmp_path: Path) -> None:
     )
 
     assert summary[PRECOUNT_KEY] == 1
+
+
+def test_database_stream_restores_precount_on_resume(tmp_path: Path) -> None:
+    """A mid-run COUNT includes rows already written — resume must restore dest-before."""
+    from services.checkpoint_service import Checkpoint
+
+    src_db = tmp_path / "src.db"
+    dst_db = tmp_path / "dst.db"
+    _seed(src_db, "people", [(1, "alice"), (2, "bob")])
+    _seed(dst_db, "people", [(7, "seed"), (1, "alice")])
+
+    source = EndpointConfig(
+        kind="database", format="sqlite", database=str(src_db), table="people"
+    )
+    cp = Checkpoint(
+        job_id="0" * 24,
+        offset=2,
+        chunk_index=1,
+        target_rows_before=1,
+    )
+    _, _, summary, _ = stream_database_transfer(
+        source,
+        _sqlite_dest(dst_db, "people"),
+        MAPPINGS,
+        SCHEMA,
+        sync_mode="full_refresh_append",
+        job_id="0" * 24,
+        checkpoint=cp,
+        checkpoint_service=CheckpointService(_FakeMongo()),
+    )
+
+    assert summary[PRECOUNT_KEY] == 1

@@ -189,19 +189,32 @@ class OracleFlashbackCdc:
                     cur.execute("SELECT current_scn FROM v$database")
                     head = cur.fetchone()
                     handoff_scn = int(head[0] or 0) if head else 0
-                    while True:
+                    from connectors.sql_snapshot_scan import fetch_scan_page
+
+                    # Fresh dump: one SELECT + fetchmany (Debezium-class).
+                    # Mid-snapshot resume still uses ROW_NUMBER so the offset
+                    # checkpoint stays authoritative.
+                    held_scan = offset == 0
+                    if held_scan:
                         cur.execute(
-                            f"""
-                            SELECT * FROM (
-                              SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.{pk}) AS df_rn
-                              FROM {qualified} t
-                            )
-                            WHERE df_rn > :off AND df_rn <= :lim
-                            """,  # nosec B608
-                            {"off": offset, "lim": offset + self.batch_size},
+                            f"SELECT * FROM {qualified} ORDER BY {pk}"  # nosec B608
                         )
+                    while True:
+                        if held_scan:
+                            rows = fetch_scan_page(cur, self.batch_size)
+                        else:
+                            cur.execute(
+                                f"""
+                                SELECT * FROM (
+                                  SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.{pk}) AS df_rn
+                                  FROM {qualified} t
+                                )
+                                WHERE df_rn > :off AND df_rn <= :lim
+                                """,  # nosec B608
+                                {"off": offset, "lim": offset + self.batch_size},
+                            )
+                            rows = cur.fetchall() or []
                         cols = [d[0] for d in (cur.description or [])]
-                        rows = cur.fetchall() or []
                         if not rows:
                             break
                         # Drop synthetic rn column

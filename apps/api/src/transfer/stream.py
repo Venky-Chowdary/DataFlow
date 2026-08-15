@@ -1266,9 +1266,19 @@ def _stream_database_transfer_impl(
     from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES as _SNAPSHOT_SCAN_SOURCES
 
     src_scan: dict[str, Any] = {}
+    # A held scan always starts at row 0. Resume must not rewrite the prefix
+    # the first probe would otherwise become. Keyset seek (after introspect)
+    # or OFFSET (legacy checkpoint) owns mid-run continuation.
+    _is_resume = bool(
+        checkpoint
+        and (
+            int(getattr(checkpoint, "offset", 0) or 0) > 0
+            or int(getattr(checkpoint, "chunk_index", 0) or 0) > 0
+        )
+    )
     _scan_kw: dict[str, Any] = (
         {"scan_state": src_scan}
-        if src_type in _SNAPSHOT_SCAN_SOURCES and not incremental
+        if src_type in _SNAPSHOT_SCAN_SOURCES and not incremental and not _is_resume
         else {}
     )
     probe, ddb_cursor = _unwrap_read(
@@ -1468,6 +1478,11 @@ def _stream_database_transfer_impl(
         rows_before = precount_table(dest_type, dest_cfg, dest_table)
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
+            checkpoint.target_rows_before = int(rows_before)
+    elif checkpoint.target_rows_before is not None:
+        # Resume: restore the first-pass dest-before. A live COUNT now includes
+        # rows this job already wrote and is not a pre-write cardinality.
+        dest_summary[PRECOUNT_KEY] = int(checkpoint.target_rows_before)
     keyed_census_acc = (
         KeyCensusAccumulator() if write_mode == "upsert" and pk_target_cols else None
     )
@@ -2382,6 +2397,8 @@ def _stream_database_transfer_impl(
         checkpoint.kafka_cursor = kafka_cursor
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
+        if dest_summary.get(PRECOUNT_KEY) is not None:
+            checkpoint.target_rows_before = int(dest_summary[PRECOUNT_KEY])
         checkpoint.chunk_total = chunks
         checkpoint.status = "running"
         # Fail-closed: no durable resume point ⇒ abort (do not keep writing).

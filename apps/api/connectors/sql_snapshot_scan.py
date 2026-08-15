@@ -25,6 +25,7 @@ SNAPSHOT_SCAN_SOURCES = frozenset(
         "sqlserver",
         "oracle",
         "databricks",
+        "sqlite",
     }
 )
 

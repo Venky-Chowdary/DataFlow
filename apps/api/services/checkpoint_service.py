@@ -94,6 +94,9 @@ class Checkpoint:
     #: How many rejection details were dropped once the sample cap was reached,
     #: so the UI can say "showing N of M" instead of implying the list is whole.
     rejected_details_truncated: int = 0
+    #: Pre-write destination COUNT from the first batch. Resume must restore
+    #: this — a mid-run COUNT is not a "before" and would invent a false delta.
+    target_rows_before: int | None = None
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -154,6 +157,7 @@ class Checkpoint:
             "coerced_null_rows": self.coerced_null_rows,
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
+            "target_rows_before": self.target_rows_before,
         }
 
     @classmethod

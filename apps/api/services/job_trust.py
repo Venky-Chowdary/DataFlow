@@ -62,6 +62,7 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
         "writer_ack",
         "sample",
         "write_pass_dest_readback",
+        "no_op_destination_unchanged",
         "none",
     }:
         return False

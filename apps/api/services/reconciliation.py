@@ -143,6 +143,19 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
 
+    if str(out.get("assurance_level") or "") == "no_op_destination_unchanged":
+        # Quiet incremental poll — dest-before equals dest-after. Digests from
+        # a prior write-pass must not upgrade this to full_checksum.
+        out["phase"] = "post_write_no_op"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = "no_op_destination_unchanged"
+        out["assurance_level"] = "no_op_destination_unchanged"
+        out["migration_proven"] = False
+        out["population_proof"] = False
+        out["checksum_match"] = False
+        return out
+
     if is_unproven_export(out, msg):
         out["phase"] = "post_write_skipped"
         out["post_write_pending"] = False
