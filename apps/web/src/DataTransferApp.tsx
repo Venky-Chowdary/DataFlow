@@ -1000,6 +1000,11 @@ function DataTransferAppInner() {
             writePublicHash("home", true);
             setStage("landing");
           }}
+          onLegal={(route) => {
+            setPublicRoute(route);
+            writePublicHash(route);
+            setStage("landing");
+          }}
         />
       )}
 

@@ -803,11 +803,21 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
           <nav className="lp-mkt-legal-nav" aria-label="On this page">
             <h2>On this page</h2>
             <ul>
-              {blocks.map((b) => (
-                <li key={b.h}>
-                  <a href={`#${b.h.toLowerCase().replace(/\s+/g, "-")}`}>{b.h}</a>
-                </li>
-              ))}
+              {blocks.map((b) => {
+                const id = b.h.toLowerCase().replace(/\s+/g, "-");
+                return (
+                  <li key={b.h}>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+                      }}
+                    >
+                      {b.h}
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </nav>
           <div className="lp-mkt-legal-content">

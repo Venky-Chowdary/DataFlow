@@ -5,11 +5,13 @@ import { useToast } from "../components/Toast";
 import { fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
 import { writeSession } from "../lib/session";
 import { Screen } from "../lib/types";
+import type { PublicRoute } from "../lib/publicNavigation";
 
 interface LoginPageProps {
   target: Screen;
   onAuthenticated: (email: string) => void;
   onBack: () => void;
+  onLegal?: (route: Extract<PublicRoute, "privacy" | "terms">) => void;
 }
 
 function isValidEmail(value: string) {
@@ -31,7 +33,7 @@ const TRUST_METRICS = [
   { value: "Σ", label: "Checksum proof" },
 ];
 
-export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
+export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPageProps) {
   const { toast } = useToast();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -234,29 +236,12 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
 
         <div className="lp-login-auth-inner">
             <div className="lp-login-auth-card">
-            <div className="lp-login-auth-banner" aria-hidden>
-              <span className="lp-login-auth-banner-glow" />
-              <span className="lp-login-auth-banner-path" />
-            </div>
-
-            <div className="lp-login-auth-mark" aria-hidden>
-              <BrandWordmark markSize={40} word={false} title="" />
-            </div>
-
             <div className="lp-login-auth-head">
               <p className="lp-login-auth-kicker">Secure workspace access</p>
               <h2 id="login-form-title">Welcome back</h2>
               <p className="lp-login-auth-sub">
-                Sign in to open <strong>{targetLabel}</strong> with the same governed path —
-                map, preflight, prove.
+                Sign in to open <strong>{targetLabel}</strong> — same Map → G1–G9 → prove path.
               </p>
-              <div className="lp-login-auth-steps" aria-hidden>
-                <span>Map</span>
-                <i />
-                <span>Preflight</span>
-                <i />
-                <span>Prove</span>
-              </div>
             </div>
 
             {credentialError && (
@@ -402,6 +387,13 @@ export function LoginPage({ target, onAuthenticated, onBack }: LoginPageProps) {
                 <span>Sign-in audited</span>
               </li>
             </ul>
+            {onLegal ? (
+              <p className="lp-login-legal">
+                <button type="button" onClick={() => onLegal("privacy")}>Privacy</button>
+                <span aria-hidden>·</span>
+                <button type="button" onClick={() => onLegal("terms")}>Terms</button>
+              </p>
+            ) : null}
           </div>
         </div>
       </section>

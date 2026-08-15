@@ -29,17 +29,17 @@ const NEXT_STEPS = [
   {
     n: "01",
     title: "Discovery call — 30 minutes",
-    body: "A solutions engineer walks your source → dest, sync mode, and compliance constraints. No slideware-only call.",
+    body: "A solutions engineer walks your source → dest, sync mode, and compliance constraints.",
   },
   {
     n: "02",
     title: "Scoped pilot on your stack",
-    body: "Same Transfer Studio path: semantic map, G1–G9, write with quarantine. Dest table, dest query, or dest CALL — whichever you actually run.",
+    body: "Same Transfer Studio path: semantic map, G1–G9, write with quarantine.",
   },
   {
     n: "03",
     title: "Reconcile artifact you keep",
-    body: "Dest-engine COUNT and checksum MATCH (or a named mismatch). Finance can archive it. We do not call a green status “done.”",
+    body: "Dest-engine COUNT and checksum MATCH. We do not call a green status “done.”",
   },
 ];
 
@@ -147,15 +147,14 @@ export function ContactSalesPage({
 
   return (
     <div className="lp-mkt-page lp-sales">
-      <section className="lp-sales-hero" aria-label="Talk to sales">
-        <div className="lp-sales-hero-inner">
+      <section className="lp-sales-hero lp-sales-hero--split" aria-label="Talk to sales">
+        <div className="lp-mkt-wrap lp-sales-hero-inner">
           <div className="lp-sales-hero-copy">
             <p className="lp-sales-kicker">Contact sales</p>
-            <h1>Talk to a solutions engineer — not a drip campaign.</h1>
+            <h1>Talk to a solutions engineer.</h1>
             <p>
-              Informatica-class discovery, Fivetran-class clarity, Datawrap proof: we scope
-              Map → G1–G9 → quarantine → dest-engine checksum on <em>your</em> sources and
-              destinations. Reply within one business day.
+              Scope Map → G1–G9 → quarantine → dest-engine checksum on your sources and
+              destinations. Reply within one business day — not a drip campaign.
             </p>
             <ul className="lp-sales-hero-slas">
               <li>
@@ -175,22 +174,18 @@ export function ContactSalesPage({
                 <span>Checksum you can archive</span>
               </li>
             </ul>
+            <aside className="lp-sales-hero-aside" aria-label="Direct contact">
+              <p>Prefer email?</p>
+              <a className="lp-sales-mail" href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">
+                sales@datawrap.io
+              </a>
+              <p className="lp-sales-hero-note">
+                Security questionnaire and DPA on the call. No SOC 2 certificate is claimed until a
+                third-party audit exists.
+              </p>
+            </aside>
           </div>
-          <aside className="lp-sales-hero-aside" aria-label="Direct contact">
-            <p>Prefer email?</p>
-            <a className="lp-sales-mail" href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">
-              sales@datawrap.io
-            </a>
-            <p className="lp-sales-hero-note">
-              Security questionnaire and DPA available on the call. No SOC 2 certificate is claimed
-              until a third-party audit exists.
-            </p>
-          </aside>
-        </div>
-      </section>
 
-      <section className="lp-sales-main" aria-label="Request a pilot">
-        <div className="lp-sales-main-inner">
           {sent ? (
             <div className="lp-sales-success" role="status">
               <div className="lp-sales-success-mark" aria-hidden>
@@ -213,16 +208,13 @@ export function ContactSalesPage({
                 <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("product-transfer")}>
                   Transfer Studio
                 </button>
-                <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("enterprise")}>
-                  Enterprise
-                </button>
               </div>
             </div>
           ) : (
             <form className="lp-sales-form" onSubmit={submit} noValidate>
               <header className="lp-sales-form-head">
                 <h2>Request a scoped pilot</h2>
-                <p>One form. Stack optional — we can refine on the call. Required: name, work email, company.</p>
+                <p>Required: name, work email, company. Stack is optional.</p>
               </header>
 
               <div className="lp-sales-fields">
@@ -344,8 +336,8 @@ export function ContactSalesPage({
                   className="lp-sales-input lp-sales-textarea"
                   value={message}
                   onChange={(e) => setMessage(e.target.value)}
-                  rows={4}
-                  placeholder="Cutover window, dest stored procedure, incremental cursor, residency, SSO / BYOK…"
+                  rows={2}
+                  placeholder="Cutover window, dest stored procedure, incremental cursor…"
                 />
               </label>
 
@@ -356,49 +348,53 @@ export function ContactSalesPage({
 
               <div className="lp-sales-form-foot">
                 <p>
-                  By submitting you agree we may email you about this request. We do not sell contact
-                  data. See <button type="button" className="lp-sales-inline" onClick={() => onNavigate("privacy")}>Privacy</button>.
+                  We may email you about this request. See{" "}
+                  <button type="button" className="lp-sales-inline" onClick={() => onNavigate("privacy")}>
+                    Privacy
+                  </button>
+                  .
                 </p>
-                <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg" disabled={!canSubmit}>
+                <button type="submit" className="lp-btn lp-btn--brand" disabled={!canSubmit}>
                   Request pilot
                 </button>
               </div>
             </form>
           )}
+        </div>
+      </section>
 
-          <aside className="lp-sales-rail" aria-label="What happens next">
-            <h2>What happens next</h2>
-            <ol>
-              {NEXT_STEPS.map((s) => (
-                <li key={s.n}>
-                  <span>{s.n}</span>
-                  <div>
-                    <strong>{s.title}</strong>
-                    <p>{s.body}</p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-            <div className="lp-sales-rail-box">
-              <h3>What we will not claim on the call</h3>
-              <ul>
-                <li>Catalog count as transfer-live</li>
-                <li>Platform-wide exactly-once</li>
-                <li>SOC 2 / ISO certificate (controls exist; audit is not done)</li>
-                <li>Informatica continue-on-error as success</li>
-              </ul>
-            </div>
+      <section className="lp-sales-follow" aria-label="What happens next">
+        <div className="lp-mkt-wrap lp-sales-follow-inner">
+          <ol className="lp-sales-next">
+            {NEXT_STEPS.map((s) => (
+              <li key={s.n}>
+                <span>{s.n}</span>
+                <div>
+                  <strong>{s.title}</strong>
+                  <p>{s.body}</p>
+                </div>
+              </li>
+            ))}
+          </ol>
+          <div className="lp-sales-rail-box">
+            <h3>What we will not claim on the call</h3>
+            <ul>
+              <li>Catalog count as transfer-live</li>
+              <li>Platform-wide exactly-once</li>
+              <li>SOC 2 / ISO certificate (controls exist; audit is not done)</li>
+              <li>Informatica continue-on-error as success</li>
+            </ul>
             <div className="lp-sales-rail-links">
-              <button type="button" onClick={() => onNavigate("security")}>Security overview</button>
-              <button type="button" onClick={() => onNavigate("enterprise")}>Enterprise controls</button>
+              <button type="button" onClick={() => onNavigate("security")}>Security</button>
+              <button type="button" onClick={() => onNavigate("enterprise")}>Enterprise</button>
               <button type="button" onClick={() => onNavigate("pricing")}>Pricing</button>
             </div>
-          </aside>
+          </div>
         </div>
       </section>
 
       <section className="lp-sales-compare" aria-label="How we position against the market">
-        <div className="lp-sales-compare-inner">
+        <div className="lp-mkt-wrap">
           <header>
             <p className="lp-sales-kicker lp-sales-kicker--ink">Market position</p>
             <h2>Advanced where Fivetran, Airbyte, Informatica, and Databricks stop.</h2>
@@ -468,7 +464,7 @@ export function ContactSalesPage({
       </section>
 
       <section className="lp-sales-faq" aria-label="Sales FAQ">
-        <div className="lp-sales-faq-inner">
+        <div className="lp-mkt-wrap">
           <h2>Questions procurement usually asks</h2>
           <dl>
             {FAQS.map((item) => (

@@ -16,8 +16,8 @@ export function MarketingInkHero({
   aside?: ReactNode;
 }) {
   return (
-    <section className="lp-sales-hero" aria-label={kicker}>
-      <div className="lp-sales-hero-inner">
+    <section className="lp-sales-hero lp-sales-hero--page" aria-label={kicker}>
+      <div className="lp-mkt-wrap lp-sales-hero-inner">
         <div className="lp-sales-hero-copy">
           <p className="lp-sales-kicker">{kicker}</p>
           <h1>{title}</h1>

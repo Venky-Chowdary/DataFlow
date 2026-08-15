@@ -99,11 +99,11 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
       <header
         ref={navRef}
-        className={`lp-nav ${scrolled ? "is-scrolled is-pill" : "is-top is-bar"}`}
+        className={`lp-nav is-bar ${scrolled ? "is-scrolled" : "is-top"}`}
         onMouseLeave={() => setMenu(null)}
       >
         <div className="lp-nav-shell">
-          <div className={`lp-nav-surface ${scrolled ? "lp-nav-pill" : "lp-nav-bar"}`}>
+          <div className="lp-nav-surface lp-nav-bar">
             <div className="lp-nav-start">
               <a
                 className="lp-nav-brand"
