@@ -427,7 +427,7 @@ def materialize_object_store_export(
                 destination_pk_columns=None,
                 destination_column_nullability=destination_column_nullability,
                 empty_cells_as_null=empty_cells_as_null,
-                row_number_start=start + 1,
+                row_number_start=start,
                 accepted_source_rows=accepted_nums,
                 struct_already_materialized=True,
             )

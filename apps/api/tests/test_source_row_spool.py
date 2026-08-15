@@ -139,13 +139,7 @@ def test_materialize_explode_via_records_writes_one_row_per_element():
 
     mappings = [
         {"source": "id", "target": "id"},
-        {"source": "tags", "target": "tag"},
-        {"source": "tags_elem", "target": "tag"},
-    ]
-    # Map tags_elem when present; keep the test honest: exploded source
-    # headers include tags_elem and we map that to tag.
-    mappings = [
-        {"source": "id", "target": "id"},
+        {"source": "tags", "target": "tags", "struct_policy": ARRAY_POLICY_EXPLODE},
         {"source": "tags_elem", "target": "tag"},
     ]
     mat = materialize_object_store_export(
