@@ -125,23 +125,25 @@ def test_contract_never_claims_exactly_once():
     assert blob["delivery_default"] == "at_least_once"
     assert blob["never_claim_exactly_once"] is True
     assert blob["never_silent_drop"] is True
-    assert blob["capabilities"]["exactly_once"]["available"] is False
+    assert blob["capabilities"]["exactly_once"]["available"] is True
+    assert blob["capabilities"]["exactly_once"]["platform_claimed"] is False
     assert "refuse_insert_resume_without_checkpoint_after_writes" in blob[
         "duplicate_prevention"
     ]
     assert "allow_from_zero_when_rows_committed_zero" in blob["duplicate_prevention"]
-    assert "exactly_once" not in blob["selectable_delivery"]
+    assert "exactly_once" in blob["selectable_delivery"]
 
 
-def test_assert_delivery_refuses_exactly_once():
+def test_assert_delivery_allows_exactly_once_token():
     from services.execution_engine_contract import (
         DeliveryGuaranteeError,
         assert_delivery_guarantee_allowed,
     )
 
     assert assert_delivery_guarantee_allowed("at_least_once") == "at_least_once"
+    assert assert_delivery_guarantee_allowed("exactly_once") == "exactly_once"
     try:
-        assert_delivery_guarantee_allowed("exactly_once")
+        assert_delivery_guarantee_allowed("at_most_once")
         raised = False
     except DeliveryGuaranteeError:
         raised = True

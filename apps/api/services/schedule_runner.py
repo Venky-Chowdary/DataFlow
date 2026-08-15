@@ -313,6 +313,8 @@ def build_schedule_request(sched, src: dict, dst: dict):
         sync_mode=effective_mode,
         schema_policy=schema_policy,
         validation_mode=sched.validation_mode or "strict",
+        delivery_guarantee=getattr(sched, "delivery_guarantee", None)
+        or "at_least_once",
         backfill_new_fields=effective_backfill_new_fields(
             backfill_new_fields=bool(sched.backfill_new_fields),
             schema_policy=schema_policy,

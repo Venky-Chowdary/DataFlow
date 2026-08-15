@@ -123,6 +123,8 @@ class PipelineSchedule:
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    # CDC dest-owned watermark EOS is opt-in; default stays at_least_once.
+    delivery_guarantee: str = "at_least_once"
     mappings: list[dict] = field(default_factory=list)
     stream_contracts: list[dict] = field(default_factory=list)
     cursor_column: str = ""  # watermark column for incremental syncs
@@ -201,6 +203,13 @@ class PipelineSchedule:
             validation_mode=data.get("validation_mode") or "strict",
             schema_policy=data.get("schema_policy") or "manual_review",
             backfill_new_fields=bool(data.get("backfill_new_fields", False)),
+            delivery_guarantee=(
+                str(data.get("delivery_guarantee") or "at_least_once")
+                .strip()
+                .lower()
+                .replace("-", "_")
+                or "at_least_once"
+            ),
             mappings=list(data.get("mappings") or []),
             stream_contracts=list(data.get("stream_contracts") or []),
             cursor_column=(data.get("cursor_column") or "").strip(),

@@ -1209,6 +1209,7 @@ export interface ScheduleInput {
   validation_mode: string;
   schema_policy: string;
   backfill_new_fields: boolean;
+  delivery_guarantee?: string;
   cursor_column: string;
   primary_key: string;
   source_read_mode?: string;
@@ -1244,6 +1245,7 @@ export interface PipelineSchedule {
   validation_mode: string;
   schema_policy: string;
   backfill_new_fields: boolean;
+  delivery_guarantee?: string;
   cursor_column: string;
   primary_key: string;
   cursor_value: string;

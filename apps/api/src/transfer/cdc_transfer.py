@@ -9,8 +9,10 @@ Debezium-class capabilities:
   - Incremental snapshot signals interleaved with stream poll
   - Transaction buffering (BEGIN/COMMIT atomic apply batches)
 
-Apply semantics are **at-least-once upsert** (not exactly-once). Job checkpoints
-persist watermark progress alongside sync_cursor watermarks.
+Apply semantics default to **at-least-once upsert**. Opt-in
+``delivery_guarantee=exactly_once`` uses a dest-owned watermark in the same
+dest transaction as apply (sqlite wired). Job checkpoints persist after dest
+commit. Platform-wide exactly-once is not claimed.
 """
 from __future__ import annotations
 
@@ -742,9 +744,29 @@ def _apply_change_batch(
     backfill_new_fields: bool = False,
     job_id: str = "",
     census_acc: Any | None = None,
+    delivery_guarantee: str = "at_least_once",
+    cursor_key: str = "",
+    stream_name: str = "",
 ) -> tuple[int, str, dict[str, Any], int]:
     """Apply a single ChangeBatch to the destination. Returns rows_written, checksum, summary, deleted_count."""
+    from services.cdc_exactly_once import normalize_delivery_guarantee
     from services.cdc_snapshot_window import _pk_columns
+
+    if normalize_delivery_guarantee(delivery_guarantee) == "exactly_once":
+        from connectors.cdc_eos_sql import apply_change_batch_exactly_once
+
+        return apply_change_batch_exactly_once(
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table=dest_table,
+            change=change,
+            mappings=mappings,
+            column_types=column_types,
+            headers=headers,
+            pk_target_cols=_pk_columns(pk_target_col) if pk_target_col else [],
+            cursor_key=cursor_key,
+            stream_name=stream_name,
+        )
 
     # Normalize once so every writer and the delete path see a real column list.
     # A comma-joined string here used to survive into conflict_columns, where
@@ -944,6 +966,7 @@ def run_cdc_database_transfer(
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
     limit: int = 0,
+    delivery_guarantee: str = "at_least_once",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run a CDC transfer from a database source to a database destination.
 
@@ -967,6 +990,7 @@ def run_cdc_database_transfer(
             backfill_new_fields=backfill_new_fields,
             validation_mode=validation_mode,
             limit=limit,
+            delivery_guarantee=delivery_guarantee,
         )
     return _run_cdc_single_stream(
         source,
@@ -982,6 +1006,7 @@ def run_cdc_database_transfer(
         backfill_new_fields=backfill_new_fields,
         validation_mode=validation_mode,
         limit=limit,
+        delivery_guarantee=delivery_guarantee,
     )
 
 
@@ -1001,17 +1026,23 @@ def _run_cdc_multi_stream(
     backfill_new_fields: bool,
     validation_mode: str,
     limit: int,
+    delivery_guarantee: str = "at_least_once",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run CDC for each selected stream.
 
     Prefer Debezium-class shared log reader (one PG slot / one MySQL server_id)
     when all streams share a postgresql or mysql source. Fall back to sequential
     N independent readers otherwise.
+
+    Exactly-once uses sequential per-stream dest-owned watermarks — a shared
+    log reader acks one LSN after N applies, which is not one dest transaction.
     """
+    from services.cdc_exactly_once import normalize_delivery_guarantee
     from services.cdc_multi_table import can_share_log_reader
 
     src_fmt = str(getattr(source, "format", "") or "").lower()
-    if can_share_log_reader(src_fmt, len(selected)):
+    eos = normalize_delivery_guarantee(delivery_guarantee) == "exactly_once"
+    if not eos and can_share_log_reader(src_fmt, len(selected)):
         try:
             return _run_cdc_shared_multi_table(
                 source,
@@ -1055,6 +1086,7 @@ def _run_cdc_multi_stream(
         backfill_new_fields=backfill_new_fields,
         validation_mode=validation_mode,
         limit=limit,
+        delivery_guarantee=delivery_guarantee,
     )
 
 
@@ -1589,6 +1621,7 @@ def _run_cdc_multi_stream_sequential(
     backfill_new_fields: bool,
     validation_mode: str,
     limit: int,
+    delivery_guarantee: str = "at_least_once",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Legacy path: N independent CDC readers (N slots / N server_ids)."""
     total_rows = 0
@@ -1656,6 +1689,7 @@ def _run_cdc_multi_stream_sequential(
                     backfill_new_fields=backfill_new_fields,
                     validation_mode=validation_mode,
                     limit=limit,
+                    delivery_guarantee=delivery_guarantee,
                 )
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
@@ -1732,6 +1766,7 @@ def _run_cdc_single_stream(
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
     limit: int = 0,
+    delivery_guarantee: str = "at_least_once",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Run a CDC transfer for a single stream contract."""
     # Driver type is used for generic read/write; CDC source kind uses the
@@ -1777,6 +1812,26 @@ def _run_cdc_single_stream(
         dest_cfg=dest_cfg,
         has_primary_key=True,
     )
+    from services.cdc_exactly_once import (
+        DELIVERY_SEMANTICS_ALO,
+        DELIVERY_SEMANTICS_EOS,
+        assert_requested_cdc_delivery,
+        dest_allow_append_only,
+    )
+    from services.procedure_source import is_callable_source
+
+    eos_guarantee = assert_requested_cdc_delivery(
+        delivery_guarantee,
+        sync_mode=sync_mode or "cdc",
+        dest_type=dest_type,
+        source_type=src_type,
+        has_primary_key=True,
+        write_mode="upsert",
+        allow_append_only=dest_allow_append_only(destination)
+        or _truthy_cfg(dest_cfg, "allow_append_only", "cdc_allow_append_only"),
+        callable_source=is_callable_source(source),
+    )
+    eos_active = eos_guarantee == "exactly_once"
     if src_type in {"mongodb", "mysql", "postgresql", "sqlserver", "oracle"}:
         cursor_field = cursor_field or pk_source_cols[0] or (
             "_id" if src_type == "mongodb" else "id"
@@ -2169,6 +2224,9 @@ def _run_cdc_single_stream(
                 backfill_new_fields=backfill_new_fields,
                 job_id=str(job_id or ""),
                 census_acc=state.acc_for(str(dest_table or "")),
+                delivery_guarantee=eos_guarantee,
+                cursor_key=cursor_key,
+                stream_name=str(table_name or dest_table or ""),
             )
         state.rows_written += rows_written
         state.inserts += len(change.inserts)
@@ -2393,7 +2451,15 @@ def _run_cdc_single_stream(
     summary["cdc_last_ddl_at"] = lag_fields.get("cdc_last_ddl_at")
     summary["cdc_plugin"] = lag_fields.get("cdc_plugin")
     summary["cdc_slot_name"] = lag_fields.get("cdc_slot_name")
-    summary["cdc_delivery"] = lag_fields.get("cdc_delivery")
+    if eos_active:
+        summary["cdc_delivery"] = "exactly_once"
+        summary["delivery_semantics"] = DELIVERY_SEMANTICS_EOS
+        summary["exactly_once_algorithm"] = "dest_owned_watermark_txn"
+        summary["exactly_once_active"] = True
+        summary["exactly_once_claimed_platform"] = False
+    else:
+        summary["cdc_delivery"] = lag_fields.get("cdc_delivery") or "at-least-once"
+        summary.setdefault("delivery_semantics", DELIVERY_SEMANTICS_ALO)
     summary["cdc_row_filter"] = lag_fields.get("cdc_row_filter")
     summary["cdc_lease_holder"] = lag_fields.get("cdc_lease_holder")
     summary["cdc_lease_resource"] = lag_fields.get("cdc_lease_resource")

@@ -137,6 +137,7 @@ def main() -> int:
         "honesty": {
             "delivery_default": "at-least-once upsert",
             "exactly_once_claimed": False,
+            "exactly_once_route_opt_in": True,
             "effectively_once_pk_sinks": True,
             "append_only_sinks_gated": True,
             "sqlserver_lsn_gap_fail_closed": True,

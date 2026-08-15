@@ -209,7 +209,7 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
-    # Delivery guarantee selector — only at_least_once is allowed (GA).
+    # Delivery guarantee — default at_least_once; exactly_once is opt-in.
     delivery_guarantee: str = "at_least_once"
     # Validate→Execute ack trail (must match Studio Validate acknowledgments).
     compliance_acknowledged: bool = False
@@ -650,22 +650,40 @@ async def execute_transfer_json(
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
 ):
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
-    from services.execution_engine_contract import (
-        DeliveryGuaranteeError,
-        assert_delivery_guarantee_allowed,
+    from services.cdc_exactly_once import (
+        ExactlyOnceRouteError,
+        assert_requested_cdc_delivery,
+        dest_allow_append_only,
+        route_has_cdc_pk,
     )
+    from services.execution_engine_contract import DeliveryGuaranteeError
+    from services.procedure_source import is_callable_source
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
 
+    src_preview = EndpointConfig.from_dict(
+        body.source.kind, body.source.model_dump(by_alias=True)
+    )
+    dst_preview = EndpointConfig.from_dict(
+        body.destination.kind, body.destination.model_dump(by_alias=True)
+    )
     try:
-        assert_delivery_guarantee_allowed(body.delivery_guarantee)
-    except DeliveryGuaranteeError as exc:
+        assert_requested_cdc_delivery(
+            body.delivery_guarantee,
+            sync_mode=body.sync_mode or "",
+            dest_type=str(getattr(dst_preview, "format", "") or ""),
+            source_type=str(getattr(src_preview, "format", "") or ""),
+            has_primary_key=route_has_cdc_pk(body.stream_contracts),
+            allow_append_only=dest_allow_append_only(dst_preview),
+            callable_source=is_callable_source(src_preview),
+        )
+    except (DeliveryGuaranteeError, ExactlyOnceRouteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
-    src = EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True))
-    dst = EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True))
+    src = src_preview
+    dst = dst_preview
     region = (
         (body.data_region or "").strip()
         or getattr(request.state, "data_region", "")

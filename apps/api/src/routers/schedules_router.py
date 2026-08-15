@@ -59,6 +59,7 @@ class ScheduleCreate(BaseModel):
     validation_mode: str = "strict"
     schema_policy: SchemaPolicy = "manual_review"
     backfill_new_fields: bool = False
+    delivery_guarantee: str = "at_least_once"
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     cursor_column: str = ""
@@ -90,6 +91,7 @@ class ScheduleUpdate(BaseModel):
     validation_mode: Optional[str] = None
     schema_policy: Optional[SchemaPolicy] = None
     backfill_new_fields: Optional[bool] = None
+    delivery_guarantee: Optional[str] = None
     mappings: Optional[list[dict[str, Any]]] = None
     stream_contracts: Optional[list[dict[str, Any]]] = None
     cursor_column: Optional[str] = None
@@ -122,6 +124,7 @@ class ScheduleResponse(BaseModel):
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    delivery_guarantee: str = "at_least_once"
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
@@ -187,6 +190,7 @@ class ScheduleSummaryResponse(BaseModel):
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    delivery_guarantee: str = "at_least_once"
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""

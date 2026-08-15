@@ -1,0 +1,89 @@
+{
+  "name": "cdc_exactly_once_matrix",
+  "algorithm": "dest_owned_watermark_txn",
+  "platform_exactly_once_claimed": false,
+  "delivery_default": "at_least_once",
+  "measured_floor": 1.0,
+  "pass": 8,
+  "fail": 0,
+  "skip": 0,
+  "cases": [
+    {
+      "id": "sqlite_cdc_pk_upsert",
+      "dest": "sqlite",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "postgres_cdc_not_wired",
+      "dest": "postgresql",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_dest_txn_not_wired",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "mysql_cdc_not_wired",
+      "dest": "mysql",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_dest_txn_not_wired",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "csv_append_not_txn",
+      "dest": "csv",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_dest_not_transactional",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "sqlite_full_refresh_refused",
+      "dest": "sqlite",
+      "sync_mode": "full_refresh_overwrite",
+      "eligible": false,
+      "reason": "exactly_once_requires_cdc_sync",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "sqlite_append_only_refused",
+      "dest": "sqlite",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_refuses_append_only",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "iceberg_not_txn",
+      "dest": "iceberg",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_dest_not_transactional",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "kafka_not_txn",
+      "dest": "kafka",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_dest_not_transactional",
+      "wired": false,
+      "pass": true
+    }
+  ],
+  "notes": [
+    "100% means this named fixture only \u2014 not live warehouse CDC.",
+    "sqlite dest-owned watermark txn is the wired EOS path.",
+    "postgresql/mysql/sqlserver remain fail-closed until shared-conn apply is wired."
+  ]
+}

@@ -150,6 +150,32 @@ def test_create_schedule_persists_studio_data_and_migration_rules(temp_store):
     assert not hasattr(reloaded, "skip_preflight") or not getattr(reloaded, "skip_preflight", False)
 
 
+def test_create_schedule_persists_cdc_exactly_once_delivery(temp_store):
+    sched = store.create_schedule({
+        "name": "CDC EOS orders",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "delivery_guarantee": "exactly_once",
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.delivery_guarantee == "exactly_once"
+    legacy = store.PipelineSchedule.from_dict({
+        "id": "legacy-eos",
+        "name": "old",
+        "source_connector_id": "a",
+        "source_table": "t",
+        "dest_connector_id": "b",
+        "dest_table": "u",
+        "interval": "daily",
+    })
+    assert legacy.delivery_guarantee == "at_least_once"
+
+
 def test_create_schedule_rejects_bad_cron(temp_store):
     with pytest.raises(ValueError):
         store.create_schedule({

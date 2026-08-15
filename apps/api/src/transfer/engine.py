@@ -2024,16 +2024,29 @@ class UniversalTransferEngine:
             logger.debug("job shell bootstrap skipped for %s", job_id, exc_info=True)
         # Hard-block Execute when Map still has unresolved requires_review rows —
         # skip_preflight must never green-path ambiguous remaps into a write.
-        # Also refuse impossible CDC delivery guarantees (exactly_once / at_most_once).
-        from services.execution_engine_contract import (
-            DeliveryGuaranteeError,
-            assert_delivery_guarantee_allowed,
+        # Delivery: at_least_once default; exactly_once opt-in and fail-closed
+        # on ineligible routes. at_most_once is never offered.
+        from services.cdc_exactly_once import (
+            ExactlyOnceRouteError,
+            assert_requested_cdc_delivery,
+            dest_allow_append_only,
+            route_has_cdc_pk,
         )
+        from services.execution_engine_contract import DeliveryGuaranteeError
         from services.mapping_pipeline import assert_mappings_executable
+        from services.procedure_source import is_callable_source
 
         try:
-            assert_delivery_guarantee_allowed(
-                getattr(request, "delivery_guarantee", None) or "at_least_once"
+            assert_requested_cdc_delivery(
+                getattr(request, "delivery_guarantee", None) or "at_least_once",
+                sync_mode=getattr(request, "sync_mode", "") or "",
+                dest_type=str(getattr(request.destination, "format", "") or ""),
+                source_type=str(getattr(request.source, "format", "") or ""),
+                has_primary_key=route_has_cdc_pk(
+                    getattr(request, "stream_contracts", None),
+                ),
+                allow_append_only=dest_allow_append_only(request.destination),
+                callable_source=is_callable_source(request.source),
             )
             from services.procedure_source import assert_callable_sync_allowed
 
@@ -2042,7 +2055,7 @@ class UniversalTransferEngine:
                 getattr(request, "source", None),
             )
             assert_mappings_executable(request.mappings)
-        except (ValueError, DeliveryGuaranteeError) as mapping_exc:
+        except (ValueError, DeliveryGuaranteeError, ExactlyOnceRouteError) as mapping_exc:
             mongo = get_mongodb_service()
             mongo.update_job_status(
                 job_id,
@@ -4095,6 +4108,8 @@ class UniversalTransferEngine:
                     backfill_new_fields=backfill_fields,
                     validation_mode=request.validation_mode,
                     limit=request.limit,
+                    delivery_guarantee=getattr(request, "delivery_guarantee", None)
+                    or "at_least_once",
                 )
             elif multi_non_cdc:
                 rows_written, ddl_log, dest_summary, _ = (

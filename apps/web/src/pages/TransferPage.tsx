@@ -102,6 +102,12 @@ import {
   schemaPolicyBackfills,
   studioSchedulePolicies,
 } from "../lib/studioDataRules";
+import {
+  CDC_DELIVERY_AT_LEAST_ONCE,
+  exactlyOnceWiredDest,
+  studioDeliveryGuarantee,
+  type CdcDeliveryGuarantee,
+} from "../lib/cdcExactlyOnce";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
   parseStreamNames,
@@ -322,6 +328,9 @@ export function TransferPage({
   const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">("desc");
   const [rowLimit, setRowLimit] = useState(0);
   const [snapshotMode, setSnapshotMode] = useState("initial");
+  const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
+    CDC_DELIVERY_AT_LEAST_ONCE,
+  );
   const [allowAppendOnly, setAllowAppendOnly] = useState(false);
   const [multiSubnetFailover, setMultiSubnetFailover] = useState(false);
   /** SQL Server CDC TVF row filter: all | all update old | net. */
@@ -4146,6 +4155,11 @@ export function TransferPage({
         syncMode,
         schemaPolicy,
         validationMode,
+        deliveryGuarantee: studioDeliveryGuarantee({
+          syncMode,
+          deliveryGuarantee,
+          allowAppendOnly,
+        }),
         dateLocale,
         backfillNewFields,
         writeViaStaging,
@@ -4450,6 +4464,11 @@ export function TransferPage({
           validationMode,
           schemaPolicy,
           backfillNewFields,
+        }),
+        delivery_guarantee: studioDeliveryGuarantee({
+          syncMode,
+          deliveryGuarantee,
+          allowAppendOnly,
         }),
         contract_id: boundContractId.trim(),
         require_signed_contract: Boolean(boundContractId.trim() && requireSignedContract),
@@ -6664,6 +6683,9 @@ export function TransferPage({
         compositeKeySuggestions={compositeKeySuggestions}
         snapshotMode={snapshotMode}
         onSnapshotModeChange={setSnapshotMode}
+        deliveryGuarantee={deliveryGuarantee}
+        onDeliveryGuaranteeChange={setDeliveryGuarantee}
+        exactlyOnceWired={exactlyOnceWiredDest(destDriverType || destType)}
         allowAppendOnly={allowAppendOnly}
         onAllowAppendOnlyChange={setAllowAppendOnly}
         multiSubnetFailover={multiSubnetFailover}

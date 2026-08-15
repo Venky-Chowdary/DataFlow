@@ -389,8 +389,15 @@ def capability_matrix() -> dict[str, Any]:
             "non_guarantee": "Bulk load 2PC / exactly-once CDC not claimed",
         },
         "exactly_once": {
-            "available": False,
-            "semantics": "Not claimed — default delivery is at-least-once",
+            "available": True,
+            "opt_in": True,
+            "platform_claimed": False,
+            "semantics": (
+                "Opt-in CDC dest-owned watermark transaction "
+                "(apply + _df_cdc_eos_watermarks in one dest txn). "
+                "Default remains at-least-once. Ineligible routes fail closed. "
+                "Not XA and not platform-wide EOS."
+            ),
         },
     }
 
@@ -398,6 +405,7 @@ def capability_matrix() -> dict[str, Any]:
 SELECTABLE_DELIVERY_SEMANTICS: frozenset[str] = frozenset(
     {
         "at_least_once",
+        "exactly_once",
         # at_most_once only when a sink path explicitly supports fire-and-forget;
         # not offered as a default product selector.
     }
@@ -409,15 +417,12 @@ class DeliveryGuaranteeError(ValueError):
 
 
 def assert_delivery_guarantee_allowed(requested: str | None) -> str:
-    """Normalize / refuse delivery guarantee selection. Exactly-once is never allowed."""
+    """Normalize delivery selection. Exactly-once is opt-in; route gate is separate."""
     raw = (requested or DEFAULT_DELIVERY_SEMANTICS).strip().lower().replace("-", "_")
     if not raw:
         return DEFAULT_DELIVERY_SEMANTICS
-    if raw in {"exactly_once", "eos", "exactlyonce"}:
-        raise DeliveryGuaranteeError(
-            "exactly_once delivery is not available — DataWrap delivery is "
-            "at_least_once only (never invent exactly-once)."
-        )
+    if raw in {"eos", "exactlyonce"}:
+        raw = "exactly_once"
     if raw == "at_most_once":
         raise DeliveryGuaranteeError(
             "at_most_once is not a selectable product guarantee — "
@@ -454,7 +459,7 @@ def execution_contract_dict() -> dict[str, Any]:
             "Checkpoint persistence failure aborts the job.",
             "Kafka offset commit after checkpoint must fail closed.",
             "Quarantine / rejected_rows is the partial-failure SSOT.",
-            "Exactly-once and one-click undo are not claimed.",
+            "Platform-wide exactly-once is not claimed; route opt-in dest-txn EOS is fail-closed.",
             "Append sinks require ack / watermark persistence fail-closed.",
             "Orphan/claim reclaim uses resume only when durable progress exists.",
         ],
