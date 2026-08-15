@@ -13,10 +13,12 @@ import pytest
 
 from connectors.snowflake_reader import snapshot_order_sql
 from connectors.snowflake_writer import copy_into_written_or_raise
-from connectors.sftp_common import parse_sftp_config, test_sftp
+from connectors.sftp_common import parse_sftp_config
+from connectors.sftp_common import test_sftp as probe_sftp
 from services.excel_parser import XLS_UNSUPPORTED_MSG, require_xlsx
 from src.transfer.connector_dispatch import writer_extra_kwargs
-from src.transfer.models import EndpointConfig
+from transfer.adapters import resolve_connector_config
+from transfer.models import EndpointConfig
 
 
 def test_copy_into_zero_rows_is_not_success():
@@ -93,7 +95,7 @@ def test_sftp_test_proves_configured_file():
         patch("connectors.sftp_common.parse_sftp_config", return_value=cfg),
         patch("connectors.sftp_common.connect_sftp", return_value=(transport, sftp)),
     ):
-        ok, msg = test_sftp(host="ftp.example.com", username="alice", password="x")
+        ok, msg = probe_sftp(host="ftp.example.com", username="alice", password="x")
 
     assert ok is True
     assert "file" in msg.lower()
@@ -122,7 +124,7 @@ def test_sftp_test_fails_closed_on_missing_file():
         patch("connectors.sftp_common.parse_sftp_config", return_value=cfg),
         patch("connectors.sftp_common.connect_sftp", return_value=(transport, sftp)),
     ):
-        ok, msg = test_sftp(host="ftp.example.com", username="alice", password="x")
+        ok, msg = probe_sftp(host="ftp.example.com", username="alice", password="x")
 
     assert ok is False
     assert "file not found" in msg.lower()
@@ -138,7 +140,6 @@ def test_require_xlsx_rejects_legacy_xls():
 
 def test_resolve_connector_config_strips_topology_role_after_merge(monkeypatch):
     from transfer import adapters
-    from src.transfer.adapters import resolve_connector_config
 
     saved = {
         "host": "acct.snowflakecomputing.com",
