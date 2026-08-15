@@ -2916,6 +2916,34 @@ _PLAN_ONLY_WORDS = (
     "check", "simulate", "estimate", "before i", "safe", "should i",
     "is it ok", "risk",
 )
+# Explicit bind only — never invent a contract from "data contract" / "open contracts".
+_CONTRACT_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:with|under|using|against|bind(?:ing)?|enforce(?:ing)?)\s+"
+    r"(?:the\s+)?(?:signed\s+)?(?:data\s+)?contract(?:\s+id)?\s*[:=]?\s*"
+    r"(?P<cid>[A-Za-z][A-Za-z0-9_.:-]{1,63})",
+    re.IGNORECASE,
+)
+_CONTRACT_ID_BARE_RE = re.compile(
+    r"\bcontract(?:\s+id)?\s*[:=]?\s*"
+    r"(?P<cid>[A-Za-z]{2,}[-_][A-Za-z0-9_.:-]+|[0-9a-fA-F]{8,})\s*$",
+    re.IGNORECASE,
+)
+_CONTRACT_ID_STOP = frozenset({
+    "id", "the", "a", "an", "my", "our", "this", "that", "data", "signed",
+})
+_VALIDATION_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:with|using|in)?\s*(?:strict|balanced|lenient)\s+validation\b",
+    re.IGNORECASE,
+)
+_RULES_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:following|per|under|obey(?:ing)?)\s+(?:the\s+)?(?:data|migration)\s+rules\b",
+    re.IGNORECASE,
+)
+_SCHEMA_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:with|using)?\s*(?:type-locked|type locked|lock types|lock type)\s+schema\b"
+    r"|(?:,\s*)?(?:with|using)?\s*pause\s+on\s+(?:schema\s+)?change\b",
+    re.IGNORECASE,
+)
 
 
 def _strip_transfer_tail(dest: str) -> tuple[str, str]:
@@ -2941,9 +2969,60 @@ def _strip_transfer_tail(dest: str) -> tuple[str, str]:
     return dest[: tail.start()].strip(), mode
 
 
+def parse_transfer_bind_and_rules(message: str) -> tuple[str, dict[str, Any]]:
+    """Pull explicit contract / validation / schema posture from NL.
+
+    Never invents a contract id. Never parses skip_preflight. Selecting a
+    contract defaults require-signed. ``migrate`` / data-or-migration-rules
+    language selects strict validation — the Studio fail-fast bar — without
+    relaxing schema_policy.
+    """
+    extras: dict[str, Any] = {}
+    original = str(message or "")
+    extras.update(parse_transfer_rule_posture(original.lower()))
+    extras.update(parse_transfer_schema_posture(original.lower()))
+    text = original
+    hit = _CONTRACT_CLAUSE_RE.search(text) or _CONTRACT_ID_BARE_RE.search(text)
+    if hit:
+        cid = str(hit.group("cid") or "").strip()
+        if cid and cid.lower() not in _CONTRACT_ID_STOP:
+            extras["contract_id"] = cid
+            extras["require_signed_contract"] = True
+            text = f"{text[:hit.start()]} {text[hit.end():]}"
+    text = _VALIDATION_CLAUSE_RE.sub(" ", text)
+    text = _RULES_CLAUSE_RE.sub(" ", text)
+    text = _SCHEMA_CLAUSE_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text, extras
+
+
+def parse_transfer_rule_posture(lowered: str) -> dict[str, Any]:
+    """Explicit validation posture. Empty when the tool default should stand."""
+    if any(w in lowered for w in ("lenient", "permissive", "best effort", "best-effort")):
+        return {"validation_mode": "lenient"}
+    if any(w in lowered for w in (
+        "strict", "zero loss", "zero-loss", "fail fast", "fail-fast",
+        "data rules", "migration rules", "migrate", "migration",
+    )):
+        return {"validation_mode": "strict"}
+    if "balanced" in lowered:
+        return {"validation_mode": "balanced"}
+    return {}
+
+
+def parse_transfer_schema_posture(lowered: str) -> dict[str, Any]:
+    """Explicit schema policy only — never invent propagate_all from chat."""
+    if "pause on" in lowered and "change" in lowered:
+        return {"schema_policy": "pause_on_change"}
+    if any(w in lowered for w in ("type-locked", "type locked", "lock types", "lock type")):
+        return {"schema_policy": "type_locked"}
+    return {}
+
+
 def parse_transfer_intent(message: str) -> dict | None:
     """Extract source/destination/table from a transfer request, or None."""
-    text = (message or "").strip()
+    cleaned, extras = parse_transfer_bind_and_rules(message)
+    text = cleaned.strip()
     if not text:
         return None
     match = (
@@ -2969,6 +3048,7 @@ def parse_transfer_intent(message: str) -> dict | None:
                     "dest_connector_name": dest[:80],
                     "sync_mode": mode,
                     "plan_only": True,  # missing source → plan/clarify, never mutate
+                    **extras,
                 }
         return None
     table = match.group("table").strip()
@@ -2989,6 +3069,7 @@ def parse_transfer_intent(message: str) -> dict | None:
         "sync_mode": mode,
         # Asking what a transfer *would* do must never stage a mutation.
         "plan_only": any(w in lowered for w in _PLAN_ONLY_WORDS),
+        **extras,
     }
 
 

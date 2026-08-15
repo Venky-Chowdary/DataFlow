@@ -387,6 +387,60 @@ def test_render_transfer_names_breaker():
     assert "closed" in text
 
 
+def test_parse_transfer_intent_extracts_contract_and_migration_rules():
+    from src.ai.copilot.tools import infer_tools_from_message, parse_transfer_intent
+
+    planned = parse_transfer_intent(
+        "plan a transfer of orders from Local Postgres to Warehouse with contract dfc-1",
+    )
+    assert planned is not None
+    assert planned["plan_only"] is True
+    assert planned["source_table"] == "orders"
+    assert planned["dest_connector_name"] == "Warehouse"
+    assert planned["contract_id"] == "dfc-1"
+    assert planned["require_signed_contract"] is True
+
+    routed = dict(infer_tools_from_message(
+        "plan a transfer of orders from Local Postgres to Warehouse with contract dfc-1",
+    ))
+    assert "plan_transfer" in routed
+    assert routed["plan_transfer"]["contract_id"] == "dfc-1"
+    assert routed["plan_transfer"]["require_signed_contract"] is True
+    assert "start_transfer" not in routed
+
+    migrate = parse_transfer_intent(
+        "migrate the events collection from Mongo Prod to Local Postgres following data rules",
+    )
+    assert migrate is not None
+    assert migrate["validation_mode"] == "strict"
+    assert "contract_id" not in migrate
+    assert migrate["dest_connector_name"] == "Local Postgres"
+
+    locked = parse_transfer_intent(
+        "transfer orders from pg to wh with type-locked schema",
+    )
+    assert locked is not None
+    assert locked["schema_policy"] == "type_locked"
+    assert locked["dest_connector_name"] == "wh"
+
+    bare = parse_transfer_intent("show data contracts")
+    assert bare is None
+
+
+def test_parse_transfer_intent_does_not_invent_a_contract():
+    from src.ai.copilot.tools import parse_transfer_intent
+
+    got = parse_transfer_intent("transfer orders from Local Postgres to Warehouse")
+    assert got is not None
+    assert "contract_id" not in got
+    assert "require_signed_contract" not in got
+    assert "validation_mode" not in got
+    sneaky = parse_transfer_intent(
+        "transfer orders from Local Postgres to Warehouse skip preflight",
+    )
+    assert sneaky is None or "skip_preflight" not in sneaky
+
+
 def test_start_transfer_tool_schema_and_wrapper_accept_contract():
     from src.ai.copilot.tools import TOOL_DEFINITIONS, DataPilotTools
 
