@@ -406,6 +406,8 @@ def plan_transfer(
     procedure_call: str = "",
     source_query: str = "",
     procedure_params: Any = None,
+    contract_id: str = "",
+    require_signed_contract: Any = None,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -652,6 +654,7 @@ def plan_transfer(
             "preflight": preflight,
             # Align with Execute unlock — passed alone must not invent safe_to_start.
             "safe_to_start": _is_execute_cleared(preflight),
+            **_preview_bound_contract(contract_id, require_signed_contract),
         },
     )
 
@@ -960,6 +963,41 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
         return []
 
 
+def _require_signed_flag(contract_id: str, require_signed_contract: Any) -> bool:
+    """Selecting a contract defaults require-signed the same way Studio does."""
+    cid = str(contract_id or "").strip()
+    if require_signed_contract is None:
+        return bool(cid)
+    if isinstance(require_signed_contract, str):
+        return require_signed_contract.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(require_signed_contract)
+
+
+def _preview_bound_contract(
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+) -> dict[str, Any]:
+    """Read-only bind for plan_transfer. Never invents. Never raises.
+
+    OPEN / unsigned / missing still appear so the operator can see why Confirm
+    would refuse. Staging uses ``_stage_bound_contract`` instead.
+    """
+    cid = str(contract_id or "").strip()
+    require = _require_signed_flag(cid, require_signed_contract)
+    from services.contract_store import bound_contract_preview, get_contract_store
+
+    preview = bound_contract_preview(cid, require_signed=require)
+    if not cid:
+        return preview
+    contract = get_contract_store().get_contract(cid)
+    preview["contract_status"] = (
+        str(getattr(contract.status, "value", contract.status)).upper()
+        if contract is not None
+        else "not_found"
+    )
+    return preview
+
+
 def _stage_bound_contract(
     contract_id: str = "",
     require_signed_contract: Any = None,
@@ -970,12 +1008,7 @@ def _stage_bound_contract(
     ScheduleForm do. Confirm is not offered for an unsigned bind.
     """
     cid = str(contract_id or "").strip()
-    if require_signed_contract is None:
-        require = bool(cid)
-    elif isinstance(require_signed_contract, str):
-        require = require_signed_contract.strip().lower() in {"1", "true", "yes", "on"}
-    else:
-        require = bool(require_signed_contract)
+    require = _require_signed_flag(cid, require_signed_contract)
     from services.contract_store import assert_contract_breaker_allows, bound_contract_preview
     from services.schedule_store import assert_signed_contract
 

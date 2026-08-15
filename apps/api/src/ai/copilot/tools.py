@@ -255,7 +255,8 @@ TOOL_DEFINITIONS: list[dict] = [
             "map columns, list type conversions and lossy casts, and run the 9 preflight gates. "
             "CDC/SCD2/mirror are refused for procedure/query sources. "
             "Read-only — it never moves data. Use whenever the operator asks what a transfer "
-            "would do, or before starting one."
+            "would do, or before starting one. When a contract_id is supplied, the plan "
+            "names the bind and breaker (Confirm still fail-closed on SIGNED / OPEN)."
         ),
         "input_schema": {
             "type": "object",
@@ -276,6 +277,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     ),
                 },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
+                "require_signed_contract": {"type": "boolean"},
             },
             "required": [],
         },
@@ -2064,6 +2067,8 @@ class DataPilotTools:
         procedure_call: str = "",
         source_query: str = "",
         procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -2082,6 +2087,8 @@ class DataPilotTools:
             procedure_call=procedure_call,
             source_query=source_query,
             procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
         )
 
     def _start_transfer(

@@ -219,14 +219,29 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
         lines.append(f"• Preflight run `{pf.get('run_id')}`")
 
     preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
-    bound_id = str((preview or {}).get("contract_id") or "").strip()
-    if tool == "start_transfer" and bound_id:
+    bound_id = str(
+        (preview or {}).get("contract_id") or plan.get("contract_id") or ""
+    ).strip()
+    if bound_id:
+        status = str(
+            (preview or {}).get("contract_status") or plan.get("contract_status") or ""
+        ).strip()
         lines.append(
-            f"• Bound contract `{bound_id}` — Confirm fails closed unless it is SIGNED."
+            f"• Bound contract `{bound_id}`"
+            + (f" ({status})" if status else "")
+            + " — Confirm fails closed unless it is SIGNED."
         )
-        breaker = str((preview or {}).get("breaker_state") or "").strip()
+        if status.lower() == "not_found":
+            lines.append("  – Contract not found — Confirm will refuse.")
+        elif status and status.upper() != "SIGNED":
+            lines.append(f"  – Contract is {status} — Confirm will refuse until SIGNED.")
+        breaker = str(
+            (preview or {}).get("breaker_state") or plan.get("breaker_state") or ""
+        ).strip()
         if breaker:
             lines.append(f"• Circuit breaker is **{breaker}**.")
+            if breaker.lower() in {"open", "half_open"}:
+                lines.append("  – Confirm will refuse while the breaker is OPEN.")
 
     if tool == "start_transfer" and o.get("requires_confirm"):
         if o.get("destructive"):

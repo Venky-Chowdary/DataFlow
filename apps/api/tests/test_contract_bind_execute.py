@@ -309,6 +309,63 @@ def test_start_transfer_without_contract_does_not_set_enforce(monkeypatch):
     assert "require_signed_contract" not in payload
 
 
+def test_preview_bound_contract_read_only_open_and_missing(monkeypatch):
+    from services.data_contract import BreakerState
+    from src.ai.copilot.transfer_tools import _preview_bound_contract
+
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    signed = DataContract(name="plan-open", status=ContractStatus.SIGNED)
+    backend.save_contract(signed)
+    breaker = backend.get_breaker(signed.id)
+    breaker.state = BreakerState.OPEN
+    backend.save_breaker(breaker)
+
+    preview = _preview_bound_contract(signed.id)
+    assert preview["contract_id"] == signed.id
+    assert preview["breaker_state"] == "open"
+    assert preview["contract_status"] == "SIGNED"
+
+    missing = _preview_bound_contract("dfc-missing")
+    assert missing["contract_id"] == "dfc-missing"
+    assert missing["contract_status"] == "not_found"
+    assert _preview_bound_contract("") == {}
+
+
+def test_plan_transfer_tool_schema_and_wrapper_accept_contract():
+    from src.ai.copilot.tools import TOOL_DEFINITIONS, DataPilotTools
+
+    plan = next(t for t in TOOL_DEFINITIONS if t["name"] == "plan_transfer")
+    props = plan["input_schema"]["properties"]
+    assert "contract_id" in props
+    assert "require_signed_contract" in props
+
+    res = DataPilotTools().execute(
+        "plan_transfer",
+        {"contract_id": "", "require_signed_contract": False},
+    )
+    assert "unexpected keyword" not in (res.error or "").lower()
+
+
+def test_render_transfer_plan_names_bind_and_open_breaker():
+    from src.ai.copilot.pilot_agent import _render_transfer
+
+    text = _render_transfer("plan_transfer", {
+        "source": {"connector_name": "Src", "table": "orders", "column_count": 1},
+        "destination": {"connector_name": "Dst", "table": "orders_wh"},
+        "sync_mode": "incremental",
+        "mapped_count": 1,
+        "contract_id": "dfc-1",
+        "require_signed_contract": True,
+        "breaker_state": "open",
+        "contract_status": "SIGNED",
+        "preflight": {},
+    })
+    assert "dfc-1" in text
+    assert "SIGNED" in text
+    assert "open" in text
+    assert "Confirm will refuse" in text
+
+
 def test_render_transfer_names_breaker():
     from src.ai.copilot.pilot_agent import _render_transfer
 
