@@ -471,10 +471,11 @@ def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`"
 def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -> str:
     """WHERE fragment for SQLite ``ON CONFLICT DO UPDATE``.
 
-    Family-aware for ``file:pos`` / numeric / opaque. PG ``hi/lo`` hex is
-    best-effort opaque text here (SQLite lacks portable hex→int); writers also
-    run :func:`filter_stale_lsn_rows` / :func:`compare_lsn` in Python before bind.
-    Cross-family pairs never invent ``newer`` via bare text ``>``.
+    Family-aware for PG ``hi/lo`` hex, ``file:pos``, numeric, and opaque.
+    Equal-width zero-padded hex strings compare in integer order, so
+    ``0/100`` is newer than ``0/20`` (bare text would invert them).
+    Writers also run :func:`filter_stale_lsn_rows` / :func:`compare_lsn`
+    in Python before bind. Cross-family pairs never invent ``newer``.
     """
     excl = f'excluded."{lsn_column}"'
     dest = f'"{table_name}"."{lsn_column}"'
@@ -499,6 +500,26 @@ def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -
         f"({dest} GLOB '[0-9]*' AND {dest} NOT GLOB '*[^0-9]*' AND length({dest}) > 0)"
     )
     both_numeric = f"({excl_numeric} AND {dest_numeric})"
+    excl_hi = f"substr({excl}, 1, instr({excl}, '/') - 1)"
+    dest_hi = f"substr({dest}, 1, instr({dest}, '/') - 1)"
+    excl_lo = f"substr({excl}, instr({excl}, '/') + 1)"
+    dest_lo = f"substr({dest}, instr({dest}, '/') + 1)"
+    hex_part = (
+        lambda part: f"({part} GLOB '[0-9A-Fa-f]*' AND {part} NOT GLOB '*[^0-9A-Fa-f]*')"
+    )
+    both_pg = (
+        f"({excl} LIKE '%/%' AND {excl} NOT LIKE '%/%/%' AND {excl} NOT LIKE '%:%' "
+        f"AND {dest} LIKE '%/%' AND {dest} NOT LIKE '%/%/%' AND {dest} NOT LIKE '%:%' "
+        f"AND {hex_part(excl_hi)} AND {hex_part(excl_lo)} "
+        f"AND {hex_part(dest_hi)} AND {hex_part(dest_lo)})"
+    )
+    pad = (
+        lambda part: f"substr('0000000000000000' || upper({part}), -16, 16)"
+    )
+    pg_newer = (
+        f"({pad(excl_hi)} > {pad(dest_hi)} "
+        f"OR ({pad(excl_hi)} = {pad(dest_hi)} AND {pad(excl_lo)} > {pad(dest_lo)}))"
+    )
     excl_opaque = (
         f"(NOT ({excl} LIKE '%:%' AND {excl} NOT LIKE 'gtid:%') "
         f"AND {excl} NOT LIKE '%/%' AND NOT {excl_numeric})"
@@ -511,6 +532,7 @@ def sqlite_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL) -
     return (
         f"({dest} IS NULL OR {dest} = '' "
         f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR ({both_pg} AND {pg_newer}) "
         f"OR ({both_numeric} AND CAST({excl} AS INTEGER) > CAST({dest} AS INTEGER)) "
         f"OR ({both_opaque} AND {excl} > {dest}))"
     )

@@ -75,12 +75,54 @@ def test_sql_guards_mention_lsn_column():
     assert "VALUES(" in mysql and "SUBSTRING_INDEX" in mysql
     sqlite = sqlite_lsn_update_guard_sql("orders")
     assert "excluded." in sqlite and DF_LSN_COL in sqlite
-    # SQLite now family-aware for file:pos (not bare text > only).
+    # Family-aware for file:pos and PG hi/lo (not bare text > only).
     assert "instr(" in sqlite and "CAST(" in sqlite
+    assert "'%/%'" in sqlite
+    assert "0000000000000000" in sqlite
     pg = postgres_lsn_update_guard_sql("orders")
     assert "split_part" in pg
     assert "file:pos" not in pg  # logic present, not a comment
     assert "bigint" in pg
+
+
+def test_sqlite_lsn_guard_orders_pg_hex_not_lexicographic() -> None:
+    """SQLite SQL must treat 0/100 as newer than 0/20 (bare text inverts)."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            f'CREATE TABLE orders (id TEXT PRIMARY KEY, v TEXT, "{DF_LSN_COL}" TEXT)'
+        )
+        conn.execute(
+            f'INSERT INTO orders (id, v, "{DF_LSN_COL}") VALUES (?, ?, ?)',
+            ("1", "old", "0/20"),
+        )
+        where_sql = sqlite_lsn_update_guard_sql("orders")
+        conn.execute(
+            f'INSERT INTO orders (id, v, "{DF_LSN_COL}") VALUES (?, ?, ?) '
+            f"ON CONFLICT(id) DO UPDATE SET v=excluded.v, "
+            f'"{DF_LSN_COL}"=excluded."{DF_LSN_COL}" WHERE {where_sql}',
+            ("1", "new", "0/100"),
+        )
+        v, lsn = conn.execute(
+            f'SELECT v, "{DF_LSN_COL}" FROM orders WHERE id = ?', ("1",)
+        ).fetchone()
+        assert v == "new"
+        assert lsn == "0/100"
+        conn.execute(
+            f'INSERT INTO orders (id, v, "{DF_LSN_COL}") VALUES (?, ?, ?) '
+            f"ON CONFLICT(id) DO UPDATE SET v=excluded.v, "
+            f'"{DF_LSN_COL}"=excluded."{DF_LSN_COL}" WHERE {where_sql}',
+            ("1", "stale", "0/20"),
+        )
+        v2, lsn2 = conn.execute(
+            f'SELECT v, "{DF_LSN_COL}" FROM orders WHERE id = ?', ("1",)
+        ).fetchone()
+        assert v2 == "new"
+        assert lsn2 == "0/100"
+    finally:
+        conn.close()
 
 
 def test_snowflake_lsn_predicate_covers_pg_hex_family():
