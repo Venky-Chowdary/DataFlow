@@ -15,7 +15,7 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
-import { cancelJob, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, RetryRefusedError } from "../lib/api";
+import { fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, RetryRefusedError } from "../lib/api";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -208,7 +208,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const [detailLoading, setDetailLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [resuming, setResuming] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [jobSearch, setJobSearch] = useState("");
   const [detailTab, setDetailTab] = useState<JobDetailTab>("detail");
@@ -460,20 +459,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       setResuming(false);
     }
   }, [selectedId, liveJob?.checkpoint, liveJob?.cdc_cursor_gap, onRefresh, onStartTransfer, toast]);
-
-  const handleCancel = useCallback(async () => {
-    if (!selectedId) return;
-    setCancelling(true);
-    try {
-      await cancelJob(selectedId);
-      toast({ title: "Cancellation requested", message: "The job will stop at the next checkpoint.", tone: "info" });
-      onRefresh?.();
-    } catch (e) {
-      toast({ title: "Could not cancel job", message: e instanceof Error ? e.message : "Cancel failed", tone: "error" });
-    } finally {
-      setCancelling(false);
-    }
-  }, [selectedId, onRefresh, toast]);
 
   const beginRename = useCallback((job: TransferJob) => {
     setRenamingId(job._id);
@@ -825,19 +810,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                         onSave={() => void commitRename(selected._id)}
                         onCancel={cancelRename}
                       />
-                      <div className="df2-jobs-v3-live-actions">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => void handleCancel()}
-                          disabled={cancelling}
-                          loading={cancelling}
-                          loadingLabel="Cancelling…"
-                          leadingIcon={<DtIcon name="x" size={14} />}
-                        >
-                          Cancel job
-                        </Button>
-                      </div>
                     </div>
                     <JobTheater
                       jobId={selectedId!}

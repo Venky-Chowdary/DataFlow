@@ -1,13 +1,20 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { DtIcon } from "./DtIcon";
+import {
+  mergeToastStack,
+  toastFingerprint,
+  type ToastTone,
+} from "../lib/toastDedupe";
 
-export type ToastTone = "info" | "success" | "warning" | "error";
+export type { ToastTone };
 
 export interface ToastItem {
   id: string;
+  key: string;
   title: string;
   message?: string;
   tone: ToastTone;
+  createdAt: number;
 }
 
 interface ToastContextValue {
@@ -26,23 +33,50 @@ const TONE_ICON: Record<ToastTone, string> = {
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [items, setItems] = useState<ToastItem[]>([]);
+  const timers = useRef(new Map<string, number>());
 
   const dismiss = useCallback((id: string) => {
+    const handle = timers.current.get(id);
+    if (handle != null) {
+      window.clearTimeout(handle);
+      timers.current.delete(id);
+    }
     setItems((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  const scheduleDismiss = useCallback(
+    (id: string, tone: ToastTone) => {
+      const prior = timers.current.get(id);
+      if (prior != null) window.clearTimeout(prior);
+      const holdMs = tone === "error" ? 16000 : tone === "warning" ? 10000 : 4500;
+      timers.current.set(id, window.setTimeout(() => dismiss(id), holdMs));
+    },
+    [dismiss],
+  );
+
   const toast = useCallback(
     ({ title, message, tone = "info" }: { title: string; message?: string; tone?: ToastTone }) => {
-      const id = crypto.randomUUID();
       const cleanTitle = title.trim();
       const cleanMessage = message?.trim() || undefined;
-      setItems((prev) => [...prev.slice(-3), { id, title: cleanTitle, message: cleanMessage, tone }]);
-      // Errors/warnings often carry multi-sentence remediation (TLS, quarantine).
-      // Give the operator time to read — success stays short.
-      const holdMs = tone === "error" ? 16000 : tone === "warning" ? 10000 : 4500;
-      window.setTimeout(() => dismiss(id), holdMs);
+      const key = toastFingerprint({ title: cleanTitle, message: cleanMessage, tone });
+      const now = Date.now();
+      const incoming: ToastItem = {
+        id: crypto.randomUUID(),
+        key,
+        title: cleanTitle,
+        message: cleanMessage,
+        tone,
+        createdAt: now,
+      };
+      let shownId = incoming.id;
+      setItems((prev) => {
+        const merged = mergeToastStack(prev, incoming, now);
+        shownId = merged.shownId;
+        return merged.items;
+      });
+      scheduleDismiss(shownId, tone);
     },
-    [dismiss]
+    [scheduleDismiss],
   );
 
   const value = useMemo(() => ({ toast, dismiss }), [toast, dismiss]);
@@ -74,7 +108,6 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 export function useToast() {
   const ctx = useContext(ToastContext);
   if (!ctx) {
-    // Avoid white-screening the app if provider is missing (HMR / entry mismatch).
     if (import.meta.env.DEV) {
       console.warn("useToast called without ToastProvider — toasts are no-ops until provider mounts.");
     }

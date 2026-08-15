@@ -202,6 +202,11 @@ export function DashboardPage({
                 Open jobs
               </button>
             )}
+            {failed.length === 0 && dlqCount != null && dlqCount > 0 && onOpenJobs && (
+              <button type="button" className="df2-overview-attention-action" onClick={onOpenJobs}>
+                Open quarantine
+              </button>
+            )}
             {freshnessStale && !failed.length && onOpenPipeline && freshness?.alerts?.[0]?.schedule_id && (
               <button
                 type="button"

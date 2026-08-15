@@ -787,7 +787,7 @@ function AppShell({
               {mountedScreens.has("settings") && (
                 <div className={`df2-screen-keep ${showScreen("settings")}`} hidden={screen !== "settings"} aria-hidden={screen !== "settings"}>
                 <PageErrorBoundary label="Settings">
-                  <SettingsPage />
+                  <SettingsPage onOpenConnectors={() => setScreen("connectors")} />
                 </PageErrorBoundary>
                 </div>
               )}

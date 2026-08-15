@@ -137,6 +137,12 @@
   --df-font-sans: "IBM Plex Sans", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
   --df-font-display: "Plus Jakarta Sans", "IBM Plex Sans", system-ui, sans-serif;
   --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --df-fs-xs: 11px;
+  --df-fs-sm: 12.5px;
+  --df-fs-md: 13.5px;
+  --df-fs-lg: 15px;
+  --df-fs-xl: 18px;
+  --df-fs-title: 15px;
 
   --df-header-height: 60px;
   --df-sidebar-width: 252px;
@@ -344,6 +350,9 @@ body:has(.df2-app) #root {
   max-height: 100%;
   overflow: hidden;
   box-sizing: border-box;
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-md);
+  color: var(--df-text-primary);
 }
 
 /* ≤1680 CSS px — typical 14–16" laptop at 100% browser zoom */
