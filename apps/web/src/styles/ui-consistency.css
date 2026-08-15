@@ -155,10 +155,10 @@
   border-radius: var(--df-radius-card, 12px);
 }
 
-/* Pipeline / connector cards equal minimum */
+/* Pipeline / connector cards — list density, never tile-tall */
 .df2-connector-card,
 .df2-pipeline-card {
-  min-height: 196px;
+  min-height: 0;
   border-radius: var(--df-radius-card, 12px);
 }
 

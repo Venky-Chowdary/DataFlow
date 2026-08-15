@@ -150,4 +150,25 @@ describe("Transfer Studio chrome contracts", () => {
     assert.equal(root!.primaryKey, "id");
     assert.match(root!.fixHint, /Primary key|unique column|dedupe/i);
   });
+
+  it("workspace list rows share compact density — Connectors match Contracts/Schedules", () => {
+    const tokens = readFileSync(join(webRoot, "styles/tokens.css"), "utf8");
+    const consistency = readFileSync(join(webRoot, "styles/ui-consistency.css"), "utf8");
+    const connectors = readFileSync(join(webRoot, "styles/connectors-page.css"), "utf8");
+    const enterprise = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+    const card = readFileSync(join(webRoot, "components/ui/ConnectorCard.tsx"), "utf8");
+
+    assert.match(tokens, /--df-list-row-min-h:\s*48px/);
+    assert.match(tokens, /--df-list-row-pad-y:\s*8px/);
+    assert.match(tokens, /--df-list-row-title:\s*13px/);
+    assert.match(tokens, /@media \(min-width: 1920px\)/);
+    assert.match(tokens, /@media \(max-height: 800px\)/);
+    assert.doesNotMatch(consistency, /min-height:\s*196px/);
+    assert.match(connectors, /\.df2-connector-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
+    assert.match(enterprise, /\.df2-contract-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
+    assert.match(enterprise, /\.df2-pipeline-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
+    assert.match(enterprise, /\.df2-connector-row,\s*\n\s*\.df2-contract-row,\s*\n\s*\.df2-pipeline-row/);
+    assert.match(card, /df2-btn-label/);
+    assert.match(card, /size=\{16\}/);
+  });
 });
