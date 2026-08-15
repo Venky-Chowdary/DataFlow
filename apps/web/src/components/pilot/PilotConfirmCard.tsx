@@ -12,12 +12,14 @@
 import { Button } from "../ui/Button";
 import { contractBindFromPreview } from "../../lib/contractBind";
 import { breakerLabel, contractBreakerBlocksRun } from "../../lib/contractBreakerUi";
+import { mergeNamedDataRules } from "../../lib/pilotDataRules";
 import {
   isDestructiveSchedulePreview,
   scheduleConfirmBind,
   scheduleConfirmBlocksRun,
   schedulePreviewFromPayload,
 } from "../../lib/pilotScheduleConfirm";
+import { formatSchemaPolicyLabel, formatValidationModeLabel } from "../../lib/transferConstants";
 import type {
   CopilotPendingAction,
   PilotGate,
@@ -127,6 +129,7 @@ function TransferBody({
   const unmapped = preview?.unmapped_source_columns
     || plan?.unmapped_source_columns
     || [];
+  const dataRules = mergeNamedDataRules(plan, preview);
   const contractBind = contractBindFromPreview(preview);
   const bindBlock = contractBreakerBlocksRun(preview?.breaker_state);
   const gates = plan?.preflight?.gates || [];
@@ -199,6 +202,26 @@ function TransferBody({
                   {breakerLabel(contractBind.breakerState) || contractBind.breakerState}
                 </>
               ) : null}
+            </dd>
+          </div>
+        ) : null}
+        {dataRules.validationMode ? (
+          <div>
+            <dt>Validation</dt>
+            <dd>
+              <code>{dataRules.validationMode}</code>
+              {" · "}
+              {formatValidationModeLabel(dataRules.validationMode)}
+            </dd>
+          </div>
+        ) : null}
+        {dataRules.schemaPolicy ? (
+          <div>
+            <dt>Schema</dt>
+            <dd>
+              <code>{dataRules.schemaPolicy}</code>
+              {" · "}
+              {formatSchemaPolicyLabel(dataRules.schemaPolicy)}
             </dd>
           </div>
         ) : null}
@@ -310,6 +333,26 @@ function ScheduleBody({
                   {breakerLabel(bind.breakerState) || bind.breakerState}
                 </>
               ) : null}
+            </dd>
+          </div>
+        ) : null}
+        {preview.validation_mode ? (
+          <div>
+            <dt>Validation</dt>
+            <dd>
+              <code>{preview.validation_mode}</code>
+              {" · "}
+              {formatValidationModeLabel(preview.validation_mode)}
+            </dd>
+          </div>
+        ) : null}
+        {preview.schema_policy ? (
+          <div>
+            <dt>Schema</dt>
+            <dd>
+              <code>{preview.schema_policy}</code>
+              {" · "}
+              {formatSchemaPolicyLabel(preview.schema_policy)}
             </dd>
           </div>
         ) : null}

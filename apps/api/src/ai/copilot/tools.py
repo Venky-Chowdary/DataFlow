@@ -1877,6 +1877,12 @@ class DataPilotTools:
             "last_status": s.last_status,
             "run_count": s.run_count,
         }
+        validation_mode = str(getattr(s, "validation_mode", "") or "").strip()
+        schema_policy = str(getattr(s, "schema_policy", "") or "").strip()
+        if validation_mode:
+            row["validation_mode"] = validation_mode
+        if schema_policy:
+            row["schema_policy"] = schema_policy
         row.update(schedule_bind_summary(s))
         return row
 
@@ -1930,6 +1936,12 @@ class DataPilotTools:
             "sync_mode": sync_mode,
             **bind,
         }
+        validation_mode = str(getattr(sched, "validation_mode", "") or "").strip()
+        schema_policy = str(getattr(sched, "schema_policy", "") or "").strip()
+        if validation_mode:
+            preview["validation_mode"] = validation_mode
+        if schema_policy:
+            preview["schema_policy"] = schema_policy
         ack_id = get_ack_ledger().put(
             kind="run_schedule",
             payload={"schedule_id": sched.id, "name": sched.name},

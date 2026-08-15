@@ -243,6 +243,10 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
             if breaker.lower() in {"open", "half_open"}:
                 lines.append("  – Confirm will refuse while the breaker is OPEN.")
 
+    rules = _render_live_data_rules(preview, plan)
+    if rules:
+        lines.append(rules)
+
     if tool == "start_transfer" and o.get("requires_confirm"):
         if o.get("destructive"):
             lines.append(
@@ -254,6 +258,35 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _data_rules_bits(o: dict[str, Any] | None) -> list[str]:
+    """Named validation / schema posture only. Never invents skip_preflight."""
+    rec = o or {}
+    bits: list[str] = []
+    mode = str(rec.get("validation_mode") or "").strip()
+    if mode:
+        bits.append(f"{mode} validation")
+    policy = str(rec.get("schema_policy") or "").strip()
+    if policy:
+        bits.append(f"schema `{policy}`")
+    return bits
+
+
+def _render_live_data_rules(*records: dict[str, Any] | None) -> str:
+    """Operator-visible data / migration rules on a live plan or Confirm."""
+    merged: dict[str, Any] = {}
+    for rec in records:
+        if not rec:
+            continue
+        if rec.get("validation_mode"):
+            merged["validation_mode"] = rec.get("validation_mode")
+        if rec.get("schema_policy"):
+            merged["schema_policy"] = rec.get("schema_policy")
+    bits = _data_rules_bits(merged)
+    if not bits:
+        return ""
+    return f"• Data / migration rules: {', '.join(bits)}."
+
+
 def _render_requested_data_rules(o: dict[str, Any]) -> str:
     """Name spoken bind / data rules on a generic route sketch.
 
@@ -263,12 +296,7 @@ def _render_requested_data_rules(o: dict[str, Any]) -> str:
     cid = str(o.get("contract_id") or "").strip()
     if cid:
         bits.append(f"contract `{cid}`")
-    mode = str(o.get("validation_mode") or "").strip()
-    if mode:
-        bits.append(f"{mode} validation")
-    policy = str(o.get("schema_policy") or "").strip()
-    if policy:
-        bits.append(f"schema `{policy}`")
+    bits.extend(_data_rules_bits(o))
     if not bits:
         return ""
     return (
@@ -318,6 +346,9 @@ def _render_schedule_detail(s: dict[str, Any]) -> str:
         lines.append(f"• Bound {bind}.")
     else:
         lines.append("• No data contract bound — enforce stays unset.")
+    rules = _render_live_data_rules(s)
+    if rules:
+        lines.append(rules)
     lines.append(
         f"• next `{s.get('next_run_at') or '—'}` · last **{s.get('last_status') or 'never'}**"
         f" ({s.get('run_count', 0)} runs)."
@@ -345,6 +376,9 @@ def _render_schedule_run(o: dict[str, Any]) -> str:
         breaker = str(preview.get("breaker_state") or "").strip()
         if breaker:
             lines.append(f"• Circuit breaker is **{breaker}**.")
+    rules = _render_live_data_rules(preview, o)
+    if rules:
+        lines.append(rules)
     if o.get("destructive") or sync == "full_refresh_overwrite":
         lines.append("• **This overwrites the destination table.**")
     lines.append(

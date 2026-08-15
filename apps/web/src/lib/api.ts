@@ -595,6 +595,8 @@ export interface PilotTransferPreview {
   destination_table_exists?: boolean;
   preflight_run_id?: string;
   readiness_score?: number;
+  validation_mode?: string;
+  schema_policy?: string;
   contract_id?: string;
   require_signed_contract?: boolean;
   enforce_contract?: boolean;

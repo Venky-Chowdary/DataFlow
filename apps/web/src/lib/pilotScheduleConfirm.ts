@@ -16,6 +16,8 @@ export interface PilotSchedulePreview {
   source_table?: string;
   dest_table?: string;
   sync_mode?: string;
+  validation_mode?: string;
+  schema_policy?: string;
   contract_id?: string;
   require_signed_contract?: boolean;
   enforce_contract?: boolean;
@@ -36,6 +38,8 @@ export function schedulePreviewFromPayload(
     source_table: String(preview.source_table || ""),
     dest_table: String(preview.dest_table || ""),
     sync_mode: String(preview.sync_mode || ""),
+    validation_mode: String(preview.validation_mode || "").trim() || undefined,
+    schema_policy: String(preview.schema_policy || "").trim() || undefined,
     contract_id: String(preview.contract_id || "").trim() || undefined,
     require_signed_contract: Boolean(preview.require_signed_contract),
     enforce_contract: Boolean(preview.enforce_contract),

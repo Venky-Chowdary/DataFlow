@@ -21,6 +21,8 @@ describe("pilotScheduleConfirm", () => {
         source_table: "orders",
         dest_table: "orders_wh",
         sync_mode: "incremental",
+        validation_mode: "strict",
+        schema_policy: "type_locked",
         contract_id: "dfc-1",
         require_signed_contract: true,
         enforce_contract: true,
@@ -29,6 +31,8 @@ describe("pilotScheduleConfirm", () => {
     });
     assert.equal(preview.source_table, "orders");
     assert.equal(preview.dest_table, "orders_wh");
+    assert.equal(preview.validation_mode, "strict");
+    assert.equal(preview.schema_policy, "type_locked");
     assert.deepEqual(scheduleConfirmBind(preview), {
       contractId: "dfc-1",
       requireSigned: true,
@@ -61,5 +65,7 @@ describe("pilotScheduleConfirm", () => {
       breakerState: "",
     });
     assert.equal(scheduleConfirmBlocksRun(preview), "");
+    assert.equal(preview.validation_mode, undefined);
+    assert.equal(preview.schema_policy, undefined);
   });
 });

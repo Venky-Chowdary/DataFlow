@@ -1150,6 +1150,8 @@ def start_transfer(
         "destination_table_exists": destination.get("table_exists"),
         "preflight_run_id": preflight.get("run_id"),
         "readiness_score": preflight.get("readiness_score"),
+        "validation_mode": plan.get("validation_mode"),
+        "schema_policy": plan.get("schema_policy"),
     }
     if bound.get("contract_id"):
         preview["contract_id"] = bound["contract_id"]

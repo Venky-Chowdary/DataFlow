@@ -96,6 +96,8 @@ def test_run_schedule_now_preview_includes_signed_bind(tmp_path, monkeypatch):
         source_table = "orders"
         dest_table = "orders_wh"
         sync_mode = "incremental"
+        validation_mode = "strict"
+        schema_policy = "type_locked"
         contract_id = signed.id
         require_signed_contract = True
 
@@ -106,6 +108,9 @@ def test_run_schedule_now_preview_includes_signed_bind(tmp_path, monkeypatch):
     assert preview["contract_id"] == signed.id
     assert preview["require_signed_contract"] is True
     assert preview["breaker_state"] == "closed"
+    assert preview["validation_mode"] == "strict"
+    assert preview["schema_policy"] == "type_locked"
+    assert "skip_preflight" not in preview
     peek = PilotAckLedger(path=tmp_path / "acks.json").peek(result.output["ack_id"])
     assert peek is not None
     assert peek.get("kind") == "run_schedule"
@@ -157,6 +162,8 @@ def test_render_schedule_run_names_bind_and_overwrite():
             "source_table": "orders",
             "dest_table": "orders_wh",
             "sync_mode": "full_refresh_overwrite",
+            "validation_mode": "strict",
+            "schema_policy": "type_locked",
             "contract_id": "dfc-1",
             "require_signed_contract": True,
             "breaker_state": "closed",
@@ -167,6 +174,8 @@ def test_render_schedule_run_names_bind_and_overwrite():
     assert "dfc-1" in text
     assert "SIGNED" in text
     assert "closed" in text
+    assert "strict validation" in text
+    assert "type_locked" in text
     assert "overwrites" in text.lower()
 
 
@@ -213,6 +222,8 @@ def test_schedule_summary_includes_bind_and_sync(monkeypatch):
         source_table = "orders"
         dest_table = "orders_wh"
         sync_mode = "incremental"
+        validation_mode = "strict"
+        schema_policy = "pause_on_change"
         next_run_at = "2026-08-16T00:00:00+00:00"
         last_run_at = None
         last_status = "success"
@@ -222,6 +233,8 @@ def test_schedule_summary_includes_bind_and_sync(monkeypatch):
 
     row = DataPilotTools()._schedule_summary(_Sched())
     assert row["sync_mode"] == "incremental"
+    assert row["validation_mode"] == "strict"
+    assert row["schema_policy"] == "pause_on_change"
     assert row["contract_id"] == signed.id
     assert row["require_signed_contract"] is True
     assert row["breaker_state"] == "closed"
@@ -251,6 +264,8 @@ def test_schedule_summary_omits_bind_when_unbound():
     assert "contract_id" not in row
     assert "enforce_contract" not in row
     assert "breaker_state" not in row
+    assert "validation_mode" not in row
+    assert "schema_policy" not in row
 
 
 def test_render_schedule_detail_names_route_and_bind():
@@ -264,6 +279,8 @@ def test_render_schedule_detail_names_route_and_bind():
         "source_table": "orders",
         "dest_table": "orders_wh",
         "sync_mode": "incremental",
+        "validation_mode": "strict",
+        "schema_policy": "manual_review",
         "contract_id": "dfc-1",
         "require_signed_contract": True,
         "breaker_state": "open",
@@ -274,6 +291,8 @@ def test_render_schedule_detail_names_route_and_bind():
     assert "Nightly" in text
     assert "`orders` → `orders_wh`" in text
     assert "incremental" in text
+    assert "strict validation" in text
+    assert "manual_review" in text
     assert "dfc-1" in text
     assert "SIGNED" in text
     assert "open" in text
@@ -293,3 +312,4 @@ def test_render_schedule_detail_unbound_does_not_invent_enforce():
     })
     assert "No data contract bound" in text
     assert "enforce stays unset" in text
+    assert "Data / migration rules" not in text

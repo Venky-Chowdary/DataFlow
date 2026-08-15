@@ -251,6 +251,9 @@ def test_start_transfer_stamps_signed_bind_on_ack(monkeypatch):
     preview = (res.output or {}).get("preview") or {}
     assert preview.get("contract_id") == signed.id
     assert preview.get("breaker_state") == "closed"
+    assert preview.get("validation_mode") == "balanced"
+    assert preview.get("schema_policy") == "manual_review"
+    assert "skip_preflight" not in preview
 
 
 def test_start_transfer_refuses_open_breaker(monkeypatch):
@@ -512,6 +515,8 @@ def test_render_transfer_plan_names_bind_and_open_breaker():
         "destination": {"connector_name": "Dst", "table": "orders_wh"},
         "sync_mode": "incremental",
         "mapped_count": 1,
+        "validation_mode": "strict",
+        "schema_policy": "type_locked",
         "contract_id": "dfc-1",
         "require_signed_contract": True,
         "breaker_state": "open",
@@ -522,6 +527,24 @@ def test_render_transfer_plan_names_bind_and_open_breaker():
     assert "SIGNED" in text
     assert "open" in text
     assert "Confirm will refuse" in text
+    assert "strict validation" in text
+    assert "type_locked" in text
+    assert "skip_preflight" not in text
+
+
+def test_render_transfer_does_not_invent_data_rules():
+    from src.ai.copilot.pilot_agent import _render_live_data_rules, _render_transfer
+
+    text = _render_transfer("plan_transfer", {
+        "source": {"connector_name": "Src", "table": "orders", "column_count": 1},
+        "destination": {"connector_name": "Dst", "table": "orders_wh"},
+        "sync_mode": "incremental",
+        "mapped_count": 1,
+        "preflight": {},
+    })
+    assert "Data / migration rules" not in text
+    assert _render_live_data_rules({}, {"skip_preflight": True}) == ""
+    assert "propagate_all" not in _render_live_data_rules({"schema_policy": ""})
 
 
 def test_render_transfer_names_breaker():
