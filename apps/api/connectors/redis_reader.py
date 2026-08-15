@@ -63,7 +63,17 @@ def _redis_client(cfg: dict[str, Any]):
     import redis
 
     if cfg.get("connection_string"):
-        return redis.from_url(cfg["connection_string"], socket_timeout=30)
+        from connectors.url_authority import parse_url_authority, rebuild_url
+
+        raw = str(cfg["connection_string"]).strip()
+        parsed = parse_url_authority(raw)
+        if parsed.host and (cfg.get("username") or cfg.get("password")):
+            raw = rebuild_url(
+                parsed,
+                user=str(cfg.get("username") or parsed.user),
+                password=str(cfg.get("password") or parsed.password),
+            )
+        return redis.from_url(raw, socket_timeout=30)
     return redis.Redis(
         host=cfg.get("host") or "localhost",
         port=int(cfg.get("port") or 6379),

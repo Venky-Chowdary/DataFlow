@@ -25,6 +25,7 @@ import {
   isSnowflakeAccountHostOnly,
   parseSnowflakeUrl,
 } from "../lib/snowflakeUrl";
+import { looksLikeUserinfoHost, parseUrlAuthority } from "../lib/urlAuthority";
 
 interface ConnectorModalProps {
   initialType?: string;
@@ -61,8 +62,7 @@ function normalizeSqlDsn(connectionString: string, type: string): string {
   const raw = connectionString.trim();
   if (!raw) return "";
   if (raw.includes("://")) return raw;
-  // user:pass@host:port/db — common Railway paste without scheme
-  if (/^[^:/@\s]+:[^@\s]+@[^:/?\s]+/.test(raw)) {
+  if (looksLikeUserinfoHost(raw)) {
     const t = type.toLowerCase();
     const scheme = t.includes("mysql") || t.includes("maria") ? "mysql://" : "postgresql://";
     return scheme + raw;
@@ -72,36 +72,33 @@ function normalizeSqlDsn(connectionString: string, type: string): string {
 
 function parseUriIfPossible(connectionString: string, typeHint = "postgresql"): { host?: string; port?: number; username?: string; password?: string; database?: string } | null {
   const normalized = normalizeSqlDsn(connectionString, typeHint);
-  try {
-    const url = new URL(normalized);
-    const database = url.pathname.replace(/^\//, "").split("?")[0];
-    return {
-      host: url.hostname || undefined,
-      port: url.port ? parseInt(url.port, 10) : undefined,
-      username: decodeURIComponent(url.username || ""),
-      password: decodeURIComponent(url.password || ""),
-      database: database || undefined,
-    };
-  } catch {
-    return null;
-  }
+  const parsed = parseUrlAuthority(normalized);
+  if (!parsed.host) return null;
+  const database = parsed.path.replace(/^\//, "").split("?")[0];
+  return {
+    host: parsed.host || undefined,
+    port: parsed.port || undefined,
+    username: parsed.user || undefined,
+    password: parsed.password || undefined,
+    database: database || undefined,
+  };
 }
 
 function parseMongoUri(connectionString: string): ReturnType<typeof parseUriIfPossible> {
-  const match = connectionString.match(/^mongodb(?:\+srv)?:\/\/(?:([^:@]+)(?::([^@]+))?@)?([^\/?#:]+)(?::(\d+))?\/?([^?#]*)?/);
-  if (match) {
-    const [, user, pass, rawHost, rawPort, rawDb] = match;
-    const authMatch = connectionString.match(/[?&](?:authSource|authsource)=([^&#]*)/);
-    const authSource = authMatch ? decodeURIComponent(authMatch[1]) : undefined;
-    const out: Record<string, string | number | undefined> = { host: rawHost };
-    if (rawPort) out.port = parseInt(rawPort, 10);
-    if (user) out.username = user;
-    if (pass) out.password = pass;
-    if (rawDb) out.database = rawDb;
-    if (authSource) out.authSource = authSource;
-    return out;
+  const parsed = parseUrlAuthority(connectionString);
+  if (!parsed.host || !connectionString.toLowerCase().startsWith("mongodb")) {
+    return parseUriIfPossible(connectionString);
   }
-  return parseUriIfPossible(connectionString);
+  const authMatch = connectionString.match(/[?&](?:authSource|authsource)=([^&#]*)/);
+  const authSource = authMatch ? decodeURIComponent(authMatch[1]) : undefined;
+  const out: Record<string, string | number | undefined> = { host: parsed.host };
+  if (parsed.port) out.port = parsed.port;
+  if (parsed.user) out.username = parsed.user;
+  if (parsed.password) out.password = parsed.password;
+  const db = parsed.path.replace(/^\//, "").split("?")[0];
+  if (db) out.database = db;
+  if (authSource) out.authSource = authSource;
+  return out;
 }
 
 export function ConnectorModal({
@@ -302,7 +299,7 @@ export function ConnectorModal({
       auth_source: resolvedType === "mongodb" || resolvedType === "email" ? authSource : undefined,
     };
 
-    if (authMode === "user_pass") {
+    if (authMode === "user_pass" || authMode === "pat") {
       payload.username = username || undefined;
       payload.password = password || undefined;
       if ((resolvedType === "sftp" || resolvedType === "snowflake") && privateKey.trim()) {
@@ -320,7 +317,15 @@ export function ConnectorModal({
         : connectionString;
       payload.connection_string = cs || undefined;
       // Ensure discrete fields are filled from the DSN so probes never fall back to localhost.
-      if (cs && (resolvedType === "postgresql" || resolvedType === "mysql" || resolvedType === "mariadb")) {
+      if (
+        cs &&
+        (resolvedType === "postgresql" ||
+          resolvedType === "mysql" ||
+          resolvedType === "mariadb" ||
+          isGenericSql(resolvedType) ||
+          resolvedType === "redis" ||
+          resolvedType === "sftp")
+      ) {
         const parsed = parseUriIfPossible(cs, resolvedType);
         if (parsed?.host) payload.host = parsed.host;
         if (parsed?.port) payload.port = parsed.port;

@@ -10,7 +10,6 @@ import os
 import re
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +99,14 @@ def parse_sftp_config(
     raw = (connection_string or "").strip()
 
     if raw:
-        parsed = urlparse(raw)
-        if parsed.scheme in ("sftp", "ssh"):
-            cfg.host = (parsed.hostname or "").strip()
+        from connectors.url_authority import parse_url_authority
+
+        parsed = parse_url_authority(raw)
+        if parsed.scheme in ("sftp", "ssh") and parsed.host:
+            cfg.host = parsed.host.strip()
             cfg.port = parsed.port or _default_port(parsed.scheme)
-            cfg.username = (parsed.username or "").strip()
-            cfg.password = (parsed.password or "").strip()
+            cfg.username = parsed.user.strip()
+            cfg.password = parsed.password
             cfg.path = parsed.path or ""
         else:
             # Treat a bare connection string as a remote path.

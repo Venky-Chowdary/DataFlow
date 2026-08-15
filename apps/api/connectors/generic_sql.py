@@ -452,7 +452,19 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
             )
         if db_type == "sqlite":
             return _normalize_sqlite_url(f"sqlite:///{connection_string}")
-        return _normalize_sqlalchemy_url_string(connection_string, db_type)
+        from connectors.sql_dsn import sync_credentials_into_connection_string
+        from connectors.url_authority import parse_url_authority, rebuild_url
+
+        sync_credentials_into_connection_string(cfg)
+        raw = (cfg.get("connection_string") or connection_string).strip()
+        parsed = parse_url_authority(raw)
+        if parsed.host:
+            form_user = str(cfg.get("username") or "").strip()
+            form_password = str(cfg.get("password") or "")
+            user = form_user or parsed.user
+            password = form_password if form_password.strip() else parsed.password
+            raw = rebuild_url(parsed, user=user, password=password)
+        return _normalize_sqlalchemy_url_string(raw, db_type)
 
     if not db_type:
         raise ValueError("A database type or connection_string is required")

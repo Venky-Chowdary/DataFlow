@@ -77,3 +77,14 @@ def test_normalize_preserves_password_with_at_sign():
     out = _normalize_sqlalchemy_url_string(raw, "mysql")
     assert out.startswith("mysql+pymysql://")
     assert "p@ss@" in out
+
+
+def test_build_url_encodes_at_in_password():
+    url = str(_build_url({
+        "type": "mysql",
+        "connection_string": "mysql://root:p@ss@127.0.0.1:3306/demo",
+    }))
+    assert url.startswith("mysql+pymysql://")
+    assert "p%40ss" in url
+    assert "127.0.0.1" in url
+    assert "demo" in url

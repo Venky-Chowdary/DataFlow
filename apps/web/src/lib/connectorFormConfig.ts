@@ -18,7 +18,8 @@ export type AuthMode =
   | "aws_keys"
   | "api_key"
   | "file_path"
-  | "key_pair";
+  | "key_pair"
+  | "pat";
 
 /** Single form field descriptor. */
 export interface FormField {
@@ -420,6 +421,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("connection_string", "Connection string", {
         rows: 2,
         placeholder: isSnowflake ? "" : genericSqlPlaceholder(type),
+        hint: "SQLAlchemy-style login URL. If the password contains @, encode it as %40 — or use Username & password.",
       })
     );
   }
@@ -611,6 +613,27 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   }
 
   if (isSnowflake) {
+    authModes.push(
+      auth("pat", "Programmatic access token", [
+        text("host", "Account host", {
+          placeholder: "xy12345.us-east-1.snowflakecomputing.com",
+          hint: "Same account host as Username & password. Snowflake PAT is the MFA-safe password replacement Fivetran/Airbyte recommend for service users.",
+        }),
+        text("username", "Username"),
+        password("password", "Programmatic access token", {
+          hint: "Create the token in Snowsight → user → Programmatic access tokens. The official Python driver sends it as password=.",
+        }),
+        text("database", "Database"),
+        text("schema", "Schema", { placeholder: "PUBLIC", optional: true }),
+        text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
+        text("authRole", "Role", { placeholder: "Leave blank for default role", optional: true }),
+      ], (values) => {
+        if (!fmt(values, "host")) return "Account host is required.";
+        if (!fmt(values, "username")) return "Username is required.";
+        if (!fmt(values, "password")) return "Programmatic access token is required.";
+        return null;
+      })
+    );
     authModes.push(
       auth("key_pair", "Key-pair (JWT)", [
         text("host", "Account host", {

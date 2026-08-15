@@ -689,6 +689,8 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
         from connectors.snowflake_conn import get_connection, normalize_account
         from connectors.writer_common import quote_sql_identifier
 
+        from services.connector_auth import engine_login_role
+
         conn = get_connection(
             account=normalize_account(kwargs.get("host", "")),
             username=kwargs.get("username", ""),
@@ -697,6 +699,9 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             schema=schema.upper(),
             warehouse=kwargs.get("warehouse", ""),
             connection_string=kwargs.get("connection_string", ""),
+            role=engine_login_role(kwargs.get("auth_role"), kwargs.get("role")),
+            private_key=str(kwargs.get("private_key") or ""),
+            private_key_passphrase=str(kwargs.get("password") or ""),
         )
 
         warnings: list[str] = []

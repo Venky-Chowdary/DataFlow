@@ -347,7 +347,7 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
             "(common for local/dev databases), or enable TLS on the server."
         )
 
-    # Snowflake: classify role / MFA / network before the generic "login" regex.
+    # Snowflake: classify role / MFA / network / positional URL before the generic "login" regex.
     # Role 'BOTH' errors contain "attempt to login" and were mislabeled as a bad password.
     if driver == "snowflake":
         from connectors.snowflake_conn import classify_snowflake_connect_error
@@ -355,6 +355,14 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
         classified = classify_snowflake_connect_error(raw)
         if classified:
             return classified
+
+    # Keyword-only drivers raise TypeError when a raw URL is passed positionally.
+    if re.search(r"takes 0 positional arguments|__init__\(\) takes 0 positional", text):
+        return (
+            "This driver does not accept a raw URL as a positional argument. "
+            "Use Username & password, or a login URL with an encoded password "
+            "(use %40 for @)."
+        )
 
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
