@@ -818,6 +818,8 @@ export interface CatalogConnector {
   capability_label?: string;
   /** Honest tier: certified | source_only | connect_only | planned */
   certification_tier?: string;
+  is_hosted_alias?: boolean;
+  alias_of?: string | null;
   capabilities?: {
     test?: boolean;
     read?: boolean;

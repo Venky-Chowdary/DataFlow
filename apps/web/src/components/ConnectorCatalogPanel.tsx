@@ -5,6 +5,7 @@ import { Skeleton } from "./LoadingState";
 import { FilterTabs } from "./ui/FilterTabs";
 import { FilterBar } from "./ui/FilterBar";
 import { fetchCatalogConnectors, type CatalogConnector } from "../lib/api";
+import { collapseHostedAliasTiles } from "../lib/catalogAliases";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -72,6 +73,8 @@ interface ConnectorCatalogPanelProps {
   /** When true, only live transfer connectors are clickable */
   requireAvailable?: boolean;
   initialStatus?: string;
+  /** Hide cloud/edition twins (Snowflake on AWS, Standard, …) — same login. */
+  collapseAliases?: boolean;
 }
 
 export function ConnectorCatalogPanel({
@@ -82,6 +85,7 @@ export function ConnectorCatalogPanel({
   transferOnly = false,
   requireAvailable = false,
   initialStatus = "",
+  collapseAliases = false,
 }: ConnectorCatalogPanelProps) {
   const [query, setQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
@@ -146,6 +150,11 @@ export function ConnectorCatalogPanel({
     }
     return items;
   }, [categories]);
+
+  const visibleConnectors = useMemo(
+    () => (collapseAliases ? collapseHostedAliasTiles(connectors) : connectors),
+    [collapseAliases, connectors],
+  );
 
   const showSidebar = !compact;
 
@@ -215,6 +224,12 @@ export function ConnectorCatalogPanel({
             )}
             {sourceOnlyCount > 0 && ` · ${sourceOnlyCount.toLocaleString()} source-only`}
             {plannedCount > 0 && ` · ${plannedCount.toLocaleString()} planned`}
+            {collapseAliases && connectors.length > visibleConnectors.length && (
+              <>
+                {" · "}
+                {connectors.length - visibleConnectors.length} cloud/edition tiles use the same login
+              </>
+            )}
             {role !== "all" && (
               <>
                 {" · "}
@@ -239,11 +254,11 @@ export function ConnectorCatalogPanel({
               <Skeleton key={i} className="df2-skeleton-tile" />
             ))}
           </div>
-        ) : connectors.length === 0 ? (
+        ) : visibleConnectors.length === 0 ? (
           <p className="df2-catalog-empty">No connectors match. Try &quot;Transfer ready&quot; or a different search.</p>
         ) : (
           <div className="df2-connector-grid">
-            {connectors.map((item) => {
+            {visibleConnectors.map((item) => {
               const badge = statusBadge(item);
               const tier = item.certification_tier || "";
               const selectable =

@@ -178,6 +178,7 @@ _TRANSFER_READY_HOSTED_TWINS = frozenset({
     "amazon_rds_oracle", "oracle_autonomous_warehouse",
     "google_bigquery", "bigquery_us", "bigquery_eu",
     "snowflake_aws", "snowflake_azure", "snowflake_gcp",
+    "snowflake_standard", "snowflake_enterprise",
     "amazon_dynamodb",
     "mongodb_atlas",
     # Search / cache

@@ -1014,6 +1014,8 @@ body {
   text-align: left;
   transition: border-color 0.15s, box-shadow 0.15s;
   min-height: 130px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .df2-connector-tile:hover {
@@ -1036,6 +1038,13 @@ body {
   font-weight: 600;
   color: #0f172a;
   line-height: 1.25;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-width: 0;
+  width: 100%;
 }
 
 .df2-connector-tile-desc {

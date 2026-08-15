@@ -253,20 +253,13 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   } else if (isSnowflake) {
     userPassFields.push(
-      text("host", "Account host", {
-        placeholder: "xy12345.us-east-1.snowflakecomputing.com",
-        hint: "Preferred: org-account from Snowsight (myorg-acctname). Locator-only xy12345.snowflakecomputing.com returns HTTP 404 when the account is not in the default region. A browser URL is the host, not a login. Leave Role blank for the user's default.",
-      }),
+      text("host", "Account host", { placeholder: "myorg-acctname" }),
       text("username", "Username"),
       password("password", "Password"),
       text("database", "Database"),
       text("schema", "Schema", { placeholder: "PUBLIC" }),
       text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
-      text("authRole", "Role", {
-        placeholder: "Leave blank for default role",
-        optional: true,
-        hint: "Optional. Only set a role the user can assume. Blank uses the Snowflake default role.",
-      })
+      text("authRole", "Role", { placeholder: "Default role", optional: true })
     );
   } else if (isRedis) {
     userPassFields.push(
@@ -425,8 +418,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     connStrFields.push(
       textarea("connection_string", "Snowflake login URL", {
         rows: 3,
-        placeholder: "snowflake://USER:PASSWORD@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH",
-        hint: "SQLAlchemy-style login, not a browser URL. Example: snowflake://USER:PASSWORD@bq73198/EMPLOYEE_DB/PUBLIC?warehouse=COMPUTE_WH. If the password contains @, encode it as %40 — or use Username & password. https://….snowflakecomputing.com is the account host only.",
+        placeholder: "snowflake://USER:PASSWORD@myorg-acctname/DATABASE/SCHEMA?warehouse=COMPUTE_WH",
       })
     );
   } else if (isSQLite || isDuckDB) {
@@ -638,14 +630,9 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   if (isSnowflake) {
     authModes.push(
       auth("pat", "Programmatic access token", [
-        text("host", "Account host", {
-          placeholder: "xy12345.us-east-1.snowflakecomputing.com",
-          hint: "Same host as Username & password — prefer the Snowsight org-account. Snowflake PAT is the MFA-safe password replacement Fivetran/Airbyte recommend for service users.",
-        }),
+        text("host", "Account host", { placeholder: "myorg-acctname" }),
         text("username", "Username"),
-        password("password", "Programmatic access token", {
-          hint: "Create the token in Snowsight → user → Programmatic access tokens. The official Python driver sends it as password=.",
-        }),
+        password("password", "Programmatic access token"),
         text("database", "Database"),
         text("schema", "Schema", { placeholder: "PUBLIC", optional: true }),
         text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
@@ -656,19 +643,15 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         if (!fmt(values, "username")) return "Username is required.";
         if (!fmt(values, "password")) return "Programmatic access token is required.";
         return null;
-      }, "Snowflake PAT from Snowsight. The official driver sends it as password=.")
+      }, "Token from Snowsight.")
     );
     authModes.push(
       auth("key_pair", "Key-pair (JWT)", [
-        text("host", "Account host", {
-          placeholder: "xy12345.us-east-1.snowflakecomputing.com",
-          hint: "Same host as Username & password — prefer the Snowsight org-account. Required when the user has MFA — password-only is refused.",
-        }),
+        text("host", "Account host", { placeholder: "myorg-acctname" }),
         text("username", "Username"),
         textarea("privateKey", "PKCS#8 private key", {
           rows: 6,
-          placeholder: "-----BEGIN PRIVATE KEY----- …",
-          hint: "PEM key whose public half is assigned on the user (ALTER USER … SET RSA_PUBLIC_KEY). Encrypted keys use Password as the passphrase.",
+          placeholder: "-----BEGIN PRIVATE KEY-----",
         }),
         password("password", "Key passphrase (optional)", { optional: true }),
         text("database", "Database"),
@@ -681,7 +664,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         if (!fmt(values, "username")) return "Username is required.";
         if (!fmt(values, "privateKey")) return "PKCS#8 private key is required.";
         return null;
-      }, "PKCS#8 key whose public half is set on the Snowflake user.")
+      }, "PKCS#8 private key.")
     );
   }
 

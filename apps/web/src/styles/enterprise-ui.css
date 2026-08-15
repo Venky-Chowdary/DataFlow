@@ -7953,7 +7953,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   min-height: 34px;
 }
 
+.df2-modal-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
 .df2-modal.df2-conn-setup {
+  position: relative;
   width: min(1120px, 96vw);
   max-width: 1120px;
   height: min(88vh, 840px);
@@ -7989,6 +7997,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: flex;
   align-items: flex-start;
   gap: 12px;
+  min-width: 0;
+}
+
+.df2-conn-setup-identity > div {
+  min-width: 0;
 }
 
 .df2-conn-setup-icon {
@@ -8008,6 +8021,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-weight: 700;
   letter-spacing: -0.02em;
   color: var(--df-text-primary, #0f172a);
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .df2-conn-setup-type-hint {
@@ -8015,6 +8030,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: 12px;
   line-height: 1.4;
   color: var(--df-text-secondary, #475569);
+  overflow-wrap: anywhere;
 }
 
 .df2-auth-cards {
@@ -8028,6 +8044,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex-direction: column;
   gap: 4px;
   width: 100%;
+  min-width: 0;
   text-align: left;
   padding: 10px 12px;
   border: 1px solid var(--df-border, #e2e8f0);
@@ -8035,6 +8052,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: #fff;
   cursor: pointer;
   color: inherit;
+  overflow: hidden;
 }
 
 .df2-auth-card:hover {
@@ -8058,6 +8076,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: 12px;
   line-height: 1.4;
   color: var(--df-text-secondary, #475569);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
 }
 
 .df2-conn-setup-main {
@@ -8086,7 +8109,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: 13px;
   line-height: 1.45;
   color: var(--df-text-secondary, #475569);
-  max-width: 62ch;
+  max-width: 42ch;
+  overflow-wrap: anywhere;
 }
 
 .df2-conn-setup-fields {
@@ -8132,6 +8156,62 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-conn-setup .df2-conn-probe {
   margin-top: 4px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.df2-conn-setup .df2-conn-probe-msg,
+.df2-conn-setup .df2-conn-probe-hint {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.df2-conn-help {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(380px, 92%);
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 18px;
+  background: #fff;
+  border-left: 1px solid var(--df-border, #e6e9ee);
+  box-shadow: -12px 0 32px rgba(15, 23, 42, 0.08);
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.df2-conn-help-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.df2-conn-help-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+
+.df2-conn-help-steps {
+  margin: 0;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 12px;
+  color: var(--df-text-secondary, #475569);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.df2-conn-help-steps li {
+  overflow-wrap: anywhere;
+  padding-right: 4px;
 }
 
 @media (max-width: 800px) {

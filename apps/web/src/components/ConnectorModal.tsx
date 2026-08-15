@@ -28,6 +28,7 @@ import {
   isSnowflakeAccountHostOnly,
   parseSnowflakeUrl,
 } from "../lib/snowflakeUrl";
+import { getConnectorSetupGuide } from "../lib/connectorSetupGuide";
 import { looksLikeUserinfoHost, parseUrlAuthority } from "../lib/urlAuthority";
 
 interface ConnectorModalProps {
@@ -142,6 +143,7 @@ export function ConnectorModal({
   const [pathStyle, setPathStyle] = useState(editing?.path_style ?? false);
   const [ssl, setSsl] = useState(editing?.ssl ?? false);
   const [authMode, setAuthMode] = useState<AuthMode>(inferAuthMode(editing, startType));
+  const [helpOpen, setHelpOpen] = useState(false);
 
   const resolvedType = useMemo(() => resolveCatalogIdToType(type), [type]);
   const isMongo = resolvedType === "mongodb";
@@ -572,14 +574,14 @@ export function ConnectorModal({
   const catalogItem = CONNECTOR_CATALOG.find((c) => c.id === type);
 
   const authDetail = (mode: { value: AuthMode; description?: string }) => {
-    if (isSnowflake && mode.value === "user_pass") {
-      return "Paste the Snowsight org-account. A 250001 is a bad password — MFA uses a different code, then use PAT.";
-    }
-    if (isSnowflake && mode.value === "connection_string") {
-      return "snowflake://user:password@account/DB/SCHEMA?warehouse=… — not a browser URL.";
-    }
+    if (isSnowflake && mode.value === "user_pass") return "Account, user, password.";
+    if (isSnowflake && mode.value === "pat") return "Snowsight token.";
+    if (isSnowflake && mode.value === "key_pair") return "PKCS#8 key.";
+    if (isSnowflake && mode.value === "connection_string") return "snowflake:// login URL.";
     return mode.description || AUTH_MODE_DETAIL[mode.value];
   };
+
+  const setupGuide = getConnectorSetupGuide(resolvedType || type);
 
   const fieldSpan = (field: FormField): "full" | "half" => {
     if (
@@ -597,7 +599,7 @@ export function ConnectorModal({
   return (
     <div className="df2-modal-overlay" onClick={onClose} role="presentation">
       <div
-        className={`df2-modal ${step === "pick" ? "df2-modal-full" : "df2-conn-setup"}`}
+        className={`df2-modal ${step === "pick" ? "df2-modal-full" : "df2-conn-setup"}${helpOpen ? " is-help-open" : ""}`}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -610,13 +612,26 @@ export function ConnectorModal({
             </h2>
             <p className="df2-modal-subtitle">
               {step === "pick"
-                ? "Transfer-ready connectors support full migration. Test-only entries save credentials but cannot transfer yet."
-                : "Name the connection, pick how you log in, enter credentials, then Test before you save."}
+                ? "Pick one product. Cloud and edition tiles (Snowflake on AWS, Standard) use the same login."
+                : "Name the connection, pick how you log in, then Test before you save."}
             </p>
           </div>
-          <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onClose} aria-label="Close">
-            <DtIcon name="x" />
-          </button>
+          <div className="df2-modal-header-actions">
+            {step === "configure" && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-ghost df2-btn-sm"
+                onClick={() => setHelpOpen((open) => !open)}
+                aria-expanded={helpOpen}
+                aria-controls="df2-conn-help"
+              >
+                How to set up
+              </button>
+            )}
+            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onClose} aria-label="Close">
+              <DtIcon name="x" />
+            </button>
+          </div>
         </div>
 
         <div className="df2-modal-body">
@@ -628,6 +643,7 @@ export function ConnectorModal({
               compact
               requireAvailable={false}
               initialStatus="live"
+              collapseAliases
             />
           ) : (
             <div className="df2-conn-setup-layout">
@@ -692,7 +708,7 @@ export function ConnectorModal({
                 <div className="df2-conn-setup-main-head">
                   <h3 className="df2-conn-setup-section">{currentAuthMode?.label || "Credentials"}</h3>
                   <p className="df2-conn-setup-section-hint">
-                    {currentAuthMode ? authDetail(currentAuthMode) : "Enter the fields required to log in."}
+                    {currentAuthMode ? authDetail(currentAuthMode) : "Enter the login fields."}
                   </p>
                 </div>
                 {currentAuthMode && (
@@ -709,7 +725,6 @@ export function ConnectorModal({
                           </label>
                         )}
                         {renderField(field)}
-                        {field.hint && <p className="df2-field-note df2-label-hint">{field.hint}</p>}
                       </div>
                     ))}
                   </div>
@@ -773,18 +788,14 @@ export function ConnectorModal({
                         emulators and plaintext Docker ports usually need it off.
                       </p>
                     )}
-                    {!testResult.success && isSnowflake && /account host|snowflake:\/\//i.test(testResult.message) && (
-                      <p className="df2-conn-probe-hint">
-                        Use <strong>Username &amp; password</strong> with the Snowsight
-                        org-account (for example <code>myorg-acctname</code>), or a login URL
-                        {" "}<code>snowflake://user:password@org-account/DATABASE/SCHEMA?warehouse=COMPUTE_WH</code>.
-                      </p>
-                    )}
-                    {!testResult.success && isSnowflake && /290404|http 404|org-account/i.test(testResult.message) && (
-                      <p className="df2-conn-probe-hint">
-                        In Snowsight, open the account menu → copy the <strong>account identifier</strong>
-                        {" "}(<code>org-account</code>). Locator-only hosts are not a login.
-                      </p>
+                    {!testResult.success && isSnowflake && (
+                      <button
+                        type="button"
+                        className="df2-btn df2-btn-ghost df2-btn-sm"
+                        onClick={() => setHelpOpen(true)}
+                      >
+                        How to set up
+                      </button>
                     )}
                   </div>
                 )}
@@ -792,6 +803,27 @@ export function ConnectorModal({
             </div>
           )}
         </div>
+
+        {step === "configure" && helpOpen && (
+          <aside id="df2-conn-help" className="df2-conn-help" role="dialog" aria-label={setupGuide.title}>
+            <div className="df2-conn-help-head">
+              <h3 className="df2-conn-help-title">{setupGuide.title}</h3>
+              <button
+                type="button"
+                className="df2-btn df2-btn-ghost df2-btn-sm"
+                onClick={() => setHelpOpen(false)}
+                aria-label="Close setup help"
+              >
+                Close
+              </button>
+            </div>
+            <ol className="df2-conn-help-steps">
+              {setupGuide.steps.map((stepText) => (
+                <li key={stepText}>{stepText}</li>
+              ))}
+            </ol>
+          </aside>
+        )}
 
         {step === "configure" && (
           <div className="df2-modal-footer">

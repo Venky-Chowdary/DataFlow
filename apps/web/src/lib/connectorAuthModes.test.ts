@@ -31,12 +31,12 @@ describe("connector auth modes", () => {
     );
   });
 
-  it("tells operators to prefer Snowsight org-account over locator-only hosts", () => {
+  it("keeps Snowflake account-host fields short so setup copy lives in How to set up", () => {
     const host = getAuthModes("snowflake")
       .find((m) => m.value === "user_pass")
       ?.fields.find((f) => f.key === "host");
-    assert.match(String(host?.hint || ""), /org-account/i);
-    assert.match(String(host?.hint || ""), /404/i);
+    assert.equal(host?.placeholder, "myorg-acctname");
+    assert.equal(host?.hint, undefined);
   });
 
   it("rejects the Salesforce yourorg placeholder host", () => {
