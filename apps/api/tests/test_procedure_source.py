@@ -235,6 +235,49 @@ def test_query_mode_sqlite_select_roundtrip(tmp_path: Path) -> None:
     close_callable_spool()
 
 
+def test_callable_source_skips_uniqueness_and_population_probes() -> None:
+    from services.population_orphan_probe import probe_population_fk_orphans
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    cfg = {
+        "type": "postgresql",
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL get_orders()",
+        "extra": {"source_read_mode": "procedure"},
+    }
+    uniq = probe_source_duplicate_keys_result(
+        source_config=cfg,
+        source_table="get_orders",
+        primary_key="id",
+    )
+    assert uniq.status == "skipped_callable"
+    assert uniq.ran is False
+    pop = probe_population_fk_orphans(
+        child_table="get_orders",
+        mappings=[{"source": "id", "target": "id"}],
+        foreign_keys=[{"columns": ["customer_id"], "referenced_table": "customers"}],
+        source_config=cfg,
+    )
+    assert pop.get("ran") is False
+    assert pop.get("reason") == "callable_source"
+    assert pop.get("population_proof") is False
+
+
+def test_callable_spool_is_job_scoped(tmp_path: Path) -> None:
+    from services.procedure_source import (
+        close_callable_spool,
+        job_id_of,
+        stamp_callable_job_id,
+    )
+
+    raw = {"type": "sqlite", "source_read_mode": "query"}
+    stamped = stamp_callable_job_id(raw, "job-abc")
+    assert job_id_of(stamped) == "job-abc"
+    assert stamped["extra"]["job_id"] == "job-abc"
+    close_callable_spool(job_id="job-abc")
+    close_callable_spool()
+
+
 def test_callable_source_skips_fk_catalog_probe() -> None:
     from services.preflight_source_catalog import load_source_foreign_keys
 

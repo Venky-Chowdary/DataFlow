@@ -1002,6 +1002,14 @@ export interface PreflightResult {
     reason?: string;
     note?: string;
   };
+  /** Procedure / SQL extract honesty — catalog probes skipped, CDC refused. */
+  callable_extract?: {
+    mode?: string;
+    catalog_probes?: string;
+    note?: string;
+    cdc?: string;
+    honesty?: string;
+  };
 }
 
 /** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */

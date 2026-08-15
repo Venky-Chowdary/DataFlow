@@ -390,6 +390,28 @@
   margin-bottom: 0;
 }
 
+.df2-vd-callable {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  margin: 0 0 0.85rem;
+  padding: 0.8rem 0.95rem;
+  border-radius: 8px;
+  border: 1px solid #94a3b855;
+  background: #f8fafc;
+  font-size: 0.875rem;
+}
+
+.df2-vd-callable strong {
+  display: block;
+  margin-bottom: 0.15rem;
+}
+
+.df2-vd-callable p {
+  margin: 0;
+  color: var(--df2-muted, #64748b);
+}
+
 .df2-map-health-banner {
   display: flex;
   gap: 0.65rem;
@@ -7490,6 +7512,7 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-vd-rule.status-pass { border-left-color: #22c55e; background: #f6fef9; }
 .df2-vd-rule.status-block { border-left-color: #ef4444; background: #fef7f7; }
+.df2-vd-rule.status-warn { border-left-color: #f59e0b; background: #fffbeb; }
 .df2-vd-rule.status-skip { border-left-color: #cbd5e1; background: #f8fafc; opacity: 0.85; }
 .df2-vd-rule.status-running { border-left-color: #0ea5e9; background: #f0f9ff; }
 .df2-vd-rule.status-pending { border-left-color: #e2e8f0; }

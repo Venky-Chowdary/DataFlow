@@ -828,6 +828,13 @@ def stream_database_transfer(
             release_active_snapshot(commit=ok)
         except Exception as exc:
             logger.warning("source snapshot release failed: %s", exc, exc_info=exc)
+        try:
+            from services.procedure_source import close_callable_spool
+
+            if job_id:
+                close_callable_spool(job_id=job_id)
+        except Exception as exc:
+            logger.warning("callable spool release failed: %s", exc, exc_info=exc)
 
 
 from .copy_route import _try_copy_fast_path  # noqa: E402 — see module docstring
@@ -861,6 +868,9 @@ def _stream_database_transfer_impl(
     dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    from services.procedure_source import stamp_callable_job_id
+
+    src_cfg = stamp_callable_job_id(src_cfg, job_id)
 
     from services.sync_cursor import (
         compare_cursor_values,

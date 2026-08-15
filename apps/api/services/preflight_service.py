@@ -1095,11 +1095,21 @@ def run_file_preflight(
     source_duplicate_probe_pk = ""
     source_duplicate_probe_status = ""
     source_duplicate_probe_message = ""
+    from services.procedure_source import is_callable_source, source_read_mode_of
+
+    callable_src = is_callable_source(source_config)
     source_duplicate_probe_expected = bool(
         (source_connector_id or source_config)
         and source_table
         and source_kind in ("database", "cloud")
+        and not callable_src
     )
+    if callable_src:
+        source_duplicate_probe_status = "skipped_callable"
+        source_duplicate_probe_message = (
+            "Stored-procedure / SQL extract is a result-set snapshot — "
+            "uniqueness GROUP BY is not run against a procedure name."
+        )
     if source_duplicate_probe_expected:
         try:
             from services.primary_key import resolve_primary_key_source_columns
@@ -1472,6 +1482,20 @@ def run_file_preflight(
             if isinstance(m, dict) and isinstance(m.get("risk_contract"), dict)
         ],
     }
+    if callable_src:
+        out["callable_extract"] = {
+            "mode": source_read_mode_of(source_config),
+            "catalog_probes": "skipped",
+            "note": (
+                "Result-set snapshot — FK catalog, uniqueness GROUP BY, and "
+                "population orphan scans are not run against a procedure name."
+            ),
+            "cdc": "refused",
+            "honesty": (
+                "CDC remains at-least-once upsert on table sources. "
+                "Not exactly-once. Not a catalog-breadth claim."
+            ),
+        }
 
     # A gate that blocks a declared conversion must show up in the report every
     # other surface reads — otherwise Validate blocks while the panel under it

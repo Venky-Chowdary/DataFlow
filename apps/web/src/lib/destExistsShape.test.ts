@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  callableExtractNote,
   destExistsPrimaryCta,
   destOnlyPreserveColumns,
   extraSourceColumnsFromContract,
@@ -48,5 +49,15 @@ describe("destExistsShape", () => {
     });
     assert.equal(fromGate?.shape, "source_superset");
     assert.equal(destExistsPrimaryCta(fromGate)?.kind, "review_mappings");
+  });
+
+  it("surfaces callable extract honesty from the Validate stamp", () => {
+    assert.equal(
+      callableExtractNote({
+        callable_extract: { note: "Result-set snapshot — FK catalog skipped." },
+      }),
+      "Result-set snapshot — FK catalog skipped.",
+    );
+    assert.equal(callableExtractNote({}), "");
   });
 });

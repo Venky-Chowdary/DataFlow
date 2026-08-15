@@ -143,10 +143,32 @@ class _ResultSpool:
     headers: list[str]
     total: int
     schema: dict[str, str]
+    job_id: str = ""
 
 
 _SPOOL_LOCK = threading.Lock()
 _SPOOLS: dict[str, _ResultSpool] = {}
+
+
+def job_id_of(cfg: Mapping[str, Any] | None) -> str:
+    """Job id stamped on the source cfg so CALL spool is not process-global."""
+    if not isinstance(cfg, Mapping):
+        return ""
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), Mapping) else {}
+    return str(cfg.get("job_id") or extra.get("job_id") or "").strip()
+
+
+def stamp_callable_job_id(cfg: dict[str, Any], job_id: str | None) -> dict[str, Any]:
+    """Copy ``job_id`` onto the reader cfg so paging and cleanup share one spool."""
+    jid = str(job_id or "").strip()
+    if not jid:
+        return cfg
+    out = dict(cfg)
+    out["job_id"] = jid
+    extra = dict(out.get("extra") or {}) if isinstance(out.get("extra"), dict) else {}
+    extra["job_id"] = jid
+    out["extra"] = extra
+    return out
 
 
 def source_read_mode_of(source: Any) -> str:
@@ -713,6 +735,7 @@ def _render_exec(ident: str, args: list[_Arg]) -> tuple[str, dict[str, Any]]:
 
 def _spool_key(cfg: Mapping[str, Any], spec: CallableSpec) -> str:
     payload = {
+        "job_id": job_id_of(cfg),
         "host": cfg.get("host"),
         "port": cfg.get("port"),
         "database": cfg.get("database"),
@@ -724,10 +747,30 @@ def _spool_key(cfg: Mapping[str, Any], spec: CallableSpec) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def close_callable_spool(key: str | None = None) -> None:
-    """Drop process-local CALL spools so a restart cannot page a stale file."""
+def _spool_dir(job_id: str) -> Path:
+    root = Path(tempfile.gettempdir()) / "dataflow-callable"
+    if job_id:
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", job_id)[:80] or "job"
+        root = root / safe
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def close_callable_spool(key: str | None = None, *, job_id: str | None = None) -> None:
+    """Drop CALL spools for one key, one job, or every process-local file.
+
+    Job-scoped files live under ``{tmp}/dataflow-callable/{job_id}/``. A
+    restart still cannot page a missing file — that is fail-closed, not
+    exactly-once.
+    """
+    jid = str(job_id or "").strip()
     with _SPOOL_LOCK:
-        keys = [key] if key else list(_SPOOLS)
+        if key:
+            keys = [key]
+        elif jid:
+            keys = [k for k, spool in _SPOOLS.items() if spool.job_id == jid]
+        else:
+            keys = list(_SPOOLS)
         for item in keys:
             if not item:
                 continue
@@ -736,6 +779,10 @@ def close_callable_spool(key: str | None = None) -> None:
                 continue
             with contextlib.suppress(OSError):
                 spool.path.unlink(missing_ok=True)
+            parent = spool.path.parent
+            if parent.name and parent.name != "dataflow-callable":
+                with contextlib.suppress(OSError):
+                    parent.rmdir()
 
 
 def _get_spool(key: str) -> _ResultSpool | None:
@@ -744,11 +791,16 @@ def _get_spool(key: str) -> _ResultSpool | None:
 
 
 def _fill_spool(cfg: Mapping[str, Any], spec: CallableSpec, key: str) -> _ResultSpool:
-    fd, name = tempfile.mkstemp(prefix="df-proc-", suffix=".jsonl")
+    jid = job_id_of(cfg)
+    fd, name = tempfile.mkstemp(
+        prefix="df-proc-", suffix=".jsonl", dir=str(_spool_dir(jid))
+    )
     os.close(fd)
     path = Path(name)
     headers, total, schema = _execute_to_jsonl(cfg, spec, path)
-    spool = _ResultSpool(path=path, headers=headers, total=total, schema=schema)
+    spool = _ResultSpool(
+        path=path, headers=headers, total=total, schema=schema, job_id=jid
+    )
     with _SPOOL_LOCK:
         _SPOOLS[key] = spool
     return spool

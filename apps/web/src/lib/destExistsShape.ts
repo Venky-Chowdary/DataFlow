@@ -80,6 +80,18 @@ export function destExistsPrimaryCta(
   return cta;
 }
 
+export function callableExtractNote(preflight: {
+  callable_extract?: { note?: string; mode?: string };
+  source_fk_catalog?: { skipped?: boolean; note?: string };
+} | null | undefined): string {
+  const stamped = String(preflight?.callable_extract?.note || "").trim();
+  if (stamped) return stamped;
+  if (preflight?.source_fk_catalog?.skipped) {
+    return String(preflight.source_fk_catalog.note || "").trim();
+  }
+  return "";
+}
+
 export function shapeContractFromPreflight(preflight: {
   source_coverage?: { shape_contract?: DestExistsShapeContract };
   gates?: Array<{ id?: string; details?: Record<string, unknown> }>;

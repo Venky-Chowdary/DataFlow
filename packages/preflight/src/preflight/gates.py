@@ -2610,7 +2610,12 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
             f"(GROUP BY / aggregate over selected transfer) · "
             f"other integrity checks use Validate sample — not a full population proof"
         )
-    elif probe_status in ("error", "skipped_unsupported", "skipped_no_source"):
+    elif probe_status in (
+        "error",
+        "skipped_unsupported",
+        "skipped_no_source",
+        "skipped_callable",
+    ):
         detail = str(probe.get("message") or probe_status)
         g9_note = (
             f"Source uniqueness probe unavailable ({detail}) — "

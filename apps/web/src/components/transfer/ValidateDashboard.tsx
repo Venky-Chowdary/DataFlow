@@ -34,6 +34,7 @@ import {
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
 import { buildValidateHonestyControls, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
 import {
+  callableExtractNote,
   destExistsPrimaryCta,
   destOnlyPreserveColumns,
   extraSourceColumnsFromContract,
@@ -181,6 +182,7 @@ const STATUS_LABEL: Record<string, string> = {
   pass: "Passed",
   block: "Blocked",
   skip: "Skipped",
+  warn: "Review",
   running: "Running",
   pending: "Pending",
 };
@@ -921,6 +923,7 @@ export function ValidateDashboard({
   const destShapeExtras = useMemo(() => extraSourceColumnsFromContract(destShape), [destShape]);
   const destShapePreserve = useMemo(() => destOnlyPreserveColumns(destShape), [destShape]);
   const destShapeCta = useMemo(() => destExistsPrimaryCta(destShape), [destShape]);
+  const callableNote = useMemo(() => callableExtractNote(preflight), [preflight]);
   const showDestShape = Boolean(
     destShape
     && (
@@ -1667,6 +1670,16 @@ export function ValidateDashboard({
                 ))}
               </ul>
             )}
+          </div>
+        </div>
+      )}
+
+      {callableNote && !running && (
+        <div className="df2-vd-callable" role="status">
+          <DtIcon name="database" size={16} />
+          <div>
+            <strong>Callable extract — result-set snapshot</strong>
+            <p>{callableNote}</p>
           </div>
         </div>
       )}
@@ -2677,12 +2690,13 @@ export function ValidateDashboard({
                   <span className={`df2-vd-rule-status status-${status}`}>
                     {status === "pass" && <DtIcon name="check" size={11} />}
                     {status === "block" && <DtIcon name="x" size={11} />}
+                    {status === "warn" && <DtIcon name="alert" size={11} />}
                     {status === "running" && <Spinner size="sm" label="" />}
                     {STATUS_LABEL[status] ?? status}
                   </span>
                 </div>
                 <strong className="df2-vd-rule-label">{meta.label}</strong>
-                {(status === "block" || status === "running" || status === "pending") && (
+                {(status === "block" || status === "warn" || status === "running" || status === "pending") && (
                   <p className="df2-vd-rule-desc">{meta.rule}</p>
                 )}
                 {status !== "pending" && status !== "pass" && message && (
