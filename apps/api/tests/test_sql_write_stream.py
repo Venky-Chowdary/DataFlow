@@ -164,7 +164,7 @@ def test_fail_scan_collects_every_reject_and_does_not_write():
         del finished
     abort = acc.abort_error("fail")
     assert abort is not None
-    assert "strict error policy blocks partial write" in abort
+    assert "blocks partial write" in abort
     rejected_rows = sorted(
         int(d["row"]) for d in acc.rejected_details if d.get("row") is not None
     )

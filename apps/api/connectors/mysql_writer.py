@@ -1433,9 +1433,11 @@ def write_mapped_rows(
 
             chunk_idx = 0
             writing = True
+            collect_map_details = policy != "fail"
             for finished in iter_mysql_finished_bundles(**_mysql_finish_kwargs):
-                rejected_details.extend(finished.rejected_details)
-                transform_errors.extend(finished.transform_errors)
+                if collect_map_details:
+                    rejected_details.extend(finished.rejected_details)
+                    transform_errors.extend(finished.transform_errors)
                 if writing and reject_on_strict_policy(
                     policy, rejected_details, "MySQL", transform_errors
                 ):
