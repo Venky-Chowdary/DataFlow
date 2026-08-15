@@ -35,6 +35,7 @@ import {
 import { jobStudioDataRules } from "../lib/studioDataRules";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
 import { clampPercent } from "../lib/progressRing";
+import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
@@ -220,6 +221,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [mappingProof, setMappingProof] = useState<MappingProof | null>(null);
   const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
+  const appliedFocusRef = useRef<string | null>(null);
+  const jobsRef = useRef(jobs);
+  jobsRef.current = jobs;
 
   const openStudio = useCallback((intent?: JobsStudioIntent) => {
     onStartTransfer?.(intent);
@@ -271,11 +275,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   }, [jobs, filter, jobSearch, nameOverrides]);
 
   useEffect(() => {
-    if (!initialJobId) return;
-    if (!jobs.some((j) => j._id === initialJobId)) return;
+    const ids = jobs.map((j) => j._id);
+    if (!shouldApplyInitialJobFocus(initialJobId, appliedFocusRef.current, ids)) return;
+    appliedFocusRef.current = initialJobId!;
     setFilter("all");
     setJobSearch("");
-    setSelectedId(initialJobId);
+    setSelectedId(initialJobId!);
     if (initialPanel === "mapping-proof") {
       setDetailTab("mapping");
       setEvidenceDrawer("mapping-proof");
@@ -314,13 +319,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   }, [selectedId, liveJob]);
 
   useEffect(() => {
-    if (filter === "failed" && counts.failed > 0 && !selectedId) {
-      const first = jobs.find((j) => j.status === "failed");
-      if (first) setSelectedId(first._id);
-    } else if (filtered.length > 0 && !filtered.some((j) => j._id === selectedId)) {
-      setSelectedId(filtered[0]._id);
-    }
-  }, [filter, filtered, jobs, counts.failed, selectedId]);
+    const next = nextListSelection(selectedId, filtered.map((j) => j._id));
+    if (next && next !== selectedId) setSelectedId(next);
+  }, [filter, filtered, selectedId]);
 
   // Feed the selected job into Datawrap Pilot so NL triage uses the real job ID.
   useEffect(() => {
@@ -350,18 +351,20 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       return;
     }
     let cancelled = false;
-    setDetailLoading(true);
-    const listed = jobs.find((j) => j._id === selectedId);
+    const listed = jobsRef.current.find((j) => j._id === selectedId);
     // Optimistic hydrate from list so the detail pane never goes blank on slow/404 get.
     if (listed) {
-      setLiveJob({
+      setLiveJob((prev) => ({
+        ...(prev && prev._id === selectedId ? prev : {}),
         ...(listed as unknown as JobDetailRecord),
         _id: listed._id,
         status: listed.status,
         progress_pct: listed.progress_pct ?? 0,
         records_processed: listed.records_processed ?? 0,
         message: listed.message || listed.error || "",
-      });
+      }));
+    } else {
+      setDetailLoading(true);
     }
     fetchJob(selectedId)
       .then((job) => {
@@ -380,7 +383,23 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     return () => {
       cancelled = true;
     };
-  }, [selectedId, jobs]);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const listed = jobs.find((j) => j._id === selectedId);
+    if (!listed) return;
+    setLiveJob((prev) => {
+      if (!prev || prev._id !== selectedId) return prev;
+      return {
+        ...prev,
+        status: listed.status,
+        progress_pct: listed.progress_pct ?? prev.progress_pct,
+        records_processed: listed.records_processed ?? prev.records_processed,
+        message: listed.message || listed.error || prev.message,
+      };
+    });
+  }, [jobs, selectedId]);
 
   const selected = jobs.find((j) => j._id === selectedId);
   const isLive = selected?.status === "running" || selected?.status === "pending";
@@ -744,6 +763,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           job.status === "failed" ? "is-failed" : "",
                           isLiveRow ? "is-live" : "",
                         ].filter(Boolean).join(" ")}
+                        aria-current={selectedId === job._id ? "true" : undefined}
                         onClick={() => setSelectedId(job._id)}
                       >
                         <span className={`df2-job-row-status is-${job.status}`} aria-hidden>
@@ -792,7 +812,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               </aside>
 
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
-                {detailLoading ? (
+                {detailLoading && !selected && !liveJob ? (
                   <LoadingBlock title="Loading job details" size="md" variant="glass" />
                 ) : isLive && selected ? (
                   <div className="df2-jobs-v3-live">

@@ -821,10 +821,16 @@
   font-size: 12px !important;
 }
 
-.df2-job-row:hover,
-.df2-job-row.is-active {
+.df2-job-row:hover {
   border-color: var(--df-brand, #0f766e);
   background: #f0fdfa;
+}
+
+.df2-job-row.is-active,
+.df2-job-row.is-active:hover {
+  border-color: var(--df-brand, #0f766e);
+  background: #ccfbf1;
+  box-shadow: inset 3px 0 0 var(--df-brand, #0f766e);
 }
 
 .df2-job-row.is-live {
@@ -3580,21 +3586,21 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 /*
- * Dense GitOps toolbars (Schedules): never share one squeezed row with
- * filter tabs. Search on its own row; filters + actions share the next
- * with clear separation.
+ * Dense GitOps toolbars (Schedules): search + filters stay on one row
+ * like Jobs / Connectors / Contracts. Actions sit on the right and wrap
+ * as a group — they must not force the filter tabs under the search.
  */
 .df2-toolbar:has(.df2-toolbar-actions-cluster) {
   row-gap: 10px;
 }
 
 .df2-toolbar:has(.df2-toolbar-actions-cluster) .df2-toolbar-start {
-  flex: 1 1 100%;
-  max-width: 100%;
+  flex: 1 1 200px;
+  max-width: min(420px, 100%);
 }
 
 .df2-toolbar:has(.df2-toolbar-actions-cluster) .df2-toolbar-center {
-  flex: 1 1 auto;
+  flex: 0 1 auto;
   justify-content: flex-start;
   min-width: 0;
 }
@@ -6555,10 +6561,16 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   min-height: 0;
 }
 
-.df2-connectors-list .df2-connector-card.is-selected,
-.df2-job-row.is-active {
+.df2-connectors-list .df2-connector-card.is-selected {
   outline: 2px solid color-mix(in srgb, var(--df-accent, #0d9488) 35%, transparent);
   outline-offset: -2px;
+}
+
+.df2-page-jobs .df2-job-row.is-active,
+.df2-job-row.is-active {
+  border-color: var(--df-brand, #0f766e);
+  background: #ccfbf1;
+  box-shadow: inset 3px 0 0 var(--df-brand, #0f766e);
 }
 
 .df2-jobs-v3-list {
@@ -8206,7 +8218,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-overview-v3-card,
   .df2-connector-card,
   .df2-pipeline-card,
-  .df2-job-row,
   .df2-jobs-v3-list,
   .df2-jobs-v3-detail,
   .df2-jobs-detail-card,
@@ -8219,6 +8230,14 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border: 1px solid var(--df-border, #e4e8ee) !important;
   border-radius: var(--df-radius-card, 8px) !important;
   box-shadow: none !important;
+}
+
+/* Job rows keep hover / is-active / failed / live chrome — do not flatten. */
+.df2-app .df2-job-row.is-active,
+.df2-app .df2-job-row.is-active:hover {
+  background: #ccfbf1 !important;
+  border-color: var(--df-brand, #0f766e) !important;
+  box-shadow: inset 3px 0 0 var(--df-brand, #0f766e) !important;
 }
 
 .df2-app .df2-card-head,

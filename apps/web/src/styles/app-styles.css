@@ -148,6 +148,12 @@
   box-shadow: var(--df-shadow-xs) !important;
 }
 
+.df2-app .df2-main .df2-screen-panel .df2-job-row.is-active {
+  box-shadow: inset 3px 0 0 var(--df-brand, #0f766e) !important;
+  background: #ccfbf1 !important;
+  border-color: var(--df-brand, #0f766e) !important;
+}
+
 /* Floating UI keeps elevation */
 .df2-app .df2-dropdown,
 .df2-app .df2-popover,
