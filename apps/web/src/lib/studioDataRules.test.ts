@@ -9,6 +9,7 @@ import {
   namedStudioSchemaPolicy,
   namedStudioValidationMode,
   schemaPolicyBackfills,
+  studioSchedulePolicies,
 } from "./studioDataRules.ts";
 
 describe("studioDataRules", () => {
@@ -45,5 +46,34 @@ describe("studioDataRules", () => {
     assert.equal(namedStudioSchemaPolicy("propagate_all"), "propagate_all");
     assert.equal(schemaPolicyBackfills("propagate_all"), true);
     assert.equal(jobStudioDataRules({ validation_mode: "strict" }).schemaPolicy, "");
+  });
+
+  it("copies Studio migrate / type-lock onto a new pipeline", () => {
+    const payload = studioSchedulePolicies({
+      validationMode: "strict",
+      schemaPolicy: "type_locked",
+      backfillNewFields: true,
+    });
+    assert.equal(payload.validation_mode, "strict");
+    assert.equal(payload.schema_policy, "type_locked");
+    assert.equal(payload.backfill_new_fields, false);
+    assert.equal("skip_preflight" in payload, false);
+  });
+
+  it("keeps propagate backfill only when the policy allows ADD COLUMN", () => {
+    const payload = studioSchedulePolicies({
+      validationMode: "balanced",
+      schemaPolicy: "propagate_columns",
+      backfillNewFields: true,
+    });
+    assert.equal(payload.schema_policy, "propagate_columns");
+    assert.equal(payload.backfill_new_fields, true);
+  });
+
+  it("does not invent a schedule posture from empty Studio fields", () => {
+    const payload = studioSchedulePolicies({});
+    assert.equal(payload.validation_mode, undefined);
+    assert.equal(payload.schema_policy, undefined);
+    assert.equal(payload.backfill_new_fields, false);
   });
 });

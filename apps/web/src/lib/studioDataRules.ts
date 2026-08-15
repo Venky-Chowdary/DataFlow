@@ -46,3 +46,27 @@ export function jobStudioDataRules(job: {
     schemaPolicy: namedStudioSchemaPolicy(req?.schema_policy || job?.schema_policy),
   };
 }
+
+/** Persist Studio data / migration rules onto a new pipeline. Never skip_preflight. */
+export function studioSchedulePolicies(input: {
+  validationMode?: string;
+  schemaPolicy?: string;
+  backfillNewFields?: boolean;
+}): {
+  validation_mode?: string;
+  schema_policy?: string;
+  backfill_new_fields: boolean;
+} {
+  const validationMode = namedStudioValidationMode(input.validationMode);
+  const schemaPolicy = namedStudioSchemaPolicy(input.schemaPolicy);
+  const out: {
+    validation_mode?: string;
+    schema_policy?: string;
+    backfill_new_fields: boolean;
+  } = {
+    backfill_new_fields: Boolean(input.backfillNewFields) && schemaPolicyBackfills(schemaPolicy),
+  };
+  if (validationMode) out.validation_mode = validationMode;
+  if (schemaPolicy) out.schema_policy = schemaPolicy;
+  return out;
+}

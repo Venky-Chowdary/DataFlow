@@ -130,6 +130,26 @@ def test_create_schedule_persists_new_fields(temp_store):
     assert parsed.tzinfo is not None
 
 
+def test_create_schedule_persists_studio_data_and_migration_rules(temp_store):
+    sched = store.create_schedule({
+        "name": "Migrate orders type-locked",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "incremental",
+        "validation_mode": "strict",
+        "schema_policy": "type_locked",
+        "backfill_new_fields": False,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.validation_mode == "strict"
+    assert reloaded.schema_policy == "type_locked"
+    assert reloaded.backfill_new_fields is False
+    assert not hasattr(reloaded, "skip_preflight") or not getattr(reloaded, "skip_preflight", False)
+
+
 def test_create_schedule_rejects_bad_cron(temp_store):
     with pytest.raises(ValueError):
         store.create_schedule({

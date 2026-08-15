@@ -100,6 +100,7 @@ import {
   namedStudioSchemaPolicy,
   namedStudioValidationMode,
   schemaPolicyBackfills,
+  studioSchedulePolicies,
 } from "../lib/studioDataRules";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
@@ -4445,6 +4446,11 @@ export function TransferPage({
           confidence: m.confidence,
           transform: m.transform,
         })),
+        ...studioSchedulePolicies({
+          validationMode,
+          schemaPolicy,
+          backfillNewFields,
+        }),
         contract_id: boundContractId.trim(),
         require_signed_contract: Boolean(boundContractId.trim() && requireSignedContract),
       });
