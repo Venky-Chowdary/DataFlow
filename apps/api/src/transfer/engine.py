@@ -2975,7 +2975,10 @@ class UniversalTransferEngine:
                     )
 
                 if effective_sync_lower == "scd2" and conflict_columns:
-                    from connectors.engine_record_spill import spill_engine_write_records
+                    from connectors.engine_record_spill import (
+                        ENGINE_SPILL_SUMMARY_KEY,
+                        spill_engine_write_records,
+                    )
 
                     dest_extra = getattr(request.destination, "extra", None)
                     scd2_spill = spill_engine_write_records(
@@ -3003,8 +3006,9 @@ class UniversalTransferEngine:
                                 max_delay_seconds=5.0,
                             ),
                         )
-                    finally:
+                    except Exception:
                         scd2_spill.close()
+                        raise
                     dest_summary = {
                         "table": request.destination.table
                         or request.destination.collection,
@@ -3015,8 +3019,19 @@ class UniversalTransferEngine:
                             scd2_summary.get("rejected_details") or []
                         ),
                         "rejected_rows": int(scd2_summary.get("rejected_rows") or 0),
+                        "source_row_count": int(scd2_spill.unexpanded_row_count),
+                        "source_row_count_source": "engine_record_spill",
+                        "engine_record_spill": {
+                            "spilled": scd2_spill.spilled,
+                            "source_row_count": scd2_spill.source_row_count,
+                            "unexpanded_row_count": scd2_spill.unexpanded_row_count,
+                        },
+                        ENGINE_SPILL_SUMMARY_KEY: scd2_spill,
                     }
                     if scd2_summary.get("ok") is False:
+                        _fail_spill = dest_summary.pop(ENGINE_SPILL_SUMMARY_KEY, None)
+                        if _fail_spill is not None:
+                            _fail_spill.close()
                         block_msg = str(
                             scd2_summary.get("error")
                             or "SCD2 map/Risk Contract blocked history merge"
