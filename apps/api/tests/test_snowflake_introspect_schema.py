@@ -93,6 +93,12 @@ def test_introspect_snowflake_ok_with_schema_fallback() -> None:
         last = calls[-1].upper() if calls else ""
         if "INFORMATION_SCHEMA.TABLES" in last and "TABLE_NAME" in last:
             return [("CUSTOMERS",), ("ORDERS",)]
+        if "DESC TABLE" in last:
+            return [
+                ("ID", "NUMBER(38,0)", "COLUMN", "N", None, "Y", "N"),
+                ("NAME", "VARCHAR(50)", "COLUMN", "Y", None, "N", "N"),
+                ("BLOB", "BINARY(16)", "COLUMN", "Y", None, "N", "N"),
+            ]
         if "INFORMATION_SCHEMA.COLUMNS" in last:
             return [
                 ("ID", "NUMBER", "NO", None, 38, 0, None),

@@ -6103,8 +6103,21 @@ export function TransferPage({
                     <Spinner size="sm" label="Analyzing destination schema" />
                     <p>
                       <strong>Checking destination…</strong> Looking up{" "}
-                      <code>{targetDb ? `${targetDb}.` : ""}{targetCollection.trim() || "table"}</code>{" "}
-                      and loading column types for mapping.
+                      <code>{targetDb ? `${targetDb}.` : ""}{targetCollection.trim() || "table"}</code>
+                      {" "}(column types only — no row scan).
+                      {destDriverType === "snowflake" ? (
+                        <>
+                          {" "}If the warehouse is suspended, Snowflake is waking it
+                          (often 20–60s), then one <code>DESC TABLE</code>.
+                          {String(targetDb || "").toUpperCase() === "SNOWFLAKE_SAMPLE_DATA" ? (
+                            <>
+                              {" "}<code>SNOWFLAKE_SAMPLE_DATA</code> is a shared
+                              sample catalog (usually read-only) — destination
+                              tables normally live in your own database.
+                            </>
+                          ) : null}
+                        </>
+                      ) : null}
                     </p>
                   </>
                 ) : destTableExists === true ? (

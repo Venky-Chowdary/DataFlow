@@ -713,6 +713,14 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
 
         warnings: list[str] = []
         with conn.cursor() as cur:
+            # Dest Map only needs DESC TABLE. A suspended warehouse plus
+            # information_schema on SNOWFLAKE_SAMPLE_DATA is why the UI sat on
+            # "Checking destination…" for minutes. Fail closed with an honest
+            # timeout instead of an unbounded resume + catalog scan.
+            try:
+                cur.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 45")
+            except Exception as exc:
+                logger.debug("Snowflake statement timeout skipped: %s", exc)
             wh = (kwargs.get("warehouse") or "").strip()
             if wh:
                 try:
@@ -770,15 +778,25 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             columns: list[dict] = []
             target_table = table or (tables[0] if tables else None)
             if target_table:
-                from connectors.snowflake_conn import (
-                    resolve_or_fold_snowflake_table,
-                    snowflake_physical_column_rows,
-                )
+                from connectors.snowflake_conn import snowflake_physical_column_rows
+                from connectors.sql_identifiers import snowflake_fold_identifier
 
-                try:
-                    target_table = resolve_or_fold_snowflake_table(cur, schema, str(target_table))
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                named = bool(table) or bool(kwargs.get("strict_namespace"))
+                if named:
+                    # Dest/named table: DESC the folded name. Do not probe
+                    # information_schema.tables five times on SNOWFLAKE_SAMPLE_DATA.
+                    target_table = snowflake_fold_identifier(str(target_table))
+                else:
+                    from connectors.snowflake_conn import resolve_or_fold_snowflake_table
+
+                    try:
+                        target_table = resolve_or_fold_snowflake_table(
+                            cur, schema, str(target_table)
+                        )
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning(
+                            "Exception suppressed: %s", exc, exc_info=exc
+                        )
                 col_rows = snowflake_physical_column_rows(
                     cur, schema, str(target_table)
                 )
@@ -834,11 +852,23 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                             "nullable": nullable == "YES",
                         }
                     )
-            unique_meta = (
-                _snowflake_fetch_unique_keys(cur, schema, str(target_table))
-                if target_table and columns
-                else {"primary_key_columns": [], "unique_keys": []}
-            )
+            unique_meta: dict[str, Any]
+            if target_table and columns:
+                desc_pk = [str(c) for c in (getattr(cur, "_dataflow_desc_pk", None) or []) if c]
+                # Named dest/source table: DESC already answered columns + PK.
+                # The information_schema.table_constraints join on
+                # SNOWFLAKE_SAMPLE_DATA is the multi-minute Destination hang.
+                if desc_pk or table or bool(kwargs.get("strict_namespace")):
+                    unique_meta = {
+                        "primary_key_columns": desc_pk,
+                        "unique_keys": [],
+                    }
+                else:
+                    unique_meta = _snowflake_fetch_unique_keys(
+                        cur, schema, str(target_table)
+                    )
+            else:
+                unique_meta = {"primary_key_columns": [], "unique_keys": []}
         conn.close()
         out: dict[str, Any] = {
             "ok": True,
@@ -859,6 +889,14 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                 "Snowflake UNIQUE/PRIMARY KEY declared but NOT ENFORCED "
                 f"({', '.join(str(n) for n in advisory[:5])}) — Validate will not "
                 "block duplicates; hybrid tables enforce constraints at write time."
+            )
+        db_name = str(kwargs.get("database") or "").strip().upper()
+        if db_name == "SNOWFLAKE_SAMPLE_DATA":
+            warnings.append(
+                "SNOWFLAKE_SAMPLE_DATA is a shared sample catalog (usually "
+                "read-only). Destination tables normally live in your own "
+                "database — looking up a write table here waits on warehouse "
+                "resume and a huge information_schema."
             )
         if warnings:
             out["warnings"] = warnings

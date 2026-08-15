@@ -482,24 +482,37 @@ _SF_COLUMN_PROJECTIONS: tuple[str, ...] = (
 )
 
 
+def _snowflake_object_missing(exc: BaseException) -> bool:
+    """True when Snowflake said the *table* is absent (002003 / 002043)."""
+    msg = str(exc)
+    low = msg.lower()
+    return (
+        "002003" in msg
+        or "002043" in msg
+        or "does not exist" in low
+        or "object does not exist" in low
+    )
+
+
 def snowflake_physical_column_rows(
     cur: Any, schema: str, table: str
 ) -> list[tuple[Any, ...]]:
     """Physical column metadata as ``(name, type, nullable, len, p, s, dt_p)``.
 
-    Single introspection SSOT for the Snowflake reader, the writer bind overlay
-    and destination schema discovery, because they must never disagree about
-    what the destination physically holds.
+    ``DESC TABLE`` first. ``information_schema.columns`` on shared catalogs
+    (``SNOWFLAKE_SAMPLE_DATA``) federates every TPCH schema and is why
+    Destination "Checking destination…" sat for minutes after a warehouse
+    resume. DESC is one object lookup and returns ``NUMBER(38,10)`` text.
 
-    Catalogs differ in which optional INFORMATION_SCHEMA columns they expose
-    (a role without full projection rights, a Snowflake-compatible engine
-    without ``DATETIME_PRECISION``). One missing optional column used to fail
-    the whole SELECT, so a table whose DDL was perfectly readable reported *no
-    physical metadata* and the writer fail-closed on every row. Degrade the
-    projection instead, then fall back to ``DESC TABLE`` — which returns the
-    fully qualified type text (``NUMBER(38,10)``, ``TIMESTAMP_NTZ(9)``). Every
-    rung reads the catalog; nothing here infers a type from data.
+    A missing table (002003) must not fall through to information_schema —
+    that is the SAMPLE_DATA hang. IS is only a fallback when DESC is empty
+    without a missing-object error (compatible engines without DESC).
     """
+    desc, desc_missing = _snowflake_desc_column_rows(cur, schema, table)
+    if desc:
+        return desc
+    if desc_missing:
+        return []
     for projection in _SF_COLUMN_PROJECTIONS:
         try:
             cur.execute(
@@ -519,20 +532,26 @@ def snowflake_physical_column_rows(
             continue
         if rows:
             return [r + (None,) * (7 - len(r)) for r in rows]
-    return _snowflake_desc_column_rows(cur, schema, table)
+    return []
 
 
 def _snowflake_desc_column_rows(
     cur: Any, schema: str, table: str
-) -> list[tuple[Any, ...]]:
-    """``DESC TABLE`` rows shaped like the INFORMATION_SCHEMA projection."""
+) -> tuple[list[tuple[Any, ...]], bool]:
+    """``DESC TABLE`` rows shaped like the INFORMATION_SCHEMA projection.
+
+    Second value is True when Snowflake said the table is absent — callers
+    must not scan ``information_schema`` on ``SNOWFLAKE_SAMPLE_DATA``.
+    """
     try:
         cur.execute(f"DESC TABLE {snowflake_qualified_table(schema, table)}")
         rows = list(cur.fetchall() or [])
     except Exception as exc:
         logger.debug("snowflake DESC TABLE failed: %s", exc, exc_info=exc)
-        return []
+        return [], _snowflake_object_missing(exc)
     out: list[tuple[Any, ...]] = []
+    pk_cols: list[str] = []
+    unique_cols: list[str] = []
     for row in rows:
         if len(row) < 2:
             continue
@@ -549,7 +568,18 @@ def _snowflake_desc_column_rows(
         # DESC carries the width inside the type text, so the typmod columns
         # stay None rather than being invented as zero.
         out.append((name, ddl, nullable, None, None, None, None))
-    return out
+        if len(row) > 5 and str(row[5] or "").upper().startswith("Y"):
+            pk_cols.append(name)
+        if len(row) > 6 and str(row[6] or "").upper().startswith("Y"):
+            unique_cols.append(name)
+    # Stash keys on the cursor so dest introspect can skip the
+    # information_schema.table_constraints join (SAMPLE_DATA hang).
+    try:
+        cur._dataflow_desc_pk = pk_cols
+        cur._dataflow_desc_unique = unique_cols
+    except Exception:
+        pass
+    return out, False
 
 
 def snowflake_qualified_table(schema: str, table: str) -> str:
