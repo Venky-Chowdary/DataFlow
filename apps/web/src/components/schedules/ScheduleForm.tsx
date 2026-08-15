@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { ConnectorSelect } from "../ui/ConnectorSelect";
+import { SqlEditor } from "../ui/SqlEditor";
 import { CadenceTiles } from "../ui/CadenceTiles";
 import { ContractBindField } from "../contracts/ContractBindField";
 import {
@@ -265,24 +266,18 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       </div>
 
       {callable && (
-        <div className="df2-field">
-          <label className="df2-label" htmlFor="sched-callable-sql">
-            {sourceReadMode === "procedure" ? "CALL / EXEC" : "Read-only SELECT"}
-          </label>
-          <textarea
-            id="sched-callable-sql"
-            className="df2-input df2-input-mono"
-            rows={3}
-            value={procedureText}
-            onChange={(e) => setProcedureText(e.target.value)}
-            placeholder={sourceReadMode === "procedure" ? "CALL get_orders(:since)" : "SELECT id, updated_at FROM orders"}
-            required
-          />
-          <p className="df2-field-hint">
-            Result-set snapshot — scheduled runs execute this statement once and page the spool.
-            CDC, SCD2, and mirror are not available. Incremental filters cursor &gt; watermark (at-least-once).
-          </p>
-        </div>
+        <SqlEditor
+          id="sched-callable-sql"
+          label={sourceReadMode === "procedure" ? "CALL / EXEC" : "Read-only SELECT"}
+          value={procedureText}
+          onChange={setProcedureText}
+          mode={sourceReadMode === "procedure" ? "procedure" : "query"}
+          dialect={sourceConnector?.type}
+          placeholder={sourceReadMode === "procedure" ? "CALL get_orders(:since)" : "SELECT id, updated_at FROM orders"}
+          hint="Result-set snapshot — one CALL/SELECT, then page the spool. CDC, SCD2, and mirror are refused. Incremental filters cursor > watermark (at-least-once)."
+          rows={6}
+          required
+        />
       )}
 
       {/* Panel: Cadence */}

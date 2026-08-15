@@ -8,6 +8,7 @@ import {
 import { TrustSection } from "../components/landing/TrustSection";
 import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection";
 import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
+import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import type { PublicRoute } from "../lib/publicNavigation";
 
@@ -426,6 +427,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           </div>
         </div>
       </section>
+
+      <ObservabilityInAction />
 
       {/* 5) Product surfaces — tabbed like Airbyte CLI/SDK/API/MCP */}
       <SurfaceTabs onNavigate={onNavigate} onGetStarted={onGetStarted} />

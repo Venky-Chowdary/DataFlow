@@ -1409,6 +1409,20 @@ def write_destination_database(
     )
 
     cfg = resolve_connector_config(endpoint)
+    from services.procedure_destination import (
+        MODE_ROW_APPLY,
+        assert_dest_procedure_sync_allowed,
+        plan_dest_procedure,
+    )
+
+    dest_plan = plan_dest_procedure(endpoint)
+    if dest_plan is not None:
+        assert_dest_procedure_sync_allowed(str(options.get("sync_mode") or ""), endpoint)
+        if dest_plan.mode == MODE_ROW_APPLY:
+            return _write_dest_procedure_rows(endpoint, records, dest_plan)
+        if dest_plan.before_spec is not None:
+            _run_dest_procedure_hook(endpoint, dest_plan.before_spec)
+
     rows_before = precount_destination(endpoint, cfg)
     write_mode = str(options.get("write_mode") or "")
     conflict_columns = list(options.get("conflict_columns") or [])
@@ -1450,6 +1464,12 @@ def write_destination_database(
         rows_written, ddl_log, summary = _write_destination_database(
             endpoint, records, columns, schema, mappings, **options
         )
+        if dest_plan is not None and dest_plan.after_spec is not None:
+            _run_dest_procedure_hook(endpoint, dest_plan.after_spec)
+            ddl_log = list(ddl_log or [])
+            ddl_log.append(f"after_write {dest_plan.after_spec.identifier}")
+            if isinstance(summary, dict):
+                summary["dest_procedure_after"] = dest_plan.after_spec.identifier
     except Exception:
         if spill is not None:
             spill.close()
@@ -1471,6 +1491,52 @@ def write_destination_database(
     elif spill is not None:
         spill.close()
     return rows_written, ddl_log, summary
+
+
+def _dest_procedure_execute(endpoint: EndpointConfig):
+    """One dest engine session. Caller owns commit via ``engine.begin()``."""
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+    from sqlalchemy import text
+
+    cfg = resolve_connector_config(endpoint)
+    engine = _engine(cfg)
+
+    def _close() -> None:
+        release_engine(engine)
+
+    return engine, text, _close
+
+
+def _run_dest_procedure_hook(endpoint: EndpointConfig, spec) -> None:
+    from services.procedure_destination import run_dest_hook
+
+    engine, text, close = _dest_procedure_execute(endpoint)
+    try:
+        with engine.begin() as conn:
+            run_dest_hook(spec, lambda sql, binds: conn.execute(text(sql), binds or {}))
+    finally:
+        close()
+
+
+def _write_dest_procedure_rows(
+    endpoint: EndpointConfig,
+    records: list[dict],
+    plan,
+) -> tuple[int, list[str], dict]:
+    from services.procedure_destination import apply_rows_via_procedure
+
+    engine, text, close = _dest_procedure_execute(endpoint)
+    try:
+        with engine.begin() as conn:
+            return apply_rows_via_procedure(
+                endpoint,
+                list(records or []),
+                execute_call=lambda sql, binds: conn.execute(text(sql), binds or {}),
+                plan=plan,
+            )
+    finally:
+        close()
 
 
 def _write_destination_database(

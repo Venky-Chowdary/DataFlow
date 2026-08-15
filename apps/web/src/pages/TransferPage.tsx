@@ -14,6 +14,8 @@ import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState"
 import { useToast } from "../components/Toast";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
+import { DestProcedurePanel, type DestWriteMode } from "../components/transfer/DestProcedurePanel";
+import { SqlEditor } from "../components/ui/SqlEditor";
 import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdvancedDrawer";
 import { ObjectNameCombobox } from "../components/transfer/ObjectNameCombobox";
 import { Button } from "../components/ui/Button";
@@ -226,6 +228,12 @@ export function TransferPage({
   const [sourceReadMode, setSourceReadMode] = useState<SourceReadMode>("table");
   const [procedureCall, setProcedureCall] = useState("");
   const [procedureParams, setProcedureParams] = useState<Record<string, string>>({});
+  const [destWriteMode, setDestWriteMode] = useState<DestWriteMode>("table");
+  const [destProcedureCall, setDestProcedureCall] = useState("");
+  const [destProcedureParams, setDestProcedureParams] = useState<Record<string, string>>({});
+  const [destProcedureBefore, setDestProcedureBefore] = useState("");
+  const [destProcedureAfter, setDestProcedureAfter] = useState("");
+  const [destProcedureParamMap, setDestProcedureParamMap] = useState<Record<string, string>>({});
   const [shapeContract, setShapeContract] = useState<{
     shape?: string;
     extra_source_columns?: string[];
@@ -501,6 +509,24 @@ export function TransferPage({
               chunk_overlap: vectorChunkOverlap,
               durable_embedding_cache: vectorDurableCache,
             }
+          : {}),
+        ...(destWriteMode === "procedure"
+          ? {
+              dest_write_mode: "procedure",
+              dest_procedure_call: destProcedureCall.trim(),
+              ...(Object.keys(destProcedureParamMap).length
+                ? { dest_procedure_param_map: destProcedureParamMap }
+                : {}),
+              ...(Object.keys(destProcedureParams).length
+                ? { dest_procedure_params: destProcedureParams }
+                : {}),
+            }
+          : {}),
+        ...(destProcedureBefore.trim()
+          ? { dest_procedure_before: destProcedureBefore.trim() }
+          : {}),
+        ...(destProcedureAfter.trim()
+          ? { dest_procedure_after: destProcedureAfter.trim() }
           : {}),
       },
     };
@@ -1106,6 +1132,12 @@ export function TransferPage({
     destWarehouse,
     targetCollection,
     destTableExists,
+    destWriteMode,
+    destProcedureCall,
+    destProcedureParams,
+    destProcedureBefore,
+    destProcedureAfter,
+    destProcedureParamMap,
     boundContractId,
     requireSignedContract,
   ]);
@@ -4215,6 +4247,18 @@ export function TransferPage({
           if (syncMode === "cdc" && allowAppendOnly) {
             extra.allow_append_only = true;
           }
+          if (destWriteMode === "procedure") {
+            extra.dest_write_mode = "procedure";
+            extra.dest_procedure_call = destProcedureCall.trim();
+            if (Object.keys(destProcedureParamMap).length) {
+              extra.dest_procedure_param_map = { ...destProcedureParamMap };
+            }
+            if (Object.keys(destProcedureParams).length) {
+              extra.dest_procedure_params = { ...destProcedureParams };
+            }
+          }
+          if (destProcedureBefore.trim()) extra.dest_procedure_before = destProcedureBefore.trim();
+          if (destProcedureAfter.trim()) extra.dest_procedure_after = destProcedureAfter.trim();
           const isVectorDestRun =
             destDriverType === "pgvector" ||
             destDriverType === "qdrant" ||
@@ -5363,27 +5407,22 @@ export function TransferPage({
                 )}
                 {isCallableSourceMode(sourceReadMode) && dialectOffersSqlExtract(sourceConnector?.type) ? (
                 <div className="df2-field df2-source-procedure">
-                  <label className="df2-label" htmlFor="source-procedure-input">
-                    {sourceReadMode === "query" ? "SQL query" : "Stored procedure"}
-                  </label>
-                  <textarea
+                  <SqlEditor
                     id="source-procedure-input"
-                    className="df2-input df2-textarea"
+                    label={sourceReadMode === "query" ? "SQL query" : "Stored procedure"}
                     value={procedureCall}
-                    onChange={(e) => setProcedureCall(e.target.value)}
+                    onChange={setProcedureCall}
+                    mode={sourceReadMode === "query" ? "query" : "procedure"}
+                    dialect={sourceConnector?.type}
+                    bound={procedureParams}
                     placeholder={
                       sourceReadMode === "query"
                         ? queryHint(sourceConnector?.type)
                         : procedureHint(sourceConnector?.type)
                     }
-                    autoComplete="off"
-                    spellCheck={false}
-                    rows={4}
+                    hint="One statement. :name binds below, or quoted/numeric literals. Extra result columns stay on Map — never silent drop."
+                    rows={8}
                   />
-                  <span className="df2-label-hint">
-                    One statement. Use :name binds below, or quoted/numeric literals.
-                    Extra result columns stay visible on Map to remap — never silent drop.
-                  </span>
                   {bindNamesFromSql(procedureCall).length > 0 && (
                     <div className="df2-source-bind-params">
                       {bindNamesFromSql(procedureCall).map((name) => (
@@ -5900,6 +5939,22 @@ export function TransferPage({
                 </div>
               )}
             </div>
+            <DestProcedurePanel
+              destType={destDriverType || destType}
+              destWriteMode={destWriteMode}
+              onDestWriteMode={setDestWriteMode}
+              destProcedureCall={destProcedureCall}
+              onDestProcedureCall={setDestProcedureCall}
+              destProcedureParams={destProcedureParams}
+              onDestProcedureParams={setDestProcedureParams}
+              destProcedureBefore={destProcedureBefore}
+              onDestProcedureBefore={setDestProcedureBefore}
+              destProcedureAfter={destProcedureAfter}
+              onDestProcedureAfter={setDestProcedureAfter}
+              sourceColumns={currentSourceColumns}
+              paramMap={destProcedureParamMap}
+              onParamMap={setDestProcedureParamMap}
+            />
             {/* Status when probing / resolved — including pending unknown existence */}
             {destDriverType !== "dynamodb"
               && (destSchemaLoading

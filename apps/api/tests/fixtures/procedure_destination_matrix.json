@@ -1,0 +1,105 @@
+{
+  "metric": "procedure_destination_write",
+  "honesty": "Named fixture. Not a claim we beat Informatica CDI catalog breadth. Dest procedure is CALL/EXEC with quarantine — not continue-on-error. CDC remains at-least-once upsert on table dests. Live warehouse matrix is not invented here.",
+  "competitor_facts": [
+    "Informatica CDI SQL transformation: connected row-by-row CALL; unconnected Target Pre-load / Target Post-load; optional Continue on SQL Error; SQLError + NumRowsAffected fields",
+    "Databricks Lakeflow query-based connectors: cursor-column table ingest — dest stored procedure is not the writer",
+    "Airbyte / Fivetran: table/stream writers; dest SP is not a first-class sink"
+  ],
+  "platform_exactly_once_claimed": false,
+  "measured_floor": 1.0,
+  "pass": 10,
+  "fail": 0,
+  "plan_accept": [
+    {
+      "id": "pg_row_apply_bound",
+      "dialect": "postgresql",
+      "expect_mode": "row_apply",
+      "extra": {
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": "CALL public.upsert_order(:id, :amt)",
+        "dest_procedure_param_map": {"id": "order_id", "amt": "order_amt"}
+      }
+    },
+    {
+      "id": "mysql_row_apply",
+      "dialect": "mysql",
+      "expect_mode": "row_apply",
+      "extra": {
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": "CALL put_customer(:email)"
+      }
+    },
+    {
+      "id": "mssql_hooks",
+      "dialect": "sqlserver",
+      "expect_mode": "hooks",
+      "extra": {
+        "dest_procedure_before": "EXEC dbo.DisableIndexes",
+        "dest_procedure_after": "EXEC dbo.RebuildIndexes"
+      }
+    },
+    {
+      "id": "oracle_bare",
+      "dialect": "oracle",
+      "expect_mode": "row_apply",
+      "extra": {
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": "app.load_order"
+      }
+    },
+    {
+      "id": "hooks_plus_row",
+      "dialect": "postgresql",
+      "expect_mode": "row_apply",
+      "extra": {
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": "CALL upsert_order(:id)",
+        "dest_procedure_before": "CALL public.prepare_load()",
+        "dest_procedure_param_map": {"id": "id"}
+      }
+    }
+  ],
+  "plan_reject": [
+    {
+      "id": "sqlite_dest",
+      "dialect": "sqlite",
+      "extra": {
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": "CALL put_row(:id)"
+      }
+    },
+    {
+      "id": "iceberg_dest",
+      "dialect": "iceberg",
+      "extra": {
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": "CALL put_row(:id)"
+      }
+    },
+    {
+      "id": "stacked",
+      "dialect": "mysql",
+      "extra": {
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": "CALL put_row(:id); DROP TABLE t"
+      }
+    },
+    {
+      "id": "empty_call",
+      "dialect": "postgresql",
+      "extra": {
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": ""
+      }
+    },
+    {
+      "id": "query_as_dest_mysql",
+      "dialect": "mysql",
+      "extra": {
+        "dest_write_mode": "procedure",
+        "dest_procedure_call": "SELECT * FROM orders"
+      }
+    }
+  ]
+}
