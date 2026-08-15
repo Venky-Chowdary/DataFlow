@@ -33,6 +33,8 @@ def test_run_probe_never_raises(driver: str):
     assert isinstance(message, str)
     assert message.strip()
     assert "takes 0 positional arguments" not in message
+    assert "ModuleNotFoundError" not in message
+    assert "No module named" not in message
 
 
 @pytest.mark.parametrize("driver", _DRIVERS)

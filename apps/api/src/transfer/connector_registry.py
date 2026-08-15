@@ -530,9 +530,12 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     spec = CONNECTOR_MODULES.get(db_type)
 
     if db_type == "mongodb" and spec:
-        from .adapters import probe_mongodb
+        try:
+            from .adapters import probe_mongodb
 
-        ok, raw = probe_mongodb(cfg)
+            ok, raw = probe_mongodb(cfg)
+        except Exception as exc:
+            return False, humanize_connection_error(db_type, exc)
         if ok:
             return True, raw
         return False, humanize_connection_error(db_type, raw)
@@ -565,12 +568,15 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     }
 
     if resolved == "generic_sql":
-        from connectors.generic_sql import test_generic_sql
-
         # The catalog id (e.g. tidb, clickhouse) must reach the generic SQL engine
         # builder so it can pick the right SQLAlchemy drivername and port.
         engine_type = cfg.get("type") or catalog_id
-        ok, raw = test_generic_sql(type=engine_type, **probe_kwargs)
+        try:
+            from connectors.generic_sql import test_generic_sql
+
+            ok, raw = test_generic_sql(type=engine_type, **probe_kwargs)
+        except Exception as exc:
+            return False, humanize_connection_error(engine_type, exc)
         if ok:
             return True, raw
         return False, humanize_connection_error(engine_type, raw)
@@ -582,8 +588,11 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         return False, f"No probe configured for {db_type}"
 
     mod_name, fn_name = spec.probe
-    mod = importlib.import_module(mod_name)
-    probe_fn = getattr(mod, fn_name)
+    try:
+        mod = importlib.import_module(mod_name)
+        probe_fn = getattr(mod, fn_name)
+    except Exception as exc:
+        return False, humanize_connection_error(db_type, exc)
     sig = inspect.signature(probe_fn)
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     if not accepts_var_kw:
@@ -594,7 +603,10 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         for k, v in cfg.items():
             if k not in probe_kwargs and v not in (None, ""):
                 probe_kwargs[k] = v
-    result = probe_fn(**probe_kwargs)
+    try:
+        result = probe_fn(**probe_kwargs)
+    except Exception as exc:
+        return False, humanize_connection_error(db_type, exc)
     if hasattr(result, "ok"):
         if result.ok:
             return True, str(result.message or "Connection successful")
