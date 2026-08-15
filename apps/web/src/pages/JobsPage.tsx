@@ -32,6 +32,7 @@ import {
   formatSyncModeLabel,
   formatValidationModeLabel,
 } from "../lib/transferConstants";
+import { jobStudioDataRules } from "../lib/studioDataRules";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
@@ -65,6 +66,7 @@ export type JobsStudioIntent = {
   /** Job-captured preflight so Studio Validate shows real gates, not Pending. */
   preflight?: import("../lib/types").PreflightResult;
   validationMode?: string;
+  schemaPolicy?: string;
 };
 
 function asMappingProof(raw: unknown): MappingProof | null {
@@ -563,22 +565,26 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   );
   const jobPreflight = liveJob?.preflight;
   const openValidateInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
+    const rules = jobStudioDataRules(liveJob);
     openStudio({
       step: "validate",
       jobId: selectedId || liveJob?._id || undefined,
       mappings: jobRepairMappings,
       preflight: liveJob?.preflight,
-      validationMode: liveJob?.transfer_request?.validation_mode,
+      validationMode: rules.validationMode || undefined,
+      schemaPolicy: rules.schemaPolicy || undefined,
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
   const openMapInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
+    const rules = jobStudioDataRules(liveJob);
     openStudio({
       step: "map",
       jobId: selectedId || liveJob?._id || undefined,
       mappings: jobRepairMappings,
       preflight: liveJob?.preflight,
-      validationMode: liveJob?.transfer_request?.validation_mode,
+      validationMode: rules.validationMode || undefined,
+      schemaPolicy: rules.schemaPolicy || undefined,
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);

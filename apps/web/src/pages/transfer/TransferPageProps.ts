@@ -20,6 +20,7 @@ export interface TransferPageProps {
     jobId?: string;
     preflight?: PreflightResult;
     validationMode?: string;
+    schemaPolicy?: string;
     mappings?: Array<{
       source?: string;
       destination?: string;

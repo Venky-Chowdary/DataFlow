@@ -95,6 +95,12 @@ import {
   multiStreamScd2MirrorBlockCopy,
   MULTI_STREAM_SCD2_MIRROR_BLOCK,
 } from "../lib/transferConstants";
+import {
+  jobStudioDataRules,
+  namedStudioSchemaPolicy,
+  namedStudioValidationMode,
+  schemaPolicyBackfills,
+} from "../lib/studioDataRules";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
   parseStreamNames,
@@ -1751,10 +1757,15 @@ export function TransferPage({
       void fetchJob(seedStudioIntent.jobId)
         .then((job) => {
           if (job?.preflight) setPreflight(job.preflight as typeof preflight);
-          const mode = (job as { transfer_request?: { validation_mode?: string } })
-            ?.transfer_request?.validation_mode;
-          if (mode === "balanced" || mode === "strict" || mode === "maximum") {
-            setValidationMode(mode);
+          const rules = jobStudioDataRules(job as {
+            validation_mode?: string;
+            schema_policy?: string;
+            transfer_request?: { validation_mode?: string; schema_policy?: string };
+          });
+          if (rules.validationMode) setValidationMode(rules.validationMode);
+          if (rules.schemaPolicy) {
+            setSchemaPolicy(rules.schemaPolicy);
+            setBackfillNewFields(schemaPolicyBackfills(rules.schemaPolicy));
           }
         })
         .catch(() => {
@@ -1764,12 +1775,12 @@ export function TransferPage({
       setPreflight(null);
     }
 
-    if (
-      seedStudioIntent.validationMode === "balanced"
-      || seedStudioIntent.validationMode === "strict"
-      || seedStudioIntent.validationMode === "maximum"
-    ) {
-      setValidationMode(seedStudioIntent.validationMode);
+    const seededMode = namedStudioValidationMode(seedStudioIntent.validationMode);
+    if (seededMode) setValidationMode(seededMode);
+    const seededPolicy = namedStudioSchemaPolicy(seedStudioIntent.schemaPolicy);
+    if (seededPolicy) {
+      setSchemaPolicy(seededPolicy);
+      setBackfillNewFields(schemaPolicyBackfills(seededPolicy));
     }
 
     const maps = seedStudioIntent.mappings;
