@@ -223,7 +223,7 @@
   gap: 2px;
   padding: 10px 12px;
   border: 1px solid var(--df-border, #e6e9ee);
-  border-radius: 10px;
+  border-radius: var(--df-radius-card, 8px);
   background: var(--df-surface-subtle, #f8fafc);
   min-width: 0;
 }
@@ -236,11 +236,12 @@
 }
 
 .df2-drawer-fact strong {
-  font-size: 13px;
+  font-size: var(--df-fs-sm, 12.5px);
   color: #0f172a;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.35;
   min-width: 0;
   max-width: 100%;
 }

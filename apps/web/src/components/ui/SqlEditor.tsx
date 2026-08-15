@@ -61,7 +61,7 @@ export function SqlEditor({
           {value.trim() ? (diagnosis.ok ? diagnosis.statement : "Needs fix") : mode === "query" ? "SELECT" : mode === "dest_dml" ? "INSERT" : "CALL"}
         </span>
       </div>
-      <div className="df2-sql-editor-frame" style={{ minHeight }}>
+      <div className="df2-sql-editor-frame" style={{ height: minHeight, minHeight }}>
         <div className="df2-sql-gutter" aria-hidden ref={gutterRef}>
           {Array.from({ length: lineCount }, (_, i) => (
             <span key={i}>{i + 1}</span>

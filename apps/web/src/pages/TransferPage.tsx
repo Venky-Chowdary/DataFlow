@@ -81,6 +81,7 @@ import {
   procedureHint,
   procedureStreamName,
   queryHint,
+  sourceExtractReady,
   type SourceReadMode,
 } from "../lib/sourceReadMode";
 import {
@@ -2654,14 +2655,21 @@ export function TransferPage({
     setSourceIntrospectError(null);
     setSourceIntrospecting(false);
     setAnalyzing(false);
-    // Nudge effect by clearing then relying on current collection key — force via
-    // a microtask re-entry of the same inputs.
+    const callable = sourceKind === "database"
+      && isCallableSourceMode(sourceReadMode)
+      && sourceConnector?.type !== "mongodb";
     const rawPath = sourceKind === "cloud"
       ? cloudPath.trim()
-      : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
-    const names = sourceKind === "cloud" ? (rawPath ? [rawPath] : []) : parseStreamNames(rawPath);
+      : callable
+        ? procedureCall.trim()
+        : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    const names = sourceKind === "cloud"
+      ? (rawPath ? [rawPath] : [])
+      : callable
+        ? (rawPath ? [procedureStreamName(rawPath)] : [])
+        : parseStreamNames(rawPath);
     if (!sourceConnectorId || !names.length) return;
-    const key = `${sourceKind}|${sourceConnectorId}|${names.join("|")}`;
+    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}`;
     const gen = ++sourceIntrospectGenRef.current;
     sourceIntrospectGateRef.current = { key, status: "running" };
     setSourceIntrospecting(true);
@@ -2696,6 +2704,8 @@ export function TransferPage({
     sourceCollection,
     sourceTable,
     cloudPath,
+    sourceReadMode,
+    procedureCall,
     introspectConnectorSource,
   ]);
 
@@ -4574,13 +4584,16 @@ export function TransferPage({
     }
   };
 
-  const sourceInputsReady =
-    sourceKind === "file"
-      ? Boolean(parsed)
-      : Boolean(
-          sourceConnectorId
-          && (sourceKind === "cloud" ? cloudPath.trim() : (sourceTable || sourceCollection)),
-        );
+  const sourceInputsReady = sourceExtractReady({
+    sourceKind,
+    parsed: Boolean(parsed),
+    sourceConnectorId,
+    cloudPath,
+    sourceTable,
+    sourceCollection,
+    sourceReadMode,
+    procedureCall,
+  });
 
   const canConfigureDest =
     sourceKind === "file"
@@ -5444,7 +5457,7 @@ export function TransferPage({
                         : procedureHint(sourceConnector?.type)
                     }
                     hint="One statement. :name binds below, or quoted/numeric literals. Extra result columns stay on Map — never silent drop."
-                    rows={8}
+                    rows={6}
                   />
                   {bindNamesFromSql(procedureCall).length > 0 && (
                     <div className="df2-source-bind-params">
@@ -5470,7 +5483,7 @@ export function TransferPage({
                   )}
                 </div>
                 ) : (
-                <div className="df2-field">
+                <div className="df2-field df2-source-stream-field">
                   <label className="df2-label" htmlFor="source-stream-input">
                     {sourceConnector?.type === "mongodb" ? "Collection(s)" : "Table(s)"}
                   </label>
@@ -5589,9 +5602,15 @@ export function TransferPage({
             ? "Source profiled — choose where data should land next."
             : sourceKind === "cloud"
               ? "Select connector and path to continue"
-              : isMultiStreamSource
-                ? `${multiStreamNames.length} streams selected — continue to pick a destination`
-                : "Select connector and table/collection to continue";
+              : isCallableSourceMode(sourceReadMode)
+                ? (currentSourceColumns.length || analysis?.columns.length
+                    ? "Result set profiled — choose where data should land next."
+                    : sourceReadMode === "query"
+                      ? "Enter a read-only SELECT. Preview the result set, then continue."
+                      : "Enter a CALL/EXEC. Preview the result set, then continue.")
+                : isMultiStreamSource
+                  ? `${multiStreamNames.length} streams selected — continue to pick a destination`
+                  : "Select connector and table/collection to continue";
           const disabled = fileReady ? uploading : !canConfigureDest || sourceIntrospecting;
           return (
             <div className="df2-card-footer df2-wizard-footer">

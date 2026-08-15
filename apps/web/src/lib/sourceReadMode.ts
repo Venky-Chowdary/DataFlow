@@ -106,6 +106,34 @@ export function isCallableSourceMode(mode: SourceReadMode | string | undefined):
   return mode === "procedure" || mode === "query";
 }
 
+export type SourceExtractReadyInput = {
+  sourceKind: string;
+  parsed?: boolean;
+  sourceConnectorId?: string;
+  cloudPath?: string;
+  sourceTable?: string;
+  sourceCollection?: string;
+  sourceReadMode?: SourceReadMode | string;
+  procedureCall?: string;
+};
+
+/**
+ * Whether Source has the extract the operator must name before Destination.
+ * Query / procedure ready is the SQL text — not a table/collection name.
+ */
+export function sourceExtractReady(input: SourceExtractReadyInput): boolean {
+  const kind = String(input.sourceKind || "");
+  if (kind === "file") return Boolean(input.parsed);
+  if (!String(input.sourceConnectorId || "").trim()) return false;
+  if (kind === "cloud") return Boolean(String(input.cloudPath || "").trim());
+  if (isCallableSourceMode(input.sourceReadMode)) {
+    return Boolean(String(input.procedureCall || "").trim());
+  }
+  return Boolean(
+    String(input.sourceTable || "").trim() || String(input.sourceCollection || "").trim(),
+  );
+}
+
 /** Fields Execute must send in source_extra — Validate already stamps these. */
 export function callableSourceExtra(
   mode: SourceReadMode | string | undefined,

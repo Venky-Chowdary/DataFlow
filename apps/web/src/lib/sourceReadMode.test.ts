@@ -11,6 +11,7 @@ import {
   dialectOffersQuery,
   isCallableSourceMode,
   procedureStreamName,
+  sourceExtractReady,
 } from "./sourceReadMode.js";
 
 describe("sourceReadMode", () => {
@@ -44,6 +45,53 @@ describe("sourceReadMode", () => {
     assert.equal(isCallableSourceMode("procedure"), true);
     assert.equal(isCallableSourceMode("query"), true);
     assert.equal(isCallableSourceMode("table"), false);
+  });
+
+  it("treats query/procedure SQL as the ready extract, not a table name", () => {
+    assert.equal(sourceExtractReady({
+      sourceKind: "database",
+      sourceConnectorId: "pg-1",
+      sourceReadMode: "query",
+      procedureCall: "SELECT id, email FROM customers",
+    }), true);
+    assert.equal(sourceExtractReady({
+      sourceKind: "database",
+      sourceConnectorId: "pg-1",
+      sourceReadMode: "query",
+      procedureCall: "   ",
+      sourceTable: "customers",
+    }), false);
+    assert.equal(sourceExtractReady({
+      sourceKind: "database",
+      sourceConnectorId: "pg-1",
+      sourceReadMode: "procedure",
+      procedureCall: "CALL public.get_orders()",
+    }), true);
+    assert.equal(sourceExtractReady({
+      sourceKind: "database",
+      sourceConnectorId: "pg-1",
+      sourceReadMode: "table",
+      sourceTable: "public.orders",
+    }), true);
+    assert.equal(sourceExtractReady({
+      sourceKind: "database",
+      sourceConnectorId: "pg-1",
+      sourceReadMode: "table",
+    }), false);
+    assert.equal(sourceExtractReady({
+      sourceKind: "file",
+      parsed: true,
+    }), true);
+    assert.equal(sourceExtractReady({
+      sourceKind: "cloud",
+      sourceConnectorId: "s3-1",
+      cloudPath: "s3://bucket/orders.csv",
+    }), true);
+    assert.equal(sourceExtractReady({
+      sourceKind: "database",
+      sourceReadMode: "query",
+      procedureCall: "SELECT 1",
+    }), false);
   });
 
   it("stamps Execute source_extra for CALL/SELECT and leaves tables alone", () => {
