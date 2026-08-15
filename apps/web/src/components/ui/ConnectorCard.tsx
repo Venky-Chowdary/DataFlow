@@ -95,7 +95,9 @@ export function ConnectorCard({
             className="df2-connector-row-meta"
             title={[c.type.replace(/_/g, " "), c.database, endpoint, usage.hint].filter(Boolean).join(" · ")}
           >
-            {c.type.replace(/_/g, " ")}{c.database ? ` · ${c.database}` : ""}
+            {c.type.replace(/_/g, " ")}
+            {endpoint ? ` · ${endpoint}` : ""}
+            {c.database ? ` · ${c.database}` : ""}
             {usage.hint ? ` · ${usage.hint}` : ""}
           </span>
         </div>

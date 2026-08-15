@@ -14,12 +14,14 @@ import {
   resolveCatalogIdToType,
 } from "../lib/connectorTypes";
 import {
+  AUTH_MODE_DETAIL,
   AuthMode,
   ConnectorFormConfig,
   FormField,
   getConnectorFormConfig,
   validateConnectorPayload,
 } from "../lib/connectorFormConfig";
+import { ConnectorIcon } from "../app/brand-icons";
 import { CONNECTOR_CATALOG } from "../lib/types";
 import {
   isSnowflakeAccountHostOnly,
@@ -121,7 +123,7 @@ export function ConnectorModal({
   const [username, setUsername] = useState(editing?.username ?? "");
   const [password, setPassword] = useState(editing?.password ?? "");
   const [connectionString, setConnectionString] = useState(editing?.connection_string ?? "");
-  const [showConnStr, setShowConnStr] = useState(false);
+  const [showSecrets, setShowSecrets] = useState(false);
   const [schema, setSchema] = useState(editing?.schema ?? "");
   const [warehouse, setWarehouse] = useState(editing?.warehouse ?? "");
   const [authRole, setAuthRole] = useState(editing?.auth_role ?? "");
@@ -531,7 +533,19 @@ export function ConnectorModal({
       );
     }
     if (field.type === "password") {
-      return <input {...commonProps} type="password" autoComplete="new-password" />;
+      return (
+        <div className="df2-secret-field">
+          <input {...commonProps} type={showSecrets ? "text" : "password"} autoComplete="new-password" />
+          <button
+            type="button"
+            className="df2-secret-toggle"
+            onClick={() => setShowSecrets((s) => !s)}
+            aria-pressed={showSecrets}
+          >
+            {showSecrets ? "Hide" : "Show"}
+          </button>
+        </div>
+      );
     }
     if (field.type === "number") {
       return (
@@ -550,10 +564,33 @@ export function ConnectorModal({
 
   const catalogItem = CONNECTOR_CATALOG.find((c) => c.id === type);
 
+  const authDetail = (mode: { value: AuthMode; description?: string }) => {
+    if (isSnowflake && mode.value === "user_pass") {
+      return "Account locator or https:// host, username, and password.";
+    }
+    if (isSnowflake && mode.value === "connection_string") {
+      return "snowflake://user:password@account/DB/SCHEMA?warehouse=… — not a browser URL.";
+    }
+    return mode.description || AUTH_MODE_DETAIL[mode.value];
+  };
+
+  const fieldSpan = (field: FormField): "full" | "half" => {
+    if (
+      field.type === "textarea" ||
+      field.type === "checkbox" ||
+      field.key === "connection_string" ||
+      field.key === "privateKey" ||
+      field.key === "serviceAccount"
+    ) {
+      return "full";
+    }
+    return "half";
+  };
+
   return (
     <div className="df2-modal-overlay" onClick={onClose} role="presentation">
       <div
-        className={`df2-modal ${step === "pick" ? "df2-modal-full" : "df2-modal-lg"}`}
+        className={`df2-modal ${step === "pick" ? "df2-modal-full" : "df2-conn-setup"}`}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -567,7 +604,7 @@ export function ConnectorModal({
             <p className="df2-modal-subtitle">
               {step === "pick"
                 ? "Transfer-ready connectors support full migration. Test-only entries save credentials but cannot transfer yet."
-                : `${catalogItem?.label ?? formConfig.label ?? type} · choose the authentication mode that matches your environment`}
+                : "Name the connection, pick how you log in, enter credentials, then Test before you save."}
             </p>
           </div>
           <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onClose} aria-label="Close">
@@ -586,13 +623,30 @@ export function ConnectorModal({
               initialStatus="live"
             />
           ) : (
-            <>
-              <div className="df2-form-row">
+            <div className="df2-conn-setup-layout">
+              <aside className="df2-conn-setup-aside">
+                <div className="df2-conn-setup-identity">
+                  <span className="df2-conn-setup-icon" aria-hidden>
+                    <ConnectorIcon id={resolvedType || type} size={36} />
+                  </span>
+                  <div>
+                    <p className="df2-conn-setup-type">{catalogItem?.label ?? formConfig.label ?? type}</p>
+                    <p className="df2-conn-setup-type-hint">
+                      {isFileFormat(resolvedType)
+                        ? "Path or URL only — no database host."
+                        : "Pick the login method your admin issued."}
+                    </p>
+                  </div>
+                </div>
                 <div className="df2-field">
-                  <label className="df2-label">Connection name</label>
+                  <label className="df2-label" htmlFor="df2-conn-name">
+                    Connection name
+                    <span className="df2-req">*</span>
+                  </label>
                   <input
+                    id="df2-conn-name"
                     className="df2-input"
-                    placeholder="Production PostgreSQL"
+                    placeholder="Production Snowflake"
                     value={name}
                     onChange={(e) => {
                       setName(e.target.value);
@@ -600,146 +654,129 @@ export function ConnectorModal({
                     }}
                   />
                 </div>
-                <div className="df2-field">
-                  <label className="df2-label">Type</label>
-                  <input className="df2-input" value={catalogItem?.label ?? formConfig.label ?? type} readOnly disabled />
-                </div>
-              </div>
-
-              {isFileFormat(resolvedType) && (
-                <p className="df2-field-note df2-label-hint" style={{ marginTop: 8, marginBottom: 12 }}>
-                  File format connectors only need a path or URL. No database host, port, or credentials are required.
-                </p>
-              )}
-
-              {formConfig.authModes.length > 1 && (
-                <div className="df2-form-row">
+                {formConfig.authModes.length > 1 && (
                   <div className="df2-field">
-                    <label className="df2-label" id="df2-auth-mode-label">
-                      Authentication mode
-                    </label>
-                    <div
-                      className="df2-segment df2-auth-modes"
-                      role="tablist"
-                      aria-labelledby="df2-auth-mode-label"
-                    >
+                    <p className="df2-label" id="df2-auth-mode-label">
+                      Authentication
+                    </p>
+                    <div className="df2-auth-cards" role="tablist" aria-labelledby="df2-auth-mode-label">
                       {formConfig.authModes.map((opt) => (
                         <button
                           key={opt.value}
                           type="button"
                           role="tab"
                           aria-selected={authMode === opt.value}
-                          className={authMode === opt.value ? "active" : ""}
+                          className={`df2-auth-card${authMode === opt.value ? " is-active" : ""}`}
                           onClick={() => {
                             setAuthMode(opt.value);
                             setFieldError(null);
                             setTestResult(null);
                           }}
                         >
-                          {opt.label}
+                          <strong>{opt.label}</strong>
+                          <span>{authDetail(opt)}</span>
                         </button>
                       ))}
                     </div>
                   </div>
-                </div>
-              )}
-
-              {currentAuthMode && (
-                <div className="df2-form-fields">
-                  {currentAuthMode.fields.map((field) => (
-                    <div key={field.key} className="df2-field" style={{ marginTop: 8 }}>
-                      <label className="df2-label" htmlFor={field.key}>
-                        {field.label}
-                        {!field.optional && <span style={{ color: "#dc2626", marginLeft: 4 }}>*</span>}
-                      </label>
-                      {renderField(field)}
-                      {field.hint && <p className="df2-field-note df2-label-hint">{field.hint}</p>}
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {isSnowflake &&
-                authMode === "connection_string" &&
-                isSnowflakeAccountHostOnly(parseSnowflakeUrl(connectionString)) && (
-                <div className="df2-conn-probe is-fail" role="status">
-                  <p className="df2-conn-probe-msg">
-                    That looks like a Snowflake account host, not a login URL.
+                )}
+              </aside>
+              <div className="df2-conn-setup-main">
+                <div className="df2-conn-setup-main-head">
+                  <h3 className="df2-conn-setup-section">{currentAuthMode?.label || "Credentials"}</h3>
+                  <p className="df2-conn-setup-section-hint">
+                    {currentAuthMode ? authDetail(currentAuthMode) : "Enter the fields required to log in."}
                   </p>
-                  <p className="df2-conn-probe-hint">
-                    Switch to Username &amp; password, or paste
-                    {" "}<code>snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH</code>.
-                  </p>
-                  <button
-                    type="button"
-                    className="df2-btn df2-btn-sm"
-                    style={{ marginTop: 8 }}
-                    onClick={() => {
-                      const parsedSf = parseSnowflakeUrl(connectionString);
-                      if (parsedSf.account) setHost(parsedSf.account);
-                      setAuthMode("user_pass");
-                      setFieldError(null);
-                      setTestResult(null);
-                    }}
-                  >
-                    Use Username &amp; password
-                  </button>
                 </div>
-              )}
-
-              {authMode === "connection_string" && currentAuthMode?.fields.some((f) => f.key === "connection_string" && f.sensitive) && (
-                <button
-                  type="button"
-                  style={{ marginTop: 4, background: "none", border: "none", padding: 0, cursor: "pointer", fontSize: 12, color: "#6b7280" }}
-                  onClick={() => setShowConnStr((s) => !s)}
-                >
-                  {showConnStr ? "Hide connection string" : "Show connection string"}
-                </button>
-              )}
-
-              {fieldError && (
-                <p className="df2-field-error-text" role="alert">
-                  {fieldError}
-                </p>
-              )}
-              {testResult && (
-                <div
-                  className={`df2-conn-probe ${testResult.success ? "is-ok" : "is-fail"}`}
-                  role={testResult.success ? "status" : "alert"}
-                >
-                  <div className="df2-conn-probe-head">
-                    <span className={`df2-badge ${testResult.success ? "df2-badge-live" : "df2-badge-error"}`}>
-                      {testResult.success ? "Connected" : "Not connected"}
-                    </span>
-                    {testResult.success && testResult.source_ha && (
-                      <span
-                        className="df2-badge df2-badge-live"
-                        title={String(testResult.source_ha.message || "")}
+                {currentAuthMode && (
+                  <div className="df2-conn-setup-fields">
+                    {currentAuthMode.fields.map((field) => (
+                      <div
+                        key={field.key}
+                        className={`df2-field${fieldSpan(field) === "full" ? " is-full" : ""}`}
                       >
-                        HA: {String(testResult.source_ha.role || "—")}
-                        {testResult.source_ha.topology && testResult.source_ha.topology !== "none"
-                          ? ` · ${String(testResult.source_ha.topology)}`
-                          : ""}
-                      </span>
-                    )}
+                        {field.type !== "checkbox" && (
+                          <label className="df2-label" htmlFor={field.key}>
+                            {field.label}
+                            {!field.optional && <span className="df2-req">*</span>}
+                          </label>
+                        )}
+                        {renderField(field)}
+                        {field.hint && <p className="df2-field-note df2-label-hint">{field.hint}</p>}
+                      </div>
+                    ))}
                   </div>
-                  <p className="df2-conn-probe-msg">{testResult.message}</p>
-                  {!testResult.success && /ssl|tls|certificate/i.test(testResult.message) && (
-                    <p className="df2-conn-probe-hint">
-                      Look for the <strong>SSL / TLS</strong> toggle in the fields above — local
-                      emulators and plaintext Docker ports usually need it off.
+                )}
+                {isSnowflake &&
+                  authMode === "connection_string" &&
+                  isSnowflakeAccountHostOnly(parseSnowflakeUrl(connectionString)) && (
+                  <div className="df2-conn-probe is-fail" role="status">
+                    <p className="df2-conn-probe-msg">
+                      That looks like a Snowflake account host, not a login URL.
                     </p>
-                  )}
-                  {!testResult.success && isSnowflake && /account host|snowflake:\/\//i.test(testResult.message) && (
                     <p className="df2-conn-probe-hint">
-                      Use <strong>Username &amp; password</strong> with the account host
-                      (for example <code>bq73198</code>), or a login URL
+                      Switch to Username &amp; password, or paste
                       {" "}<code>snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH</code>.
                     </p>
-                  )}
-                </div>
-              )}
-            </>
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-sm"
+                      onClick={() => {
+                        const parsedSf = parseSnowflakeUrl(connectionString);
+                        if (parsedSf.account) setHost(parsedSf.account);
+                        setAuthMode("user_pass");
+                        setFieldError(null);
+                        setTestResult(null);
+                      }}
+                    >
+                      Use Username &amp; password
+                    </button>
+                  </div>
+                )}
+                {fieldError && (
+                  <p className="df2-field-error-text" role="alert">
+                    {fieldError}
+                  </p>
+                )}
+                {testResult && (
+                  <div
+                    className={`df2-conn-probe ${testResult.success ? "is-ok" : "is-fail"}`}
+                    role={testResult.success ? "status" : "alert"}
+                  >
+                    <div className="df2-conn-probe-head">
+                      <span className={`df2-badge ${testResult.success ? "df2-badge-live" : "df2-badge-error"}`}>
+                        {testResult.success ? "Connected" : "Not connected"}
+                      </span>
+                      {testResult.success && testResult.source_ha && (
+                        <span
+                          className="df2-badge df2-badge-live"
+                          title={String(testResult.source_ha.message || "")}
+                        >
+                          HA: {String(testResult.source_ha.role || "—")}
+                          {testResult.source_ha.topology && testResult.source_ha.topology !== "none"
+                            ? ` · ${String(testResult.source_ha.topology)}`
+                            : ""}
+                        </span>
+                      )}
+                    </div>
+                    <p className="df2-conn-probe-msg">{testResult.message}</p>
+                    {!testResult.success && /ssl|tls|certificate/i.test(testResult.message) && (
+                      <p className="df2-conn-probe-hint">
+                        Look for the <strong>SSL / TLS</strong> toggle in the fields above — local
+                        emulators and plaintext Docker ports usually need it off.
+                      </p>
+                    )}
+                    {!testResult.success && isSnowflake && /account host|snowflake:\/\//i.test(testResult.message) && (
+                      <p className="df2-conn-probe-hint">
+                        Use <strong>Username &amp; password</strong> with the account host
+                        (for example <code>bq73198</code>), or a login URL
+                        {" "}<code>snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH</code>.
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
         </div>
 

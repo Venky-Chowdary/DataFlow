@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { getAuthModes, validateConnectorPayload } from "./connectorFormConfig.js";
+import { AUTH_MODE_DETAIL, getAuthModes, validateConnectorPayload } from "./connectorFormConfig.js";
 import { TRANSFER_LIVE_TYPES } from "./connectorTypes.js";
 
 const SNOWFLAKE_MODES = ["user_pass", "pat", "key_pair", "connection_string"];
@@ -16,6 +16,12 @@ describe("connector auth modes", () => {
       if (!modes.length) missing.push(type);
     }
     assert.deepEqual(missing, []);
+  });
+
+  it("documents every auth mode for the setup rail", () => {
+    for (const mode of Object.keys(AUTH_MODE_DETAIL)) {
+      assert.ok(AUTH_MODE_DETAIL[mode as keyof typeof AUTH_MODE_DETAIL].length > 12);
+    }
   });
 
   it("lists Snowflake password, PAT, key-pair, and login URL", () => {

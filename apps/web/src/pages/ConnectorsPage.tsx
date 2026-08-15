@@ -245,7 +245,7 @@ export function ConnectorsPage({
       wide
       className="df2-page-connectors"
       title="Connectors"
-      description="Saved connections and the transfer-ready catalog."
+      description="Saved logins for Transfer Studio. Open a row for status and last test, or start a new connection."
     >
       <PageFrame className="df2-connectors-page">
         <PageToolbar

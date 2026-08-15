@@ -7953,6 +7953,208 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   min-height: 34px;
 }
 
+.df2-modal.df2-conn-setup {
+  width: min(1120px, 96vw);
+  max-width: 1120px;
+  height: min(88vh, 840px);
+  max-height: min(88vh, 840px);
+}
+
+.df2-conn-setup .df2-modal-body {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+  max-height: none;
+}
+
+.df2-conn-setup-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 320px) minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.df2-conn-setup-aside {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px 18px;
+  border-right: 1px solid var(--df-border, #e6e9ee);
+  background: #f8fafc;
+  overflow-y: auto;
+}
+
+.df2-conn-setup-identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.df2-conn-setup-icon {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid var(--df-border, #e6e9ee);
+}
+
+.df2-conn-setup-type {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-conn-setup-type-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-auth-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.df2-auth-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+  color: inherit;
+}
+
+.df2-auth-card:hover {
+  border-color: #99f6e4;
+}
+
+.df2-auth-card.is-active,
+.df2-auth-card[aria-selected="true"] {
+  border-color: var(--df-brand, #0d9488);
+  background: var(--df-brand-muted, #f0fdfa);
+  box-shadow: inset 3px 0 0 var(--df-brand, #0d9488);
+}
+
+.df2-auth-card strong {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-auth-card span {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-conn-setup-main {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px 22px;
+  overflow-y: auto;
+  min-width: 0;
+}
+
+.df2-conn-setup-main-head {
+  padding-bottom: 4px;
+}
+
+.df2-conn-setup-section {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-conn-setup-section-hint {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--df-text-secondary, #475569);
+  max-width: 62ch;
+}
+
+.df2-conn-setup-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px 16px;
+}
+
+.df2-conn-setup-fields .df2-field.is-full {
+  grid-column: 1 / -1;
+}
+
+.df2-conn-setup-fields .df2-field {
+  margin: 0;
+}
+
+.df2-req {
+  color: #dc2626;
+  margin-left: 4px;
+}
+
+.df2-secret-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.df2-secret-field .df2-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.df2-secret-toggle {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0f766e;
+}
+
+.df2-conn-setup .df2-conn-probe {
+  margin-top: 4px;
+}
+
+@media (max-width: 800px) {
+  .df2-modal.df2-conn-setup {
+    width: min(96vw, 1120px);
+    height: min(94vh, 840px);
+  }
+
+  .df2-conn-setup-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .df2-conn-setup-aside {
+    border-right: none;
+    border-bottom: 1px solid var(--df-border, #e6e9ee);
+    max-height: 42vh;
+  }
+
+  .df2-conn-setup-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* Validate + Map step enterprise polish */
 .df2-validate-dashboard-host,
 .df2-validate-step {

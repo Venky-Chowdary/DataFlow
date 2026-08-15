@@ -40,7 +40,21 @@ export interface AuthModeConfig {
   label: string;
   fields: FormField[];
   validate: (values: Record<string, unknown>) => string | null;
+  /** One-line operator copy shown on the setup rail. */
+  description?: string;
 }
+
+/** Default rail copy — Snowflake and others override per mode when needed. */
+export const AUTH_MODE_DETAIL: Record<AuthMode, string> = {
+  user_pass: "Host, username, and password for this system.",
+  connection_string: "Login URL. If the password contains @, encode it as %40.",
+  service_account: "JSON key or file path for cloud identity.",
+  aws_keys: "Access key ID and secret access key.",
+  api_key: "API token issued by this service.",
+  file_path: "Local path or object-store URI.",
+  key_pair: "PKCS#8 private key assigned on the user.",
+  pat: "Programmatic access token. Snowflake sends it as password=.",
+};
 
 /** Complete per-connector form configuration. */
 export interface ConnectorFormConfig {
@@ -103,8 +117,14 @@ function requiredAny(values: Record<string, unknown>, keys: string[], message: s
   return message;
 }
 
-function auth(mode: AuthMode, label: string, fields: FormField[], validate: (values: Record<string, unknown>) => string | null): AuthModeConfig {
-  return { value: mode, label, fields, validate };
+function auth(
+  mode: AuthMode,
+  label: string,
+  fields: FormField[],
+  validate: (values: Record<string, unknown>) => string | null,
+  description?: string,
+): AuthModeConfig {
+  return { value: mode, label, fields, validate, description: description || AUTH_MODE_DETAIL[mode] };
 }
 
 /** Generic SQL placeholder derived from the generic SQL map. */
@@ -632,7 +652,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         if (!fmt(values, "username")) return "Username is required.";
         if (!fmt(values, "password")) return "Programmatic access token is required.";
         return null;
-      })
+      }, "Snowflake PAT from Snowsight. The official driver sends it as password=.")
     );
     authModes.push(
       auth("key_pair", "Key-pair (JWT)", [
@@ -656,7 +676,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         if (!fmt(values, "username")) return "Username is required.";
         if (!fmt(values, "privateKey")) return "PKCS#8 private key is required.";
         return null;
-      })
+      }, "PKCS#8 key whose public half is set on the Snowflake user.")
     );
   }
 
