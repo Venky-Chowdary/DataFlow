@@ -643,9 +643,9 @@ def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str],
         if folded and folded not in candidates:
             candidates.append(folded)
 
-    available = _snowflake_list_schemas(cur)
-    available_set = {a.upper() for a in available}
-
+    # Try the operator schema first. Listing every schema via
+    # information_schema.schemata is a cold-warehouse tax and is why
+    # "Analyzing destination schema" sat for minutes on Snowflake dest.
     for cand in candidates:
         try:
             cur.execute(f"USE SCHEMA {quote_sql_identifier(cand)}")
@@ -655,15 +655,16 @@ def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str],
                 warning = (
                     f"Schema '{requested}' was not usable; using '{resolved}' instead."
                 )
-            elif available_set and resolved not in available_set:
-                warning = None
-            return resolved, available, warning
+            return resolved, [], warning
         except Exception as exc:
             msg = str(exc).lower()
             if "002043" in str(exc) or "002003" in str(exc) or "does not exist" in msg or "not exist" in msg:
                 continue
             # Unexpected errors (permissions, etc.) — re-raise for outer handler
             raise
+
+    available = _snowflake_list_schemas(cur)
+    available_set = {a.upper() for a in available}
 
     # Requested schema missing: fall back to first available, preferring PUBLIC.
     fallback = None
@@ -755,15 +756,17 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             if schema_warning:
                 warnings.append(schema_warning)
 
-            cur.execute(
-                """
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = %s AND table_type = 'BASE TABLE'
-                ORDER BY table_name LIMIT 100
-                """,
-                (schema,),
-            )
-            tables = [r[0] for r in cur.fetchall()]
+            tables: list[str] = []
+            if not table:
+                cur.execute(
+                    """
+                    SELECT table_name FROM information_schema.tables
+                    WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                    ORDER BY table_name LIMIT 100
+                    """,
+                    (schema,),
+                )
+                tables = [r[0] for r in cur.fetchall()]
             columns: list[dict] = []
             target_table = table or (tables[0] if tables else None)
             if target_table:

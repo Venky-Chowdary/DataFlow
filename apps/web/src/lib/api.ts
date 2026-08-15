@@ -3,7 +3,7 @@ import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { clearSession, getAuthToken } from "./session";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
-const LONG_REQUEST_TIMEOUT_MS = 120000;
+const LONG_REQUEST_TIMEOUT_MS = 180000;
 
 /** Unauthenticated liveness probe — used so a 401 on connectors is not "API offline". */
 let _healthFailStreak = 0;
@@ -1768,6 +1768,8 @@ export interface EndpointIntrospection {
   >;
   objects?: { name: string; type: string }[];
   row_estimate?: number;
+  row_estimate_uncertain?: boolean;
+  sample_row_count?: number;
   table_exists?: boolean;
   data?: Record<string, unknown>[];
   sample_data?: Record<string, unknown>[];

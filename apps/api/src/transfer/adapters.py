@@ -953,11 +953,33 @@ def _guard_truncated_read(batch, db_type: str, name: str) -> None:
         )
 
 
+def _pack_source_read(
+    records: list[dict],
+    headers: list[str],
+    schema: dict[str, str],
+    *,
+    batch: Any = None,
+    stamp_total: dict[str, Any] | None = None,
+) -> tuple[list[dict], list[str], dict[str, str]]:
+    """Return the read triple and optionally stamp the measured population.
+
+    Readers already run ``COUNT(*)`` (or equivalent) onto ``batch.total_rows``.
+    Introspect used to throw that away and treat ``len(records)`` (the 100-row
+    preview) as the transfer size.
+    """
+    if stamp_total is not None:
+        total = getattr(batch, "total_rows", None) if batch is not None else None
+        stamp_total["total_rows"] = int(total) if total is not None else None
+        stamp_total["sample_rows"] = len(records)
+    return records, headers, schema
+
+
 def read_source_database(
     endpoint: EndpointConfig,
     *,
     limit: int = _NON_STREAMING_ROW_LIMIT,
     raise_on_truncate: bool = True,
+    stamp_total: dict[str, Any] | None = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
     from .connector_capabilities import resolve_driver_type
 
@@ -976,7 +998,9 @@ def read_source_database(
         schema = dict(native) if isinstance(native, dict) else {}
         if not schema:
             schema = {c: "string" for c in batch.headers}
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_reader import read_table_batch
@@ -1003,7 +1027,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             "postgresql", cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "mongodb":
         from connectors.mongodb_reader import read_collection_batch
@@ -1031,7 +1057,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             "mongodb", cfg, coll_name, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "mysql":
         from connectors.mysql_reader import read_table_batch
@@ -1057,7 +1085,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "bigquery":
         from connectors.bigquery_reader import read_table_batch
@@ -1085,7 +1115,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "snowflake":
         from connectors.snowflake_reader import read_table_batch
@@ -1110,6 +1142,9 @@ def read_source_database(
                 or cfg.get("primary_key")
                 or ""
             ),
+            skip_population_count=bool(
+                (endpoint.extra or {}).get("skip_population_count")
+            ),
             **snowflake_session_kwargs(cfg),
         )
         if raise_on_truncate:
@@ -1118,7 +1153,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "gcs":
         from connectors.gcs_reader import read_object
@@ -1138,7 +1175,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "adls":
         from connectors.adls_reader import read_object
@@ -1158,7 +1197,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "s3":
         from connectors.s3_reader import read_object
@@ -1178,7 +1219,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "dynamodb":
         from connectors.dynamodb_reader import read_all_paginated
@@ -1195,7 +1238,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "elasticsearch":
         from connectors.elasticsearch_reader import read_index_batch
@@ -1214,7 +1259,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "redis":
         from connectors.redis_reader import read_keys_batch, resolve_key_pattern
@@ -1231,7 +1278,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "sqlite":
         from connectors.sqlite_reader import read_table_batch
@@ -1257,7 +1306,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "generic_sql":
         from connectors.generic_sql import read_table_batch
@@ -1284,7 +1335,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type in ("sqlserver", "oracle"):
         from .connector_dispatch import read_via_registry
@@ -1299,7 +1352,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "iceberg":
         from .connector_dispatch import read_via_registry
@@ -1314,7 +1369,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "sftp":
         from connectors.sftp_reader import read_object
@@ -1346,7 +1403,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type in (
         "salesforce",
@@ -1375,7 +1434,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "singer_tap":
         from connectors.sdk import sdk_read_as_matrix

@@ -121,6 +121,7 @@ def read_table_batch(
     role: str = "",
     private_key: str = "",
     cursor_primary_key: str | None = None,
+    skip_population_count: bool = False,
 ) -> ReadBatch:
     account = normalize_account(host)
     schema = _snowflake_schema(schema)
@@ -142,13 +143,13 @@ def read_table_batch(
             table_ref = _table_ref(cur, schema, table)
             if known_total_rows is not None:
                 total = known_total_rows
+            elif skip_population_count:
+                total = None
             else:
-                total = count_table_rows(
-                    host=host, port=port, database=database, username=username, password=password,
-                    schema=schema, connection_string=connection_string, warehouse=warehouse, table=table,
-                    role=role,
-                    private_key=private_key,
-                )
+                # Same session — a nested count_table_rows() used to open a
+                # second login just to COUNT(*), doubling warehouse cold-start.
+                cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+                total = int(cur.fetchone()[0])
             col_sql = (
                 quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
                 if columns

@@ -181,6 +181,7 @@ def introspect_endpoint(
         from connectors.snowflake import test_snowflake
         from services.connector_auth import snowflake_session_kwargs
 
+        purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
         probe = test_snowflake(
             host=cfg["host"],
             port=cfg["port"] or 443,
@@ -191,6 +192,7 @@ def introspect_endpoint(
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
+            list_tables=not (purpose == "destination" and bool(endpoint.table)),
             **snowflake_session_kwargs(cfg),
         )
         out["connected"] = probe.ok
@@ -1105,6 +1107,25 @@ def _attach_callable_source_sample(
         logger.warning("callable source peek failed for %s: %s", fmt, exc, exc_info=exc)
 
 
+def apply_measured_row_estimate(
+    out: dict, total_rows: int | None, sample_len: int
+) -> None:
+    """Stamp population separately from the preview window.
+
+    A 100-row SELECT is not a 100-row table. When COUNT(*) (or equivalent)
+    measured the table, that number is the wizard volume. When it did not,
+    leave the estimate unknown — never publish ``len(sample)`` as population.
+    """
+    out["sample_row_count"] = int(sample_len)
+    if total_rows is not None and int(total_rows) >= 0:
+        out["row_estimate"] = int(total_rows)
+        out.pop("row_estimate_uncertain", None)
+        return
+    if out.get("row_estimate") in (None, 0):
+        out["row_estimate"] = 0
+        out["row_estimate_uncertain"] = True
+
+
 def _attach_sql_sample_rows(
     out: dict,
     endpoint: EndpointConfig,
@@ -1145,8 +1166,18 @@ def _attach_sql_sample_rows(
         )
         # Cap preview reads to the same window Execute uses for preflight integrity.
         limit = max(1, min(int(sample_limit or 100), 100))
+        purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
+        # Destination Map/Validate need columns and keys, not dest population
+        # and not a dest 100-row peek. That peek opened extra Snowflake logins
+        # and COUNT(*)'d the dest table — the "analyzing destination schema"
+        # hang and the preflight timeout.
+        if purpose == "destination" and out.get("columns"):
+            return
+        if purpose == "destination":
+            sample_ep.extra = {**(sample_ep.extra or {}), "skip_population_count": True}
+        stamp: dict[str, Any] = {}
         records, headers, inferred = read_source_database(
-            sample_ep, limit=limit, raise_on_truncate=False
+            sample_ep, limit=limit, raise_on_truncate=False, stamp_total=stamp
         )
         if headers and not out.get("columns"):
             out["columns"] = list(headers)
@@ -1161,9 +1192,7 @@ def _attach_sql_sample_rows(
             safe_records.append({k: cell_to_string(row.get(k, "")) for k in (headers or out.get("columns") or [])})
         out["sample_data"] = safe_records
         out["data"] = safe_records
-        if out.get("row_estimate") in (None, 0) and records:
-            # Best-effort; full COUNT can be expensive on warehouses.
-            out["row_estimate"] = max(int(out.get("row_estimate") or 0), len(records))
+        apply_measured_row_estimate(out, stamp.get("total_rows"), len(safe_records))
         if not records:
             out["message"] = (
                 f"{out.get('message', '')} · table `{table}` is empty "

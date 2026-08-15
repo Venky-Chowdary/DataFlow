@@ -31,6 +31,7 @@ def test_snowflake(
     private_key: str = "",
     auth_role: str = "",
     auth_mode: str = "",
+    list_tables: bool = True,
 ) -> ConnectResult:
     del port, ssl, auth_mode
     parsed = parse_snowflake_url(connection_string) if (connection_string or "").strip() else {}
@@ -85,21 +86,29 @@ def test_snowflake(
         with conn.cursor() as cur:
             if wh:
                 cur.execute(f'USE WAREHOUSE "{wh}"')
-            cur.execute(
-                """
-                SELECT table_name
-                FROM information_schema.tables
-                WHERE table_schema = %s AND table_type = 'BASE TABLE'
-                ORDER BY table_name
-                LIMIT 50
-                """,
-                (schema or "PUBLIC",),
-            )
-            tables = [row[0] for row in cur.fetchall()]
+            if list_tables:
+                cur.execute(
+                    """
+                    SELECT table_name
+                    FROM information_schema.tables
+                    WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                    ORDER BY table_name
+                    LIMIT 50
+                    """,
+                    (schema or "PUBLIC",),
+                )
+                tables = [row[0] for row in cur.fetchall()]
+            else:
+                cur.execute("SELECT 1")
+                tables = []
         return ConnectResult(
             ok=True,
-            tables=tables or ["(no tables in schema)"],
-            message=f"Snowflake connected — {len(tables)} tables in schema '{schema or 'PUBLIC'}'",
+            tables=tables or (["(no tables in schema)"] if list_tables else []),
+            message=(
+                f"Snowflake connected — {len(tables)} tables in schema '{schema or 'PUBLIC'}'"
+                if list_tables
+                else "Snowflake connected"
+            ),
             driver="snowflake-connector-python",
         )
     except Exception as exc:

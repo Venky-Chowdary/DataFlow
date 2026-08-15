@@ -2329,13 +2329,19 @@ export function TransferPage({
       schema?: Record<string, string>;
       schema_intelligence?: Record<string, { semantic_role?: string; logical_type?: string; notes?: string[] }>;
       row_estimate?: number;
+      row_estimate_uncertain?: boolean;
       data?: Record<string, unknown>[];
       sample_data?: Record<string, unknown>[];
       message?: string;
     },
   ) => {
     if (!sourceConnector) return;
-    if (intro.row_estimate != null && intro.row_estimate > 0) {
+    // Never stamp a 100-row preview as the transfer volume.
+    if (
+      !intro.row_estimate_uncertain
+      && intro.row_estimate != null
+      && intro.row_estimate > 0
+    ) {
       setSourceRowEstimate(intro.row_estimate);
     }
     const sampleRows = intro.data ?? intro.sample_data ?? [];
@@ -2354,17 +2360,22 @@ export function TransferPage({
       source_columns: intro.columns,
       source_schema: intro.schema ?? {},
     }));
+    const population = (
+      intro.row_estimate_uncertain
+      || intro.row_estimate == null
+      || intro.row_estimate <= 0
+    ) ? 0 : intro.row_estimate;
     setActiveData({
       name: streamName || sourceConnector.name,
       columns: intro.columns,
-      row_count: intro.row_estimate ?? 0,
+      row_count: population,
       samples: columnSamples,
       schema: intro.schema ?? {},
     });
     setParsed({
       columns: intro.columns,
       schema: intro.schema ?? {},
-      row_count: intro.row_estimate ?? 0,
+      row_count: population,
       data: intro.data ?? intro.sample_data ?? [],
       file_type: sourceConnector.type,
     });
