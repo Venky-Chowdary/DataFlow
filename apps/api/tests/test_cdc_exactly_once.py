@@ -9,6 +9,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 import pytest
@@ -688,6 +689,132 @@ def test_sqlalchemy_eos_bundle_crash_then_retry() -> None:
         assert sa_dest_engine_count(dest_cfg, "orders", "generic_sql") == 1
         assert sa_dest_engine_count(dest_cfg, "users", "generic_sql") == 1
         assert sa_dest_watermark_lsn(dest_cfg, "sa|b|shared", "generic_sql") == "0/600"
+
+
+def test_shared_transfer_eos_bundle_two_tables_one_dest_txn(tmp_path, monkeypatch) -> None:
+    """Shared-log EOS: N tables land in one dest txn; redelivery does not double-write."""
+    from unittest.mock import patch
+
+    from services.sync_cursor import SyncContract
+    from src.transfer.cdc_transfer import _run_cdc_shared_multi_table
+    from src.transfer.models import EndpointConfig
+
+    class FakeCdc:
+        def __init__(self, *a, **k):
+            self._polled = False
+
+        def is_available(self):
+            return True
+
+        def snapshot(self):
+            yield ChangeBatch(
+                inserts=[{"id": "1", "v": "o"}],
+                resume_token="slot=s|phase=snapshot|lsn=0/1",
+                table="orders",
+                ack_barrier=False,
+            )
+            yield ChangeBatch(
+                inserts=[{"id": "u1", "v": "u"}],
+                resume_token="slot=s|phase=snapshot|lsn=0/1",
+                table="users",
+                ack_barrier=False,
+            )
+            yield ChangeBatch(
+                resume_token="slot=s|phase=streaming|lsn=0/1",
+                ack_barrier=True,
+            )
+
+        def poll(self):
+            if self._polled:
+                return
+                yield  # pragma: no cover
+            self._polled = True
+            yield ChangeBatch(
+                updates=[{"id": "1", "v": "o2"}],
+                resume_token="slot=s|phase=streaming|lsn=0/2",
+                table="orders",
+                ack_barrier=False,
+            )
+            yield ChangeBatch(
+                inserts=[{"id": "u2", "v": "u2"}],
+                resume_token="slot=s|phase=streaming|lsn=0/2",
+                table="users",
+                ack_barrier=True,
+            )
+
+        def ack(self, token=None):
+            self.acked = token
+
+        def close(self):
+            pass
+
+    dest_path = str(tmp_path / "eos_shared.db")
+    dest_cfg = {"database": dest_path}
+    job_id = f"job-eos-bundle-{uuid.uuid4().hex[:10]}"
+    source = EndpointConfig(
+        kind="database",
+        format="postgresql",
+        database=f"app_{job_id}",
+        table="orders",
+        schema="public",
+    )
+    destination = EndpointConfig(
+        kind="database", format="sqlite", database=dest_path, table="orders"
+    )
+    selected = [
+        SyncContract(name="orders", primary_key="id", sync_mode="cdc"),
+        SyncContract(name="users", primary_key="id", sync_mode="cdc"),
+    ]
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 1.0},
+        {"source": "v", "target": "v", "confidence": 1.0},
+    ]
+    kwargs = dict(
+        sync_mode="cdc",
+        stream_contracts=[
+            {"name": "orders", "selected": True, "primary_key": "id", "mappings": mappings},
+            {"name": "users", "selected": True, "primary_key": "id", "mappings": mappings},
+        ],
+        selected=selected,
+        job_id=job_id,
+        checkpoint=None,
+        checkpoint_service=None,
+        backfill_new_fields=False,
+        validation_mode="strict",
+        limit=0,
+        delivery_guarantee="exactly_once",
+    )
+    monkeypatch.setenv("DATAFLOW_CDC_MAX_IDLE_POLLS", "1")
+    monkeypatch.setenv("DATAFLOW_CDC_MAX_POLL_ROUNDS", "2")
+    with patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", FakeCdc):
+        rows, ddl, summary, _ = _run_cdc_shared_multi_table(
+            source, destination, mappings, {"id": "string", "v": "string"}, None, **kwargs
+        )
+    assert any("exactly_once" in line for line in ddl)
+    assert summary.get("exactly_once_active") is True
+    assert summary.get("exactly_once_claimed_platform") is False
+    assert summary.get("exactly_once_protocol") == PROTOCOL
+    assert summary.get("eos_bundle") is True
+    assert dest_engine_count(dest_cfg, "orders") == 1
+    assert dest_engine_count(dest_cfg, "users") == 2
+    from services.cdc_multi_table import shared_route_cursor_key
+
+    shared_key = shared_route_cursor_key(
+        engine="postgresql",
+        database=f"app_{job_id}",
+        tables=["orders", "users"],
+        job_id=job_id,
+    )
+    assert dest_watermark_lsn(dest_cfg, shared_key) == "0/2"
+    first_orders = dest_engine_count(dest_cfg, "orders")
+    first_users = dest_engine_count(dest_cfg, "users")
+    with patch("src.transfer.cdc_transfer.PostgreSqlChangeStreamCdc", FakeCdc):
+        _run_cdc_shared_multi_table(
+            source, destination, mappings, {"id": "string", "v": "string"}, None, **kwargs
+        )
+    assert dest_engine_count(dest_cfg, "orders") == first_orders
+    assert dest_engine_count(dest_cfg, "users") == first_users
+    assert rows >= 3
 
 
 def test_named_matrix_artifact_matches_measured() -> None:

@@ -1,6 +1,7 @@
 {
   "name": "cdc_exactly_once_matrix",
   "algorithm": "dest_owned_watermark_txn",
+  "protocol": "dest_authoritative_fenced_bundle",
   "platform_exactly_once_claimed": false,
   "delivery_default": "at_least_once",
   "measured_floor": 1.0,
@@ -146,6 +147,7 @@
   ],
   "notes": [
     "100% means this named fixture only \u2014 not live warehouse CDC.",
+    "Protocol dest_authoritative_fenced_bundle: dest SSOT + fence + last-op-per-PK + shared-log N-table dest txn + snapshot/stream handoff + redelivery checksum.",
     "Wired dests: sqlite (native) plus SQLAlchemy dest-txn for postgresql/mysql/sqlserver/duckdb/generic_sql/oracle/snowflake.",
     "File/Iceberg/Kafka dests stay fail-closed."
   ]
