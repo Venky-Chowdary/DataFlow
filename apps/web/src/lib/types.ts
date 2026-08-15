@@ -1002,12 +1002,14 @@ export interface PreflightResult {
     reason?: string;
     note?: string;
   };
-  /** Procedure / SQL extract honesty — catalog probes skipped, CDC refused. */
+  /** Procedure / SQL extract honesty — catalog probes skipped, CDC/SCD2/mirror refused. */
   callable_extract?: {
     mode?: string;
     catalog_probes?: string;
     note?: string;
     cdc?: string;
+    history_sync?: string;
+    incremental?: string;
     honesty?: string;
   };
 }

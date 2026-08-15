@@ -2747,7 +2747,7 @@ def _plan_mapping_dicts(ctx: PreflightContext) -> list[dict[str, Any]]:
 
 
 def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
-    """CDC + callable extract is refuse-closed. Hosted policy gate may replace this."""
+    """CDC / SCD2 / mirror + callable extract is refuse-closed. Hosted policy gate may replace this."""
     start = time.perf_counter()
     mode = str(getattr(ctx.plan.source, "source_read_mode", "") or "").strip().lower()
     sync = str(ctx.plan.sync_mode or "").strip().lower()
@@ -2768,11 +2768,16 @@ def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
         )
         return _host_gate_to_result(GateId.G9_SYNC_CONTRACT, payload, start)
     except ImportError:
-        if sync == "cdc" and mode in {"procedure", "query"}:
+        if mode in {"procedure", "query"} and sync in {
+            "cdc",
+            "scd2",
+            "mirror",
+            "full_refresh_mirror",
+        }:
             return _block(
                 GateId.G9_SYNC_CONTRACT,
-                "Stored-procedure / custom-SQL extract is a result-set snapshot, "
-                "not a WAL/binlog read — CDC is not available on this source",
+                "Stored-procedure / custom-SQL extract is a result-set snapshot — "
+                "CDC, SCD2, and mirror are not available on this source",
                 start,
                 {"source_read_mode": mode, "sync_mode": sync},
             )

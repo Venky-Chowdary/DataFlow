@@ -103,7 +103,7 @@ class SourceConfig:
     columns: list[ColumnSchema] = field(default_factory=list)
     row_count_estimate: int = 0
     error: str | None = None
-    # table | query | procedure — CDC + callable is refuse-closed.
+    # table | query | procedure — CDC / SCD2 / mirror + callable is refuse-closed.
     source_read_mode: str = ""
 
 

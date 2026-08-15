@@ -189,7 +189,12 @@ def build_sync_contract_gate(
                         unknown_pk.append(f"{stream}.{name}")
 
     issues: list[str] = []
-    if sync in {"scd2", "mirror"}:
+    from services.procedure_source import callable_sync_refusal
+
+    refused = callable_sync_refusal(sync, source_read_mode=source_read_mode)
+    if refused:
+        issues.append(refused)
+    if sync in {"scd2", "mirror"} and not refused:
         if multi_stream:
             issues.append(
                 f"{sync.upper()} is not supported for multi-stream transfers"
@@ -200,14 +205,9 @@ def build_sync_contract_gate(
             issues.append(
                 f"{sync.upper()} requires a SQL table destination (not '{dest}')"
             )
-    if sync == "cdc":
+    if sync == "cdc" and not refused:
         if kind in {"file", "cloud"}:
             issues.append("CDC requires a database source (not file/cloud)")
-        elif (source_read_mode or "").strip().lower() in {"procedure", "query"}:
-            issues.append(
-                "Stored-procedure / custom-SQL extract is a result-set snapshot, "
-                "not a WAL/binlog read — CDC is not available on this source"
-            )
         elif src and src not in CDC_CAPABLE_SOURCES:
             issues.append(f"CDC is not supported for source type '{src}'")
     if missing_cursor:

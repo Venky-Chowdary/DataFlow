@@ -79,6 +79,14 @@ def test_g9_sync_blocks_cdc_on_procedure_source() -> None:
     assert "snapshot" in blob or "cdc" in blob or "procedure" in blob
 
 
+def test_g9_sync_blocks_scd2_on_procedure_source() -> None:
+    result = gate_g9_sync_contract(_ctx(source_read_mode="procedure", sync_mode="scd2"))
+    assert result.gate_id == GateId.G9_SYNC_CONTRACT
+    assert result.status == GateStatus.BLOCK
+    blob = f"{result.message} {result.details}".lower()
+    assert "snapshot" in blob or "scd2" in blob or "table identity" in blob
+
+
 def test_g9_sync_allows_full_refresh_on_procedure_source() -> None:
     result = gate_g9_sync_contract(
         _ctx(source_read_mode="procedure", sync_mode="full_refresh_overwrite")

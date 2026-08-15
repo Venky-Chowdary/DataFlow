@@ -868,7 +868,7 @@ def _stream_database_transfer_impl(
     dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
-    from services.procedure_source import stamp_callable_job_id
+    from services.procedure_source import is_callable_source, stamp_callable_job_id
 
     src_cfg = stamp_callable_job_id(src_cfg, job_id)
 
@@ -991,7 +991,6 @@ def _stream_database_transfer_impl(
     table = _source_name(source)
     if not table:
         from services.procedure_source import (
-            is_callable_source,
             parse_callable_source,
             procedure_params_of,
             procedure_text_of,
@@ -1731,6 +1730,25 @@ def _stream_database_transfer_impl(
                     database=src_db,
                     kafka_cursor=kafka_cursor,
                     known_total_rows=total_rows,
+                )
+            )
+            return batch
+        elif incremental and cursor_source_col and (
+            is_callable_source(src_cfg)
+        ):
+            # Spool is not cursor-sorted. Filter against the *run* watermark
+            # then OFFSET — never the advancing page max (that drops rows).
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    fetch_offset,
+                    batch_limit,
+                    database=src_db,
+                    known_total_rows=total_rows,
+                    **_cursor_read_args(watermark),
                 )
             )
             return batch

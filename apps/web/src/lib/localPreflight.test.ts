@@ -46,6 +46,22 @@ describe("runLocalPreflight file export honesty", () => {
     assert.equal(byId.g15_dest_exists_shape?.status, "skip");
   });
 
+  it("blocks SCD2 on a stored-procedure extract", () => {
+    const pf = runLocalPreflight({
+      columns: ["id"],
+      rowCount: 1,
+      mappings: [
+        { source: "id", target: "id", confidence: 0.99, transform: "none", approved: true, requiresReview: false, isPii: false },
+      ],
+      destKind: "file_export",
+      sourceReadMode: "procedure",
+      syncMode: "scd2",
+    });
+    const byId = Object.fromEntries(pf.gates.map((g) => [g.id, g]));
+    assert.equal(byId.g9_sync_contract?.status, "block");
+    assert.equal(pf.passed, false);
+  });
+
   it("blocks CDC on a stored-procedure extract", () => {
     const pf = runLocalPreflight({
       columns: ["id"],

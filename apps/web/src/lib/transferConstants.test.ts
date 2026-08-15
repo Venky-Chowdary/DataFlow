@@ -45,7 +45,11 @@ describe("availableSyncModes", () => {
       sourceReadMode: "procedure",
     }).map((m) => m.id);
     assert.ok(!modes.includes("cdc"));
+    assert.ok(!modes.includes("scd2"));
+    assert.ok(!modes.includes("mirror"));
     assert.ok(modes.includes("full_refresh_append"));
+    assert.ok(modes.includes("incremental_append"));
+    assert.ok(modes.includes("incremental_deduped"));
   });
 
   it("hides CDC for file sources", () => {

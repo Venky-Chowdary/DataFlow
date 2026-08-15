@@ -241,8 +241,9 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   });
 
   const callable = input.sourceReadMode === "procedure" || input.sourceReadMode === "query";
-  if (callable && (input.syncMode || "").toLowerCase() === "cdc") {
-    block("g9_sync_contract", "Stored-procedure / SQL extract cannot drive CDC — use Full refresh.", {
+  const sync = (input.syncMode || "").toLowerCase();
+  if (callable && (sync === "cdc" || sync === "scd2" || sync === "mirror" || sync === "full_refresh_mirror")) {
+    block("g9_sync_contract", "Stored-procedure / SQL extract cannot drive CDC, SCD2, or mirror — use Full refresh or incremental.", {
       kind: "sync_contract", coverage: "n/a",
     });
   } else {

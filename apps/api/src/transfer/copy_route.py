@@ -46,7 +46,14 @@ def _try_copy_fast_path(
     cannot prove belongs on the row path, which knows how to reconcile the
     differences this one refuses to guess at.
     """
+    from services.procedure_source import is_callable_source
     from services.sync_cursor import is_overwrite_sync
+
+    # Studio may set source.table to the procedure stream name (e.g. get_orders).
+    # COPY of a colliding real table would move the wrong population — refuse.
+    if is_callable_source(source) or is_callable_source(src_cfg):
+        logger.info("COPY fast path declined: callable source is a result set, not a table")
+        return None
 
     if (
         incremental

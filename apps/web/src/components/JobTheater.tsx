@@ -32,6 +32,7 @@ import { writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
+import { callableExtractNote } from "../lib/destExistsShape";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -523,6 +524,7 @@ export function JobTheaterView({
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
   const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
+  const callableNote = callableExtractNote(preflight);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
   const jobRps = Number(job.records_per_second ?? destinationSummary.records_per_second ?? 0) || 0;
   const displayRps = isComplete && jobRps > 0 ? Math.round(jobRps) : throughput;
@@ -766,6 +768,15 @@ export function JobTheaterView({
       />
       {(job.cdc_plugin || job.watermark || job.cdc_delivery || job.sync_mode === "cdc") && job._id && (
         <CdcIncrementalSnapshotPanel jobId={job._id} enabled />
+      )}
+      {callableNote && (
+        <div className="df2-vd-callable" role="status">
+          <DtIcon name="database" size={16} />
+          <div>
+            <strong>Callable extract — result-set snapshot</strong>
+            <p>{callableNote}</p>
+          </div>
+        </div>
       )}
 
       {!earlyFail && (isComplete || isFailed || isCancelled || isQuarantine) && (

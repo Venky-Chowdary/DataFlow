@@ -1491,8 +1491,11 @@ def run_file_preflight(
                 "population orphan scans are not run against a procedure name."
             ),
             "cdc": "refused",
+            "history_sync": "refused",
+            "incremental": "spool_cursor_filter_at_least_once",
             "honesty": (
-                "CDC remains at-least-once upsert on table sources. "
+                "CDC / SCD2 / mirror are refused on CALL/SELECT. Incremental "
+                "filters the spool with cursor > watermark (at-least-once). "
                 "Not exactly-once. Not a catalog-breadth claim."
             ),
         }

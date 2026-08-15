@@ -242,18 +242,52 @@ def stream_name_for_callable(spec: CallableSpec) -> str:
     return re.sub(r"[^A-Za-z0-9_]+", "_", leaf) or "procedure_result"
 
 
-def assert_callable_sync_allowed(sync_mode: str, source: Any) -> None:
-    """CDC / incremental log read cannot be driven by a CALL result set."""
-    if not is_callable_source(source):
-        return
-    sync = str(sync_mode or "").strip().lower()
+#: Sync modes that treat the source as a table identity or a WAL/binlog.
+#: A CALL/SELECT result is a snapshot — refuse these so we do not delete dest
+#: rows the procedure never listed, close SCD2 windows, or claim CDC.
+CALLABLE_REFUSED_SYNC_MODES = frozenset({"cdc", "scd2", "mirror"})
+
+
+def callable_sync_refusal(
+    sync_mode: str,
+    source: Any = None,
+    *,
+    source_read_mode: str = "",
+) -> str | None:
+    """Why this sync mode cannot drive a CALL/SELECT extract, or None if allowed."""
+    if source is not None:
+        if not is_callable_source(source):
+            return None
+    else:
+        mode = (source_read_mode or MODE_TABLE).strip().lower()
+        if mode not in CALLABLE_MODES:
+            return None
+    from services.sync_cursor import normalize_sync_mode
+
+    sync = normalize_sync_mode(sync_mode, default="")
     if sync == "cdc":
-        raise ProcedureSourceError(
+        return (
             "Stored-procedure and custom-SQL sources are a result-set snapshot, "
             "not a CDC log. Use Full refresh (or incremental only when the "
             "procedure itself is cursor-stable). CDC stays at-least-once on "
             "table sources until dest-engine exactly-once is proven."
         )
+    if sync in {"scd2", "mirror"}:
+        return (
+            f"{sync.upper()} versions or deletes against a table identity. "
+            "A CALL/SELECT result is a snapshot, not a keyed table population — "
+            "refusing so we do not close SCD2 windows or delete dest rows the "
+            "procedure never listed. Use Full refresh or incremental when the "
+            "procedure is cursor-stable."
+        )
+    return None
+
+
+def assert_callable_sync_allowed(sync_mode: str, source: Any) -> None:
+    """CDC / SCD2 / mirror cannot be driven by a CALL result set."""
+    reason = callable_sync_refusal(sync_mode, source)
+    if reason:
+        raise ProcedureSourceError(reason)
 
 
 def parse_callable_source(
@@ -397,11 +431,19 @@ def read_callable_batch(
     limit: int = 10_000,
     peek: bool = False,
     columns: list[str] | None = None,
+    cursor_column: str | None = None,
+    cursor_after: Any = None,
 ) -> Any:
     """Execute CALL/SELECT once; page from a disk spool so CALL is not replayed.
 
     Re-executing a procedure at OFFSET N is wrong (side effects, different
     result). Peek fetches at most ``PEEK_ROW_LIMIT`` and does not spool.
+
+    Incremental: filter the spool with ``cursor > cursor_after`` *before*
+    OFFSET/LIMIT. The spool is not cursor-sorted, so the caller must pass the
+    **run watermark** (not an advancing page max) or later pages lose rows.
+    Missing cursor column is fail-closed. Delivery stays at-least-once.
+    Peek does not apply the cursor filter — it is schema discovery.
     """
     from connectors.base import ReadBatch
 
@@ -431,15 +473,27 @@ def read_callable_batch(
                 "Procedure result was not opened at offset 0 — cannot page a CALL mid-stream."
             )
         spool = _fill_spool(cfg, spec, key)
-    headers, rows = _read_spool_page(spool, offset=offset, limit=limit)
+    headers, rows, matched = _read_spool_page(
+        spool,
+        offset=offset,
+        limit=limit,
+        cursor_column=cursor_column,
+        cursor_after=cursor_after,
+    )
     if columns:
         headers, rows = _project(headers, rows, columns)
     return ReadBatch(
         headers=headers,
         rows=rows,
         offset=offset,
-        total_rows=spool.total,
-        meta={"native_types": spool.schema, "source_read_mode": spec.mode, "procedure": spec.identifier},
+        total_rows=matched,
+        meta={
+            "native_types": spool.schema,
+            "source_read_mode": spec.mode,
+            "procedure": spec.identifier,
+            "cursor_column": (cursor_column or "").strip() or None,
+            "cursor_filtered": bool((cursor_column or "").strip() and cursor_after not in (None, "")),
+        },
     )
 
 
@@ -450,27 +504,25 @@ def callable_sync_gate(
     pass_status: str,
     block_status: str,
 ) -> dict[str, Any] | None:
-    """Optional g9 detail — None when the source is a table."""
-    mode = (source_read_mode or MODE_TABLE).strip().lower()
-    if mode not in CALLABLE_MODES:
+    """Optional g9 detail — None when the source is a table or the mode is allowed."""
+    reason = callable_sync_refusal(sync_mode, source_read_mode=source_read_mode)
+    if not reason:
         return None
-    sync = (sync_mode or "").strip().lower()
-    if sync == "cdc":
-        return {
-            "id": "g9_sync_contract",
-            "status": block_status,
-            "message": "Stored-procedure / SQL extract cannot drive CDC",
-            "duration_ms": 0,
-            "details": {
-                "issues": [
-                    "CALL/EXEC is a result-set snapshot, not a WAL/binlog read. "
-                    "Pick Full refresh. CDC delivery remains at-least-once on table sources."
-                ],
-                "sync_mode": sync,
-                "source_read_mode": mode,
-            },
-        }
-    return None
+    mode = (source_read_mode or MODE_TABLE).strip().lower()
+    from services.sync_cursor import normalize_sync_mode
+
+    sync = normalize_sync_mode(sync_mode, default="")
+    return {
+        "id": "g9_sync_contract",
+        "status": block_status,
+        "message": "Stored-procedure / SQL extract cannot drive this sync mode",
+        "duration_ms": 0,
+        "details": {
+            "issues": [reason],
+            "sync_mode": sync,
+            "source_read_mode": mode,
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -806,22 +858,84 @@ def _fill_spool(cfg: Mapping[str, Any], spec: CallableSpec, key: str) -> _Result
     return spool
 
 
-def _read_spool_page(spool: _ResultSpool, *, offset: int, limit: int) -> tuple[list[str], list[list[str]]]:
+def _cursor_header_index(headers: list[str], cursor_column: str) -> int:
+    want = cursor_column.strip().lower()
+    for i, header in enumerate(headers):
+        if str(header).lower() == want:
+            return i
+    raise ProcedureSourceError(
+        f"Cursor column `{cursor_column}` is not in the procedure result — "
+        "incremental on a CALL/SELECT cannot invent a watermark field."
+    )
+
+
+def _cursor_cell(row: list[Any], idx: int) -> str | None:
+    if idx < 0 or idx >= len(row):
+        return None
+    val = row[idx]
+    if val is None:
+        return None
+    text = str(val)
+    return text if text != "" else None
+
+
+def _row_after_cursor(row: list[Any], idx: int, cursor_after: Any) -> bool:
+    from services.sync_cursor import compare_cursor_values
+
+    return compare_cursor_values(_cursor_cell(row, idx), cursor_after) > 0
+
+
+def _row_from_spool_line(obj: Any, headers: list[str]) -> list[str]:
+    if isinstance(obj, dict):
+        return ["" if obj.get(h) is None else str(obj.get(h)) for h in headers]
+    return ["" if v is None else str(v) for v in obj]
+
+
+def _read_spool_page(
+    spool: _ResultSpool,
+    *,
+    offset: int,
+    limit: int,
+    cursor_column: str | None = None,
+    cursor_after: Any = None,
+) -> tuple[list[str], list[list[str]], int]:
+    """Page the spool. Cursor filter runs before OFFSET so incremental cannot duplicate.
+
+    ``cursor_after`` must be the **run watermark**. The spool is not sorted;
+    paging by an advancing page-max would drop unsorted rows (silent loss).
+    """
+    cursor_col = str(cursor_column or "").strip()
+    cursor_idx: int | None = None
+    apply_filter = False
+    if cursor_col:
+        cursor_idx = _cursor_header_index(spool.headers, cursor_col)
+        apply_filter = cursor_after not in (None, "")
     rows: list[list[str]] = []
     start = max(0, int(offset))
     end = start + max(0, int(limit))
+    matched = 0
     with spool.path.open("r", encoding="utf-8") as fh:
         for i, line in enumerate(fh):
-            if i < start:
+            if not apply_filter:
+                if i < start:
+                    continue
+                if i >= end:
+                    break
+                obj = json.loads(line)
+                rows.append(_row_from_spool_line(obj, spool.headers))
                 continue
-            if i >= end:
-                break
             obj = json.loads(line)
-            if isinstance(obj, dict):
-                rows.append(["" if obj.get(h) is None else str(obj.get(h)) for h in spool.headers])
-            else:
-                rows.append(["" if v is None else str(v) for v in obj])
-    return list(spool.headers), rows
+            row = _row_from_spool_line(obj, spool.headers)
+            if cursor_idx is None or not _row_after_cursor(row, cursor_idx, cursor_after):
+                continue
+            if start <= matched < end:
+                rows.append(row)
+            matched += 1
+    if apply_filter:
+        return list(spool.headers), rows, matched
+    if cursor_col:
+        return list(spool.headers), rows, spool.total
+    return list(spool.headers), rows, spool.total
 
 
 def _project(

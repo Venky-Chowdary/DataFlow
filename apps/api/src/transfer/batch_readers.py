@@ -48,6 +48,8 @@ def _read_batch_impl(
             limit=limit,
             peek=False,
             columns=columns,
+            cursor_column=cursor_column or None,
+            cursor_after=cursor_after,
         )
 
     # Phase F2 — N-col composite keyset (≥3) on SQLAlchemy dialects goes through

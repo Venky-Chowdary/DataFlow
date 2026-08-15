@@ -166,6 +166,7 @@ export function availableSyncModes(opts: {
   const callable = opts.sourceReadMode === "procedure" || opts.sourceReadMode === "query";
   return SYNC_MODES.filter((mode) => {
     if (mode.id === "scd2" || mode.id === "mirror") {
+      if (callable) return false;
       if (opts.isMultiStream) return false;
       if (!dest || !SQL_HISTORY_SYNC_DESTS.has(dest)) return false;
     }

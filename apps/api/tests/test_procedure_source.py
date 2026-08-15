@@ -119,6 +119,73 @@ def test_map_callable_result_matrix() -> None:
     assert correct == len(data["map_cases"]), rows
 
 
+def test_history_sync_refused_on_procedure_source() -> None:
+    src = {"source_read_mode": "procedure", "procedure_call": "CALL get_orders()"}
+    for mode in ("scd2", "mirror", "full_refresh_mirror"):
+        with pytest.raises(ProcedureSourceError, match="table identity|snapshot"):
+            assert_callable_sync_allowed(mode, src)
+    gates = run_transfer_policy_gates(
+        sync_mode="scd2",
+        source_kind="database",
+        source_type="postgresql",
+        dest_type="postgresql",
+        source_read_mode="procedure",
+        stream_contracts=[
+            {
+                "name": "get_orders",
+                "selected": True,
+                "cursor_field": "updated_at",
+                "primary_key": "order_id",
+            }
+        ],
+    )
+    blockers = [g for g in gates if g["status"] == "block" and g["id"] == "g9_sync_contract"]
+    assert blockers
+    assert "snapshot" in str(blockers[0]["details"]).lower() or "SCD2" in str(blockers[0]["details"])
+
+
+def test_copy_fast_path_declines_callable_without_pg() -> None:
+    """Colliding table name must not COPY the wrong population — no live PG."""
+    from src.transfer.copy_route import _try_copy_fast_path
+    from src.transfer.models import EndpointConfig
+
+    source = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "table": "get_orders",
+            "schema": "public",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL get_orders()",
+        },
+    )
+    dest = EndpointConfig.from_dict(
+        "database",
+        {"format": "postgresql", "table": "orders", "schema": "public"},
+    )
+    result = _try_copy_fast_path(
+        source=source,
+        destination=dest,
+        mappings=[{"source": "id", "target": "id"}],
+        schema={"id": "INTEGER"},
+        src_type="postgresql",
+        dest_type="postgresql",
+        src_cfg={
+            "type": "postgresql",
+            "table": "get_orders",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL get_orders()",
+        },
+        dest_cfg={"type": "postgresql", "table": "orders"},
+        effective_sync="full_refresh_overwrite",
+        incremental=False,
+        source_filter=None,
+        limit=0,
+        checkpoint=None,
+    )
+    assert result is None
+
+
 def test_cdc_refused_on_procedure_source() -> None:
     src = {"source_read_mode": "procedure", "procedure_call": "CALL get_orders()"}
     assert is_callable_source(src)
@@ -232,6 +299,74 @@ def test_query_mode_sqlite_select_roundtrip(tmp_path: Path) -> None:
     assert str(page1.rows[0][0]) == "2"
     from services.procedure_source import close_callable_spool
 
+    close_callable_spool()
+
+
+def test_query_mode_incremental_filters_before_offset(tmp_path: Path) -> None:
+    """cursor > watermark, then OFFSET — unsorted spool must not drop or duplicate."""
+    import sqlite3
+
+    from services.procedure_source import close_callable_spool, read_callable_batch
+
+    db = tmp_path / "inc.db"
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE events (id INTEGER, updated_at TEXT)")
+    conn.executemany(
+        "INSERT INTO events VALUES (?, ?)",
+        [
+            (1, "2024-01-01"),
+            (2, "2024-01-03"),
+            (3, "2024-01-02"),
+            (4, "2024-01-05"),
+            (5, "2024-01-04"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    cfg = {
+        "type": "sqlite",
+        "database": str(db),
+        "source_read_mode": "query",
+        "source_query": "SELECT id, updated_at FROM events",
+        "host": "",
+        "port": 0,
+        "username": "",
+        "password": "",
+        "schema": "",
+        "connection_string": f"sqlite:///{db}",
+        "ssl": False,
+    }
+    full = read_callable_batch(cfg, offset=0, limit=10, cursor_column="updated_at")
+    assert full.total_rows == 5
+    assert {str(r[0]) for r in full.rows} == {"1", "2", "3", "4", "5"}
+
+    filtered = read_callable_batch(
+        cfg, offset=0, limit=10, cursor_column="updated_at", cursor_after="2024-01-02"
+    )
+    ids = [str(r[0]) for r in filtered.rows]
+    assert filtered.total_rows == 3
+    assert set(ids) == {"2", "4", "5"}
+    assert "1" not in ids and "3" not in ids
+
+    page0 = read_callable_batch(
+        cfg, offset=0, limit=1, cursor_column="updated_at", cursor_after="2024-01-02"
+    )
+    page1 = read_callable_batch(
+        cfg, offset=1, limit=1, cursor_column="updated_at", cursor_after="2024-01-02"
+    )
+    page2 = read_callable_batch(
+        cfg, offset=2, limit=1, cursor_column="updated_at", cursor_after="2024-01-02"
+    )
+    paged = [str(page0.rows[0][0]), str(page1.rows[0][0]), str(page2.rows[0][0])]
+    assert page0.total_rows == page1.total_rows == page2.total_rows == 3
+    assert set(paged) == {"2", "4", "5"}
+    assert len(paged) == 3
+
+    with pytest.raises(ProcedureSourceError, match="Cursor column"):
+        read_callable_batch(
+            cfg, offset=0, limit=10, cursor_column="missing_ts", cursor_after="2024-01-01"
+        )
     close_callable_spool()
 
 
