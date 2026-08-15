@@ -746,9 +746,12 @@ export function rankAndDedupeSuggestedActions(
         return 1;
       case "add_transform":
         return 2;
+      case "run_population_orphan_scan":
+        return 2;
       case "open_bad_data_fix":
       case "normalize_control_chars":
       case "quarantine_and_rerun":
+      case "fix_orphans":
         return 3;
       case "map_column":
       case "review_mappings":

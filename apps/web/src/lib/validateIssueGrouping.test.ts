@@ -494,4 +494,17 @@ describe("rankAndDedupeSuggestedActions", () => {
     assert.equal(out.filter((a) => a.kind === "map_column" || a.kind === "review_mappings").length, 1);
     assert.equal(out.filter((a) => a.kind === "change_target_type").length, 1);
   });
+
+  it("keeps orphan scan and fix-parents as distinct CTAs and ranks scan first", () => {
+    const out = rankAndDedupeSuggestedActions([
+      { kind: "review_mappings", column: "customer_id", label: "Review FK mapping" },
+      { kind: "fix_orphans", column: "customer_id", label: "Fix parent rows / load order" },
+      { kind: "run_population_orphan_scan", label: "Run population orphan scan" },
+    ]);
+    assert.equal(out[0]?.kind, "run_population_orphan_scan");
+    assert.deepEqual(
+      out.map((a) => a.kind),
+      ["run_population_orphan_scan", "fix_orphans", "review_mappings"],
+    );
+  });
 });

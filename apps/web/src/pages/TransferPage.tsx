@@ -143,7 +143,9 @@ import {
   buildDisplayBlockers,
   findDuplicateKeyRoot,
   isEncodingIntegritySignal,
+  rankAndDedupeSuggestedActions,
 } from "../lib/validateIssueGrouping";
+import { planFkOrphanSuggestedAction, resolvePopulationOrphanScanFlag } from "../lib/fkOrphanCta";
 import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import { needsMappingReview } from "../lib/columnWorkbench";
 import {
@@ -3355,6 +3357,30 @@ export function TransferPage({
       case "continue_validate":
         void executePreflight();
         break;
+      case "run_population_orphan_scan": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        if (!plan) break;
+        setRunPopulationOrphanScan(true);
+        toast({
+          title: plan.toastTitle,
+          message: plan.toastMessage,
+          tone: plan.toastTone,
+        });
+        void executePreflight(undefined, undefined, { runPopulationOrphanScan: true });
+        break;
+      }
+      case "fix_orphans": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        if (!plan) break;
+        if (plan.focusSource) setMapFocusSource(plan.focusSource);
+        if (plan.goToMap) setStep(STEP_MAP);
+        toast({
+          title: plan.toastTitle,
+          message: plan.toastMessage,
+          tone: plan.toastTone,
+        });
+        break;
+      }
       case "check_connection":
         window.location.hash = "#/connectors";
         toast({
@@ -3376,6 +3402,7 @@ export function TransferPage({
       schemaDriftAcknowledged?: boolean;
       fkRiskAcknowledged?: boolean;
       acknowledgmentReason?: string;
+      runPopulationOrphanScan?: boolean;
     },
   ) => {
     const activeMappings = overrideMappings ?? columnMappings;
@@ -3700,7 +3727,10 @@ export function TransferPage({
           compliance_acknowledged: ackCompliance,
           schema_drift_acknowledged: ackSchemaDrift,
           fk_risk_acknowledged: ackFkRisk,
-          run_population_orphan_scan: runPopulationOrphanScan,
+          run_population_orphan_scan: resolvePopulationOrphanScanFlag(
+            opts?.runPopulationOrphanScan,
+            runPopulationOrphanScan,
+          ),
           acknowledgment_actor: ackActor || undefined,
           acknowledgment_reason: ackReason || undefined,
           write_via_staging: writeViaStaging,
@@ -3828,7 +3858,7 @@ export function TransferPage({
       };
     }
     const g15Cta = destExistsPrimaryCta(shapeContractFromPreflight(preflight));
-    const action = firstBlocker?.suggested_actions?.[0]
+    const action = rankAndDedupeSuggestedActions(firstBlocker?.suggested_actions)[0]
       || (g15Cta
         ? { kind: g15Cta.kind, label: g15Cta.label, column: g15Cta.column }
         : undefined);
@@ -3907,6 +3937,38 @@ export function TransferPage({
         };
       case "fix_source_keys":
         return { onPrimaryFix: openIdentitySettings, primaryFixLabel: action.label };
+      case "run_population_orphan_scan": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        return {
+          onPrimaryFix: () => {
+            if (!plan) return;
+            setRunPopulationOrphanScan(true);
+            toast({
+              title: plan.toastTitle,
+              message: plan.toastMessage,
+              tone: plan.toastTone,
+            });
+            void executePreflight(undefined, undefined, { runPopulationOrphanScan: true });
+          },
+          primaryFixLabel: action.label,
+        };
+      }
+      case "fix_orphans": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        return {
+          onPrimaryFix: () => {
+            if (!plan) return;
+            if (plan.focusSource) setMapFocusSource(plan.focusSource);
+            if (plan.goToMap) setStep(STEP_MAP);
+            toast({
+              title: plan.toastTitle,
+              message: plan.toastMessage,
+              tone: plan.toastTone,
+            });
+          },
+          primaryFixLabel: action.label,
+        };
+      }
       default:
         return { onPrimaryFix: undefined, primaryFixLabel: undefined };
     }

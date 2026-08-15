@@ -1030,7 +1030,9 @@ export type ValidationActionKind =
   | "confirm_or_remap"
   | "reload_dest_schema"
   | "confirm_add"
-  | "continue_validate";
+  | "continue_validate"
+  | "fix_orphans"
+  | "run_population_orphan_scan";
 
 export interface ValidationSuggestedAction {
   kind: ValidationActionKind | string;

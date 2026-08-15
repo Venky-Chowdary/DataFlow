@@ -33,6 +33,7 @@ import {
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
 import { buildValidateHonestyControls, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
+import { isFkOrphanBlockerText, isFkOrphanCtaKind } from "../../lib/fkOrphanCta";
 import {
   callableExtractNote,
   destExistsPrimaryCta,
@@ -377,6 +378,8 @@ const ACTION_ICON: Record<string, string> = {
   reload_dest_schema: "scan",
   confirm_add: "layers",
   continue_validate: "check",
+  fix_orphans: "alert",
+  run_population_orphan_scan: "scan",
 };
 
 /** Encoding remediations collapse to one Fix-bad-data CTA (drawer owns Strip/Quarantine). */
@@ -863,6 +866,17 @@ export function ValidateDashboard({
     || preflight?.gates.some((g) => g.status === "block" && isEncodingIntegritySignal(g.message)),
   );
   const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && !isPrivilegeBlock && (hasEncodingIssue || encodingBlocks);
+  const isFkOrphanBlock = Boolean(
+    preflight?.blockers.some((b) =>
+      (b.id === "constraint_fk" || /constraint_fk/i.test(b.id || ""))
+      && isFkOrphanBlockerText(`${b.message || ""} ${JSON.stringify(b.details || {})}`),
+    )
+    || preflight?.gates.some((g) =>
+      g.status === "block"
+      && (g.id === "constraint_fk" || /constraint_fk/i.test(g.id || ""))
+      && isFkOrphanBlockerText(`${g.message || ""} ${JSON.stringify(g.details || {})}`),
+    ),
+  );
   // Auto-open the Fix bad data drawer when dry-run is blocked by encoding/control chars.
   useEffect(() => {
     if (!running && encodingBlocks && hasEncodingIssue) {
@@ -1170,6 +1184,13 @@ export function ValidateDashboard({
     () => (preflight ? buildDisplayBlockers(preflight, syncMode) : []),
     [preflight, syncMode],
   );
+  const orphanBarActions = useMemo(() => {
+    const fromBlockers = displayBlockers.flatMap((b) => b.suggested_actions || []);
+    const fromEngine = (preflight?.blockers ?? []).flatMap((b) => b.guidance?.suggested_actions || []);
+    return rankAndDedupeSuggestedActions(
+      [...fromBlockers, ...fromEngine].filter((a) => isFkOrphanCtaKind(String(a.kind))),
+    );
+  }, [displayBlockers, preflight]);
   const fidelityRoot = useMemo(
     () => displayBlockers.find((d) => d.kind === "fidelity_root") ?? null,
     [displayBlockers],
@@ -1440,6 +1461,26 @@ export function ValidateDashboard({
     }
     if (action.kind === "continue_validate") {
       onRunPreflight?.();
+      return;
+    }
+    if (action.kind === "run_population_orphan_scan") {
+      pendingVerifyRef.current = true;
+      pushRemediation(
+        action.label || "Run population orphan scan",
+        "Opt-in full-table anti-join — only path to RI proven. Sample Validate never claims referential integrity.",
+        "Running population orphan scan",
+        [
+          "Enables the same honesty checkbox as Run population orphan scan on next Validate.",
+          "Sample orphan probe is not population RI proof.",
+          "Zero orphans on the population scan is required before RI proven.",
+        ],
+      );
+      onApplyAction?.(action);
+      return;
+    }
+    if (action.kind === "fix_orphans") {
+      // Do not claim applied / re-validating — DataFlow cannot invent parent rows.
+      onApplyAction?.(action);
       return;
     }
     pendingVerifyRef.current = true;
@@ -1966,10 +2007,24 @@ export function ValidateDashboard({
                     Fix bad data…
                   </Button>
                 )}
+                {isFkOrphanBlock && orphanBarActions.map((action, i) => (
+                  <Button
+                    key={`${action.kind}-${action.column ?? ""}-${i}`}
+                    size="sm"
+                    variant={i === 0 ? "primary" : "secondary"}
+                    disabled={remediating || (!onApplyAction && action.kind !== "fix_orphans")}
+                    leadingIcon={<DtIcon name={ACTION_ICON[action.kind] ?? "alert"} size={14} />}
+                    onClick={() => handleSuggestedAction(action)}
+                    title={action.label}
+                  >
+                    {action.label}
+                  </Button>
+                ))}
                 {!isTypeMismatchBlock
                   && !showEncodingRemediation
                   && !isPrivilegeBlock
                   && !isConnectionBlock
+                  && !isFkOrphanBlock
                   && onReviewMappings && (
                   <Button
                     size="sm"
@@ -2607,6 +2662,11 @@ export function ValidateDashboard({
                               action.kind === "review_mappings"
                               || action.kind === "change_target_type"
                               || action.kind === "open_mapping"
+                            ))
+                            && !(isFkOrphanBlock && (
+                              action.kind === "fix_orphans"
+                              || action.kind === "run_population_orphan_scan"
+                              || action.kind === "review_mappings"
                             )),
                           ),
                         )
@@ -2623,6 +2683,8 @@ export function ValidateDashboard({
                               && action.kind !== "quarantine_and_rerun"
                               && action.kind !== "fix_source_keys"
                               && action.kind !== "review_mappings"
+                              && action.kind !== "fix_orphans"
+                              && action.kind !== "run_population_orphan_scan"
                             }
                             title={action.label}
                             leadingIcon={<DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={14} />}
