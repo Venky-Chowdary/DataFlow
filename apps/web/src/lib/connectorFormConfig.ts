@@ -173,7 +173,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isEmail = resolved === "email";
   const isSQLite = resolved === "sqlite";
   const isDuckDB = resolved === "duckdb";
-  const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml"].includes(resolved);
+  const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml", "pdf", "docx", "html"].includes(resolved);
   const isAzure = resolved === "adls";
   const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved) || resolved === "rest_api";
   const isNoSqlSource = ["influxdb", "neo4j", "couchbase"].includes(resolved);
