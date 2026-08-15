@@ -39,7 +39,16 @@ commit-on-restore, plus Debezium-class snapshot/stream LSN compare:
     in-memory Kafka buffer (lost on crash).
 13. Bundle coordinator LSN cannot advance past a member that did not
     reach it (Estuary multi-binding checkpoint is all-or-nothing).
-14. COMMIT dest. Persist job watermark and ack the source **after**.
+14. Dest load-reduce-store: SELECT dest rows for batch PKs **in the apply
+    txn** (Estuary Load), merge incoming into dest documents (partial CDC
+    updates keep dest columns), then Store. Estuary Load can be a separate
+    pipelined phase; ours cannot race dest between Load and Store.
+15. apply_seq is dest-monotonic (Iceberg-style sequence). Never write a
+    lower seq than dest already committed.
+16. Post-commit dest verify: re-read dest watermark after COMMIT. If dest
+    does not show the LSN/seq/fence, refuse success so the source is not
+    acked (stronger than Flink heuristic recoverAndCommit).
+17. COMMIT dest. Persist job watermark and ack the source **after** verify.
 
 Crash before dest COMMIT → dest rolls back; source not acked; retry.
 Crash after dest COMMIT → dest watermark wins; redelivery is a no-op.
@@ -121,8 +130,10 @@ REASON_AT_MOST = "at_most_once_not_offered"
 REASON_STALE_FENCE = "exactly_once_stale_writer_fence"
 REASON_CHECKSUM = "exactly_once_checksum_mismatch"
 REASON_BUNDLE_LSN = "exactly_once_bundle_lsn_divergence"
+REASON_UNVERIFIED = "exactly_once_dest_commit_unverified"
+REASON_STALE_SEQ = "exactly_once_stale_apply_seq"
 REASON_OK = "dest_owned_watermark_txn"
-PROTOCOL = "dest_authoritative_open_bundle"
+PROTOCOL = "dest_authoritative_verified_bundle"
 
 
 class ExactlyOnceRouteError(ValueError):
@@ -197,6 +208,7 @@ class EosApplyResult:
     protocol: str = PROTOCOL
     phase: str = "streaming"
     apply_checksum: str = ""
+    apply_seq: int = 0
 
     def to_dest_summary(self) -> dict[str, Any]:
         return {
@@ -216,6 +228,7 @@ class EosApplyResult:
             "eos_dest_authoritative": self.dest_authoritative,
             "eos_phase": self.phase,
             "eos_apply_checksum": self.apply_checksum,
+            "eos_apply_seq": self.apply_seq,
             "rows_written": self.rows_written,
         }
 
@@ -492,6 +505,124 @@ def combine_change_batch(change: Any, *, pk_cols: list[str]) -> Any:
         table=getattr(change, "table", None),
         ack_barrier=bool(getattr(change, "ack_barrier", True)),
     )
+
+
+def next_apply_seq(dest_seq: int) -> int:
+    return int(dest_seq or 0) + 1
+
+
+def assert_apply_seq_monotonic(incoming_seq: int, dest_seq: int) -> None:
+    """Iceberg-style dest sequence — never commit a lower apply_seq."""
+    incoming = int(incoming_seq or 0)
+    dest = int(dest_seq or 0)
+    if dest > 0 and incoming <= dest:
+        raise ExactlyOnceRouteError(
+            "exactly_once dest apply_seq refused a stale writer "
+            f"(incoming={incoming} dest={dest}).",
+            reason=REASON_STALE_SEQ,
+        )
+
+
+def planned_apply_seq(dest_seq: int) -> int:
+    """Next dest apply_seq, fail-closed if it would regress."""
+    seq = next_apply_seq(dest_seq)
+    assert_apply_seq_monotonic(seq, dest_seq)
+    return seq
+
+
+def incoming_pk_keys(rows: list[dict[str, Any]], pk_cols: list[str]) -> list[str]:
+    """PK identities for Estuary Load — unkeyed rows are omitted here, kept in reduce."""
+    from services.cdc_snapshot_window import _pk_value
+
+    keys: list[str] = []
+    for rec in rows:
+        if not isinstance(rec, dict):
+            continue
+        key = _pk_value(rec, pk_cols) if pk_cols else None
+        if key:
+            keys.append(str(key))
+    return keys
+
+
+def load_reduce_into_dest(
+    *,
+    incoming_rows: list[dict[str, Any]],
+    dest_rows: dict[str, dict[str, Any]],
+    pk_cols: list[str],
+    incoming_lsn: str,
+) -> list[dict[str, Any]]:
+    """Estuary Load + Reduce, in the dest apply transaction.
+
+    Incoming keys overwrite dest columns. Dest columns absent from the CDC
+    event are kept (partial update). A dest row whose LSN is already
+    ``>=`` incoming is omitted — never regress dest.
+    Unkeyed rows are kept (never silently dropped).
+    """
+    from services.cdc_effectively_once import should_apply_pk_row
+    from services.cdc_snapshot_window import _pk_value
+
+    out: list[dict[str, Any]] = []
+    for rec in incoming_rows:
+        if not isinstance(rec, dict):
+            continue
+        key = _pk_value(rec, pk_cols) if pk_cols else None
+        if not key:
+            stamped = dict(rec)
+            stamped[DF_LSN_COL] = incoming_lsn
+            out.append(stamped)
+            continue
+        dest = dest_rows.get(str(key))
+        if dest:
+            if not should_apply_pk_row(
+                existing_lsn=dest.get(DF_LSN_COL), incoming_lsn=incoming_lsn
+            ).applied:
+                continue
+            merged = dict(dest)
+            merged.update(rec)
+            merged[DF_LSN_COL] = incoming_lsn
+            out.append(merged)
+        else:
+            stamped = dict(rec)
+            stamped[DF_LSN_COL] = incoming_lsn
+            out.append(stamped)
+    return out
+
+
+def verify_dest_commit(
+    *,
+    dest: DestWmView,
+    expected_lsn: str,
+    expected_fence: int = 0,
+    expected_seq: int = 0,
+) -> None:
+    """Re-read dest after COMMIT. Refuse success if dest did not persist.
+
+    Flink recoverAndCommit is heuristic — if it never succeeds, that is
+    data loss. We do not ack the source unless dest shows the LSN.
+    """
+    if not expected_lsn:
+        return
+    if not dest.committed_lsn or compare_lsn(dest.committed_lsn, expected_lsn) < 0:
+        raise ExactlyOnceRouteError(
+            "exactly_once dest commit unverified — watermark LSN "
+            f"{dest.committed_lsn!r} is behind expected {expected_lsn!r}. "
+            "Refuse source ack.",
+            reason=REASON_UNVERIFIED,
+        )
+    if expected_fence and int(dest.fence_epoch or 0) < int(expected_fence):
+        raise ExactlyOnceRouteError(
+            "exactly_once dest commit unverified — fence "
+            f"{dest.fence_epoch} is behind expected {expected_fence}. "
+            "Refuse source ack.",
+            reason=REASON_UNVERIFIED,
+        )
+    if expected_seq and int(dest.apply_seq or 0) < int(expected_seq):
+        raise ExactlyOnceRouteError(
+            "exactly_once dest commit unverified — apply_seq "
+            f"{dest.apply_seq} is behind expected {expected_seq}. "
+            "Refuse source ack.",
+            reason=REASON_UNVERIFIED,
+        )
 
 
 def extract_cdc_phase(resume_token: Any) -> str:
@@ -817,6 +948,9 @@ def classify_exactly_once_route(
         "Open raises dest fence with no data and returns the dest resume blob.",
         "Dest-owned DDD-3 stream-wins: snapshot READ cannot overwrite streaming dest.",
         "Bundle coordinator LSN cannot pass a member that did not reach it.",
+        "Dest load-reduce-store merges incoming into dest rows in the apply txn.",
+        "Post-commit dest verify before source ack — dest must show the LSN.",
+        "apply_seq is dest-monotonic.",
         "Platform never claims all CDC is exactly-once.",
         "At-most-once is not offered (silent loss).",
     ]

@@ -28,6 +28,10 @@ from services.cdc_exactly_once import (
     combine_change_batch,
     decide_from_view,
     encode_resume_blob,
+    incoming_pk_keys,
+    load_reduce_into_dest,
+    planned_apply_seq,
+    verify_dest_commit,
     eos_stream_key,
     extract_cdc_phase,
     is_incremental_snapshot_token,
@@ -274,6 +278,39 @@ def _prepare_sqlite_targets(
     return mappings, column_types, target_cols, tgt_to_src
 
 
+def _sqlite_load_dest_rows(
+    cur: sqlite3.Cursor,
+    table_name: str,
+    pk_cols: list[str],
+    keys: list[str],
+    columns: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Estuary Load — dest documents for batch PKs on the apply cursor."""
+    from services.cdc_snapshot_window import _pk_row_dict, _pk_value
+
+    out: dict[str, dict[str, Any]] = {}
+    if not keys or not pk_cols or not columns:
+        return out
+    table_q = quote_sql_identifier(table_name)
+    col_sql = ", ".join(quote_sql_identifier(c) for c in columns)
+    for key in keys:
+        parts = _pk_row_dict(pk_cols, key) if len(pk_cols) > 1 else {pk_cols[0]: key}
+        where = " AND ".join(f"{quote_sql_identifier(c)} = ?" for c in pk_cols)
+        binds = [parts[c] for c in pk_cols]
+        cur.execute(
+            f"SELECT {col_sql} FROM {table_q} WHERE {where}",  # nosec B608
+            binds,
+        )
+        row = cur.fetchone()
+        if not row:
+            continue
+        rec = {columns[i]: row[i] for i in range(len(columns))}
+        pk = _pk_value(rec, pk_cols)
+        if pk:
+            out[str(pk)] = rec
+    return out
+
+
 def _sqlite_apply_member(
     cur: sqlite3.Cursor,
     *,
@@ -323,7 +360,9 @@ def _sqlite_apply_member(
             fence_epoch=fence,
             phase=dest.phase or "streaming",
             apply_checksum=dest.apply_checksum,
+            apply_seq=dest.apply_seq,
         )
+    dest_seq = planned_apply_seq(dest.apply_seq)
     if action == "handoff_phase":
         new_epoch = dest.epoch + 1
         _write_watermark(
@@ -338,7 +377,7 @@ def _sqlite_apply_member(
             phase="streaming",
             apply_checksum=incoming_checksum or dest.apply_checksum,
             resume_blob=resume_blob or dest.resume_blob,
-            apply_seq=dest.apply_seq + 1,
+            apply_seq=dest_seq,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -349,11 +388,25 @@ def _sqlite_apply_member(
             fence_epoch=fence,
             phase="streaming",
             apply_checksum=incoming_checksum or dest.apply_checksum,
+            apply_seq=dest_seq,
         )
 
     rows_written = 0
     records = list(change.inserts or []) + list(change.updates or [])
     if records:
+        dest_docs = _sqlite_load_dest_rows(
+            cur,
+            dest_table,
+            pk_target_cols,
+            incoming_pk_keys(records, pk_target_cols),
+            target_cols,
+        )
+        records = load_reduce_into_dest(
+            incoming_rows=records,
+            dest_rows=dest_docs,
+            pk_cols=pk_target_cols,
+            incoming_lsn=incoming_lsn,
+        )
         tuples: list[tuple[Any, ...]] = []
         for rec in records:
             stamped = dict(rec)
@@ -400,7 +453,7 @@ def _sqlite_apply_member(
         phase=phase,
         apply_checksum=incoming_checksum,
         resume_blob=resume_blob,
-        apply_seq=dest.apply_seq + 1,
+        apply_seq=dest_seq,
     )
     if crash_after == "after_watermark_before_commit":
         from services.cdc_exactly_once import EosCrash
@@ -416,6 +469,7 @@ def _sqlite_apply_member(
         fence_epoch=fence,
         phase=phase,
         apply_checksum=incoming_checksum,
+        apply_seq=dest_seq,
     )
 
 
@@ -549,13 +603,20 @@ def _apply_eos_sqlite(
                 crash_after=crash_after,
             )
             conn.execute("COMMIT")
-            return result
         except Exception:
             try:
                 conn.execute("ROLLBACK")
             except Exception:
                 pass
             raise
+        if result.status in {"applied", "empty"} and result.committed_lsn:
+            verify_dest_commit(
+                dest=dest_watermark_view(dest_cfg, stream_key),
+                expected_lsn=result.committed_lsn,
+                expected_fence=result.fence_epoch,
+                expected_seq=result.apply_seq,
+            )
+        return result
     finally:
         conn.close()
 
@@ -597,6 +658,7 @@ def apply_eos_bundle(
     path = _sqlite_path(dest_cfg)
     conn = sqlite3.connect(path, timeout=30, isolation_level=None)
     members: list[EosApplyResult] = []
+    member_keys: list[str] = []
     try:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
@@ -610,6 +672,7 @@ def apply_eos_bundle(
                 except ExactlyOnceRouteError:
                     if not incoming_lsn:
                         raise
+                member_keys.append(stream.stream_key)
                 members.append(
                     _sqlite_apply_member(
                         cur,
@@ -663,6 +726,23 @@ def apply_eos_bundle(
             raise
     finally:
         conn.close()
+    if incoming_lsn:
+        for key, member in zip(member_keys, members):
+            if member.status in {"applied", "empty"} and member.committed_lsn:
+                verify_dest_commit(
+                    dest=dest_watermark_view(dest_cfg, key),
+                    expected_lsn=member.committed_lsn,
+                    expected_fence=member.fence_epoch,
+                    expected_seq=member.apply_seq,
+                )
+        if bundle_key:
+            verify_dest_commit(
+                dest=dest_watermark_view(dest_cfg, bundle_key),
+                expected_lsn=incoming_lsn,
+                expected_fence=max(
+                    (m.fence_epoch for m in members), default=writer_fence
+                ),
+            )
     rows = sum(m.rows_written for m in members)
     deleted = sum(m.deleted for m in members)
     fence = max((m.fence_epoch for m in members), default=writer_fence)

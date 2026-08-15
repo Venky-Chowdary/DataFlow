@@ -39,6 +39,8 @@ from services.cdc_exactly_once import (  # noqa: E402
     REASON_DEST_NOT_TXN,
     REASON_NOT_CDC,
     REASON_OK,
+    REASON_STALE_SEQ,
+    REASON_UNVERIFIED,
     EosBundleStream,
     EosCrash,
     ExactlyOnceRouteError,
@@ -54,7 +56,12 @@ from services.cdc_exactly_once import (  # noqa: E402
     assert_bundle_members_reached,
     dest_owned_stream_wins,
     decide_eos_apply,
+    DestWmView,
     eos_stream_key,
+    assert_apply_seq_monotonic,
+    load_reduce_into_dest,
+    next_apply_seq,
+    verify_dest_commit,
 )
 from services.execution_engine_contract import (  # noqa: E402
     DeliveryGuaranteeError,
@@ -245,6 +252,81 @@ def test_decide_same_lsn_payload_mismatch_refuses() -> None:
     assert exc.value.reason == REASON_CHECKSUM
 
 
+def test_load_reduce_keeps_dest_columns_absent_from_cdc() -> None:
+    dest_rows = {
+        "1": {"id": "1", "v": "first", "extra": "keep", DF_LSN_COL: "0/10"},
+    }
+    reduced = load_reduce_into_dest(
+        incoming_rows=[{"id": "1", "v": "second"}],
+        dest_rows=dest_rows,
+        pk_cols=["id"],
+        incoming_lsn="0/20",
+    )
+    assert len(reduced) == 1
+    assert reduced[0]["v"] == "second"
+    assert reduced[0]["extra"] == "keep"
+    assert reduced[0][DF_LSN_COL] == "0/20"
+
+
+def test_load_reduce_omits_when_dest_lsn_newer() -> None:
+    dest_rows = {
+        "1": {"id": "1", "v": "stream", "extra": "keep", DF_LSN_COL: "0/30"},
+    }
+    reduced = load_reduce_into_dest(
+        incoming_rows=[{"id": "1", "v": "snapshot"}],
+        dest_rows=dest_rows,
+        pk_cols=["id"],
+        incoming_lsn="0/20",
+    )
+    assert reduced == []
+
+
+def test_load_reduce_keeps_unkeyed_rows() -> None:
+    reduced = load_reduce_into_dest(
+        incoming_rows=[{"v": "orphan"}],
+        dest_rows={},
+        pk_cols=["id"],
+        incoming_lsn="0/1",
+    )
+    assert len(reduced) == 1
+    assert reduced[0]["v"] == "orphan"
+
+
+def test_verify_dest_commit_refuses_behind() -> None:
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        verify_dest_commit(
+            dest=DestWmView(committed_lsn="0/10", fence_epoch=1, apply_seq=1),
+            expected_lsn="0/20",
+            expected_fence=1,
+            expected_seq=2,
+        )
+    assert exc.value.reason == REASON_UNVERIFIED
+
+
+def test_verify_dest_commit_accepts_equal_or_ahead() -> None:
+    verify_dest_commit(
+        dest=DestWmView(committed_lsn="0/20", fence_epoch=2, apply_seq=2),
+        expected_lsn="0/20",
+        expected_fence=2,
+        expected_seq=2,
+    )
+    verify_dest_commit(
+        dest=DestWmView(committed_lsn="0/30", fence_epoch=3, apply_seq=4),
+        expected_lsn="0/20",
+        expected_fence=2,
+        expected_seq=2,
+    )
+
+
+def test_apply_seq_is_dest_monotonic() -> None:
+    assert next_apply_seq(0) == 1
+    assert next_apply_seq(3) == 4
+    assert_apply_seq_monotonic(4, 3)
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        assert_apply_seq_monotonic(3, 3)
+    assert exc.value.reason == REASON_STALE_SEQ
+
+
 def test_combine_batch_last_op_per_pk_wins() -> None:
     combined = combine_change_batch(
         _batch(
@@ -377,6 +459,114 @@ def test_sqlite_eos_apply_and_redelivery_count_once() -> None:
             conn.close()
         assert v == "first"
         assert str(lsn) == "0/100"
+        assert int(summary.get("eos_apply_seq") or 0) == 1
+        assert dest_watermark_view(dest_cfg, "sqlite|eos|orders").apply_seq == 1
+
+
+def test_sqlite_eos_partial_update_keeps_dest_column() -> None:
+    """Estuary Load proof: omitted CDC columns must not NULL-wipe dest."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_partial.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+            {"source": "extra", "target": "extra", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string", "extra": "string"}
+        first = _batch(
+            "0/10",
+            inserts=[{"id": "1", "v": "first", "extra": "keep"}],
+        )
+        apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=first,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v", "extra"],
+            pk_target_cols=["id"],
+            cursor_key="sqlite|eos|partial",
+        )
+        second = _batch("0/20", updates=[{"id": "1", "v": "second"}])
+        rows, _ck, summary, _deleted = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=second,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v", "extra"],
+            pk_target_cols=["id"],
+            cursor_key="sqlite|eos|partial",
+        )
+        assert rows == 1
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        assert dest_watermark_lsn(dest_cfg, "sqlite|eos|partial") == "0/20"
+        assert int(summary.get("eos_apply_seq") or 0) == 2
+        conn = sqlite3.connect(path)
+        try:
+            v, extra, lsn = conn.execute(
+                f'SELECT v, extra, "{DF_LSN_COL}" FROM orders WHERE id = ?',
+                ("1",),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert v == "second"
+        assert extra == "keep"
+        assert str(lsn) == "0/20"
+
+
+def test_sqlalchemy_eos_partial_update_keeps_dest_column() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_sa_partial.db")
+        dest_cfg = {"type": "sqlite", "database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+            {"source": "extra", "target": "extra", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string", "extra": "string"}
+        first = _batch(
+            "0/10",
+            inserts=[{"id": "1", "v": "first", "extra": "keep"}],
+        )
+        apply_change_batch_exactly_once(
+            dest_type="generic_sql",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=first,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v", "extra"],
+            pk_target_cols=["id"],
+            cursor_key="sa|eos|partial",
+        )
+        second = _batch("0/20", updates=[{"id": "1", "v": "second"}])
+        rows, _ck, summary, _deleted = apply_change_batch_exactly_once(
+            dest_type="generic_sql",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=second,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v", "extra"],
+            pk_target_cols=["id"],
+            cursor_key="sa|eos|partial",
+        )
+        assert rows == 1
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        assert int(summary.get("eos_apply_seq") or 0) == 2
+        conn = sqlite3.connect(path)
+        try:
+            v, extra = conn.execute(
+                "SELECT v, extra FROM orders WHERE id = ?", ("1",)
+            ).fetchone()
+        finally:
+            conn.close()
+        assert v == "second"
+        assert extra == "keep"
 
 
 def test_sqlite_eos_crash_before_watermark_then_retry() -> None:
@@ -1105,10 +1295,11 @@ def test_named_matrix_artifact_matches_measured() -> None:
         "cases": results,
         "notes": [
             "100% means this named fixture only — not live warehouse CDC.",
-            "Protocol dest_authoritative_open_bundle: dest SSOT + Open fence "
-            "(no data) + dest resume blob + last-op-per-PK + shared-log N-table "
-            "dest txn + dest-owned DDD-3 stream-wins + checksum quarantine + "
-            "bundle min-LSN.",
+            "Protocol dest_authoritative_verified_bundle: dest SSOT + Open fence "
+            "(no data) + dest resume blob + last-op-per-PK + dest load-reduce-store "
+            "+ shared-log N-table dest txn + dest-owned DDD-3 stream-wins + "
+            "checksum quarantine + bundle min-LSN + dest-monotonic apply_seq + "
+            "post-commit dest verify before source ack.",
             "Wired dests: sqlite (native) plus SQLAlchemy dest-txn for "
             "postgresql/mysql/sqlserver/duckdb/generic_sql/oracle/snowflake.",
             "File/Iceberg/Kafka dests stay fail-closed.",

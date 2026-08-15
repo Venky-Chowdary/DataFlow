@@ -29,9 +29,13 @@ from services.cdc_exactly_once import (
     decide_from_view,
     encode_resume_blob,
     extract_cdc_phase,
+    incoming_pk_keys,
     is_incremental_snapshot_token,
+    load_reduce_into_dest,
     next_handoff_phase,
     plan_open_session,
+    planned_apply_seq,
+    verify_dest_commit,
 )
 from services.cdc_effectively_once import should_apply_pk_delete, should_apply_pk_row
 from services.cdc_engine import ChangeBatch
@@ -144,8 +148,10 @@ def _wm_ddl(dialect: str) -> str:
     )
 
 
-def _lock_watermark_sql(dialect: str) -> str:
+def _lock_watermark_sql(dialect: str, *, with_seq: bool = True) -> str:
     cols = "committed_lsn, epoch, fence_epoch, phase, apply_checksum"
+    if with_seq:
+        cols = f"{cols}, resume_blob, apply_seq"
     if dialect in _FOR_UPDATE_LIKE:
         return (
             f"SELECT {cols} FROM {WATERMARK_TABLE} "
@@ -159,6 +165,18 @@ def _lock_watermark_sql(dialect: str) -> str:
     return f"SELECT {cols} FROM {WATERMARK_TABLE} WHERE stream_key = :k"
 
 
+def _lock_watermark(conn: Any, dialect: str, stream_key: str) -> DestWmView:
+    try:
+        locked = conn.execute(
+            text(_lock_watermark_sql(dialect, with_seq=True)), {"k": stream_key}
+        ).fetchone()
+    except Exception:
+        locked = conn.execute(
+            text(_lock_watermark_sql(dialect, with_seq=False)), {"k": stream_key}
+        ).fetchone()
+    return _row_to_wm(locked)
+
+
 def _row_to_wm(locked: Any) -> DestWmView:
     if not locked:
         return DestWmView()
@@ -168,6 +186,8 @@ def _row_to_wm(locked: Any) -> DestWmView:
         fence_epoch=int(locked[2] or 0) if len(locked) > 2 else 0,
         phase=str(locked[3] or "") if len(locked) > 3 else "",
         apply_checksum=str(locked[4] or "") if len(locked) > 4 else "",
+        resume_blob=str(locked[5] or "") if len(locked) > 5 else "",
+        apply_seq=int(locked[6] or 0) if len(locked) > 6 else 0,
     )
 
 
@@ -348,6 +368,38 @@ def _ensure_dest_table(conn: Any, dialect: str, table_name: str, columns: list[s
             pass
 
 
+def _sa_load_dest_rows(
+    conn: Any,
+    dest_table: str,
+    pk_cols: list[str],
+    keys: list[str],
+    columns: list[str],
+) -> dict[str, dict[str, Any]]:
+    """Estuary Load — dest documents for batch PKs on the apply connection."""
+    from services.cdc_snapshot_window import _pk_row_dict, _pk_value
+
+    out: dict[str, dict[str, Any]] = {}
+    if not keys or not pk_cols or not columns:
+        return out
+    table_q = _q(dest_table)
+    col_sql = ", ".join(_q(c) for c in columns)
+    for key in keys:
+        parts = _pk_row_dict(pk_cols, key) if len(pk_cols) > 1 else {pk_cols[0]: key}
+        where = " AND ".join(f"{_q(c)} = :pk_{i}" for i, c in enumerate(pk_cols))
+        binds = {f"pk_{i}": parts[c] for i, c in enumerate(pk_cols)}
+        row = conn.execute(
+            text(f"SELECT {col_sql} FROM {table_q} WHERE {where}"),
+            binds,
+        ).fetchone()
+        if not row:
+            continue
+        rec = {columns[i]: row[i] for i in range(len(columns))}
+        pk = _pk_value(rec, pk_cols)
+        if pk:
+            out[str(pk)] = rec
+    return out
+
+
 def _row_values(
     rec: dict[str, Any],
     target_cols: list[str],
@@ -427,16 +479,13 @@ def _sa_write_watermark(
         },
     )
     if resume_blob or apply_seq:
-        try:
-            conn.execute(
-                text(
-                    f"UPDATE {WATERMARK_TABLE} SET resume_blob = :rb, apply_seq = :seq "
-                    f"WHERE stream_key = :k"
-                ),
-                {"rb": resume_blob, "seq": apply_seq, "k": stream_key},
-            )
-        except Exception:
-            pass
+        conn.execute(
+            text(
+                f"UPDATE {WATERMARK_TABLE} SET resume_blob = :rb, apply_seq = :seq "
+                f"WHERE stream_key = :k"
+            ),
+            {"rb": resume_blob, "seq": apply_seq, "k": stream_key},
+        )
 
 
 def _sa_apply_member(
@@ -488,8 +537,7 @@ def _sa_apply_member(
         change, incoming_lsn=incoming_lsn, pk_cols=pk_target_cols
     )
     _ensure_dest_table(conn, dialect, dest_table, target_cols, pk_target_cols)
-    locked = conn.execute(text(_lock_watermark_sql(dialect)), {"k": stream_key}).fetchone()
-    dest = _row_to_wm(locked)
+    dest = _lock_watermark(conn, dialect, stream_key)
     action, fence = decide_from_view(
         incoming_lsn=incoming_lsn,
         dest=dest,
@@ -511,7 +559,9 @@ def _sa_apply_member(
             fence_epoch=fence,
             phase=dest.phase or "streaming",
             apply_checksum=dest.apply_checksum,
+            apply_seq=dest.apply_seq,
         )
+    dest_seq = planned_apply_seq(dest.apply_seq)
     if action == "handoff_phase":
         new_epoch = dest.epoch + 1
         _sa_write_watermark(
@@ -527,7 +577,7 @@ def _sa_apply_member(
             phase="streaming",
             apply_checksum=incoming_checksum or dest.apply_checksum,
             resume_blob=resume_blob or dest.resume_blob,
-            apply_seq=dest.apply_seq + 1,
+            apply_seq=dest_seq,
         )
         return EosApplyResult(
             status="handoff_phase",
@@ -538,10 +588,26 @@ def _sa_apply_member(
             fence_epoch=fence,
             phase="streaming",
             apply_checksum=incoming_checksum or dest.apply_checksum,
+            apply_seq=dest_seq,
         )
     table_q = _q(dest_table)
     rows_written = 0
-    for rec in list(change.inserts or []) + list(change.updates or []):
+    records = list(change.inserts or []) + list(change.updates or [])
+    if records:
+        dest_docs = _sa_load_dest_rows(
+            conn,
+            dest_table,
+            pk_target_cols,
+            incoming_pk_keys(records, pk_target_cols),
+            target_cols,
+        )
+        records = load_reduce_into_dest(
+            incoming_rows=records,
+            dest_rows=dest_docs,
+            pk_cols=pk_target_cols,
+            incoming_lsn=incoming_lsn,
+        )
+    for rec in records:
         values = _row_values(rec, target_cols, tgt_to_src, incoming_lsn)
         rows_written += _upsert_row(conn, table_q, target_cols, pk_target_cols, values)
     deleted = 0
@@ -582,12 +648,12 @@ def _sa_apply_member(
         phase=phase,
         apply_checksum=incoming_checksum,
         resume_blob=resume_blob,
-        apply_seq=dest.apply_seq + 1,
+        apply_seq=dest_seq,
     )
     if crash_after == "after_watermark_before_commit":
         raise EosCrash(crash_after)
     return EosApplyResult(
-        status="applied" if (rows_written or deleted) else "empty",
+        status="applied" if (rows_written or deleted or records) else "empty",
         rows_written=rows_written,
         deleted=deleted,
         committed_lsn=incoming_lsn,
@@ -596,6 +662,7 @@ def _sa_apply_member(
         fence_epoch=fence,
         phase=phase,
         apply_checksum=incoming_checksum,
+        apply_seq=dest_seq,
     )
 
 
@@ -641,6 +708,13 @@ def apply_eos_sqlalchemy(
             )
         if crash_after == "after_commit_before_ack":
             raise EosCrash(crash_after)
+        if result.status in {"applied", "empty"} and result.committed_lsn:
+            verify_dest_commit(
+                dest=sa_dest_watermark_view(dest_cfg, stream_key, dest_type),
+                expected_lsn=result.committed_lsn,
+                expected_fence=result.fence_epoch,
+                expected_seq=result.apply_seq,
+            )
         return result
     except EosCrash:
         raise
@@ -672,6 +746,7 @@ def apply_eos_sa_bundle(
     cfg.setdefault("type", dialect if dialect != "generic_sql" else (dest_cfg.get("type") or dest_type))
     engine = _engine(cfg)
     members: list[EosApplyResult] = []
+    member_keys: list[str] = []
     try:
         with engine.begin() as conn:
             conn.execute(text(_wm_ddl(dialect)))
@@ -683,6 +758,7 @@ def apply_eos_sa_bundle(
                 except ExactlyOnceRouteError:
                     if not incoming_lsn:
                         raise
+                member_keys.append(stream.stream_key)
                 members.append(
                     _sa_apply_member(
                         conn,
@@ -703,10 +779,7 @@ def apply_eos_sa_bundle(
                     [m.committed_lsn for m in members], incoming_lsn
                 )
             if bundle_key and incoming_lsn:
-                locked = conn.execute(
-                    text(_lock_watermark_sql(dialect)), {"k": bundle_key}
-                ).fetchone()
-                dest_wm = _row_to_wm(locked)
+                dest_wm = _lock_watermark(conn, dialect, bundle_key)
                 action, fence = decide_from_view(
                     incoming_lsn=incoming_lsn,
                     dest=dest_wm,
@@ -735,6 +808,23 @@ def apply_eos_sa_bundle(
         raise
     finally:
         release_engine(engine)
+    if incoming_lsn:
+        for key, member in zip(member_keys, members):
+            if member.status in {"applied", "empty"} and member.committed_lsn:
+                verify_dest_commit(
+                    dest=sa_dest_watermark_view(dest_cfg, key, dest_type),
+                    expected_lsn=member.committed_lsn,
+                    expected_fence=member.fence_epoch,
+                    expected_seq=member.apply_seq,
+                )
+        if bundle_key:
+            verify_dest_commit(
+                dest=sa_dest_watermark_view(dest_cfg, bundle_key, dest_type),
+                expected_lsn=incoming_lsn,
+                expected_fence=max(
+                    (m.fence_epoch for m in members), default=writer_fence
+                ),
+            )
     rows = sum(m.rows_written for m in members)
     deleted = sum(m.deleted for m in members)
     fence = max((m.fence_epoch for m in members), default=writer_fence)
@@ -768,21 +858,7 @@ def open_eos_sa_session(
         with engine.begin() as conn:
             conn.execute(text(_wm_ddl(dialect)))
             _ensure_wm_columns(conn, dialect)
-            locked = conn.execute(text(_lock_watermark_sql(dialect)), {"k": stream_key}).fetchone()
-            view = _row_to_wm(locked)
-            try:
-                extra = conn.execute(
-                    text(
-                        f"SELECT resume_blob, apply_seq FROM {WATERMARK_TABLE} "
-                        f"WHERE stream_key = :k"
-                    ),
-                    {"k": stream_key},
-                ).fetchone()
-                if extra:
-                    view.resume_blob = str(extra[0] or "")
-                    view.apply_seq = int(extra[1] or 0)
-            except Exception:
-                pass
+            view = _lock_watermark(conn, dialect, stream_key)
             opened = plan_open_session(
                 dest=view, incoming_fence=incoming_fence, job_resume=job_resume
             )
@@ -803,6 +879,35 @@ def open_eos_sa_session(
                     apply_seq=view.apply_seq,
                 )
             return opened
+    finally:
+        release_engine(engine)
+
+
+def sa_dest_watermark_view(
+    dest_cfg: dict[str, Any], stream_key: str, dest_type: str
+) -> DestWmView:
+    """Post-commit dest watermark re-read (never trust the in-txn view)."""
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+
+    dialect = normalize_eos_dialect(dest_type, dest_cfg)
+    cfg = dict(dest_cfg)
+    cfg.setdefault("type", dialect)
+    engine = _engine(cfg)
+    try:
+        with engine.connect() as conn:
+            try:
+                row = conn.execute(
+                    text(
+                        f"SELECT committed_lsn, epoch, fence_epoch, phase, "
+                        f"apply_checksum, resume_blob, apply_seq "
+                        f"FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+                    ),
+                    {"k": stream_key},
+                ).fetchone()
+            except Exception:
+                return DestWmView()
+            return _row_to_wm(row)
     finally:
         release_engine(engine)
 
