@@ -35,6 +35,7 @@ HARD_GATE_IDS = {
     "proof_bundle",
     "g13_source_coverage",
     "g14_destination_requirements",
+    "g15_dest_exists_shape",
 }
 
 SOFT_GATE_IDS = {
@@ -148,6 +149,27 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to fill required columns"},
+        ],
+    },
+    "g15_dest_exists_shape": {
+        "title": "Dest-exists shape",
+        "category": "hard",
+        "why": (
+            "When the destination table already exists, source extras, dest-only "
+            "NOT NULL columns, and false-friend binds must be classified once. "
+            "A positional INSERT would shift values if a new column is not last."
+        ),
+        "fix": (
+            "Open Map. Remap extra source columns or mark them omitted. Fill "
+            "required dest-only columns. Writes stay name-addressed — dest-only "
+            "columns stay off SET."
+        ),
+        "examples": [
+            "Stored-procedure result grew loyalty_tier — remap or omit, never silent drop.",
+            "Dest UserID vs userid fold is dest-superset, not a false bind.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to remap extra columns"},
         ],
     },
     "g4_mapping_confidence": {

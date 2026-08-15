@@ -4,7 +4,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  bindNamesFromSql,
   dialectOffersProcedures,
+  dialectOffersQuery,
   isCallableSourceMode,
   procedureStreamName,
 } from "./sourceReadMode.js";
@@ -15,6 +17,15 @@ describe("sourceReadMode", () => {
     assert.equal(dialectOffersProcedures("sqlserver"), true);
     assert.equal(dialectOffersProcedures("mongodb"), false);
     assert.equal(dialectOffersProcedures("sqlite"), false);
+    assert.equal(dialectOffersQuery("sqlite"), true);
+    assert.equal(dialectOffersQuery("postgresql"), true);
+    assert.equal(dialectOffersQuery("mongodb"), false);
+  });
+
+  it("extracts :name binds from CALL/SELECT text", () => {
+    assert.deepEqual(bindNamesFromSql("CALL get_orders(:since, :limit)"), ["since", "limit"]);
+    assert.deepEqual(bindNamesFromSql("SELECT * FROM t WHERE id = :id"), ["id"]);
+    assert.deepEqual(bindNamesFromSql("CALL get_orders('2024-01-01')"), []);
   });
 
   it("names the stream from CALL / EXEC / bare ident", () => {

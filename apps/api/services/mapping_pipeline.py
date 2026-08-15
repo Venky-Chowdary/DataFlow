@@ -1115,8 +1115,18 @@ def run_mapping_pipeline(
         ],
     }
 
+    from services.shape_contract import classify_dest_exists_shape
+
+    shape_contract = classify_dest_exists_shape(
+        destination_table_exists=destination_table_exists,
+        source_columns=list(source_columns or []),
+        dest_columns=list(target_columns or []),
+        mappings=list(enriched_mappings),
+    )
+
     return {
         "mappings": enriched_mappings,
+        "shape_contract": shape_contract,
         "transforms": transforms,
         "validation": validation,
         "classification": classification,

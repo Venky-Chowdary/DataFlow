@@ -71,6 +71,9 @@ interface TransferMapStepProps {
   uniqueKeySuggestions?: UniqueKeySuggestion[];
   compositeKeySuggestions?: Array<{ columns: string[]; uniqueCount: number; sampleRows: number }>;
   onApplyPrimaryKey?: (column: string) => void;
+  /** Dest-exists extras the operator must remap or omit — never silent drop. */
+  extraSourceColumns?: string[];
+  destShapeHeadline?: string;
 }
 
 
@@ -122,6 +125,8 @@ export function TransferMapStep({
   uniqueKeySuggestions = [],
   compositeKeySuggestions = [],
   onApplyPrimaryKey,
+  extraSourceColumns = [],
+  destShapeHeadline = "",
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("review");
@@ -244,6 +249,19 @@ export function TransferMapStep({
           </button>
         </div>
       </div>
+
+      {extraSourceColumns.length > 0 && (
+        <div className="df2-map-stream-diverge" role="status">
+          <DtIcon name="layers" size={16} />
+          <div>
+            <strong>{destShapeHeadline || "Extra source columns — remap or omit"}</strong>
+            <p>
+              {extraSourceColumns.join(", ")} — dest-exists write is name-addressed.
+              These columns are not dropped. Use Remap dest or mark omit.
+            </p>
+          </div>
+        </div>
+      )}
 
       {streamNames.length > 1 && (
         <div className="df2-map-stream-bar" role="tablist" aria-label="Map per source stream">

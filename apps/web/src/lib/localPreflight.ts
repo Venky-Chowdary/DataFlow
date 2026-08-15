@@ -51,6 +51,8 @@ export interface LocalPreflightInput {
   sampleRows?: Record<string, unknown>[];
   confidenceThreshold?: number;
   destKind?: "database" | "file_export";
+  sourceReadMode?: string;
+  syncMode?: string;
 }
 
 /** True when this preflight was produced entirely in the browser (no API gates). */
@@ -238,8 +240,24 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     note: "Not a full-table integrity probe — do not treat as gate-pass evidence",
   });
 
-  skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.", {
-    kind: "sync_contract", coverage: "n/a",
+  const callable = input.sourceReadMode === "procedure" || input.sourceReadMode === "query";
+  if (callable && (input.syncMode || "").toLowerCase() === "cdc") {
+    block("g9_sync_contract", "Stored-procedure / SQL extract cannot drive CDC — use Full refresh.", {
+      kind: "sync_contract", coverage: "n/a",
+    });
+  } else {
+    skip("g9_sync_contract", "Full refresh file export — sync contract not applicable.", {
+      kind: "sync_contract", coverage: "n/a",
+    });
+  }
+  skip("g13_source_coverage", "Browser-only — source coverage requires API dest-exists shape.", {
+    kind: "source_coverage", coverage: "n/a",
+  });
+  skip("g14_destination_requirements", "Browser-only — dest NOT NULL coverage requires API introspect.", {
+    kind: "destination_requirements", coverage: "n/a",
+  });
+  skip("constraint_fk", "Browser-only — FK coverage requires API catalog metadata.", {
+    kind: "foreign_key", coverage: "n/a",
   });
   skip("g10_schema_policy", "Browser-only — schema policy gate skipped; requires API.", {
     kind: "schema_policy", coverage: "n/a",

@@ -221,6 +221,13 @@
   padding: 10px 12px;
 }
 
+.df2-source-bind-params {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 12px;
+  margin-top: 8px;
+}
+
 .df2-source-multistream {
   padding: 0;
   border: none;

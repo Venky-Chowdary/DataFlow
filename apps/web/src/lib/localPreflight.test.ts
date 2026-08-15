@@ -40,6 +40,26 @@ describe("runLocalPreflight file export honesty", () => {
     const ids = pf.gates.map((g) => g.id);
     assert.equal(new Set(ids).size, ids.length, "gate ids must be unique");
     assert.ok(ids.indexOf("g6_target_ddl") < ids.indexOf("g9_data_integrity"));
+    assert.equal(byId.g13_source_coverage?.status, "skip");
+    assert.equal(byId.g14_destination_requirements?.status, "skip");
+    assert.equal(byId.constraint_fk?.status, "skip");
+    assert.equal(byId.g15_dest_exists_shape?.status, "skip");
+  });
+
+  it("blocks CDC on a stored-procedure extract", () => {
+    const pf = runLocalPreflight({
+      columns: ["id"],
+      rowCount: 1,
+      mappings: [
+        { source: "id", target: "id", confidence: 0.99, transform: "none", approved: true, requiresReview: false, isPii: false },
+      ],
+      destKind: "file_export",
+      sourceReadMode: "procedure",
+      syncMode: "cdc",
+    });
+    const byId = Object.fromEntries(pf.gates.map((g) => [g.id, g]));
+    assert.equal(byId.g9_sync_contract?.status, "block");
+    assert.equal(pf.passed, false);
   });
 
   it("does not invent approve decision when local gates pass", () => {

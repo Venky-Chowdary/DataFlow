@@ -814,6 +814,14 @@ def _engine_population_digests(
     if not pairs:
         return None
 
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_endpoint):
+        # CALL/SELECT extract is not a physical table — engine checksum would
+        # probe a fake relation named after the procedure. Row accounting stays
+        # on dest COUNT / committed_offset.
+        return None
+
     source_table = source_endpoint.table or source_endpoint.collection or ""
     if not source_table or not dest_table:
         return None

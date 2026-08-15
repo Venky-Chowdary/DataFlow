@@ -84,6 +84,16 @@ def _is_pending_mapping(m: dict[str, Any]) -> bool:
     return str(m.get("assignment_strategy") or "") == "pending_dest_schema"
 
 
+def write_ready_mappings(mappings: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    """Mappings that may appear in INSERT/MERGE — omit and pending stay off the write.
+
+    Dest-only columns are never invented here. Execute must use this list, not
+    the raw Map array, so a pending extra source column cannot become a
+    positional INSERT value (dbt-databricks#1289).
+    """
+    return [m for m in write_mappings(mappings) if not _is_pending_mapping(m)]
+
+
 def insert_sql_is_name_addressed(sql: str) -> bool:
     """True when INSERT names dest columns — the dbt positional hole is closed.
 

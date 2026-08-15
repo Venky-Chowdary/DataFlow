@@ -26,6 +26,7 @@ SQLite has no stored procedures — procedure mode is rejected; query mode
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -721,6 +722,20 @@ def _spool_key(cfg: Mapping[str, Any], spec: CallableSpec) -> str:
     }
     blob = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def close_callable_spool(key: str | None = None) -> None:
+    """Drop process-local CALL spools so a restart cannot page a stale file."""
+    with _SPOOL_LOCK:
+        keys = [key] if key else list(_SPOOLS)
+        for item in keys:
+            if not item:
+                continue
+            spool = _SPOOLS.pop(item, None)
+            if spool is None:
+                continue
+            with contextlib.suppress(OSError):
+                spool.path.unlink(missing_ok=True)
 
 
 def _get_spool(key: str) -> _ResultSpool | None:

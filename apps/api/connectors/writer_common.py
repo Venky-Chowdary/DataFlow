@@ -2247,6 +2247,8 @@ def resolve_target_columns(
 
             if is_intentional_omit(m) or not m.get("target"):
                 continue
+            if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
+                continue
         except Exception:
             if not m.get("target"):
                 continue

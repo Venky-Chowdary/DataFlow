@@ -980,7 +980,28 @@ def _stream_database_transfer_impl(
 
     table = _source_name(source)
     if not table:
-        raise ValueError("Source table/collection name required for streaming transfer")
+        from services.procedure_source import (
+            is_callable_source,
+            parse_callable_source,
+            procedure_params_of,
+            procedure_text_of,
+            source_read_mode_of,
+            stream_name_for_callable,
+        )
+
+        if is_callable_source(source) or is_callable_source(src_cfg):
+            try:
+                spec = parse_callable_source(
+                    procedure_text_of(source) or procedure_text_of(src_cfg),
+                    dialect=src_type,
+                    mode=source_read_mode_of(source) or source_read_mode_of(src_cfg),
+                    params=procedure_params_of(source) or procedure_params_of(src_cfg),
+                )
+                table = stream_name_for_callable(spec)
+            except Exception:
+                table = "procedure_result"
+        if not table:
+            raise ValueError("Source table/collection name required for streaming transfer")
 
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
 
@@ -1330,6 +1351,10 @@ def _stream_database_transfer_impl(
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+    from services.shape_contract import write_ready_mappings
+
+    # Pending extras and intentional omits stay off INSERT/MERGE (name-addressed).
+    mappings = write_ready_mappings(mappings)
     # Schemaless sources: always allow ADD COLUMN when attrs appear mid-transfer.
     if src_type in ("dynamodb", "mongodb", "elasticsearch", "redis", "kafka"):
         backfill_new_fields = True

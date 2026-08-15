@@ -21,8 +21,43 @@ const PROCEDURE_DIALECTS = new Set([
 export function dialectOffersProcedures(driver: string | undefined | null): boolean {
   const d = String(driver || "").toLowerCase();
   if (!d) return false;
-  if (d === "mongodb" || d === "sqlite" || d === "dynamodb") return false;
+  if (d === "mongodb" || d === "sqlite" || d === "duckdb" || d === "dynamodb") return false;
   return PROCEDURE_DIALECTS.has(d) || d.includes("sql");
+}
+
+/** Read-only SELECT extract — SQLite/DuckDB have no stored procedures. */
+export function dialectOffersQuery(driver: string | undefined | null): boolean {
+  const d = String(driver || "").toLowerCase();
+  if (!d) return false;
+  if (d === "mongodb" || d === "dynamodb") return false;
+  return dialectOffersProcedures(d) || d === "sqlite" || d === "duckdb";
+}
+
+export function dialectOffersSqlExtract(driver: string | undefined | null): boolean {
+  return dialectOffersProcedures(driver) || dialectOffersQuery(driver);
+}
+
+export function bindNamesFromSql(text: string): string[] {
+  const names: string[] = [];
+  const seen = new Set<string>();
+  const re = /(?<!:):([A-Za-z_][A-Za-z0-9_]*)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(String(text || ""))) !== null) {
+    const name = m[1];
+    if (name && !seen.has(name)) {
+      seen.add(name);
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+export function queryHint(driver: string | undefined | null): string {
+  const d = String(driver || "").toLowerCase();
+  if (d === "sqlite" || d === "duckdb") {
+    return "SELECT id, email FROM customers — one read-only statement.";
+  }
+  return "SELECT … FROM schema.table WHERE … — one read-only SELECT/WITH. CALL belongs in Stored procedure.";
 }
 
 export function procedureStreamName(callText: string): string {

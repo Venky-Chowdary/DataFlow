@@ -439,6 +439,7 @@ async def map_columns_route(body: MapColumnsRequest):
         "destination_table_exists": body.destination_table_exists,
         "plan_summary": result.get("plan_summary", {}),
         "mapping_proof": result.get("mapping_proof", {}),
+        "shape_contract": result.get("shape_contract", {}),
         "quality_issues": result.get("quality_issues", []),
         # The engine computes these; dropping them here left the Map step
         # showing client-side guesses while the real verdict stayed server-side.

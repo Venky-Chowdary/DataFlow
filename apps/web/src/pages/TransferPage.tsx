@@ -67,10 +67,14 @@ import {
 } from "../lib/dialectDefaults";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import {
+  bindNamesFromSql,
   dialectOffersProcedures,
+  dialectOffersQuery,
+  dialectOffersSqlExtract,
   isCallableSourceMode,
   procedureHint,
   procedureStreamName,
+  queryHint,
   type SourceReadMode,
 } from "../lib/sourceReadMode";
 import {
@@ -199,6 +203,14 @@ export function TransferPage({
   const [sourceCollection, setSourceCollection] = useState("");
   const [sourceReadMode, setSourceReadMode] = useState<SourceReadMode>("table");
   const [procedureCall, setProcedureCall] = useState("");
+  const [procedureParams, setProcedureParams] = useState<Record<string, string>>({});
+  const [shapeContract, setShapeContract] = useState<{
+    shape?: string;
+    extra_source_columns?: string[];
+    headline?: string;
+    primary_action?: string;
+    unaccounted_sources?: string[];
+  } | null>(null);
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   /** Shared Fix-bad-data drawer open state (Validate dashboard + rail Fix CTA). */
@@ -980,10 +992,14 @@ export function TransferPage({
       ...(callable
         ? {
             source_read_mode: sourceReadMode,
-            procedure_call: procedureCall.trim(),
+            procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : undefined,
+            source_query: sourceReadMode === "query" ? procedureCall.trim() : undefined,
+            procedure_params: Object.keys(procedureParams).length ? procedureParams : undefined,
             extra: {
               source_read_mode: sourceReadMode,
-              procedure_call: procedureCall.trim(),
+              procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+              source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+              procedure_params: procedureParams,
             },
           }
         : {}),
@@ -1249,6 +1265,22 @@ export function TransferPage({
           threshold,
           targetSchema,
         );
+        const shape = (result as { shape_contract?: typeof shapeContract }).shape_contract;
+        if (shape && typeof shape === "object") {
+          const extras = [
+            ...((shape as { unaccounted_sources?: string[] }).unaccounted_sources || []),
+            ...(((shape as { columns?: Array<{ source?: string; kind?: string }> }).columns || [])
+              .filter((c) => c.kind === "add_proposed" || c.kind === "pending" || c.kind === "unaccounted")
+              .map((c) => c.source || "")
+              .filter(Boolean)),
+          ];
+          setShapeContract({
+            ...shape,
+            extra_source_columns: [...new Set(extras)],
+          });
+        } else {
+          setShapeContract(null);
+        }
         return commitMappings(
           mapped,
           Boolean(result.llm?.llm_used),
@@ -1313,6 +1345,8 @@ export function TransferPage({
           source_samples: buildColumnSamples(sourceCols, rows ?? []),
           destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
           sync_mode: syncMode,
+          destination_table_exists:
+            destKindMode === "database" ? destTableExists : false,
         });
         return editableFromPipelineMappings(
           result.mappings,
@@ -1346,6 +1380,7 @@ export function TransferPage({
       exportFormat,
       destType,
       syncMode,
+      destTableExists,
     ],
   );
 
@@ -1638,7 +1673,10 @@ export function TransferPage({
   }, [sourceKind]);
 
   useEffect(() => {
-    if (!dialectOffersProcedures(sourceConnector?.type) && sourceReadMode !== "table") {
+    if (sourceReadMode === "procedure" && !dialectOffersProcedures(sourceConnector?.type)) {
+      setSourceReadMode(dialectOffersQuery(sourceConnector?.type) ? "query" : "table");
+    }
+    if (sourceReadMode === "query" && !dialectOffersQuery(sourceConnector?.type)) {
       setSourceReadMode("table");
     }
   }, [sourceConnector?.type, sourceReadMode]);
@@ -2093,8 +2131,10 @@ export function TransferPage({
     }
     if (sourceKind === "database" && isCallableSourceMode(sourceReadMode) && !procedureCall.trim()) {
       toast({
-        title: "Stored procedure required",
-        message: "Paste a single CALL / EXEC (or a PostgreSQL SELECT * FROM func()) to inspect the result set.",
+        title: sourceReadMode === "query" ? "SQL query required" : "Stored procedure required",
+        message: sourceReadMode === "query"
+          ? "Paste one read-only SELECT/WITH to inspect the result set."
+          : "Paste a single CALL / EXEC (or a PostgreSQL SELECT * FROM func()) to inspect the result set.",
         tone: "warning",
       });
       setStep(STEP_SOURCE);
@@ -2239,10 +2279,14 @@ export function TransferPage({
     else sourceEndpoint.table = streamName;
     if (isCallableSourceMode(sourceReadMode) && !isMongo) {
       sourceEndpoint.source_read_mode = sourceReadMode;
-      sourceEndpoint.procedure_call = procedureCall.trim();
+      if (sourceReadMode === "procedure") sourceEndpoint.procedure_call = procedureCall.trim();
+      if (sourceReadMode === "query") sourceEndpoint.source_query = procedureCall.trim();
+      if (Object.keys(procedureParams).length) sourceEndpoint.procedure_params = procedureParams;
       sourceEndpoint.extra = {
         source_read_mode: sourceReadMode,
-        procedure_call: procedureCall.trim(),
+        procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+        source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+        procedure_params: procedureParams,
       };
     }
 
@@ -3572,6 +3616,8 @@ export function TransferPage({
             sampleRows,
             confidenceThreshold: threshold,
             destKind: destKindMode,
+            sourceReadMode,
+            syncMode,
           });
           toast({
             title: "Validated locally",
@@ -3633,6 +3679,8 @@ export function TransferPage({
           sampleRows: (parsed.data ?? parsed.sample_data)?.slice(0, PREFLIGHT_SAMPLE_LIMIT),
           confidenceThreshold: threshold,
           destKind: destKindMode,
+          sourceReadMode,
+          syncMode,
         });
         setPreflight(pf);
         setValidatedContractKey(buildValidateContractKey(activeMappings));
@@ -4646,6 +4694,8 @@ export function TransferPage({
           destColumns={destColumns}
           destSchemaLoading={destSchemaLoading}
           destTableExists={destTableExists}
+          extraSourceColumns={shapeContract?.extra_source_columns ?? []}
+          destShapeHeadline={shapeContract?.headline ?? ""}
           destConnected={destConnected}
           destConnectionError={destConnectionError}
           targetCollection={targetCollection}
@@ -5007,7 +5057,7 @@ export function TransferPage({
                   placeholder="Select connector…"
                   hint="Saved connection (host, database, credentials)."
                 />
-                {dialectOffersProcedures(sourceConnector?.type) && (
+                {dialectOffersSqlExtract(sourceConnector?.type) && (
                   <div className="df2-field df2-source-read-mode">
                     <label className="df2-label" htmlFor="source-read-mode">
                       Source extract
@@ -5018,35 +5068,68 @@ export function TransferPage({
                       onChange={setSourceReadMode}
                       items={[
                         { id: "table", label: "Table" },
-                        { id: "procedure", label: "Stored procedure" },
+                        ...(dialectOffersQuery(sourceConnector?.type)
+                          ? [{ id: "query" as const, label: "SQL query" }]
+                          : []),
+                        ...(dialectOffersProcedures(sourceConnector?.type)
+                          ? [{ id: "procedure" as const, label: "Stored procedure" }]
+                          : []),
                       ]}
                     />
                     <span className="df2-label-hint">
                       {sourceReadMode === "procedure"
                         ? "Execute one CALL/EXEC, map the result set, remap extra columns on Map."
-                        : "Read a table or view. Stored procedures are a result-set snapshot, not CDC."}
+                        : sourceReadMode === "query"
+                          ? "One read-only SELECT/WITH. Result columns map on the next step. Not CDC."
+                          : "Read a table or view. Query and stored procedure are result-set snapshots, not CDC."}
                     </span>
                   </div>
                 )}
-                {sourceReadMode === "procedure" && dialectOffersProcedures(sourceConnector?.type) ? (
+                {isCallableSourceMode(sourceReadMode) && dialectOffersSqlExtract(sourceConnector?.type) ? (
                 <div className="df2-field df2-source-procedure">
                   <label className="df2-label" htmlFor="source-procedure-input">
-                    Stored procedure
+                    {sourceReadMode === "query" ? "SQL query" : "Stored procedure"}
                   </label>
                   <textarea
                     id="source-procedure-input"
                     className="df2-input df2-textarea"
                     value={procedureCall}
                     onChange={(e) => setProcedureCall(e.target.value)}
-                    placeholder={procedureHint(sourceConnector?.type)}
+                    placeholder={
+                      sourceReadMode === "query"
+                        ? queryHint(sourceConnector?.type)
+                        : procedureHint(sourceConnector?.type)
+                    }
                     autoComplete="off"
                     spellCheck={false}
                     rows={4}
                   />
                   <span className="df2-label-hint">
-                    One statement. Literals or :name binds only — no stacked SQL, DDL, or xp_ admin calls.
-                    If the destination table already exists, Map rates each column and lists extras to remap.
+                    One statement. Use :name binds below, or quoted/numeric literals.
+                    Extra result columns stay visible on Map to remap — never silent drop.
                   </span>
+                  {bindNamesFromSql(procedureCall).length > 0 && (
+                    <div className="df2-source-bind-params">
+                      {bindNamesFromSql(procedureCall).map((name) => (
+                        <div className="df2-field" key={name}>
+                          <label className="df2-label" htmlFor={`bind-${name}`}>
+                            :{name}
+                          </label>
+                          <input
+                            id={`bind-${name}`}
+                            className="df2-input"
+                            value={procedureParams[name] ?? ""}
+                            onChange={(e) =>
+                              setProcedureParams((prev) => ({ ...prev, [name]: e.target.value }))
+                            }
+                            placeholder="Bound value"
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 ) : (
                 <div className="df2-field">
@@ -5080,7 +5163,7 @@ export function TransferPage({
                 )}
               </div>
 
-              {sourceReadMode !== "procedure" && (
+              {!isCallableSourceMode(sourceReadMode) && (
               <div className="df2-source-multistream" role="note">
                 <div className="df2-source-multistream-head">
                   <DtIcon name="activity" size={15} />

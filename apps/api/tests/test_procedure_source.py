@@ -149,6 +149,39 @@ def test_source_read_mode_from_extra() -> None:
     assert source_read_mode_of({"procedure_call": "CALL x()"}) == "procedure"
 
 
+def test_endpoint_extra_roundtrip_preserves_procedure_fields() -> None:
+    from src.transfer.models import EndpointConfig, endpoint_to_dict
+
+    ep = EndpointConfig.from_dict(
+        "database",
+        {
+            "format": "postgresql",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL get_orders(:since)",
+            "procedure_params": {"since": "2024-01-01"},
+        },
+    )
+    assert source_read_mode_of(ep) == "procedure"
+    assert ep.extra.get("procedure_call") == "CALL get_orders(:since)"
+    assert ep.extra.get("procedure_params") == {"since": "2024-01-01"}
+    back = EndpointConfig.from_dict("database", endpoint_to_dict(ep))
+    assert source_read_mode_of(back) == "procedure"
+    assert back.extra.get("procedure_params") == {"since": "2024-01-01"}
+
+
+def test_write_ready_mappings_drop_pending_extras() -> None:
+    from services.shape_contract import write_ready_mappings
+
+    ready = write_ready_mappings(
+        [
+            {"source": "id", "target": "id"},
+            {"source": "loyalty_tier", "target": "loyalty_tier", "assignment_strategy": "pending_dest_schema"},
+            {"source": "notes", "target": "notes", "intentional_omit": True},
+        ]
+    )
+    assert [m["source"] for m in ready] == ["id"]
+
+
 def test_query_mode_sqlite_select_roundtrip(tmp_path: Path) -> None:
     """Query mode (not CALL) against SQLite — procedure mode stays refused."""
     import sqlite3
@@ -157,6 +190,7 @@ def test_query_mode_sqlite_select_roundtrip(tmp_path: Path) -> None:
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE customers (id INTEGER, email TEXT)")
     conn.execute("INSERT INTO customers VALUES (1, 'a@example.com')")
+    conn.execute("INSERT INTO customers VALUES (2, 'b@example.com')")
     conn.commit()
     conn.close()
 
@@ -171,24 +205,31 @@ def test_query_mode_sqlite_select_roundtrip(tmp_path: Path) -> None:
     assert spec.mode == "query"
     from services.procedure_source import read_callable_batch
 
-    batch = read_callable_batch(
-        {
-            "type": "sqlite",
-            "database": str(db),
-            "source_read_mode": "query",
-            "source_query": "SELECT id, email FROM customers",
-            "host": "",
-            "port": 0,
-            "username": "",
-            "password": "",
-            "schema": "",
-            "connection_string": f"sqlite:///{db}",
-            "ssl": False,
-        },
-        offset=0,
-        limit=10,
-        peek=True,
-    )
+    cfg = {
+        "type": "sqlite",
+        "database": str(db),
+        "source_read_mode": "query",
+        "source_query": "SELECT id, email FROM customers ORDER BY id",
+        "host": "",
+        "port": 0,
+        "username": "",
+        "password": "",
+        "schema": "",
+        "connection_string": f"sqlite:///{db}",
+        "ssl": False,
+    }
+    batch = read_callable_batch(cfg, offset=0, limit=10, peek=True)
     assert batch.headers == ["id", "email"]
-    assert len(batch.rows) == 1
+    assert len(batch.rows) == 2
     assert str(batch.rows[0][0]) == "1"
+
+    page0 = read_callable_batch(cfg, offset=0, limit=1, peek=False)
+    page1 = read_callable_batch(cfg, offset=1, limit=1, peek=False)
+    assert page0.total_rows == 2
+    assert len(page0.rows) == 1
+    assert str(page0.rows[0][0]) == "1"
+    assert len(page1.rows) == 1
+    assert str(page1.rows[0][0]) == "2"
+    from services.procedure_source import close_callable_spool
+
+    close_callable_spool()
