@@ -4,8 +4,13 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from connectors.mongodb_reader import read_collection_scan_batch
 from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES, close_table_scan
+
+# Mock-only — do not skip when localhost Mongo is down (conftest live-mongo gate).
+pytestmark = pytest.mark.fake_mongo
 
 
 def test_mongodb_is_a_snapshot_scan_source() -> None:
