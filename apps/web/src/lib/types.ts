@@ -470,12 +470,6 @@ export interface JobProgress extends TransferJob {
   event_log?: string[];
   sync_mode?: string;
   source_read_mode?: string;
-  transfer_request?: {
-    source?: {
-      source_read_mode?: string;
-      extra?: { source_read_mode?: string };
-    };
-  };
   schema_policy?: string;
   validation_mode?: string;
   /** Operator who started the job. */

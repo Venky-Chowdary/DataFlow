@@ -91,7 +91,9 @@ export function callableExtractNote(
       source?: {
         source_read_mode?: string;
         extra?: { source_read_mode?: string };
+        [key: string]: unknown;
       };
+      [key: string]: unknown;
     };
   } | null,
 ): string {

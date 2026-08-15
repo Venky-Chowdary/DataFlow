@@ -112,7 +112,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       isMultiStream: false,
       sourceReadMode,
     });
-    const offeredIds = new Set(offered.map((m) => m.id));
+    const offeredIds = new Set<string>(offered.map((m) => m.id));
     return (intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODE_IDS).filter((mode) => {
       if (mode === "incremental") {
         return offeredIds.has("incremental_append") || offeredIds.has("incremental_deduped");
@@ -132,7 +132,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     syncMode === "mirror";
 
   useEffect(() => {
-    if (!syncModes.includes(syncMode)) {
+    if (!syncModes.includes(syncMode as typeof syncModes[number])) {
       setSyncMode("full_refresh_overwrite");
     }
   }, [syncMode, syncModes]);
