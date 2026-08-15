@@ -433,22 +433,6 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
       />
 
       <MarketingReveal>
-        <section className="lp-ent-metrics" aria-label="Enterprise capabilities at a glance">
-          {[
-            { value: "SSO", label: "SAML & OIDC" },
-            { value: "BYOK", label: "Customer keys" },
-            { value: "Full", label: "Job audit trail" },
-            { value: "Multi", label: "Tenant isolation" },
-          ].map((item) => (
-            <div key={item.label} className="lp-ent-metric">
-              <strong>{item.value}</strong>
-              <span>{item.label}</span>
-            </div>
-          ))}
-        </section>
-      </MarketingReveal>
-
-      <MarketingReveal>
         <section className="lp-ent-capabilities">
           <div className="lp-ent-section-head">
             <p className="lp-mkt-kicker">Control plane</p>
