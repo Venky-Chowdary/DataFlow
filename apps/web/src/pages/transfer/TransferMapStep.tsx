@@ -384,7 +384,6 @@ export function TransferMapStep({
                 onFilterChange={handleFilterChange}
                 focusSource={focusSource}
                 onFocusHandled={() => setFocusSource(null)}
-                footerAction={continueToValidate}
               />
             </div>
           </div>
@@ -459,7 +458,7 @@ export function TransferMapStep({
               <DtIcon name="settings" size={14} /> Advanced
             </button>
           )}
-          {columnMappings.length === 0 ? continueToValidate : null}
+          {continueToValidate}
         </div>
       </div>
 

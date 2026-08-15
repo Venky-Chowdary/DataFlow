@@ -1,7 +1,7 @@
 import { DtIcon } from "./DtIcon";
 import { FilterTabs } from "./ui/FilterTabs";
 import { StructurePreview } from "./ui/StructurePreview";
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ARRAY_POLICIES,
   MAPPING_TRANSFORMS,
@@ -93,8 +93,6 @@ interface ColumnReviewPanelProps {
   migrationId?: string;
   /** Destination table stamped onto Risk Contracts. */
   tableName?: string;
-  /** Compact map-step primary (Continue) — sits on the same band as the row count. */
-  footerAction?: ReactNode;
 }
 
 function confidenceClass(
@@ -146,7 +144,6 @@ export function ColumnReviewPanel({
   onFilterChange,
   migrationId = "",
   tableName = "",
-  footerAction,
 }: ColumnReviewPanelProps) {
   const [internalSearch, setInternalSearch] = useState("");
   const [internalFilter, setInternalFilter] = useState<ColumnFilter>("review");
@@ -1204,7 +1201,7 @@ export function ColumnReviewPanel({
         </table>
       </div>
 
-      {(compact || displayItems.length > pageSize || footerAction) && (
+      {(compact || pages > 1) && (
         <div className="df2-column-review-footer df2-column-workbench-pagination">
           {compact && (
             <span>
@@ -1219,8 +1216,8 @@ export function ColumnReviewPanel({
                 }`}
             </span>
           )}
-          {displayItems.length > pageSize && (
-            <div className="df2-column-workbench-pagination">
+          {pages > 1 && (
+            <div className="df2-column-workbench-pagination df2-column-review-pager" role="navigation" aria-label="Mapping column pages">
               <button
                 type="button"
                 className="df2-btn df2-btn-sm"
@@ -1242,11 +1239,6 @@ export function ColumnReviewPanel({
               </button>
             </div>
           )}
-          {footerAction ? (
-            <div className="df2-column-review-footer-action">
-              {footerAction}
-            </div>
-          ) : null}
         </div>
       )}
       </div>

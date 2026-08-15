@@ -9916,8 +9916,8 @@ button.df2-vd-assist-toggle:focus-visible {
 
 .df2-map-step-panel .df2-card-body,
 .df2-map-step .df2-card-body {
-  gap: 8px !important;
-  padding: 10px 12px !important;
+  gap: 0 !important;
+  padding: 4px 8px 0 !important;
 }
 
 .df2-page-transfer-studio .df2-filter-tabs .df2-tab,

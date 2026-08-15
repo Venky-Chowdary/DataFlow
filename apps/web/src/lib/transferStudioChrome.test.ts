@@ -14,6 +14,7 @@ import {
   findDuplicateKeyRoot,
   isDuplicateIdentitySignal,
 } from "./validateIssueGrouping.js";
+import { totalPages } from "./columnWorkbench.js";
 import type { PreflightResult } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -89,28 +90,36 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(src, /decision === "review"[\s\S]*executiveSummary\?\.subtitle/);
   });
 
-  it("Map step keeps Continue on the mapping-card footer and does not clip it", () => {
+  it("Map step keeps Continue in the wizard footer and pages columns when needed", () => {
     const mapStep = readFileSync(join(webRoot, "pages/transfer/TransferMapStep.tsx"), "utf8");
     const review = readFileSync(join(webRoot, "components/ColumnReviewPanel.tsx"), "utf8");
     const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
     const workbench = readFileSync(join(webRoot, "styles/column-workbench.css"), "utf8");
 
-    assert.match(mapStep, /footerAction=\{continueToValidate\}/);
+    assert.match(mapStep, /\{continueToValidate\}/);
     assert.match(mapStep, /Continue to Validate →/);
-    assert.match(review, /footerAction\?: ReactNode/);
-    assert.match(review, /df2-column-review-footer-action/);
+    assert.doesNotMatch(mapStep, /footerAction=/);
+    assert.doesNotMatch(review, /footerAction/);
+    assert.match(review, /pages > 1 &&/);
+    assert.match(review, /df2-column-review-pager/);
+    assert.match(review, /Mapping column pages/);
     assert.doesNotMatch(review, /compact && sampleRows && sampleRows\.length > 0 \? "is-split"/);
 
     assert.match(
       studio,
       /df2-map-step-panel > \.df2-card-footer\.df2-wizard-footer\.df2-map-footer \{[\s\S]*max-height:\s*none !important/,
     );
+    assert.match(studio, /df2-map-step-panel \.df2-card-body,[\s\S]*padding:\s*4px 8px 0 !important/);
     assert.match(studio, /grid-template-rows:\s*minmax\(0, 1fr\) !important/);
     assert.match(
       workbench,
-      /df2-map-step-workspace\.is-full-editor \{[\s\S]*grid-template-rows:\s*minmax\(0, 1fr\)/,
+      /df2-map-step-workspace\.is-full-editor \{[\s\S]*grid-template-rows:\s*minmax\(0, 1fr\) !important/,
     );
-    assert.match(workbench, /df2-column-review-footer-action/);
+    assert.doesNotMatch(workbench, /minmax\(0, min\(42vh, 380px\)\)/);
+    assert.doesNotMatch(workbench, /header-height, 60px\) - 40px/);
+    assert.equal(totalPages(8, 50), 1);
+    assert.equal(totalPages(51, 50), 2);
+    assert.equal(totalPages(100, 25), 4);
   });
 
   it("source-probe duplicate signal is recognized for Fix routing", () => {
