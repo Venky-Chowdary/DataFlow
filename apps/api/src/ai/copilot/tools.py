@@ -250,8 +250,10 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "plan_transfer",
         "description": (
-            "Plan a real transfer between two saved connectors: introspect both schemas live, "
+            "Plan a real transfer between two saved connectors: introspect both schemas live "
+            "(or peek a CALL/SELECT result — never treat a procedure stream name as a table), "
             "map columns, list type conversions and lossy casts, and run the 9 preflight gates. "
+            "CDC/SCD2/mirror are refused for procedure/query sources. "
             "Read-only — it never moves data. Use whenever the operator asks what a transfer "
             "would do, or before starting one."
         ),
@@ -259,7 +261,11 @@ TOOL_DEFINITIONS: list[dict] = [
             "type": "object",
             "properties": {
                 "source_connector_name": {"type": "string", "description": "Saved source connector"},
-                "source_table": {"type": "string", "description": "Source table or collection"},
+                "source_table": {"type": "string", "description": "Source table, collection, or a CALL/SELECT statement"},
+                "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
+                "procedure_call": {"type": "string", "description": "CALL/EXEC text when source_read_mode is procedure"},
+                "source_query": {"type": "string", "description": "Read-only SELECT when source_read_mode is query"},
+                "procedure_params": {"type": "object", "description": "Bound :name parameters for CALL/SELECT"},
                 "dest_connector_name": {"type": "string", "description": "Saved destination connector"},
                 "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
                 "sync_mode": {
@@ -271,7 +277,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
             },
-            "required": ["source_table"],
+            "required": [],
         },
     },
     {
@@ -286,12 +292,16 @@ TOOL_DEFINITIONS: list[dict] = [
             "properties": {
                 "source_connector_name": {"type": "string"},
                 "source_table": {"type": "string"},
+                "source_read_mode": {"type": "string"},
+                "procedure_call": {"type": "string"},
+                "source_query": {"type": "string"},
+                "procedure_params": {"type": "object"},
                 "dest_connector_name": {"type": "string"},
                 "dest_table": {"type": "string"},
                 "sync_mode": {"type": "string"},
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
             },
-            "required": ["source_table"],
+            "required": [],
         },
     },
     {
@@ -309,6 +319,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "has_cursor": {"type": "boolean"},
                 "has_primary_key": {"type": "boolean"},
                 "needs_history": {"type": "boolean"},
+                "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
             },
             "required": [],
         },
@@ -1655,8 +1666,24 @@ class DataPilotTools:
         has_cursor: bool = False,
         has_primary_key: bool = False,
         needs_history: bool = False,
+        source_read_mode: str = "",
     ) -> ToolResult:
         w = workload.lower()
+        callable_src = (source_read_mode or "").strip().lower() in {"procedure", "query"}
+        if callable_src and ("cdc" in w or needs_history or "scd" in w or "mirror" in w):
+            return ToolResult(name="recommend_sync_mode", success=True, output={
+                "recommended_mode": "Full Refresh Append",
+                "reason": (
+                    "CALL/SELECT is a result-set snapshot, not a WAL/binlog or table "
+                    "identity. CDC, SCD2, and mirror are refused. Use full refresh, "
+                    "or incremental only when the procedure is cursor-stable."
+                ),
+                "requires": {
+                    "cursor": False,
+                    "primary_key": False,
+                    "cdc_log_access": False,
+                },
+            })
         if "cdc" in w:
             mode = "Incremental CDC"
             reason = "Source changes should be read from a log stream and resumed from cursor state."
@@ -2009,6 +2036,11 @@ class DataPilotTools:
         sync_mode: str = "",
         schema_policy: str = "manual_review",
         validation_mode: str = "balanced",
+        source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -2022,6 +2054,11 @@ class DataPilotTools:
             sync_mode=sync_mode,
             schema_policy=schema_policy,
             validation_mode=validation_mode,
+            source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
         )
 
     def _start_transfer(
@@ -2037,6 +2074,10 @@ class DataPilotTools:
         validation_mode: str = "balanced",
         limit: int = 0,
         source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -2052,6 +2093,10 @@ class DataPilotTools:
             validation_mode=validation_mode,
             limit=limit,
             source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
         )
 
     def _analyze_result(

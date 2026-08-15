@@ -153,6 +153,14 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
         f"**{dst.get('connector_name')}**.`{dst.get('table')}`"
     )
     lines = [f"{route} — sync `{plan.get('sync_mode')}`"]
+    read_mode = str(src.get("source_read_mode") or "table").strip().lower()
+    if read_mode in {"procedure", "query"}:
+        sql = str(src.get("procedure_call") or src.get("source_query") or "").strip()
+        lines.append(
+            f"• Source is a **{read_mode}** result-set snapshot"
+            + (f" (`{sql}`)" if sql else "")
+            + f", not table `{src.get('table')}`. CDC/SCD2/mirror stay refused."
+        )
 
     dest_exists = dst.get("table_exists")
     if dest_exists is True:
