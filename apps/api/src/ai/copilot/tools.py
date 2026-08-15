@@ -233,7 +233,13 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "plan_transfer_route",
-        "description": "Plan an any-to-any transfer route with sync mode, schema policy, validation gates, and risk controls.",
+        "description": (
+            "Plan an any-to-any transfer route with sync mode, schema policy, validation gates, "
+            "and risk controls. When source, destination, and table resolve to saved connectors, "
+            "this delegates to plan_transfer and must forward contract_id, require_signed_contract, "
+            "validation_mode, and schema_policy — never invent a contract, skip_preflight, or "
+            "propagate_all. A generic sketch is not a plan for the operator's data."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -243,6 +249,18 @@ TOOL_DEFINITIONS: list[dict] = [
                 "table": {"type": "string", "description": "Source table — required for a real plan"},
                 "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
                 "sync_mode": {"type": "string"},
+                "leftover_nl": {
+                    "type": "string",
+                    "description": "Remaining operator prose (contract / migrate / data rules). Never parse skip_preflight.",
+                },
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "description": "Spoken schema posture only — never invent propagate_all",
+                },
+                "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
+                "require_signed_contract": {"type": "boolean"},
             },
             "required": [],
         },
@@ -277,6 +295,11 @@ TOOL_DEFINITIONS: list[dict] = [
                     ),
                 },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "description": "Spoken schema posture only — never invent propagate_all",
+                },
                 "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
                 "require_signed_contract": {"type": "boolean"},
             },
@@ -303,6 +326,12 @@ TOOL_DEFINITIONS: list[dict] = [
                 "dest_table": {"type": "string"},
                 "sync_mode": {"type": "string"},
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "description": "Spoken schema posture only — never invent propagate_all",
+                },
                 "contract_id": {"type": "string", "description": "Signed data contract to enforce on Confirm"},
                 "require_signed_contract": {"type": "boolean"},
             },
@@ -1602,6 +1631,11 @@ class DataPilotTools:
         table: str = "",
         dest_table: str = "",
         sync_mode: str = "",
+        leftover_nl: str = "",
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        validation_mode: str = "",
+        schema_policy: str = "",
     ) -> ToolResult:
         """Route guidance. Real plan when connectors resolve, honest sketch otherwise.
 
@@ -1609,7 +1643,24 @@ class DataPilotTools:
         gate list whose IDs did not exist in ``PREFLIGHT_GATES``. Now the named
         gates come from the registry, and naming a table gets the operator the
         engine's actual mapping and gate results instead of a guess.
+
+        Bind / validation / schema posture must survive the hop into
+        ``plan_transfer``. Unbound still leaves enforce unset. A generic sketch
+        names the requested posture but is not a plan for the operator's data.
         """
+        bind = resolve_transfer_bind_kwargs(
+            leftover_nl,
+            source,
+            destination,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            validation_mode=validation_mode,
+            schema_policy=schema_policy,
+        )
+        source_clean, _ = parse_transfer_bind_and_rules(source)
+        dest_clean, _ = parse_transfer_bind_and_rules(destination)
+        source = (source_clean or source or "").strip()
+        destination = (dest_clean or destination or "").strip()
         if source and destination and table:
             from .transfer_tools import plan_transfer
 
@@ -1619,6 +1670,7 @@ class DataPilotTools:
                 dest_connector_name=destination,
                 dest_table=dest_table or table,
                 sync_mode=sync_mode or workload,
+                **bind,
             )
             if planned.success:
                 return planned
@@ -1637,6 +1689,7 @@ class DataPilotTools:
             "source": source or "source not specified",
             "destination": destination or "destination not specified",
             "required_gates": gate_ids,
+            **bind,
             "note": (
                 "This is the standard gate sequence, not a plan for your data. "
                 "Name two saved connectors and a table and I will introspect both "
@@ -2996,6 +3049,40 @@ def parse_transfer_bind_and_rules(message: str) -> tuple[str, dict[str, Any]]:
     return text, extras
 
 
+def resolve_transfer_bind_kwargs(
+    *texts: str,
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+    validation_mode: str = "",
+    schema_policy: str = "",
+) -> dict[str, Any]:
+    """Merge spoken + explicit bind / data-rule posture. Never invents a bind.
+
+    Explicit kwargs win when set. Unbound leaves the dict without
+    ``contract_id`` so ``enforce_contract`` stays unset. ``skip_preflight``
+    and ``propagate_all`` are never returned.
+    """
+    parsed: dict[str, Any] = {}
+    for blob in texts:
+        if blob:
+            parsed.update(parse_transfer_bind_and_rules(str(blob))[1])
+    out: dict[str, Any] = {}
+    cid = str(contract_id or parsed.get("contract_id") or "").strip()
+    if cid:
+        out["contract_id"] = cid
+        if require_signed_contract is None:
+            out["require_signed_contract"] = bool(parsed.get("require_signed_contract", True))
+        else:
+            out["require_signed_contract"] = bool(require_signed_contract)
+    mode = str(validation_mode or parsed.get("validation_mode") or "").strip()
+    if mode in {"strict", "balanced", "lenient"}:
+        out["validation_mode"] = mode
+    policy = str(schema_policy or parsed.get("schema_policy") or "").strip()
+    if policy in {"manual_review", "type_locked", "pause_on_change"}:
+        out["schema_policy"] = policy
+    return out
+
+
 def parse_transfer_rule_posture(lowered: str) -> dict[str, Any]:
     """Explicit validation posture. Empty when the tool default should stand."""
     if any(w in lowered for w in ("lenient", "permissive", "best effort", "best-effort")):
@@ -3646,33 +3733,36 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "into mysql", "into warehouse",
         )
     ):
+        cleaned, extras = parse_transfer_bind_and_rules(message)
+        route_text = cleaned.lower()
         src, dst = "", ""
         route = re.search(
             r"(?:from|source|out of)\s+(.+?)\s+(?:to|into|->|destination)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"move\s+(?:data|rows|records)?\s*(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"(?:cdc|copy|sync|replicate)\s+(?:data\s+)?(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"(?:plan|route)\s+(?:a\s+|the\s+)?(?:route\s+)?(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"(?:moving|move)\s+(?:data\s+)?(?:out\s+of\s+)?(.+?)\s+(?:into|to)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"go\s+from\s+(.+?)\s+into\s+(.+?)\s*$",
-            lower,
+            route_text,
         )
         if route:
             src = _capture_connector_name(route.group(1))
             dst = _capture_connector_name(route.group(2))
         planned.append(("plan_transfer_route", {
-            "source": src or message[:80],
-            "destination": dst or message[-80:],
+            "source": src or cleaned[:80] or message[:80],
+            "destination": dst or cleaned[-80:] or message[-80:],
             "workload": "cdc" if "cdc" in lower else "unknown",
+            **{k: v for k, v in extras.items() if v},
         }))
         # Prefer route planning over a bare sync-mode recommendation.
         planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]

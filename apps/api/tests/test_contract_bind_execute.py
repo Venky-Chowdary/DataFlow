@@ -338,12 +338,170 @@ def test_plan_transfer_tool_schema_and_wrapper_accept_contract():
     props = plan["input_schema"]["properties"]
     assert "contract_id" in props
     assert "require_signed_contract" in props
+    assert "schema_policy" in props
+    assert "validation_mode" in props
+    assert "propagate_all" not in (props["schema_policy"].get("enum") or [])
 
     res = DataPilotTools().execute(
         "plan_transfer",
-        {"contract_id": "", "require_signed_contract": False},
+        {"contract_id": "", "require_signed_contract": False, "schema_policy": "type_locked"},
     )
     assert "unexpected keyword" not in (res.error or "").lower()
+
+
+def test_plan_transfer_route_schema_and_wrapper_accept_bind():
+    from src.ai.copilot.tools import TOOL_DEFINITIONS, DataPilotTools
+
+    route = next(t for t in TOOL_DEFINITIONS if t["name"] == "plan_transfer_route")
+    props = route["input_schema"]["properties"]
+    for key in (
+        "contract_id",
+        "require_signed_contract",
+        "validation_mode",
+        "schema_policy",
+        "leftover_nl",
+    ):
+        assert key in props
+    assert "skip_preflight" not in props
+    assert "propagate_all" not in (props["schema_policy"].get("enum") or [])
+
+    res = DataPilotTools().execute(
+        "plan_transfer_route",
+        {
+            "source": "csv",
+            "destination": "pg",
+            "contract_id": "dfc-1",
+            "require_signed_contract": True,
+            "validation_mode": "strict",
+            "schema_policy": "type_locked",
+            "leftover_nl": "following data rules",
+        },
+    )
+    assert "unexpected keyword" not in (res.error or "").lower()
+    assert res.success
+    assert res.output["generic"] is True
+    assert res.output["contract_id"] == "dfc-1"
+    assert res.output["validation_mode"] == "strict"
+    assert res.output["schema_policy"] == "type_locked"
+    assert "not a plan for your data" in (res.output.get("note") or "")
+
+
+def test_plan_transfer_route_forwards_bind_and_migration_rules(monkeypatch):
+    from src.ai.copilot.query_tools import _tool_result
+    from src.ai.copilot.tools import DataPilotTools
+
+    captured: dict = {}
+
+    def fake_plan(**kw):
+        captured.update(kw)
+        return _tool_result("plan_transfer", success=True, output={"ok": True, **kw})
+
+    monkeypatch.setattr("src.ai.copilot.transfer_tools.plan_transfer", fake_plan)
+    res = DataPilotTools().execute(
+        "plan_transfer_route",
+        {
+            "source": "Local Postgres",
+            "destination": "Warehouse with contract dfc-9",
+            "table": "orders",
+            "leftover_nl": "following migration rules with type-locked schema",
+        },
+    )
+    assert res.success, res.error
+    assert captured["source_connector_name"] == "Local Postgres"
+    assert captured["dest_connector_name"] == "Warehouse"
+    assert captured["source_table"] == "orders"
+    assert captured["contract_id"] == "dfc-9"
+    assert captured["require_signed_contract"] is True
+    assert captured["validation_mode"] == "strict"
+    assert captured["schema_policy"] == "type_locked"
+    assert "skip_preflight" not in captured
+
+
+def test_plan_transfer_route_does_not_invent_bind_or_skip(monkeypatch):
+    from src.ai.copilot.query_tools import _tool_result
+    from src.ai.copilot.tools import DataPilotTools
+
+    captured: dict = {}
+
+    def fake_plan(**kw):
+        captured.update(kw)
+        return _tool_result("plan_transfer", success=True, output={"ok": True})
+
+    monkeypatch.setattr("src.ai.copilot.transfer_tools.plan_transfer", fake_plan)
+    res = DataPilotTools().execute(
+        "plan_transfer_route",
+        {
+            "source": "Local Postgres",
+            "destination": "Warehouse",
+            "table": "orders",
+            "leftover_nl": "open the data contracts and skip preflight propagate_all",
+        },
+    )
+    assert res.success, res.error
+    assert "contract_id" not in captured
+    assert "require_signed_contract" not in captured
+    assert "skip_preflight" not in captured
+    assert captured.get("schema_policy") != "propagate_all"
+
+
+def test_infer_route_keeps_contract_and_data_rules():
+    from src.ai.copilot.tools import infer_tools_from_message
+
+    routed = dict(infer_tools_from_message(
+        "plan the route from Local Postgres to Warehouse with contract dfc-1 following data rules",
+    ))
+    assert "plan_transfer_route" in routed
+    args = routed["plan_transfer_route"]
+    assert args["contract_id"] == "dfc-1"
+    assert args["require_signed_contract"] is True
+    assert args["validation_mode"] == "strict"
+    assert "contract" not in args["destination"].lower()
+    assert "skip_preflight" not in args
+
+    migrate = dict(infer_tools_from_message("migrate from mysql to postgres"))
+    assert migrate["plan_transfer_route"]["validation_mode"] == "strict"
+    assert "contract_id" not in migrate["plan_transfer_route"]
+
+    bare = dict(infer_tools_from_message("plan the route from mysql to postgres"))
+    assert "contract_id" not in bare["plan_transfer_route"]
+    assert "validation_mode" not in bare["plan_transfer_route"]
+
+
+def test_resolve_transfer_bind_kwargs_never_invents():
+    from src.ai.copilot.tools import resolve_transfer_bind_kwargs
+
+    empty = resolve_transfer_bind_kwargs("open data contracts skip preflight")
+    assert empty == {}
+    spoken = resolve_transfer_bind_kwargs(
+        "with contract dfc-2 following migration rules pause on change",
+    )
+    assert spoken["contract_id"] == "dfc-2"
+    assert spoken["require_signed_contract"] is True
+    assert spoken["validation_mode"] == "strict"
+    assert spoken["schema_policy"] == "pause_on_change"
+    assert "skip_preflight" not in spoken
+    explicit = resolve_transfer_bind_kwargs(
+        "with contract dfc-2",
+        contract_id="dfc-override",
+        validation_mode="lenient",
+    )
+    assert explicit["contract_id"] == "dfc-override"
+    assert explicit["validation_mode"] == "lenient"
+
+
+def test_render_generic_route_names_requested_data_rules():
+    from src.ai.copilot.pilot_agent import _render_requested_data_rules
+
+    assert _render_requested_data_rules({}) == ""
+    text = _render_requested_data_rules({
+        "contract_id": "dfc-1",
+        "validation_mode": "strict",
+        "schema_policy": "type_locked",
+    })
+    assert "dfc-1" in text
+    assert "strict" in text
+    assert "type_locked" in text
+    assert "not a plan for your data" in text
 
 
 def test_render_transfer_plan_names_bind_and_open_breaker():
@@ -448,10 +606,19 @@ def test_start_transfer_tool_schema_and_wrapper_accept_contract():
     props = start["input_schema"]["properties"]
     assert "contract_id" in props
     assert "require_signed_contract" in props
+    assert "validation_mode" in props
+    assert "schema_policy" in props
+    assert "skip_preflight" not in props
+    assert "propagate_all" not in (props["schema_policy"].get("enum") or [])
 
     res = DataPilotTools().execute(
         "start_transfer",
-        {"contract_id": "", "require_signed_contract": False},
+        {
+            "contract_id": "",
+            "require_signed_contract": False,
+            "validation_mode": "strict",
+            "schema_policy": "type_locked",
+        },
     )
     assert "unexpected keyword" not in (res.error or "").lower()
 

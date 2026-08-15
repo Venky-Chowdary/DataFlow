@@ -254,6 +254,30 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_requested_data_rules(o: dict[str, Any]) -> str:
+    """Name spoken bind / data rules on a generic route sketch.
+
+    This is not a live plan. Confirm still fail-closes on SIGNED / OPEN.
+    """
+    bits: list[str] = []
+    cid = str(o.get("contract_id") or "").strip()
+    if cid:
+        bits.append(f"contract `{cid}`")
+    mode = str(o.get("validation_mode") or "").strip()
+    if mode:
+        bits.append(f"{mode} validation")
+    policy = str(o.get("schema_policy") or "").strip()
+    if policy:
+        bits.append(f"schema `{policy}`")
+    if not bits:
+        return ""
+    return (
+        f"\nRequested data / migration rules: {', '.join(bits)} — "
+        "previewed on a real plan; Confirm stays fail-closed. "
+        "This sketch is not a plan for your data."
+    )
+
+
 def _schedule_bind_phrase(row: dict[str, Any] | None) -> str:
     """One-line bind for list/get. Empty when the schedule is unbound."""
     s = row or {}
@@ -2021,9 +2045,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if not o.get("generic"):
                     parts.append(_render_transfer("plan_transfer", o))
                 else:
+                    posture = _render_requested_data_rules(o)
                     parts.append(
                         f"**Standard gate sequence**: {', '.join(o.get('required_gates') or [])}\n"
-                        f"{o.get('note') or ''}\n{o.get('next') or ''}"
+                        f"{o.get('note') or ''}"
+                        f"{posture}"
+                        f"\n{o.get('next') or ''}"
                     )
             elif tr.name == "explain_mapping_assurance" and tr.success:
                 o = tr.output or {}
