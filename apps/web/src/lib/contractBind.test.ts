@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
   contractBindBlocksRun,
   contractBindFromPolicies,
+  contractBindFromPreview,
   isSignedContractStatus,
 } from "./contractBind.js";
 
@@ -60,6 +61,20 @@ describe("contractBind", () => {
         require_signed_contract: false,
       }),
       { contractId: "c1", requireSigned: false },
+    );
+  });
+
+  it("reads the Pilot Confirm preview bind", () => {
+    assert.deepEqual(contractBindFromPreview(null), {
+      contractId: "",
+      requireSigned: false,
+    });
+    assert.deepEqual(
+      contractBindFromPreview({
+        contract_id: "dfc-1",
+        require_signed_contract: true,
+      }),
+      { contractId: "dfc-1", requireSigned: true },
     );
   });
 });

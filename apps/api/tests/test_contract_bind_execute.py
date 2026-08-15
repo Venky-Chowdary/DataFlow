@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.transfer.contract_engine import (
+    enforce_bound_contract,
     resolve_bound_contract,
     stamp_bound_contract,
     stamp_request_contract,
@@ -23,6 +24,9 @@ def _backend(monkeypatch):
     cstore.reset_contract_store()
     backend = cstore.InMemoryContractStore()
     monkeypatch.setattr(cstore, "get_contract_store", lambda: backend)
+    import src.transfer.contract_engine as ce
+
+    monkeypatch.setattr(ce, "get_contract_store", lambda: backend)
     return backend, DataContract, ContractStatus
 
 
@@ -286,3 +290,57 @@ def test_start_transfer_tool_schema_and_wrapper_accept_contract():
         {"contract_id": "", "require_signed_contract": False},
     )
     assert "unexpected keyword" not in (res.error or "").lower()
+
+
+def test_enforce_bound_contract_skips_when_unbound():
+    req = SimpleNamespace(
+        contract_id="",
+        enforce_contract=True,
+        require_signed_contract=False,
+        column_types={"id": "INTEGER"},
+    )
+    assert enforce_bound_contract(req, schema={"id": "INTEGER"}, mappings=[]) == ""
+    assert req.contract_id == ""
+
+
+def test_enforce_bound_contract_signed_matching_route(monkeypatch):
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    signed = DataContract(
+        name="replay-ok",
+        status=ContractStatus.SIGNED,
+        source={"format": "sqlite"},
+        destination={"format": "sqlite"},
+    )
+    backend.save_contract(signed)
+    req = SimpleNamespace(
+        contract_id=signed.id,
+        enforce_contract=True,
+        require_signed_contract=True,
+        source=SimpleNamespace(format="sqlite"),
+        destination=SimpleNamespace(format="sqlite"),
+        column_types={"id": "INTEGER"},
+    )
+    assert enforce_bound_contract(req, schema={"id": "INTEGER"}, mappings=[]) == signed.id
+
+
+def test_enforce_bound_contract_format_drift_fail_closed(monkeypatch):
+    from services.data_contract import ContractViolation
+
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    signed = DataContract(
+        name="replay-drift",
+        status=ContractStatus.SIGNED,
+        source={"format": "postgres"},
+        destination={"format": "postgres"},
+    )
+    backend.save_contract(signed)
+    req = SimpleNamespace(
+        contract_id=signed.id,
+        enforce_contract=True,
+        require_signed_contract=True,
+        source=SimpleNamespace(format="postgres"),
+        destination=SimpleNamespace(format="sqlite"),
+        column_types={"id": "INTEGER"},
+    )
+    with pytest.raises(ContractViolation, match="Destination format changed"):
+        enforce_bound_contract(req, schema={"id": "INTEGER"}, mappings=[])

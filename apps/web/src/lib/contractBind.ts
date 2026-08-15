@@ -32,3 +32,17 @@ export function contractBindFromPolicies(
   }
   return { contractId, requireSigned: true };
 }
+
+/** Redacted Pilot Confirm preview — same bind shape as plan policies. */
+export function contractBindFromPreview(
+  preview: {
+    contract_id?: string;
+    require_signed_contract?: boolean;
+  } | null | undefined,
+): { contractId: string; requireSigned: boolean } {
+  if (!preview) return { contractId: "", requireSigned: false };
+  return contractBindFromPolicies({
+    contract_id: preview.contract_id,
+    require_signed_contract: preview.require_signed_contract,
+  });
+}

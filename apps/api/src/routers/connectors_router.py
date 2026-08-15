@@ -1334,7 +1334,12 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     child_payload["sync_mode"] = "incremental_deduped"
     child_payload["skip_preflight"] = True
     child_req = transfer_request_from_dict(child_payload)
-    from src.transfer.contract_engine import stamp_request_contract
+    from src.transfer.contract_engine import enforce_bound_contract, stamp_request_contract
+
+    try:
+        from services.data_contract import ContractViolation
+    except ImportError:  # pragma: no cover
+        from src.services.data_contract import ContractViolation
 
     try:
         stamp_request_contract(
@@ -1342,7 +1347,12 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             explicit_id=str(getattr(transfer_req, "contract_id", "") or ""),
             explicit_require=bool(getattr(transfer_req, "require_signed_contract", False)),
         )
-    except ValueError as exc:
+        enforce_bound_contract(
+            child_req,
+            schema=schema,
+            mappings=mappings,
+        )
+    except (ValueError, ContractViolation) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     child_job_id = engine._create_pending_job(child_req)
     mongo.update_job_status(

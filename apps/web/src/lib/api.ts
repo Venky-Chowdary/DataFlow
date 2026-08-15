@@ -595,6 +595,9 @@ export interface PilotTransferPreview {
   destination_table_exists?: boolean;
   preflight_run_id?: string;
   readiness_score?: number;
+  contract_id?: string;
+  require_signed_contract?: boolean;
+  enforce_contract?: boolean;
 }
 
 export interface CopilotChatResponse {

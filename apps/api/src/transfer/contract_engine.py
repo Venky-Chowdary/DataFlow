@@ -94,6 +94,22 @@ def stamp_bound_contract(
         request.require_signed_contract = require
 
 
+def enforce_bound_contract(
+    request: Any,
+    schema: dict[str, str] | None = None,
+    mappings: list[dict[str, Any]] | None = None,
+) -> str:
+    """Enforce a bound contract. Never auto-create from missing preflight.
+
+    Quarantine replay and other skip_preflight writers must call this instead
+    of ``enforce_or_create_contract`` so an unbound job does not invent a draft.
+    """
+    cid = str(getattr(request, "contract_id", "") or "").strip()
+    if not cid or not getattr(request, "enforce_contract", True):
+        return cid
+    return enforce_or_create_contract(request, schema, mappings, preflight=None)
+
+
 def enforce_or_create_contract(
     request: Any,
     schema: dict[str, str] | None,

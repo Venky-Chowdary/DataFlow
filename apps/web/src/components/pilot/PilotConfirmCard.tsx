@@ -10,6 +10,7 @@
  */
 
 import { Button } from "../ui/Button";
+import { contractBindFromPreview } from "../../lib/contractBind";
 import type {
   CopilotPendingAction,
   PilotGate,
@@ -119,6 +120,7 @@ function TransferBody({
   const unmapped = preview?.unmapped_source_columns
     || plan?.unmapped_source_columns
     || [];
+  const contractBind = contractBindFromPreview(preview);
   const gates = plan?.preflight?.gates || [];
   const destructive = Boolean(
     action.destructive
@@ -172,6 +174,17 @@ function TransferBody({
                 ? ` · ${plan.preflight.passed_count}/${plan.preflight.total_gates} gates`
                 : null}
               {runId ? <> · <code className="df2-pilot-confirm-runid">{runId}</code></> : null}
+            </dd>
+          </div>
+        ) : null}
+        {contractBind.contractId ? (
+          <div>
+            <dt>Contract</dt>
+            <dd>
+              <code>{contractBind.contractId}</code>
+              {contractBind.requireSigned
+                ? " · Confirm fails closed unless SIGNED"
+                : null}
             </dd>
           </div>
         ) : null}
