@@ -262,6 +262,9 @@ class _RecordAuditRow:
         self._record = record
         self._headers = headers
 
+    def __len__(self) -> int:
+        return len(self._headers)
+
     def __getitem__(self, idx: int) -> Any:
         if idx >= len(self._headers):
             return ""

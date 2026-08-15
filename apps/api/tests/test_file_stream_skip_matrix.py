@@ -135,7 +135,8 @@ def test_s3_file_stream_skips_matrix(monkeypatch):
     assert written == 2
 
 
-def test_mongodb_file_stream_still_builds_matrix(monkeypatch):
+def test_kafka_file_stream_still_builds_matrix(monkeypatch):
+    """Non-spool writers still need the matrix — that list is the write image."""
     seen = {"matrix": 0}
 
     real = records_to_matrix
@@ -156,11 +157,11 @@ def test_mongodb_file_stream_still_builds_matrix(monkeypatch):
     monkeypatch.setattr("src.transfer.file_stream._write_batch", fake_write_batch)
 
     dest = EndpointConfig(
-        kind="database",
-        format="mongodb",
+        kind="streaming",
+        format="kafka",
         host="127.0.0.1",
         database="df",
-        table="docs",
+        table="events",
     )
     written, _ddl, _summary, _cols = stream_file_to_database(
         content=_csv_bytes(2),
@@ -240,7 +241,7 @@ def test_overwrite_keys_collected_before_spill(monkeypatch):
         schema={},
         sync_mode="full_refresh_overwrite",
         stream_contracts=[
-            {"selected": True, "primary_key": ["id"], "sync_mode": "full_refresh_overwrite"}
+            {"selected": True, "primary_key": "id", "sync_mode": "full_refresh_overwrite"}
         ],
         validation_mode="balanced",
     )
