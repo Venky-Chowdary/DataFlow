@@ -11,8 +11,10 @@ Debezium-class capabilities:
 
 Apply semantics default to **at-least-once upsert**. Opt-in
 ``delivery_guarantee=exactly_once`` uses a dest-owned watermark in the same
-dest transaction as apply (sqlite wired). Job checkpoints persist after dest
-commit. Platform-wide exactly-once is not claimed.
+dest transaction as apply. Shared-log multi-stream applies N tables in one
+dest transaction (Estuary multi-binding), then acks the source LSN once.
+Job checkpoints persist after dest commit. Platform-wide exactly-once is
+not claimed.
 """
 from __future__ import annotations
 
@@ -1036,15 +1038,18 @@ def _run_cdc_multi_stream(
     when all streams share a postgresql or mysql source. Fall back to sequential
     N independent readers otherwise.
 
-    Exactly-once uses sequential per-stream dest-owned watermarks — a shared
-    log reader acks one LSN after N applies, which is not one dest transaction.
+    Exactly-once on a wired SQL dest uses the shared log reader *and* one
+    dest transaction for the demuxed barrier (N tables + one LSN). Unwired
+    dests stay sequential and fail-closed at apply.
     """
-    from services.cdc_exactly_once import normalize_delivery_guarantee
+    from services.cdc_exactly_once import EOS_TXN_WIRED_DESTS, normalize_delivery_guarantee
     from services.cdc_multi_table import can_share_log_reader
 
     src_fmt = str(getattr(source, "format", "") or "").lower()
+    dest_fmt = str(getattr(destination, "format", "") or "").lower().replace("-", "_")
     eos = normalize_delivery_guarantee(delivery_guarantee) == "exactly_once"
-    if not eos and can_share_log_reader(src_fmt, len(selected)):
+    dest_wired = dest_fmt in EOS_TXN_WIRED_DESTS
+    if (not eos or dest_wired) and can_share_log_reader(src_fmt, len(selected)):
         try:
             return _run_cdc_shared_multi_table(
                 source,
@@ -1061,6 +1066,7 @@ def _run_cdc_multi_stream(
                 backfill_new_fields=backfill_new_fields,
                 validation_mode=validation_mode,
                 limit=limit,
+                delivery_guarantee=delivery_guarantee,
             )
         except Exception as exc:
             from services.cdc_lease import CdcLeaseConflict
@@ -1108,11 +1114,13 @@ def _run_cdc_shared_multi_table(
     backfill_new_fields: bool,
     validation_mode: str,
     limit: int,
+    delivery_guarantee: str = "at_least_once",
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """One log consumer for N tables (Debezium-class); demux apply per stream.
 
-    Semantics remain **at-least-once upsert**. Shared LSN/GTID advances only after
-    the demux barrier batch (``ack_barrier``) is applied.
+    Default semantics are **at-least-once upsert**. Opt-in exactly-once buffers
+    demuxed table batches until ``ack_barrier``, then applies them in one dest
+    transaction and acks the source LSN once.
     """
     from services.cdc_multi_table import (
         shared_route_cursor_key,
@@ -1123,10 +1131,13 @@ def _run_cdc_shared_multi_table(
         is_side_channel_resume_token,
     )
 
+    from services.cdc_exactly_once import PROTOCOL, normalize_delivery_guarantee
+
     src_type = resolve_driver_type(getattr(source, "format", "") or "")
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    eos_active = normalize_delivery_guarantee(delivery_guarantee) == "exactly_once"
 
     tables = [(c.name or "").strip() for c in selected if (c.name or "").strip()]
     if len(tables) < 2:
@@ -1180,11 +1191,21 @@ def _run_cdc_shared_multi_table(
         job_id=job_id,
     )
     shared_wm = get_watermark(shared_key)
+    if eos_active:
+        from connectors.cdc_eos_sql import read_route_dest_lsn
+        from services.cdc_exactly_once import clamp_job_resume_to_dest
+
+        dest_lsn = read_route_dest_lsn(dest_type, dest_cfg, shared_key)
+        shared_wm, _clamp = clamp_job_resume_to_dest(shared_wm, dest_lsn)
 
     cdc: Any
     ddl_log: list[str] = [
         f"CDC(shared_reader) {src_type} tables={tables} → {dest_type} "
-        f"(one slot/server_id; at-least-once upsert)"
+        + (
+            f"(one slot/server_id; exactly_once dest-owned bundle {PROTOCOL})"
+            if eos_active
+            else "(one slot/server_id; at-least-once upsert)"
+        )
     ]
     if src_type in {"postgresql", "postgres"}:
         from services.dialect_profiles import default_schema_for
@@ -1383,6 +1404,7 @@ def _run_cdc_shared_multi_table(
     # recording that anything is missing. Staging here and flushing on the
     # barrier makes the whole transaction advance together or not at all.
     pending_table_watermarks: dict[str, str] = {}
+    pending_eos_bundle: list[Any] = []
 
     def _flush_table_watermarks() -> None:
         """Publish staged per-table cursors now that the transaction is fully applied."""
@@ -1426,30 +1448,79 @@ def _run_cdc_shared_multi_table(
             sample = (change.inserts or change.updates)[0]
             headers = list(sample.keys())
         _assert_cdc_lease_before_apply(cdc)
-        with _cdc_span(
-            "cdc.apply_batch",
-            job_id=str(job_id or ""),
-            dest_table=str(dest_table or ""),
-            stream=str(stream or ""),
-            chunk_idx=int(chunk_idx),
-        ):
-            rows_written, checksum, dest_summary, deleted = _apply_change_batch(
-                dest_type,
-                destination,
-                dest_cfg,
-                dest_table,
-                change,
-                use_maps,
-                col_types,
-                headers,
-                pk_target,
-                chunk_idx,
-                max(1, chunk_idx + 1),
-                backfill_new_fields=backfill_new_fields,
+        rows_written = 0
+        deleted = 0
+        dest_summary: dict[str, Any] = {}
+        if eos_active:
+            from services.cdc_exactly_once import EosBundleStream, batch_lsn
+
+            if change.total_changes:
+                pending_eos_bundle.append(
+                    EosBundleStream(
+                        dest_table=str(dest_table or stream),
+                        change=change,
+                        mappings=use_maps,
+                        column_types=col_types,
+                        pk_target_cols=pk_target,
+                        stream_key=str(cfg["cursor_key"]),
+                        headers=list(headers),
+                    )
+                )
+            if should_ack_shared_batch(change):
+                from connectors.cdc_eos_sql import apply_eos_bundle
+
+                incoming = batch_lsn(change.resume_token) or ""
+                if pending_eos_bundle or incoming:
+                    with _cdc_span(
+                        "cdc.apply_bundle",
+                        job_id=str(job_id or ""),
+                        dest_table=str(dest_table or ""),
+                        stream=str(stream or ""),
+                        chunk_idx=int(chunk_idx),
+                    ):
+                        bundle = apply_eos_bundle(
+                            dest_type=dest_type,
+                            dest_cfg=dest_cfg,
+                            streams=list(pending_eos_bundle),
+                            incoming_lsn=incoming,
+                            bundle_key=shared_key,
+                            writer_fence=int(
+                                getattr(
+                                    getattr(cdc, "_lease", None), "generation", 0
+                                )
+                                or 0
+                            ),
+                        )
+                    pending_eos_bundle.clear()
+                    rows_written = bundle.rows_written
+                    deleted = bundle.deleted
+                    dest_summary = bundle.to_dest_summary()
+                chunk_idx += 1
+        else:
+            with _cdc_span(
+                "cdc.apply_batch",
                 job_id=str(job_id or ""),
-                census_acc=shared_accum.acc_for(str(dest_table or stream or "")),
-            )
-        chunk_idx += 1
+                dest_table=str(dest_table or ""),
+                stream=str(stream or ""),
+                chunk_idx=int(chunk_idx),
+            ):
+                rows_written, _checksum, dest_summary, deleted = _apply_change_batch(
+                    dest_type,
+                    destination,
+                    dest_cfg,
+                    dest_table,
+                    change,
+                    use_maps,
+                    col_types,
+                    headers,
+                    pk_target,
+                    chunk_idx,
+                    max(1, chunk_idx + 1),
+                    backfill_new_fields=backfill_new_fields,
+                    job_id=str(job_id or ""),
+                    census_acc=shared_accum.acc_for(str(dest_table or stream or "")),
+                )
+            chunk_idx += 1
         total_rows += rows_written + deleted
         stream_health[stream]["records_processed"] = (
             int(stream_health[stream].get("records_processed") or 0) + rows_written + deleted
@@ -1515,7 +1586,7 @@ def _run_cdc_shared_multi_table(
                     "watermark": shared_wm,
                     "rows_written": total_rows,
                     "streams": list(stream_health.values()),
-                    "cdc_delivery": "at-least-once",
+                    "cdc_delivery": "exactly_once" if eos_active else "at-least-once",
                     "cdc_shared_reader": True,
                     "rejected_details": list(
                         (last_summary or {}).get("rejected_details") or []
@@ -1596,7 +1667,17 @@ def _run_cdc_shared_multi_table(
         "watermark": get_watermark(shared_key),
         **lag_fields,
     }
-    last_summary["cdc_delivery"] = "at-least-once"
+    if eos_active:
+        last_summary["cdc_delivery"] = "exactly_once"
+        last_summary["delivery_semantics"] = "exactly_once_dest_owned_watermark_txn"
+        last_summary["exactly_once_algorithm"] = "dest_owned_watermark_txn"
+        last_summary["exactly_once_protocol"] = PROTOCOL
+        last_summary["exactly_once_active"] = True
+        last_summary["exactly_once_claimed_platform"] = False
+        last_summary["eos_dest_authoritative"] = True
+        last_summary["eos_bundle"] = True
+    else:
+        last_summary["cdc_delivery"] = "at-least-once"
     last_summary["cdc_shared_reader"] = True
     last_summary["snapshot_mode"] = snapshot_mode.value
     stamp = snapshot_plan_stamp(snapshot_plan)
@@ -1817,6 +1898,7 @@ def _run_cdc_single_stream(
     from services.cdc_exactly_once import (
         DELIVERY_SEMANTICS_ALO,
         DELIVERY_SEMANTICS_EOS,
+        PROTOCOL,
         assert_requested_cdc_delivery,
         dest_allow_append_only,
     )
@@ -2466,7 +2548,7 @@ def _run_cdc_single_stream(
         summary["cdc_delivery"] = "exactly_once"
         summary["delivery_semantics"] = DELIVERY_SEMANTICS_EOS
         summary["exactly_once_algorithm"] = "dest_owned_watermark_txn"
-        summary["exactly_once_protocol"] = "dest_authoritative_fenced_reduce"
+        summary["exactly_once_protocol"] = PROTOCOL
         summary["exactly_once_active"] = True
         summary["exactly_once_claimed_platform"] = False
         summary["eos_dest_authoritative"] = True

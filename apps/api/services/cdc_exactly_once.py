@@ -20,8 +20,16 @@ commit-on-restore, plus Debezium-class snapshot/stream LSN compare:
 4. Reduce: last op per PK in the batch wins (Estuary load-reduce-store).
 5. Drop events with LSN ``<=`` dest-committed watermark.
 6. Apply upserts/deletes with ``_df_lsn`` guards on the same connection.
-7. UPSERT ``_df_cdc_eos_watermarks`` (LSN + fence + epoch) in the same txn.
-8. COMMIT dest. Persist job watermark and ack the source **after**.
+7. UPSERT ``_df_cdc_eos_watermarks`` (LSN + fence + epoch + phase +
+   apply checksum) in the same txn.
+8. Shared-log multi-stream: N tables + one LSN in **one** dest BEGIN/COMMIT
+   (Estuary multi-binding). Crash before COMMIT rolls back every stream;
+   source is acked once after dest commit.
+9. Snapshot→stream handoff is dest-owned: same LSN, dest phase=snapshot,
+   incoming=streaming → phase-only update, no double-write.
+10. Redelivery checksum: same LSN + different payload is refused
+    (not a silent overwrite). Handoff skips this check.
+11. COMMIT dest. Persist job watermark and ack the source **after**.
 
 Crash before dest COMMIT → dest rolls back; source not acked; retry.
 Crash after dest COMMIT → dest watermark wins; redelivery is a no-op.
@@ -101,8 +109,9 @@ REASON_NO_LSN = "exactly_once_requires_durable_lsn"
 REASON_CALLABLE = "exactly_once_refuses_callable_source"
 REASON_AT_MOST = "at_most_once_not_offered"
 REASON_STALE_FENCE = "exactly_once_stale_writer_fence"
+REASON_CHECKSUM = "exactly_once_checksum_mismatch"
 REASON_OK = "dest_owned_watermark_txn"
-PROTOCOL = "dest_authoritative_fenced_reduce"
+PROTOCOL = "dest_authoritative_fenced_bundle"
 
 
 class ExactlyOnceRouteError(ValueError):
@@ -157,7 +166,7 @@ class EosWatermark:
 
 @dataclass
 class EosApplyResult:
-    status: str  # applied | already_committed | empty
+    status: str  # applied | already_committed | empty | handoff_phase
     rows_written: int = 0
     deleted: int = 0
     committed_lsn: str | None = None
@@ -168,6 +177,8 @@ class EosApplyResult:
     fence_epoch: int = 0
     dest_authoritative: bool = True
     protocol: str = PROTOCOL
+    phase: str = "streaming"
+    apply_checksum: str = ""
 
     def to_dest_summary(self) -> dict[str, Any]:
         return {
@@ -185,8 +196,43 @@ class EosApplyResult:
             "eos_epoch": self.epoch,
             "eos_fence_epoch": self.fence_epoch,
             "eos_dest_authoritative": self.dest_authoritative,
+            "eos_phase": self.phase,
+            "eos_apply_checksum": self.apply_checksum,
             "rows_written": self.rows_written,
         }
+
+
+@dataclass
+class EosBundleResult:
+    """N streams committed in one dest transaction (shared-log bundle)."""
+
+    members: list[EosApplyResult] = field(default_factory=list)
+    committed_lsn: str | None = None
+    already_committed: bool = False
+    rows_written: int = 0
+    deleted: int = 0
+    fence_epoch: int = 0
+    protocol: str = PROTOCOL
+    dest_authoritative: bool = True
+    bundle_key: str = ""
+
+    def to_dest_summary(self) -> dict[str, Any]:
+        first = self.members[0] if self.members else None
+        blob = (first.to_dest_summary() if first else EosApplyResult(status="empty").to_dest_summary())
+        blob.update(
+            {
+                "eos_bundle": True,
+                "eos_bundle_streams": len(self.members),
+                "eos_committed_lsn": self.committed_lsn,
+                "eos_already_committed": self.already_committed,
+                "eos_fence_epoch": self.fence_epoch,
+                "eos_dest_authoritative": self.dest_authoritative,
+                "exactly_once_protocol": self.protocol,
+                "rows_written": self.rows_written,
+                "eos_bundle_key": self.bundle_key,
+            }
+        )
+        return blob
 
 
 def normalize_delivery_guarantee(requested: str | None) -> str:
@@ -338,6 +384,100 @@ def combine_change_batch(change: Any, *, pk_cols: list[str]) -> Any:
     )
 
 
+def extract_cdc_phase(resume_token: Any) -> str:
+    """Snapshot vs streaming phase — Debezium handoff token, dest-owned."""
+    if isinstance(resume_token, dict):
+        nested = resume_token.get("token")
+        if isinstance(nested, (dict, str)) and nested:
+            phase = extract_cdc_phase(nested)
+            if phase:
+                return phase
+        raw = str(resume_token.get("phase") or "").strip().lower()
+        if raw in {"snapshot", "streaming"}:
+            return raw
+        return "streaming"
+    text = str(resume_token or "").lower()
+    if "phase=snapshot" in text:
+        return "snapshot"
+    if "phase=streaming" in text:
+        return "streaming"
+    return "streaming"
+
+
+def next_handoff_phase(incoming_phase: str, dest_phase: str | None) -> str:
+    incoming = (incoming_phase or "streaming").strip().lower()
+    dest = (dest_phase or "").strip().lower()
+    if incoming == "streaming" or dest == "streaming":
+        return "streaming"
+    return "snapshot"
+
+
+def batch_apply_checksum(
+    change: Any,
+    *,
+    incoming_lsn: str,
+    pk_cols: list[str],
+) -> str:
+    """Dest-owned payload identity for this LSN — redelivery must match."""
+    import hashlib
+    import json
+
+    from services.cdc_snapshot_window import _pk_value
+
+    combined = combine_change_batch(change, pk_cols=pk_cols)
+    updates = []
+    for rec in list(combined.inserts or []) + list(combined.updates or []):
+        if not isinstance(rec, dict):
+            continue
+        updates.append(
+            {
+                "pk": _pk_value(rec, pk_cols) or "",
+                "cols": {str(k): rec.get(k) for k in sorted(rec)},
+            }
+        )
+    updates.sort(key=lambda row: str(row.get("pk") or ""))
+    payload = {
+        "lsn": incoming_lsn,
+        "updates": updates,
+        "deletes": sorted(str(k) for k in list(combined.deletes or [])),
+    }
+    raw = json.dumps(payload, sort_keys=True, default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def assert_redelivery_checksum(incoming: str, dest: str | None) -> None:
+    if not dest or not incoming:
+        return
+    if dest != incoming:
+        raise ExactlyOnceRouteError(
+            "exactly_once redelivery checksum mismatch — dest already committed "
+            "this LSN with a different payload. Refuse silent overwrite.",
+            reason=REASON_CHECKSUM,
+        )
+
+
+@dataclass
+class EosBundleStream:
+    """One stream inside a shared-log dest transaction (Estuary multi-binding)."""
+
+    dest_table: str
+    change: Any
+    mappings: list[dict[str, Any]]
+    column_types: dict[str, str]
+    pk_target_cols: list[str]
+    stream_key: str
+    headers: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DestWmView:
+    committed_lsn: str | None = None
+    epoch: int = 0
+    fence_epoch: int = 0
+    phase: str = ""
+    apply_checksum: str = ""
+
+
 def decide_eos_apply(
     *,
     incoming_lsn: str,
@@ -345,14 +485,50 @@ def decide_eos_apply(
     incoming_fence: int = 0,
     dest_fence: int = 0,
     dest_epoch: int = 0,
+    incoming_phase: str = "",
+    dest_phase: str = "",
+    incoming_checksum: str = "",
+    dest_checksum: str = "",
 ) -> tuple[str, int]:
-    """Return ``(action, next_fence)`` — apply | already_committed."""
+    """Return ``(action, next_fence)`` — apply | already_committed | handoff_phase.
+
+    Handoff (snapshot→streaming at the same LSN) must not checksum-compare
+    snapshot rows against an empty/stream batch — that is the Debezium
+    handoff window, not a conflicting redelivery.
+    """
     assert_writer_fence(incoming_fence, dest_fence)
     fence = next_dest_fence(incoming_fence, dest_fence)
     if already_committed(incoming_lsn, dest_lsn):
+        if (
+            (incoming_phase or "streaming") == "streaming"
+            and (dest_phase or "") == "snapshot"
+        ):
+            return "handoff_phase", fence
+        assert_redelivery_checksum(incoming_checksum, dest_checksum or None)
         return "already_committed", fence
     _ = dest_epoch
     return "apply", fence
+
+
+def decide_from_view(
+    *,
+    incoming_lsn: str,
+    dest: DestWmView,
+    incoming_fence: int = 0,
+    incoming_phase: str = "",
+    incoming_checksum: str = "",
+) -> tuple[str, int]:
+    return decide_eos_apply(
+        incoming_lsn=incoming_lsn,
+        dest_lsn=dest.committed_lsn,
+        incoming_fence=incoming_fence,
+        dest_fence=dest.fence_epoch,
+        dest_epoch=dest.epoch,
+        incoming_phase=incoming_phase,
+        dest_phase=dest.phase,
+        incoming_checksum=incoming_checksum,
+        dest_checksum=dest.apply_checksum,
+    )
 
 
 def classify_exactly_once_route(
@@ -386,6 +562,9 @@ def classify_exactly_once_route(
         "Dest watermark is SSOT on resume (job cursor cannot invent ahead).",
         "Writer fence (lease generation) is persisted in the dest txn.",
         "Batch is reduced last-op-per-PK before apply.",
+        "Shared-log multi-stream applies N tables in one dest transaction.",
+        "Snapshot→stream handoff is dest-owned (same LSN does not double-write).",
+        "Redelivery checksum must match the dest-committed payload.",
         "Platform never claims all CDC is exactly-once.",
         "At-most-once is not offered (silent loss).",
     ]

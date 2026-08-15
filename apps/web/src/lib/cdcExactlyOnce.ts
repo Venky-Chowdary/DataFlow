@@ -87,10 +87,14 @@ export function cdcDeliveryResultCopy(input: {
   exactlyOnceActive?: boolean;
   destLsn?: string | null;
   fenceEpoch?: number | null;
+  protocol?: string | null;
 }): string {
   const delivery = namedCdcDeliveryGuarantee(input.cdcDelivery);
   if (input.exactlyOnceActive || delivery === CDC_DELIVERY_EXACTLY_ONCE) {
     const parts = ["exactly_once dest-owned watermark · dest authoritative · not platform-wide"];
+    if (input.protocol === "dest_authoritative_fenced_bundle") {
+      parts.push("shared-log bundle");
+    }
     if (input.destLsn) parts.push(`dest LSN ${input.destLsn}`);
     if (input.fenceEpoch) parts.push(`fence ${input.fenceEpoch}`);
     return parts.join(" · ");

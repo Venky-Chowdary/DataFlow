@@ -82,5 +82,14 @@ describe("cdcExactlyOnce", () => {
       cdcDeliveryResultCopy({ cdcDelivery: "exactly_once", exactlyOnceActive: true }),
       "exactly_once dest-owned watermark · dest authoritative · not platform-wide",
     );
+    assert.equal(
+      cdcDeliveryResultCopy({
+        cdcDelivery: "exactly_once",
+        exactlyOnceActive: true,
+        protocol: "dest_authoritative_fenced_bundle",
+        destLsn: "0/20",
+      }),
+      "exactly_once dest-owned watermark · dest authoritative · not platform-wide · shared-log bundle · dest LSN 0/20",
+    );
   });
 });

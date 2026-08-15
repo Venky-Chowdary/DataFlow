@@ -531,6 +531,7 @@ export function TransferResultDashboard({
               ),
               destLsn: (result as { eos_committed_lsn?: string }).eos_committed_lsn,
               fenceEpoch: (result as { eos_fence_epoch?: number }).eos_fence_epoch,
+              protocol: (result as { exactly_once_protocol?: string }).exactly_once_protocol,
             })}</span>
           </header>
           <dl>

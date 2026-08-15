@@ -17,11 +17,17 @@ from connectors.sql_identifiers import quote_sql_identifier, require_safe_identi
 from services.cdc_exactly_once import (
     ALGORITHM,
     WATERMARK_TABLE,
+    DestWmView,
     EosApplyResult,
+    EosBundleResult,
+    EosBundleStream,
     ExactlyOnceRouteError,
+    batch_apply_checksum,
     combine_change_batch,
-    decide_eos_apply,
+    decide_from_view,
     eos_stream_key,
+    extract_cdc_phase,
+    next_handoff_phase,
     require_batch_lsn,
 )
 from services.cdc_engine import ChangeBatch
@@ -36,7 +42,8 @@ CREATE TABLE IF NOT EXISTS {WATERMARK_TABLE} (
   epoch INTEGER NOT NULL DEFAULT 1,
   fence_epoch INTEGER NOT NULL DEFAULT 0,
   prev_lsn TEXT,
-  phase TEXT
+  phase TEXT,
+  apply_checksum TEXT
 )
 """
 
@@ -44,6 +51,7 @@ _WM_ALTERS = (
     "ALTER TABLE {table} ADD COLUMN fence_epoch INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE {table} ADD COLUMN prev_lsn TEXT",
     "ALTER TABLE {table} ADD COLUMN phase TEXT",
+    "ALTER TABLE {table} ADD COLUMN apply_checksum TEXT",
 )
 
 
@@ -106,11 +114,11 @@ def _ensure_wm_table(cur: sqlite3.Cursor) -> None:
             pass
 
 
-def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> tuple[str | None, int, int]:
+def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> DestWmView:
     try:
         cur.execute(
-            f"SELECT committed_lsn, epoch, fence_epoch FROM {WATERMARK_TABLE} "
-            "WHERE stream_key = ?",
+            f"SELECT committed_lsn, epoch, fence_epoch, phase, apply_checksum "
+            f"FROM {WATERMARK_TABLE} WHERE stream_key = ?",
             (stream_key,),
         )
     except Exception:
@@ -120,9 +128,14 @@ def _read_watermark(cur: sqlite3.Cursor, stream_key: str) -> tuple[str | None, i
         )
     row = cur.fetchone()
     if not row:
-        return None, 0, 0
-    fence = int(row[2] or 0) if len(row) > 2 else 0
-    return str(row[0] or "") or None, int(row[1] or 0), fence
+        return DestWmView()
+    return DestWmView(
+        committed_lsn=str(row[0] or "") or None,
+        epoch=int(row[1] or 0),
+        fence_epoch=int(row[2] or 0) if len(row) > 2 else 0,
+        phase=str(row[3] or "") if len(row) > 3 else "",
+        apply_checksum=str(row[4] or "") if len(row) > 4 else "",
+    )
 
 
 def _write_watermark(
@@ -136,14 +149,15 @@ def _write_watermark(
     fence_epoch: int = 0,
     prev_lsn: str | None = None,
     phase: str = "streaming",
+    apply_checksum: str = "",
 ) -> None:
     now = datetime.now(timezone.utc).isoformat()
     cur.execute(
         f"""
         INSERT INTO {WATERMARK_TABLE}
           (stream_key, committed_lsn, batch_id, committed_at, dest_object, epoch,
-           fence_epoch, prev_lsn, phase)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           fence_epoch, prev_lsn, phase, apply_checksum)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(stream_key) DO UPDATE SET
           committed_lsn = excluded.committed_lsn,
           batch_id = excluded.batch_id,
@@ -152,9 +166,21 @@ def _write_watermark(
           epoch = excluded.epoch,
           fence_epoch = excluded.fence_epoch,
           prev_lsn = excluded.prev_lsn,
-          phase = excluded.phase
+          phase = excluded.phase,
+          apply_checksum = excluded.apply_checksum
         """,
-        (stream_key, lsn, batch_id, now, dest_object, epoch, fence_epoch, prev_lsn, phase),
+        (
+            stream_key,
+            lsn,
+            batch_id,
+            now,
+            dest_object,
+            epoch,
+            fence_epoch,
+            prev_lsn,
+            phase,
+            apply_checksum,
+        ),
     )
 
 
@@ -191,6 +217,181 @@ def _delete_on_cursor(
         cur.execute(f"DELETE FROM {table_q} WHERE {where}", binds)  # nosec B608
         deleted += int(cur.rowcount or 0)
     return deleted
+
+
+def _prepare_sqlite_targets(
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+    pk_target_cols: list[str],
+) -> tuple[list[dict[str, Any]], dict[str, str], list[str], dict[str, str]]:
+    from connectors.writer_common import resolve_target_columns
+
+    mappings = list(mappings)
+    column_types = dict(column_types)
+    if not any(m.get("source") == DF_LSN_COL for m in mappings):
+        mappings.append(
+            {"source": DF_LSN_COL, "target": DF_LSN_COL, "confidence": 1.0}
+        )
+    column_types.setdefault(DF_LSN_COL, "string")
+    target_cols, _logical = resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        table_exists=None,
+        dest_db="sqlite",
+    )
+    if DF_LSN_COL not in target_cols:
+        target_cols = list(target_cols) + [DF_LSN_COL]
+    if not pk_target_cols:
+        raise ExactlyOnceRouteError(
+            "exactly_once SQLite apply requires destination primary-key columns.",
+            reason="exactly_once_requires_primary_key",
+        )
+    src_to_tgt = {
+        str(m.get("source") or ""): str(m.get("target") or m.get("source") or "")
+        for m in mappings
+        if m.get("source")
+    }
+    tgt_to_src = {t: s for s, t in src_to_tgt.items() if t}
+    return mappings, column_types, target_cols, tgt_to_src
+
+
+def _sqlite_apply_member(
+    cur: sqlite3.Cursor,
+    *,
+    dest_table: str,
+    change: ChangeBatch,
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+    pk_target_cols: list[str],
+    stream_key: str,
+    incoming_lsn: str,
+    batch_id: str,
+    writer_fence: int = 0,
+    crash_after: str | None = None,
+) -> EosApplyResult:
+    """Apply one stream on an open dest cursor — no BEGIN/COMMIT (bundle-safe)."""
+    from connectors.sqlite_writer import _sqlite_upsert_batch
+
+    mappings, column_types, target_cols, tgt_to_src = _prepare_sqlite_targets(
+        mappings, column_types, pk_target_cols
+    )
+    change = combine_change_batch(change, pk_cols=pk_target_cols)
+    incoming_phase = extract_cdc_phase(change.resume_token)
+    incoming_checksum = batch_apply_checksum(
+        change, incoming_lsn=incoming_lsn, pk_cols=pk_target_cols
+    )
+    _ensure_wm_table(cur)
+    _ensure_dest_table(cur, dest_table, target_cols, pk_target_cols)
+    dest = _read_watermark(cur, stream_key)
+    action, fence = decide_from_view(
+        incoming_lsn=incoming_lsn,
+        dest=dest,
+        incoming_fence=writer_fence,
+        incoming_phase=incoming_phase,
+        incoming_checksum=incoming_checksum,
+    )
+    phase = next_handoff_phase(incoming_phase, dest.phase or None)
+    if action == "already_committed":
+        return EosApplyResult(
+            status="already_committed",
+            committed_lsn=dest.committed_lsn,
+            batch_id=batch_id,
+            epoch=dest.epoch,
+            already_committed=True,
+            fence_epoch=fence,
+            phase=dest.phase or "streaming",
+            apply_checksum=dest.apply_checksum,
+        )
+    if action == "handoff_phase":
+        new_epoch = dest.epoch + 1
+        _write_watermark(
+            cur,
+            stream_key=stream_key,
+            lsn=dest.committed_lsn or incoming_lsn,
+            batch_id=batch_id,
+            dest_object=dest_table,
+            epoch=new_epoch,
+            fence_epoch=fence,
+            prev_lsn=dest.committed_lsn,
+            phase="streaming",
+            apply_checksum=incoming_checksum or dest.apply_checksum,
+        )
+        return EosApplyResult(
+            status="handoff_phase",
+            committed_lsn=dest.committed_lsn or incoming_lsn,
+            batch_id=batch_id,
+            epoch=new_epoch,
+            already_committed=True,
+            fence_epoch=fence,
+            phase="streaming",
+            apply_checksum=incoming_checksum or dest.apply_checksum,
+        )
+
+    rows_written = 0
+    records = list(change.inserts or []) + list(change.updates or [])
+    if records:
+        tuples: list[tuple[Any, ...]] = []
+        for rec in records:
+            stamped = dict(rec)
+            stamped[DF_LSN_COL] = incoming_lsn
+            values: list[Any] = []
+            for tgt in target_cols:
+                src = tgt_to_src.get(tgt, tgt)
+                if tgt in stamped:
+                    values.append(stamped.get(tgt))
+                else:
+                    values.append(stamped.get(src))
+            tuples.append(tuple(values))
+        written, _skipped = _sqlite_upsert_batch(
+            cur,
+            dest_table,
+            target_cols,
+            tuples,
+            pk_target_cols,
+            schema=None,
+        )
+        rows_written += int(written or 0)
+
+    deleted = 0
+    if change.deletes:
+        deleted = _delete_on_cursor(
+            cur, dest_table, pk_target_cols, list(change.deletes), incoming_lsn
+        )
+
+    if crash_after == "after_apply_before_watermark":
+        from services.cdc_exactly_once import EosCrash
+
+        raise EosCrash(crash_after)
+
+    new_epoch = dest.epoch + 1
+    _write_watermark(
+        cur,
+        stream_key=stream_key,
+        lsn=incoming_lsn,
+        batch_id=batch_id,
+        dest_object=dest_table,
+        epoch=new_epoch,
+        fence_epoch=fence,
+        prev_lsn=dest.committed_lsn,
+        phase=phase,
+        apply_checksum=incoming_checksum,
+    )
+    if crash_after == "after_watermark_before_commit":
+        from services.cdc_exactly_once import EosCrash
+
+        raise EosCrash(crash_after)
+    return EosApplyResult(
+        status="applied" if (rows_written or deleted or records) else "empty",
+        rows_written=rows_written,
+        deleted=deleted,
+        committed_lsn=incoming_lsn,
+        batch_id=batch_id,
+        epoch=new_epoch,
+        fence_epoch=fence,
+        phase=phase,
+        apply_checksum=incoming_checksum,
+    )
 
 
 def apply_change_batch_exactly_once(
@@ -302,130 +503,28 @@ def _apply_eos_sqlite(
     crash_after: str | None = None,
     writer_fence: int = 0,
 ) -> EosApplyResult:
-    from connectors.sqlite_writer import _sqlite_upsert_batch
-    from connectors.writer_common import resolve_target_columns
-
-    mappings = list(mappings)
-    column_types = dict(column_types)
-    if not any(m.get("source") == DF_LSN_COL for m in mappings):
-        mappings.append(
-            {"source": DF_LSN_COL, "target": DF_LSN_COL, "confidence": 1.0}
-        )
-    column_types.setdefault(DF_LSN_COL, "string")
-    target_cols, _logical = resolve_target_columns(
-        mappings,
-        column_types,
-        preserve_case=True,
-        table_exists=None,
-        dest_db="sqlite",
-    )
-    if DF_LSN_COL not in target_cols:
-        target_cols = list(target_cols) + [DF_LSN_COL]
-    if not pk_target_cols:
-        raise ExactlyOnceRouteError(
-            "exactly_once SQLite apply requires destination primary-key columns.",
-            reason="exactly_once_requires_primary_key",
-        )
     _ = headers  # caller headers; dest columns come from mappings
-
     path = _sqlite_path(dest_cfg)
     conn = sqlite3.connect(path, timeout=30, isolation_level=None)
     try:
         cur = conn.cursor()
         cur.execute("BEGIN IMMEDIATE")
         try:
-            _ensure_wm_table(cur)
-            _ensure_dest_table(cur, dest_table, target_cols, pk_target_cols)
-            dest_lsn, epoch, dest_fence = _read_watermark(cur, stream_key)
-            action, fence = decide_eos_apply(
-                incoming_lsn=incoming_lsn,
-                dest_lsn=dest_lsn,
-                incoming_fence=writer_fence,
-                dest_fence=dest_fence,
-                dest_epoch=epoch,
-            )
-            if action == "already_committed":
-                conn.execute("COMMIT")
-                return EosApplyResult(
-                    status="already_committed",
-                    committed_lsn=dest_lsn,
-                    batch_id=batch_id,
-                    epoch=epoch,
-                    already_committed=True,
-                    fence_epoch=fence,
-                )
-
-            rows_written = 0
-            records = list(change.inserts or []) + list(change.updates or [])
-            if records:
-                src_to_tgt = {
-                    str(m.get("source") or ""): str(
-                        m.get("target") or m.get("source") or ""
-                    )
-                    for m in mappings
-                    if m.get("source")
-                }
-                tgt_to_src = {t: s for s, t in src_to_tgt.items() if t}
-                tuples: list[tuple[Any, ...]] = []
-                for rec in records:
-                    stamped = dict(rec)
-                    stamped[DF_LSN_COL] = incoming_lsn
-                    values: list[Any] = []
-                    for tgt in target_cols:
-                        src = tgt_to_src.get(tgt, tgt)
-                        if tgt in stamped:
-                            values.append(stamped.get(tgt))
-                        else:
-                            values.append(stamped.get(src))
-                    tuples.append(tuple(values))
-                written, _skipped = _sqlite_upsert_batch(
-                    cur,
-                    dest_table,
-                    target_cols,
-                    tuples,
-                    pk_target_cols,
-                    schema=None,
-                )
-                rows_written += int(written or 0)
-
-            deleted = 0
-            if change.deletes:
-                deleted = _delete_on_cursor(
-                    cur, dest_table, pk_target_cols, list(change.deletes), incoming_lsn
-                )
-
-            if crash_after == "after_apply_before_watermark":
-                conn.execute("ROLLBACK")
-                from services.cdc_exactly_once import EosCrash
-
-                raise EosCrash(crash_after)
-
-            new_epoch = epoch + 1
-            _write_watermark(
+            result = _sqlite_apply_member(
                 cur,
+                dest_table=dest_table,
+                change=change,
+                mappings=mappings,
+                column_types=column_types,
+                pk_target_cols=pk_target_cols,
                 stream_key=stream_key,
-                lsn=incoming_lsn,
+                incoming_lsn=incoming_lsn,
                 batch_id=batch_id,
-                dest_object=dest_table,
-                epoch=new_epoch,
-                fence_epoch=fence,
-                prev_lsn=dest_lsn,
+                writer_fence=writer_fence,
+                crash_after=crash_after,
             )
-            if crash_after == "after_watermark_before_commit":
-                conn.execute("ROLLBACK")
-                from services.cdc_exactly_once import EosCrash
-
-                raise EosCrash(crash_after)
             conn.execute("COMMIT")
-            return EosApplyResult(
-                status="applied" if (rows_written or deleted or records) else "empty",
-                rows_written=rows_written,
-                deleted=deleted,
-                committed_lsn=incoming_lsn,
-                batch_id=batch_id,
-                epoch=new_epoch,
-                fence_epoch=fence,
-            )
+            return result
         except Exception:
             try:
                 conn.execute("ROLLBACK")
@@ -434,6 +533,119 @@ def _apply_eos_sqlite(
             raise
     finally:
         conn.close()
+
+
+def apply_eos_bundle(
+    *,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    streams: list[EosBundleStream],
+    incoming_lsn: str = "",
+    bundle_key: str = "",
+    writer_fence: int = 0,
+    crash_after: str | None = None,
+) -> EosBundleResult:
+    """N streams + one shared LSN in one dest transaction.
+
+    Crash before COMMIT rolls back every member. Source ack happens after.
+    """
+    dest = (dest_type or "").strip().lower().replace("-", "_")
+    if dest != "sqlite":
+        from connectors.cdc_eos_sa import apply_eos_sa_bundle
+
+        return apply_eos_sa_bundle(
+            dest_type=dest,
+            dest_cfg=dest_cfg,
+            streams=streams,
+            incoming_lsn=incoming_lsn,
+            bundle_key=bundle_key,
+            writer_fence=writer_fence,
+            crash_after=crash_after,
+        )
+    if not incoming_lsn:
+        if streams:
+            incoming_lsn = require_batch_lsn(streams[0].change.resume_token)
+        else:
+            incoming_lsn = ""
+    if not streams and not (bundle_key and incoming_lsn):
+        return EosBundleResult(committed_lsn=incoming_lsn or None)
+    path = _sqlite_path(dest_cfg)
+    conn = sqlite3.connect(path, timeout=30, isolation_level=None)
+    members: list[EosApplyResult] = []
+    try:
+        cur = conn.cursor()
+        cur.execute("BEGIN IMMEDIATE")
+        try:
+            _ensure_wm_table(cur)
+            ordered = sorted(streams, key=lambda s: s.stream_key)
+            for stream in ordered:
+                member_lsn = incoming_lsn
+                try:
+                    member_lsn = require_batch_lsn(stream.change.resume_token)
+                except ExactlyOnceRouteError:
+                    if not incoming_lsn:
+                        raise
+                members.append(
+                    _sqlite_apply_member(
+                        cur,
+                        dest_table=stream.dest_table,
+                        change=stream.change,
+                        mappings=stream.mappings,
+                        column_types=stream.column_types,
+                        pk_target_cols=stream.pk_target_cols,
+                        stream_key=stream.stream_key,
+                        incoming_lsn=member_lsn,
+                        batch_id=f"eos-b-{uuid.uuid4().hex[:12]}",
+                        writer_fence=writer_fence,
+                    )
+                )
+            if bundle_key and incoming_lsn:
+                dest_wm = _read_watermark(cur, bundle_key)
+                action, fence = decide_from_view(
+                    incoming_lsn=incoming_lsn,
+                    dest=dest_wm,
+                    incoming_fence=writer_fence,
+                )
+                if action != "already_committed":
+                    _write_watermark(
+                        cur,
+                        stream_key=bundle_key,
+                        lsn=incoming_lsn,
+                        batch_id=f"eos-bundle-{uuid.uuid4().hex[:10]}",
+                        dest_object="*",
+                        epoch=dest_wm.epoch + 1,
+                        fence_epoch=fence,
+                        prev_lsn=dest_wm.committed_lsn,
+                        phase="streaming",
+                    )
+            if crash_after in {
+                "after_apply_before_watermark",
+                "after_watermark_before_commit",
+            }:
+                from services.cdc_exactly_once import EosCrash
+
+                raise EosCrash(crash_after)
+            conn.execute("COMMIT")
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+    finally:
+        conn.close()
+    rows = sum(m.rows_written for m in members)
+    deleted = sum(m.deleted for m in members)
+    fence = max((m.fence_epoch for m in members), default=writer_fence)
+    return EosBundleResult(
+        members=members,
+        committed_lsn=incoming_lsn or None,
+        already_committed=bool(members) and all(m.already_committed for m in members),
+        rows_written=rows,
+        deleted=deleted,
+        fence_epoch=fence,
+        bundle_key=bundle_key,
+    )
 
 
 def dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str) -> str | None:
@@ -448,8 +660,24 @@ def dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str) -> str | None:
         )
         if cur.fetchone() is None:
             return None
-        lsn, _epoch, _fence = _read_watermark(cur, stream_key)
-        return lsn
+        return _read_watermark(cur, stream_key).committed_lsn
+    finally:
+        conn.close()
+
+
+def dest_watermark_view(dest_cfg: dict[str, Any], stream_key: str) -> DestWmView:
+    """Read dest-owned watermark fields (phase / checksum proofs)."""
+    path = _sqlite_path(dest_cfg)
+    conn = sqlite3.connect(path, timeout=8)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (WATERMARK_TABLE,),
+        )
+        if cur.fetchone() is None:
+            return DestWmView()
+        return _read_watermark(cur, stream_key)
     finally:
         conn.close()
 

@@ -469,7 +469,7 @@ export function DestinationAdvancedDrawer({
             >
               <option value="at_least_once">at_least_once — default upsert (PK + _df_lsn)</option>
               <option value="exactly_once">
-                exactly_once — dest-owned watermark transaction (opt-in)
+                exactly_once — dest-owned watermark + shared-log bundle (opt-in)
               </option>
             </select>
             <small className="df2-label-hint">

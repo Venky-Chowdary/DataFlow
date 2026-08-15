@@ -19,19 +19,24 @@ if str(_API_ROOT) not in sys.path:
 
 from connectors.cdc_eos_sql import (  # noqa: E402
     apply_change_batch_exactly_once,
+    apply_eos_bundle,
     dest_engine_count,
     dest_watermark_lsn,
+    dest_watermark_view,
 )
 from connectors.lsn_guards import DF_LSN_COL  # noqa: E402
 from services.cdc_engine import ChangeBatch  # noqa: E402
 from services.cdc_exactly_once import (  # noqa: E402
     ALGORITHM,
     PLATFORM_EXACTLY_ONCE_CLAIMED,
+    PROTOCOL,
     WATERMARK_TABLE,
     REASON_APPEND,
+    REASON_CHECKSUM,
     REASON_DEST_NOT_TXN,
     REASON_NOT_CDC,
     REASON_OK,
+    EosBundleStream,
     EosCrash,
     ExactlyOnceRouteError,
     REASON_STALE_FENCE,
@@ -43,6 +48,7 @@ from services.cdc_exactly_once import (  # noqa: E402
     chaos_crash_after_commit_redelivery,
     chaos_crash_before_commit_then_retry,
     classify_exactly_once_route,
+    decide_eos_apply,
     eos_stream_key,
 )
 from services.execution_engine_contract import (  # noqa: E402
@@ -179,6 +185,34 @@ def test_stale_writer_fence_refuses_zombie() -> None:
     assert exc.value.reason == REASON_STALE_FENCE
 
 
+def test_decide_handoff_skips_checksum() -> None:
+    action, fence = decide_eos_apply(
+        incoming_lsn="0/10",
+        dest_lsn="0/10",
+        incoming_phase="streaming",
+        dest_phase="snapshot",
+        incoming_checksum="aaa",
+        dest_checksum="bbb",
+        incoming_fence=1,
+        dest_fence=1,
+    )
+    assert action == "handoff_phase"
+    assert fence == 1
+
+
+def test_decide_same_lsn_payload_mismatch_refuses() -> None:
+    with pytest.raises(ExactlyOnceRouteError) as exc:
+        decide_eos_apply(
+            incoming_lsn="0/10",
+            dest_lsn="0/10",
+            incoming_phase="streaming",
+            dest_phase="streaming",
+            incoming_checksum="aaa",
+            dest_checksum="bbb",
+        )
+    assert exc.value.reason == REASON_CHECKSUM
+
+
 def test_combine_batch_last_op_per_pk_wins() -> None:
     combined = combine_change_batch(
         _batch(
@@ -286,7 +320,7 @@ def test_sqlite_eos_apply_and_redelivery_count_once() -> None:
 
         redelivery = _batch(
             "0/100",
-            inserts=[{"id": "1", "v": "dup"}],
+            inserts=[{"id": "1", "v": "first"}],
         )
         rows2, _ck2, summary2, _del2 = apply_change_batch_exactly_once(
             dest_type="sqlite",
@@ -400,7 +434,7 @@ def test_sqlalchemy_sqlite_eos_apply_and_redelivery() -> None:
             dest_type="generic_sql",
             dest_cfg=dest_cfg,
             dest_table="lines",
-            change=_batch("0/300", inserts=[{"id": "2", "v": "dup"}]),
+            change=_batch("0/300", inserts=[{"id": "2", "v": "sa"}]),
             mappings=mappings,
             column_types=types,
             headers=["id", "v"],
@@ -453,6 +487,207 @@ def test_sqlalchemy_eos_crash_before_watermark_then_retry() -> None:
         )
         assert sa_dest_engine_count(dest_cfg, "crash", "generic_sql") == 1
         assert sa_dest_watermark_lsn(dest_cfg, "sa|eos|crash", "generic_sql") == "0/350"
+
+
+def test_sqlite_eos_checksum_mismatch_refuses_overwrite() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_ck.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string"}
+        apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=_batch("0/80", inserts=[{"id": "1", "v": "first"}]),
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="ck|orders",
+        )
+        with pytest.raises(ExactlyOnceRouteError) as exc:
+            apply_change_batch_exactly_once(
+                dest_type="sqlite",
+                dest_cfg=dest_cfg,
+                dest_table="orders",
+                change=_batch("0/80", inserts=[{"id": "1", "v": "other"}]),
+                mappings=mappings,
+                column_types=types,
+                headers=["id", "v"],
+                pk_target_cols=["id"],
+                cursor_key="ck|orders",
+            )
+        assert exc.value.reason == REASON_CHECKSUM
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        conn = sqlite3.connect(path)
+        try:
+            v = conn.execute("SELECT v FROM orders WHERE id = ?", ("1",)).fetchone()[0]
+        finally:
+            conn.close()
+        assert v == "first"
+
+
+def test_sqlite_eos_snapshot_stream_handoff_no_double_write() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_ho.db")
+        dest_cfg = {"database": path}
+        mappings = [
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ]
+        types = {"id": "string", "v": "string"}
+        snap = ChangeBatch(
+            inserts=[{"id": "1", "v": "snap"}],
+            resume_token={"lsn": "0/90", "phase": "snapshot"},
+        )
+        apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=snap,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="ho|orders",
+        )
+        assert dest_watermark_view(dest_cfg, "ho|orders").phase == "snapshot"
+        stream = ChangeBatch(
+            resume_token={"lsn": "0/90", "phase": "streaming"},
+        )
+        rows, _ck, summary, _del = apply_change_batch_exactly_once(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            dest_table="orders",
+            change=stream,
+            mappings=mappings,
+            column_types=types,
+            headers=["id", "v"],
+            pk_target_cols=["id"],
+            cursor_key="ho|orders",
+        )
+        assert summary["eos_status"] == "handoff_phase"
+        assert rows == 0
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        view = dest_watermark_view(dest_cfg, "ho|orders")
+        assert view.phase == "streaming"
+        assert view.committed_lsn == "0/90"
+
+
+def _bundle_stream(table: str, key: str, change: ChangeBatch) -> EosBundleStream:
+    return EosBundleStream(
+        dest_table=table,
+        change=change,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 1.0},
+            {"source": "v", "target": "v", "confidence": 1.0},
+        ],
+        column_types={"id": "string", "v": "string"},
+        pk_target_cols=["id"],
+        stream_key=key,
+        headers=["id", "v"],
+    )
+
+
+def test_sqlite_eos_bundle_crash_rolls_back_both_then_retry() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_bundle.db")
+        dest_cfg = {"database": path}
+        streams = [
+            _bundle_stream(
+                "orders",
+                "b|orders",
+                _batch("0/500", inserts=[{"id": "1", "v": "o"}]),
+            ),
+            _bundle_stream(
+                "users",
+                "b|users",
+                _batch("0/500", inserts=[{"id": "u1", "v": "u"}]),
+            ),
+        ]
+        with pytest.raises(EosCrash):
+            apply_eos_bundle(
+                dest_type="sqlite",
+                dest_cfg=dest_cfg,
+                streams=streams,
+                incoming_lsn="0/500",
+                bundle_key="b|shared",
+                crash_after="after_watermark_before_commit",
+            )
+        assert dest_engine_count(dest_cfg, "orders") == 0
+        assert dest_engine_count(dest_cfg, "users") == 0
+        assert dest_watermark_lsn(dest_cfg, "b|orders") is None
+        assert dest_watermark_lsn(dest_cfg, "b|shared") is None
+        result = apply_eos_bundle(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            streams=streams,
+            incoming_lsn="0/500",
+            bundle_key="b|shared",
+        )
+        assert result.rows_written == 2
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        assert dest_engine_count(dest_cfg, "users") == 1
+        assert dest_watermark_lsn(dest_cfg, "b|orders") == "0/500"
+        assert dest_watermark_lsn(dest_cfg, "b|users") == "0/500"
+        assert dest_watermark_lsn(dest_cfg, "b|shared") == "0/500"
+        again = apply_eos_bundle(
+            dest_type="sqlite",
+            dest_cfg=dest_cfg,
+            streams=streams,
+            incoming_lsn="0/500",
+            bundle_key="b|shared",
+        )
+        assert again.already_committed is True
+        assert again.rows_written == 0
+        assert dest_engine_count(dest_cfg, "orders") == 1
+        assert dest_engine_count(dest_cfg, "users") == 1
+
+
+def test_sqlalchemy_eos_bundle_crash_then_retry() -> None:
+    from connectors.cdc_eos_sa import sa_dest_engine_count, sa_dest_watermark_lsn
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "eos_sa_bundle.db")
+        dest_cfg = {"type": "sqlite", "database": path}
+        streams = [
+            _bundle_stream(
+                "orders",
+                "sa|b|orders",
+                _batch("0/600", inserts=[{"id": "1", "v": "o"}]),
+            ),
+            _bundle_stream(
+                "users",
+                "sa|b|users",
+                _batch("0/600", inserts=[{"id": "u1", "v": "u"}]),
+            ),
+        ]
+        with pytest.raises(EosCrash):
+            apply_eos_bundle(
+                dest_type="generic_sql",
+                dest_cfg=dest_cfg,
+                streams=streams,
+                incoming_lsn="0/600",
+                bundle_key="sa|b|shared",
+                crash_after="after_watermark_before_commit",
+            )
+        assert sa_dest_engine_count(dest_cfg, "orders", "generic_sql") == 0
+        assert sa_dest_watermark_lsn(dest_cfg, "sa|b|orders", "generic_sql") is None
+        result = apply_eos_bundle(
+            dest_type="generic_sql",
+            dest_cfg=dest_cfg,
+            streams=streams,
+            incoming_lsn="0/600",
+            bundle_key="sa|b|shared",
+        )
+        assert result.rows_written == 2
+        assert sa_dest_engine_count(dest_cfg, "orders", "generic_sql") == 1
+        assert sa_dest_engine_count(dest_cfg, "users", "generic_sql") == 1
+        assert sa_dest_watermark_lsn(dest_cfg, "sa|b|shared", "generic_sql") == "0/600"
 
 
 def test_named_matrix_artifact_matches_measured() -> None:
@@ -598,6 +833,7 @@ def test_named_matrix_artifact_matches_measured() -> None:
     payload = {
         "name": "cdc_exactly_once_matrix",
         "algorithm": ALGORITHM,
+        "protocol": PROTOCOL,
         "platform_exactly_once_claimed": PLATFORM_EXACTLY_ONCE_CLAIMED,
         "delivery_default": "at_least_once",
         "measured_floor": 1.0,
@@ -607,6 +843,9 @@ def test_named_matrix_artifact_matches_measured() -> None:
         "cases": results,
         "notes": [
             "100% means this named fixture only — not live warehouse CDC.",
+            "Protocol dest_authoritative_fenced_bundle: dest SSOT + fence + "
+            "last-op-per-PK + shared-log N-table dest txn + snapshot/stream "
+            "handoff + redelivery checksum.",
             "Wired dests: sqlite (native) plus SQLAlchemy dest-txn for "
             "postgresql/mysql/sqlserver/duckdb/generic_sql/oracle/snowflake.",
             "File/Iceberg/Kafka dests stay fail-closed.",
@@ -700,7 +939,7 @@ def test_postgres_eos_apply_and_redelivery_live() -> None:
             dest_type="postgresql",
             dest_cfg=dest_cfg,
             dest_table=table,
-            change=_batch("0/400", inserts=[{"id": "1", "v": "dup"}]),
+            change=_batch("0/400", inserts=[{"id": "1", "v": "pg"}]),
             mappings=mappings,
             column_types=types,
             headers=["id", "v"],

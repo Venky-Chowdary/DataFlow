@@ -16,10 +16,17 @@ from connectors.lsn_guards import DF_LSN_COL
 from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 from services.cdc_exactly_once import (
     WATERMARK_TABLE,
+    DestWmView,
     EosApplyResult,
+    EosBundleResult,
+    EosBundleStream,
     EosCrash,
     ExactlyOnceRouteError,
-    decide_eos_apply,
+    batch_apply_checksum,
+    combine_change_batch,
+    decide_from_view,
+    extract_cdc_phase,
+    next_handoff_phase,
 )
 from services.cdc_effectively_once import should_apply_pk_delete, should_apply_pk_row
 from services.cdc_engine import ChangeBatch
@@ -85,7 +92,8 @@ def _wm_ddl(dialect: str) -> str:
             f"epoch INT NOT NULL DEFAULT 1, "
             f"fence_epoch INT NOT NULL DEFAULT 0, "
             f"prev_lsn NVARCHAR(512) NULL, "
-            f"phase NVARCHAR(32) NULL)"
+            f"phase NVARCHAR(32) NULL, "
+            f"apply_checksum NVARCHAR(64) NULL)"
         )
     if dialect in _MYSQL_LIKE:
         return (
@@ -98,7 +106,8 @@ def _wm_ddl(dialect: str) -> str:
             f"epoch INT NOT NULL DEFAULT 1, "
             f"fence_epoch INT NOT NULL DEFAULT 0, "
             f"prev_lsn VARCHAR(512) NULL, "
-            f"phase VARCHAR(32) NULL)"
+            f"phase VARCHAR(32) NULL, "
+            f"apply_checksum VARCHAR(64) NULL)"
         )
     if dialect in _ORACLE_LIKE:
         return (
@@ -111,7 +120,8 @@ def _wm_ddl(dialect: str) -> str:
             f"epoch NUMBER DEFAULT 1 NOT NULL, "
             f"fence_epoch NUMBER DEFAULT 0 NOT NULL, "
             f"prev_lsn VARCHAR2(512), "
-            f"phase VARCHAR2(32))'; "
+            f"phase VARCHAR2(32), "
+            f"apply_checksum VARCHAR2(64))'; "
             f"EXCEPTION WHEN OTHERS THEN IF SQLCODE != -955 THEN RAISE; END IF; END;"
         )
     return (
@@ -124,95 +134,113 @@ def _wm_ddl(dialect: str) -> str:
         f"epoch INTEGER NOT NULL DEFAULT 1, "
         f"fence_epoch INTEGER NOT NULL DEFAULT 0, "
         f"prev_lsn TEXT, "
-        f"phase TEXT)"
+        f"phase TEXT, "
+        f"apply_checksum TEXT)"
     )
 
 
 def _lock_watermark_sql(dialect: str) -> str:
+    cols = "committed_lsn, epoch, fence_epoch, phase, apply_checksum"
     if dialect in _FOR_UPDATE_LIKE:
         return (
-            f"SELECT committed_lsn, epoch, fence_epoch FROM {WATERMARK_TABLE} "
+            f"SELECT {cols} FROM {WATERMARK_TABLE} "
             f"WHERE stream_key = :k FOR UPDATE"
         )
     if dialect in _MSSQL_LIKE:
         return (
-            f"SELECT committed_lsn, epoch, fence_epoch FROM {WATERMARK_TABLE} "
+            f"SELECT {cols} FROM {WATERMARK_TABLE} "
             f"WITH (UPDLOCK, ROWLOCK) WHERE stream_key = :k"
         )
-    return (
-        f"SELECT committed_lsn, epoch, fence_epoch FROM {WATERMARK_TABLE} "
-        f"WHERE stream_key = :k"
+    return f"SELECT {cols} FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+
+
+def _row_to_wm(locked: Any) -> DestWmView:
+    if not locked:
+        return DestWmView()
+    return DestWmView(
+        committed_lsn=str(locked[0] or "") or None,
+        epoch=int(locked[1] or 0),
+        fence_epoch=int(locked[2] or 0) if len(locked) > 2 else 0,
+        phase=str(locked[3] or "") if len(locked) > 3 else "",
+        apply_checksum=str(locked[4] or "") if len(locked) > 4 else "",
     )
 
 
 def _upsert_watermark_sql(dialect: str) -> str:
     cols = (
         "stream_key, committed_lsn, batch_id, committed_at, dest_object, "
-        "epoch, fence_epoch, prev_lsn, phase"
+        "epoch, fence_epoch, prev_lsn, phase, apply_checksum"
     )
     if dialect in _MYSQL_LIKE:
         return (
             f"INSERT INTO {WATERMARK_TABLE} ({cols}) "
-            f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph) "
+            f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph, :ck) "
             f"ON DUPLICATE KEY UPDATE committed_lsn = VALUES(committed_lsn), "
             f"batch_id = VALUES(batch_id), committed_at = VALUES(committed_at), "
             f"dest_object = VALUES(dest_object), epoch = VALUES(epoch), "
             f"fence_epoch = VALUES(fence_epoch), prev_lsn = VALUES(prev_lsn), "
-            f"phase = VALUES(phase)"
+            f"phase = VALUES(phase), apply_checksum = VALUES(apply_checksum)"
         )
     if dialect in _MSSQL_LIKE:
         return (
             f"MERGE {WATERMARK_TABLE} WITH (HOLDLOCK) AS t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
             f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
-            f":prev AS prev_lsn, :ph AS phase) AS s "
+            f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum) AS s "
             f"ON t.stream_key = s.stream_key "
             f"WHEN MATCHED THEN UPDATE SET committed_lsn = s.committed_lsn, "
             f"batch_id = s.batch_id, committed_at = s.committed_at, "
             f"dest_object = s.dest_object, epoch = s.epoch, "
-            f"fence_epoch = s.fence_epoch, prev_lsn = s.prev_lsn, phase = s.phase "
+            f"fence_epoch = s.fence_epoch, prev_lsn = s.prev_lsn, phase = s.phase, "
+            f"apply_checksum = s.apply_checksum "
             f"WHEN NOT MATCHED THEN INSERT ({cols}) "
             f"VALUES (s.stream_key, s.committed_lsn, s.batch_id, s.committed_at, "
-            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase);"
+            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase, "
+            f"s.apply_checksum);"
         )
     if dialect in _ORACLE_LIKE:
         return (
             f"MERGE INTO {WATERMARK_TABLE} t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
             f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
-            f":prev AS prev_lsn, :ph AS phase FROM dual) s "
+            f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum FROM dual) s "
             f"ON (t.stream_key = s.stream_key) "
             f"WHEN MATCHED THEN UPDATE SET t.committed_lsn = s.committed_lsn, "
             f"t.batch_id = s.batch_id, t.committed_at = s.committed_at, "
             f"t.dest_object = s.dest_object, t.epoch = s.epoch, "
-            f"t.fence_epoch = s.fence_epoch, t.prev_lsn = s.prev_lsn, t.phase = s.phase "
+            f"t.fence_epoch = s.fence_epoch, t.prev_lsn = s.prev_lsn, t.phase = s.phase, "
+            f"t.apply_checksum = s.apply_checksum "
             f"WHEN NOT MATCHED THEN INSERT ({cols}) "
             f"VALUES (s.stream_key, s.committed_lsn, s.batch_id, s.committed_at, "
-            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase)"
+            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase, "
+            f"s.apply_checksum)"
         )
     if dialect in _SNOW_LIKE:
         return (
             f"MERGE INTO {WATERMARK_TABLE} t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
             f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
-            f":prev AS prev_lsn, :ph AS phase) s "
+            f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum) s "
             f"ON t.stream_key = s.stream_key "
             f"WHEN MATCHED THEN UPDATE SET t.committed_lsn = s.committed_lsn, "
             f"t.batch_id = s.batch_id, t.committed_at = s.committed_at, "
             f"t.dest_object = s.dest_object, t.epoch = s.epoch, "
-            f"t.fence_epoch = s.fence_epoch, t.prev_lsn = s.prev_lsn, t.phase = s.phase "
+            f"t.fence_epoch = s.fence_epoch, t.prev_lsn = s.prev_lsn, t.phase = s.phase, "
+            f"t.apply_checksum = s.apply_checksum "
             f"WHEN NOT MATCHED THEN INSERT ({cols}) "
             f"VALUES (s.stream_key, s.committed_lsn, s.batch_id, s.committed_at, "
-            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase)"
+            f"s.dest_object, s.epoch, s.fence_epoch, s.prev_lsn, s.phase, "
+            f"s.apply_checksum)"
         )
     return (
         f"INSERT INTO {WATERMARK_TABLE} ({cols}) "
-        f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph) "
+        f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph, :ck) "
         f"ON CONFLICT (stream_key) DO UPDATE SET "
         f"committed_lsn = excluded.committed_lsn, batch_id = excluded.batch_id, "
         f"committed_at = excluded.committed_at, dest_object = excluded.dest_object, "
         f"epoch = excluded.epoch, fence_epoch = excluded.fence_epoch, "
-        f"prev_lsn = excluded.prev_lsn, phase = excluded.phase"
+        f"prev_lsn = excluded.prev_lsn, phase = excluded.phase, "
+        f"apply_checksum = excluded.apply_checksum"
     )
 
 
@@ -230,6 +258,11 @@ def _ensure_wm_columns(conn: Any, dialect: str) -> None:
         ("phase", "TEXT" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
             "NVARCHAR(32)" if dialect in _MSSQL_LIKE else (
                 "VARCHAR(32)" if dialect in _MYSQL_LIKE else "VARCHAR2(32)"
+            )
+        )),
+        ("apply_checksum", "TEXT" if dialect not in _MSSQL_LIKE | _MYSQL_LIKE | _ORACLE_LIKE else (
+            "NVARCHAR(64)" if dialect in _MSSQL_LIKE else (
+                "VARCHAR(64)" if dialect in _MYSQL_LIKE else "VARCHAR2(64)"
             )
         )),
     ]
@@ -349,10 +382,41 @@ def _upsert_row(
     return 1
 
 
-def apply_eos_sqlalchemy(
+def _sa_write_watermark(
+    conn: Any,
+    dialect: str,
     *,
-    dest_type: str,
-    dest_cfg: dict[str, Any],
+    stream_key: str,
+    lsn: str,
+    batch_id: str,
+    dest_object: str,
+    epoch: int,
+    fence_epoch: int,
+    prev_lsn: str | None,
+    phase: str,
+    apply_checksum: str,
+) -> None:
+    conn.execute(
+        text(_upsert_watermark_sql(dialect)),
+        {
+            "k": stream_key,
+            "lsn": lsn,
+            "bid": batch_id,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "obj": dest_object,
+            "ep": epoch,
+            "fe": fence_epoch,
+            "prev": prev_lsn,
+            "ph": phase,
+            "ck": apply_checksum,
+        },
+    )
+
+
+def _sa_apply_member(
+    conn: Any,
+    dialect: str,
+    *,
     dest_table: str,
     change: ChangeBatch,
     mappings: list[dict[str, Any]],
@@ -361,15 +425,12 @@ def apply_eos_sqlalchemy(
     stream_key: str,
     incoming_lsn: str,
     batch_id: str,
-    crash_after: str | None = None,
     writer_fence: int = 0,
+    crash_after: str | None = None,
 ) -> EosApplyResult:
-    from connectors.generic_sql import _engine
     from connectors.writer_common import resolve_target_columns
     from services.cdc_snapshot_window import _pk_row_dict
-    from services.engine_pool import release_engine
 
-    dialect = normalize_eos_dialect(dest_type, dest_cfg)
     mappings = list(mappings)
     column_types = dict(column_types)
     if not any(m.get("source") == DF_LSN_COL for m in mappings):
@@ -395,7 +456,135 @@ def apply_eos_sqlalchemy(
         if m.get("source")
     }
     tgt_to_src = {t: s for s, t in src_to_tgt.items() if t}
+    change = combine_change_batch(change, pk_cols=pk_target_cols)
+    incoming_phase = extract_cdc_phase(change.resume_token)
+    incoming_checksum = batch_apply_checksum(
+        change, incoming_lsn=incoming_lsn, pk_cols=pk_target_cols
+    )
+    _ensure_dest_table(conn, dialect, dest_table, target_cols, pk_target_cols)
+    locked = conn.execute(text(_lock_watermark_sql(dialect)), {"k": stream_key}).fetchone()
+    dest = _row_to_wm(locked)
+    action, fence = decide_from_view(
+        incoming_lsn=incoming_lsn,
+        dest=dest,
+        incoming_fence=writer_fence,
+        incoming_phase=incoming_phase,
+        incoming_checksum=incoming_checksum,
+    )
+    phase = next_handoff_phase(incoming_phase, dest.phase or None)
+    if action == "already_committed":
+        return EosApplyResult(
+            status="already_committed",
+            committed_lsn=dest.committed_lsn,
+            batch_id=batch_id,
+            epoch=dest.epoch,
+            already_committed=True,
+            fence_epoch=fence,
+            phase=dest.phase or "streaming",
+            apply_checksum=dest.apply_checksum,
+        )
+    if action == "handoff_phase":
+        new_epoch = dest.epoch + 1
+        _sa_write_watermark(
+            conn,
+            dialect,
+            stream_key=stream_key,
+            lsn=dest.committed_lsn or incoming_lsn,
+            batch_id=batch_id,
+            dest_object=dest_table,
+            epoch=new_epoch,
+            fence_epoch=fence,
+            prev_lsn=dest.committed_lsn,
+            phase="streaming",
+            apply_checksum=incoming_checksum or dest.apply_checksum,
+        )
+        return EosApplyResult(
+            status="handoff_phase",
+            committed_lsn=dest.committed_lsn or incoming_lsn,
+            batch_id=batch_id,
+            epoch=new_epoch,
+            already_committed=True,
+            fence_epoch=fence,
+            phase="streaming",
+            apply_checksum=incoming_checksum or dest.apply_checksum,
+        )
+    table_q = _q(dest_table)
+    rows_written = 0
+    for rec in list(change.inserts or []) + list(change.updates or []):
+        values = _row_values(rec, target_cols, tgt_to_src, incoming_lsn)
+        rows_written += _upsert_row(conn, table_q, target_cols, pk_target_cols, values)
+    deleted = 0
+    for key in list(change.deletes or []):
+        parts = (
+            _pk_row_dict(pk_target_cols, key)
+            if len(pk_target_cols) > 1
+            else {pk_target_cols[0]: key}
+        )
+        where = " AND ".join(
+            f"{_q(c)} = :pk_{i}" for i, c in enumerate(pk_target_cols)
+        )
+        binds = {f"pk_{i}": parts[c] for i, c in enumerate(pk_target_cols)}
+        existing = conn.execute(
+            text(f"SELECT {_q(DF_LSN_COL)} FROM {table_q} WHERE {where}"),
+            binds,
+        ).fetchone()
+        prior = existing[0] if existing else None
+        if not should_apply_pk_delete(
+            existing_lsn=prior, incoming_lsn=incoming_lsn
+        ).applied:
+            continue
+        result = conn.execute(text(f"DELETE FROM {table_q} WHERE {where}"), binds)
+        deleted += int(getattr(result, "rowcount", 0) or 0)
+    if crash_after == "after_apply_before_watermark":
+        raise EosCrash(crash_after)
+    new_epoch = dest.epoch + 1
+    _sa_write_watermark(
+        conn,
+        dialect,
+        stream_key=stream_key,
+        lsn=incoming_lsn,
+        batch_id=batch_id,
+        dest_object=dest_table,
+        epoch=new_epoch,
+        fence_epoch=fence,
+        prev_lsn=dest.committed_lsn,
+        phase=phase,
+        apply_checksum=incoming_checksum,
+    )
+    if crash_after == "after_watermark_before_commit":
+        raise EosCrash(crash_after)
+    return EosApplyResult(
+        status="applied" if (rows_written or deleted) else "empty",
+        rows_written=rows_written,
+        deleted=deleted,
+        committed_lsn=incoming_lsn,
+        batch_id=batch_id,
+        epoch=new_epoch,
+        fence_epoch=fence,
+        phase=phase,
+        apply_checksum=incoming_checksum,
+    )
 
+
+def apply_eos_sqlalchemy(
+    *,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    change: ChangeBatch,
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+    pk_target_cols: list[str],
+    stream_key: str,
+    incoming_lsn: str,
+    batch_id: str,
+    crash_after: str | None = None,
+    writer_fence: int = 0,
+) -> EosApplyResult:
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+
+    dialect = normalize_eos_dialect(dest_type, dest_cfg)
     cfg = dict(dest_cfg)
     cfg.setdefault("type", dialect if dialect != "generic_sql" else (dest_cfg.get("type") or dest_type))
     engine = _engine(cfg)
@@ -403,81 +592,19 @@ def apply_eos_sqlalchemy(
         with engine.begin() as conn:
             conn.execute(text(_wm_ddl(dialect)))
             _ensure_wm_columns(conn, dialect)
-            _ensure_dest_table(conn, dialect, dest_table, target_cols, pk_target_cols)
-            locked = conn.execute(text(_lock_watermark_sql(dialect)), {"k": stream_key}).fetchone()
-            dest_lsn = str(locked[0]) if locked and locked[0] else None
-            epoch = int(locked[1] or 0) if locked else 0
-            dest_fence = int(locked[2] or 0) if locked and len(locked) > 2 else 0
-            action, fence = decide_eos_apply(
+            result = _sa_apply_member(
+                conn,
+                dialect,
+                dest_table=dest_table,
+                change=change,
+                mappings=mappings,
+                column_types=column_types,
+                pk_target_cols=pk_target_cols,
+                stream_key=stream_key,
                 incoming_lsn=incoming_lsn,
-                dest_lsn=dest_lsn,
-                incoming_fence=writer_fence,
-                dest_fence=dest_fence,
-                dest_epoch=epoch,
-            )
-            if action == "already_committed":
-                return EosApplyResult(
-                    status="already_committed",
-                    committed_lsn=dest_lsn,
-                    batch_id=batch_id,
-                    epoch=epoch,
-                    already_committed=True,
-                    fence_epoch=fence,
-                )
-            table_q = _q(dest_table)
-            rows_written = 0
-            for rec in list(change.inserts or []) + list(change.updates or []):
-                values = _row_values(rec, target_cols, tgt_to_src, incoming_lsn)
-                rows_written += _upsert_row(conn, table_q, target_cols, pk_target_cols, values)
-            deleted = 0
-            for key in list(change.deletes or []):
-                parts = (
-                    _pk_row_dict(pk_target_cols, key)
-                    if len(pk_target_cols) > 1
-                    else {pk_target_cols[0]: key}
-                )
-                where = " AND ".join(
-                    f"{_q(c)} = :pk_{i}" for i, c in enumerate(pk_target_cols)
-                )
-                binds = {f"pk_{i}": parts[c] for i, c in enumerate(pk_target_cols)}
-                existing = conn.execute(
-                    text(f"SELECT {_q(DF_LSN_COL)} FROM {table_q} WHERE {where}"),
-                    binds,
-                ).fetchone()
-                prior = existing[0] if existing else None
-                if not should_apply_pk_delete(
-                    existing_lsn=prior, incoming_lsn=incoming_lsn
-                ).applied:
-                    continue
-                result = conn.execute(text(f"DELETE FROM {table_q} WHERE {where}"), binds)
-                deleted += int(getattr(result, "rowcount", 0) or 0)
-            if crash_after == "after_apply_before_watermark":
-                raise EosCrash(crash_after)
-            new_epoch = epoch + 1
-            conn.execute(
-                text(_upsert_watermark_sql(dialect)),
-                {
-                    "k": stream_key,
-                    "lsn": incoming_lsn,
-                    "bid": batch_id,
-                    "at": datetime.now(timezone.utc).isoformat(),
-                    "obj": dest_table,
-                    "ep": new_epoch,
-                    "fe": fence,
-                    "prev": dest_lsn,
-                    "ph": "streaming",
-                },
-            )
-            if crash_after == "after_watermark_before_commit":
-                raise EosCrash(crash_after)
-            result = EosApplyResult(
-                status="applied" if (rows_written or deleted) else "empty",
-                rows_written=rows_written,
-                deleted=deleted,
-                committed_lsn=incoming_lsn,
                 batch_id=batch_id,
-                epoch=new_epoch,
-                fence_epoch=fence,
+                writer_fence=writer_fence,
+                crash_after=crash_after,
             )
         if crash_after == "after_commit_before_ack":
             raise EosCrash(crash_after)
@@ -486,6 +613,103 @@ def apply_eos_sqlalchemy(
         raise
     finally:
         release_engine(engine)
+
+
+def apply_eos_sa_bundle(
+    *,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    streams: list[EosBundleStream],
+    incoming_lsn: str = "",
+    bundle_key: str = "",
+    writer_fence: int = 0,
+    crash_after: str | None = None,
+) -> EosBundleResult:
+    """N streams in one SQLAlchemy dest transaction (Estuary multi-binding)."""
+    from connectors.generic_sql import _engine
+    from services.cdc_exactly_once import require_batch_lsn
+    from services.engine_pool import release_engine
+
+    dialect = normalize_eos_dialect(dest_type, dest_cfg)
+    if not incoming_lsn and streams:
+        incoming_lsn = require_batch_lsn(streams[0].change.resume_token)
+    if not streams and not (bundle_key and incoming_lsn):
+        return EosBundleResult(committed_lsn=incoming_lsn or None)
+    cfg = dict(dest_cfg)
+    cfg.setdefault("type", dialect if dialect != "generic_sql" else (dest_cfg.get("type") or dest_type))
+    engine = _engine(cfg)
+    members: list[EosApplyResult] = []
+    try:
+        with engine.begin() as conn:
+            conn.execute(text(_wm_ddl(dialect)))
+            _ensure_wm_columns(conn, dialect)
+            for stream in sorted(streams, key=lambda s: s.stream_key):
+                member_lsn = incoming_lsn
+                try:
+                    member_lsn = require_batch_lsn(stream.change.resume_token)
+                except ExactlyOnceRouteError:
+                    if not incoming_lsn:
+                        raise
+                members.append(
+                    _sa_apply_member(
+                        conn,
+                        dialect,
+                        dest_table=stream.dest_table,
+                        change=stream.change,
+                        mappings=stream.mappings,
+                        column_types=stream.column_types,
+                        pk_target_cols=stream.pk_target_cols,
+                        stream_key=stream.stream_key,
+                        incoming_lsn=member_lsn,
+                        batch_id=f"eos-b-{stream.stream_key[-12:]}",
+                        writer_fence=writer_fence,
+                    )
+                )
+            if bundle_key and incoming_lsn:
+                locked = conn.execute(
+                    text(_lock_watermark_sql(dialect)), {"k": bundle_key}
+                ).fetchone()
+                dest_wm = _row_to_wm(locked)
+                action, fence = decide_from_view(
+                    incoming_lsn=incoming_lsn,
+                    dest=dest_wm,
+                    incoming_fence=writer_fence,
+                )
+                if action != "already_committed":
+                    _sa_write_watermark(
+                        conn,
+                        dialect,
+                        stream_key=bundle_key,
+                        lsn=incoming_lsn,
+                        batch_id=f"eos-bundle-{bundle_key[-10:]}",
+                        dest_object="*",
+                        epoch=dest_wm.epoch + 1,
+                        fence_epoch=fence,
+                        prev_lsn=dest_wm.committed_lsn,
+                        phase="streaming",
+                        apply_checksum="",
+                    )
+            if crash_after in {
+                "after_apply_before_watermark",
+                "after_watermark_before_commit",
+            }:
+                raise EosCrash(crash_after)
+    except EosCrash:
+        raise
+    finally:
+        release_engine(engine)
+    rows = sum(m.rows_written for m in members)
+    deleted = sum(m.deleted for m in members)
+    fence = max((m.fence_epoch for m in members), default=writer_fence)
+    return EosBundleResult(
+        members=members,
+        committed_lsn=incoming_lsn or None,
+        already_committed=bool(members) and all(m.already_committed for m in members),
+        rows_written=rows,
+        deleted=deleted,
+        fence_epoch=fence,
+        bundle_key=bundle_key,
+    )
 
 
 def sa_dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str, dest_type: str) -> str | None:
