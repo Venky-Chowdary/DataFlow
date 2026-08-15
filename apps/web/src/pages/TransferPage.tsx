@@ -68,6 +68,7 @@ import {
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import {
   bindNamesFromSql,
+  callableSourceExtra,
   dialectOffersProcedures,
   dialectOffersQuery,
   dialectOffersSqlExtract,
@@ -3957,18 +3958,23 @@ export function TransferPage({
         writeViaStaging,
         enableOcr,
         sourceExtra: (() => {
-          if (syncMode !== "cdc") return undefined;
-          const extra: Record<string, unknown> = {};
-          if (multiSubnetFailover) extra.multi_subnet_failover = true;
-          const sqlServerCdc = [
-            "sqlserver",
-            "mssql",
-            "azure_sql_database",
-            "microsoft_sql_server",
-            "amazon_rds_sql_server",
-          ].includes(resolveDriverType(sourceConnector?.type || ""));
-          if (sqlServerCdc && cdcRowFilter && cdcRowFilter !== "all") {
-            extra.cdc_row_filter = cdcRowFilter;
+          const extra: Record<string, unknown> = {
+            ...(sourceKind === "database"
+              ? callableSourceExtra(sourceReadMode, procedureCall, procedureParams) || {}
+              : {}),
+          };
+          if (syncMode === "cdc") {
+            if (multiSubnetFailover) extra.multi_subnet_failover = true;
+            const sqlServerCdc = [
+              "sqlserver",
+              "mssql",
+              "azure_sql_database",
+              "microsoft_sql_server",
+              "amazon_rds_sql_server",
+            ].includes(resolveDriverType(sourceConnector?.type || ""));
+            if (sqlServerCdc && cdcRowFilter && cdcRowFilter !== "all") {
+              extra.cdc_row_filter = cdcRowFilter;
+            }
           }
           return Object.keys(extra).length ? extra : undefined;
         })(),

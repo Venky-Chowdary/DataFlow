@@ -426,9 +426,13 @@ async def accept_source_schema(schedule_id: str):
     """
     from datetime import datetime, timezone
 
-    from services.schedule_runner import _endpoint_from_connector, _resolve_connector
+    from services.schedule_runner import (
+        _apply_callable_schedule_source,
+        _endpoint_from_connector,
+        _resolve_connector,
+        probe_schedule_source_schema,
+    )
     from services.source_schema_memory import fingerprint_source
-    from src.transfer.endpoint_intelligence import introspect_endpoint
 
     sched = get_schedule(schedule_id)
     if not sched:
@@ -442,7 +446,8 @@ async def accept_source_schema(schedule_id: str):
         )
     try:
         endpoint = _endpoint_from_connector(src, sched.source_table)
-        info = introspect_endpoint(endpoint) or {}
+        _apply_callable_schedule_source(endpoint, sched)
+        info = probe_schedule_source_schema(endpoint) or {}
     except Exception as exc:
         raise HTTPException(
             status_code=502, detail=f"Could not read the source schema: {exc}"

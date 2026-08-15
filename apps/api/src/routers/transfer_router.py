@@ -1093,6 +1093,12 @@ async def run_universal_transfer(
                 plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
                 if isinstance(plan_contracts, list) and plan_contracts:
                     request_obj.stream_contracts = plan_contracts
+            from services.procedure_source import merge_callable_source_extra
+
+            request_obj.source.extra = merge_callable_source_extra(
+                request_obj.source.extra,
+                payload.get("source") or {},
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip() and not (plan_id and plan_id.strip()):

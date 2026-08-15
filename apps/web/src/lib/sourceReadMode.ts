@@ -89,3 +89,18 @@ export function procedureHint(driver: string | undefined | null): string {
 export function isCallableSourceMode(mode: SourceReadMode | string | undefined): boolean {
   return mode === "procedure" || mode === "query";
 }
+
+/** Fields Execute must send in source_extra — Validate already stamps these. */
+export function callableSourceExtra(
+  mode: SourceReadMode | string | undefined,
+  sql: string,
+  params?: Record<string, string>,
+): Record<string, unknown> | undefined {
+  if (!isCallableSourceMode(mode)) return undefined;
+  const extra: Record<string, unknown> = { source_read_mode: mode };
+  const text = String(sql || "").trim();
+  if (mode === "procedure") extra.procedure_call = text;
+  if (mode === "query") extra.source_query = text;
+  if (params && Object.keys(params).length) extra.procedure_params = { ...params };
+  return extra;
+}

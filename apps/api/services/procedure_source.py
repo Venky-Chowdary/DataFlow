@@ -199,6 +199,32 @@ def is_callable_source(source: Any) -> bool:
     return source_read_mode_of(source) in CALLABLE_MODES
 
 
+_CALLABLE_CFG_KEYS = (
+    "source_read_mode",
+    "procedure_call",
+    "source_query",
+    "procedure_params",
+)
+
+
+def merge_callable_source_extra(dst: Mapping[str, Any] | None, src: Any) -> dict[str, Any]:
+    """Copy CALL/SELECT fields onto Execute extra. Form values win over the plan."""
+    out = dict(dst or {})
+    extra_src: Mapping[str, Any] = {}
+    if hasattr(src, "extra"):
+        extra_src = getattr(src, "extra", None) or {}
+    elif isinstance(src, Mapping):
+        nested = src.get("extra") if isinstance(src.get("extra"), Mapping) else {}
+        extra_src = {**dict(nested or {}), **{k: v for k, v in src.items() if k != "extra"}}
+    for key in _CALLABLE_CFG_KEYS:
+        if out.get(key) not in (None, "", {}):
+            continue
+        val = extra_src.get(key) if isinstance(extra_src, Mapping) else None
+        if val not in (None, "", {}):
+            out[key] = val
+    return out
+
+
 def callable_identity_token(source: Any) -> str:
     """Watermark identity for a CALL/SELECT — stream name plus SQL+binds digest.
 

@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   bindNamesFromSql,
+  callableSourceExtra,
   dialectOffersProcedures,
   dialectOffersQuery,
   isCallableSourceMode,
@@ -39,5 +40,18 @@ describe("sourceReadMode", () => {
     assert.equal(isCallableSourceMode("procedure"), true);
     assert.equal(isCallableSourceMode("query"), true);
     assert.equal(isCallableSourceMode("table"), false);
+  });
+
+  it("stamps Execute source_extra for CALL/SELECT and leaves tables alone", () => {
+    assert.equal(callableSourceExtra("table", "orders"), undefined);
+    assert.deepEqual(callableSourceExtra("procedure", "CALL get_orders(:since)", { since: "2024-01-01" }), {
+      source_read_mode: "procedure",
+      procedure_call: "CALL get_orders(:since)",
+      procedure_params: { since: "2024-01-01" },
+    });
+    assert.deepEqual(callableSourceExtra("query", "SELECT * FROM get_orders()"), {
+      source_read_mode: "query",
+      source_query: "SELECT * FROM get_orders()",
+    });
   });
 });

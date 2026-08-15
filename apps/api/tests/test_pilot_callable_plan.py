@@ -189,6 +189,35 @@ def test_plan_transfer_peeks_callable_and_skips_source_introspect(
     assert introspect_purposes == ["destination:orders_out"]
 
 
+def test_merge_callable_source_extra_form_wins_over_plan() -> None:
+    from services.procedure_source import merge_callable_source_extra
+
+    merged = merge_callable_source_extra(
+        {"source_read_mode": "procedure", "procedure_call": "CALL form_orders()"},
+        {
+            "source_read_mode": "query",
+            "source_query": "SELECT 1",
+            "extra": {"procedure_call": "CALL plan_orders()"},
+        },
+    )
+    assert merged["source_read_mode"] == "procedure"
+    assert merged["procedure_call"] == "CALL form_orders()"
+    assert merged["source_query"] == "SELECT 1"
+
+    filled = merge_callable_source_extra(
+        {},
+        {
+            "table": "get_orders",
+            "extra": {
+                "source_read_mode": "procedure",
+                "procedure_call": "CALL get_orders()",
+            },
+        },
+    )
+    assert filled["source_read_mode"] == "procedure"
+    assert filled["procedure_call"] == "CALL get_orders()"
+
+
 def test_confirm_payload_keeps_callable_on_endpoint() -> None:
     """Confirm builds EndpointConfig from the staged payload — extra must keep CALL."""
     from services.procedure_source import is_callable_source, procedure_text_of, source_read_mode_of

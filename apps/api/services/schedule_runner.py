@@ -156,6 +156,41 @@ def _apply_callable_schedule_source(source, sched) -> None:
     source.extra = extra
 
 
+def probe_schedule_source_schema(source) -> dict[str, Any]:
+    """Read the extract shape. CALL/SELECT peeks — never a colliding table."""
+    from services.procedure_source import (
+        close_callable_spool,
+        is_callable_source,
+        read_callable_batch,
+    )
+
+    if is_callable_source(source):
+        from src.transfer.models import endpoint_to_dict
+
+        cfg = endpoint_to_dict(source)
+        try:
+            batch = read_callable_batch(cfg, offset=0, limit=1, peek=True)
+        finally:
+            close_callable_spool()
+        headers = [str(h) for h in (batch.headers or []) if str(h).strip()]
+        meta = getattr(batch, "meta", None) or {}
+        native = meta.get("native_types") if isinstance(meta, dict) else {}
+        schema: dict[str, str] = {}
+        if isinstance(native, dict):
+            schema = {str(k): str(v) for k, v in native.items() if str(k).strip()}
+        for name in headers:
+            schema.setdefault(name, "VARCHAR")
+        return {
+            "schema": schema,
+            "columns": headers or list(schema.keys()),
+            "primary_key_columns": [],
+        }
+
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+
+    return introspect_endpoint(source) or {}
+
+
 def _endpoint_from_connector(conn: dict, table: str):
     from src.transfer.models import EndpointConfig
 
@@ -313,9 +348,7 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
         if str(p).strip()
     ]
     try:
-        from src.transfer.endpoint_intelligence import introspect_endpoint
-
-        info = introspect_endpoint(request.source) or {}
+        info = probe_schedule_source_schema(request.source) or {}
     except Exception as exc:
         logger.info(
             "Schedule %s source schema probe unavailable: %s",
