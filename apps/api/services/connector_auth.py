@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, Mapping
+
 # SavedConnector.role is inventory topology, not a warehouse/login role.
 TOPOLOGY_ROLES = frozenset({"source", "destination", "both", "src", "dest", "any"})
 
@@ -229,3 +231,25 @@ def engine_login_role(*candidates: str | None) -> str:
             continue
         return value
     return ""
+
+
+def snowflake_session_kwargs(
+    cfg: Mapping[str, Any] | None = None, **overrides: Any
+) -> dict[str, Any]:
+    """Auth extras every Snowflake connect/read/write/introspect path must pass.
+
+    Key-pair and login role used to stop at Test — Map and transfer then failed
+    mid-extract with a password error. One helper so a new call site cannot
+    drop ``private_key`` again.
+    """
+    src: dict[str, Any] = dict(cfg or {})
+    src.update({k: v for k, v in overrides.items() if v is not None})
+    extra_nested = src.get("extra") if isinstance(src.get("extra"), dict) else {}
+    pk = str(src.get("private_key") or extra_nested.get("private_key") or "").strip()
+    role = engine_login_role(
+        src.get("auth_role"),
+        src.get("role"),
+        extra_nested.get("auth_role") if extra_nested else None,
+        extra_nested.get("role") if extra_nested else None,
+    )
+    return {"private_key": pk, "role": role}

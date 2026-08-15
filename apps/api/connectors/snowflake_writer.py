@@ -982,6 +982,25 @@ def _batch_insert_rows(
     return written
 
 
+def copy_into_written_or_raise(written: int, staged_rows: int, table: str) -> int:
+    """Fail closed when COPY INTO loads nothing or only part of the staged batch.
+
+    Treating ``written <= 0`` as ``staged_rows`` used to report a full write
+    after a 0-row COPY — silent data loss on the warehouse path.
+    """
+    if written <= 0:
+        raise RuntimeError(
+            f"Snowflake COPY INTO loaded 0 of {staged_rows} staged rows for {table}. "
+            "The batch was not written. Check file format, column mapping, and warehouse."
+        )
+    if written < staged_rows:
+        raise RuntimeError(
+            f"Snowflake COPY INTO loaded {written} of {staged_rows} staged rows for {table}. "
+            "Partial COPY is not success — remaining rows were not written."
+        )
+    return written
+
+
 def _load_rows_into_table(
     cur: Any,
     table_name: str,
@@ -1024,8 +1043,7 @@ def _load_rows_into_table(
             written = _copy_into_table(
                 cur, table_name, str(tmp.resolve()), target_cols, target_types
             )
-            if written <= 0:
-                written = total
+            copy_into_written_or_raise(written, total, table_name)
             return "copy_into"
         finally:
             tmp.unlink(missing_ok=True)

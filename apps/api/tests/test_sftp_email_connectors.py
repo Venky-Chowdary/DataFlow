@@ -46,6 +46,14 @@ class TestSFTPConfig:
         assert cfg.path == "/data/raw/file.jsonl"
         assert cfg.host == ""
 
+    def test_uri_path_survives_root_database_and_filename(self):
+        cfg = parse_sftp_config(
+            connection_string="sftp://alice:secret@ftp.example.com/incoming/nested/data.csv",
+            database="/",
+            table="data.csv",
+        )
+        assert cfg.path == "/incoming/nested/data.csv"
+
     def test_split_remote_path(self):
         assert split_remote_path("/data/file.csv") == ("/data", "file.csv")
         assert split_remote_path("/data/") == ("/data", "")

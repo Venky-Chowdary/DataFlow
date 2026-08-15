@@ -179,6 +179,7 @@ def introspect_endpoint(
 
     if fmt == "snowflake":
         from connectors.snowflake import test_snowflake
+        from services.connector_auth import snowflake_session_kwargs
 
         probe = test_snowflake(
             host=cfg["host"],
@@ -190,7 +191,7 @@ def introspect_endpoint(
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
-            role=cfg.get("role", ""),
+            **snowflake_session_kwargs(cfg),
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]

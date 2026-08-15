@@ -70,12 +70,9 @@ def writer_extra_kwargs(
     """
     common = common or {}
     if driver == "snowflake":
-        from services.connector_auth import engine_login_role
+        from services.connector_auth import snowflake_session_kwargs
 
-        return {
-            "private_key": str(cfg.get("private_key") or ""),
-            "role": engine_login_role(cfg.get("auth_role"), cfg.get("role")),
-        }
+        return snowflake_session_kwargs(cfg)
     if driver == "sftp":
         from connectors.sftp_common import host_key_settings
 

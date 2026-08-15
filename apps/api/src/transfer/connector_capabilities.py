@@ -136,6 +136,12 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "ssh": "sftp",
     "email": "email",
     "smtp": "email",
+    "excel_workbook": "excel",
+    "csv_upload": "csv",
+    "tsv_upload": "tsv",
+    "json_documents": "json",
+    "parquet_lake": "parquet",
+    "jsonl_stream": "jsonl",
 }
 
 # Suggested lists — only connectors users can configure today

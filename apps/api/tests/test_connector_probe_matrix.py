@@ -12,7 +12,7 @@ import pytest
 
 from connectors.snowflake_conn import SNOWFLAKE_BAD_PASSWORD_MSG
 from services.connector_auth import SALESFORCE_PLACEHOLDER_HOST_MSG, validate_probe_auth
-from src.transfer.connector_capabilities import file_source_types
+from src.transfer.connector_capabilities import file_source_types, resolve_driver_type
 from src.transfer.connector_registry import (
     CONNECTOR_MODULES,
     humanize_connection_error,
@@ -89,6 +89,25 @@ def test_salesforce_placeholder_host_is_rejected():
         host="https://yourorg.my.salesforce.com",
         api_key="00Dxx0000000000",
     ) == SALESFORCE_PLACEHOLDER_HOST_MSG
+
+
+@pytest.mark.parametrize(
+    "twin,driver",
+    [
+        ("excel_workbook", "excel"),
+        ("csv_upload", "csv"),
+        ("tsv_upload", "tsv"),
+        ("json_documents", "json"),
+        ("parquet_lake", "parquet"),
+        ("jsonl_stream", "jsonl"),
+    ],
+)
+def test_file_catalog_twins_resolve_to_file_probe(twin: str, driver: str):
+    assert resolve_driver_type(twin) == driver
+    assert driver in file_source_types()
+    ok, message = probe_file_source(driver, "")
+    assert ok is False
+    assert "catalog support is not a successful connection" in message.lower()
 
 
 def test_snowflake_250001_humanize_is_idempotent():

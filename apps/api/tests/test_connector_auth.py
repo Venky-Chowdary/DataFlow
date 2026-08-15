@@ -370,3 +370,23 @@ def test_user_pass_still_requires_host_and_secret():
         username="u",
         password="p",
     ) is None
+
+
+def test_snowflake_session_kwargs_threads_key_pair_and_drops_topology():
+    from services.connector_auth import snowflake_session_kwargs
+
+    out = snowflake_session_kwargs(
+        {
+            "private_key": "-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----",
+            "role": "both",
+            "auth_role": "SYSADMIN",
+        }
+    )
+    assert out["private_key"].startswith("-----BEGIN PRIVATE KEY-----")
+    assert out["role"] == "SYSADMIN"
+
+    nested = snowflake_session_kwargs(
+        {"extra": {"private_key": "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----"}}
+    )
+    assert nested["private_key"].startswith("-----BEGIN PRIVATE KEY-----")
+    assert snowflake_session_kwargs({"role": "both"})["role"] == ""

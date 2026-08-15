@@ -59,7 +59,7 @@ from services.dest_precount import (
     precount_table,
     stamp_overwrite_source_keys,
 )
-from services.excel_parser import sheet_headers
+from services.excel_parser import cell_to_string, require_xlsx, sheet_headers
 from services.reconciliation import FingerprintAccumulator
 from services.tabular_rows import is_blank_row
 
@@ -195,6 +195,7 @@ def _text_reader(content: bytes | str | os.PathLike, encoding: str | None = None
 
 
 def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
+    require_xlsx(content if _is_path(content) else None)
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
@@ -224,7 +225,7 @@ def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) 
                 continue
             total += 1
             if len(preview) < preview_rows:
-                preview.append([str(c).strip() if c is not None else "" for c in row])
+                preview.append([cell_to_string(c) for c in row])
 
         return headers, preview, total
     finally:
@@ -232,6 +233,7 @@ def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) 
 
 
 def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
+    require_xlsx(content if _is_path(content) else None)
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
@@ -268,7 +270,7 @@ def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
                     "or fix the sheet"
                 )
             record = {
-                headers[i]: ("" if c is None else str(c).strip())
+                headers[i]: cell_to_string(c)
                 for i, c in enumerate(row[: len(headers)])
             }
             batch.append(record)
@@ -282,6 +284,7 @@ def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
 
 
 def _excel_count(content: bytes | str | os.PathLike) -> int:
+    require_xlsx(content if _is_path(content) else None)
     try:
         from openpyxl import load_workbook
     except ImportError as exc:

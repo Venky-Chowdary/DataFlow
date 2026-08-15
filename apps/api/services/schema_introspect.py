@@ -142,6 +142,9 @@ def introspect_schema(
     catalog_type: str = "",
     auth_source: str = "",
     api_key: str = "",
+    role: str = "",
+    auth_role: str = "",
+    private_key: str = "",
     strict_namespace: bool = False,
 ) -> dict[str, Any]:
     """Load tables/columns for ``table`` in the requested database/schema.
@@ -199,6 +202,9 @@ def introspect_schema(
             connection_string=connection_string,
             warehouse=warehouse,
             table=table,
+            role=role,
+            auth_role=auth_role,
+            private_key=private_key,
             strict_namespace=strict_namespace,
         )
     if db_type == "mysql":

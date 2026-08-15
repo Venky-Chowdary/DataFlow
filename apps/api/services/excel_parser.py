@@ -2,20 +2,37 @@
 
 from __future__ import annotations
 
+import os
 from io import BytesIO
 from typing import Any, Iterator
 
 from services.tabular_rows import is_blank_row
 from services.value_serializer import cell_to_string
 
+XLS_UNSUPPORTED_MSG = (
+    "Legacy .xls is not supported. Save the workbook as .xlsx and retry."
+)
+
 __all__ = [
+    "XLS_UNSUPPORTED_MSG",
+    "cell_to_string",
     "count_excel_rows",
     "is_blank_row",
     "iter_excel_batches",
     "iter_excel_dicts",
     "parse_excel_preview",
+    "require_xlsx",
     "sheet_headers",
 ]
+
+
+def require_xlsx(path_or_name: str | os.PathLike[str] | bytes | None) -> None:
+    """Refuse BIFF .xls — openpyxl only reads Office Open XML (.xlsx)."""
+    if path_or_name is None or isinstance(path_or_name, (bytes, bytearray)):
+        return
+    name = str(path_or_name).lower()
+    if name.endswith(".xls") and not name.endswith(".xlsx"):
+        raise ValueError(XLS_UNSUPPORTED_MSG)
 
 
 def sheet_headers(first_row: tuple) -> list[str]:

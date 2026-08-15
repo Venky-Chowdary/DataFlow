@@ -26,6 +26,21 @@ if str(_api_root) not in sys.path:
 from services.value_serializer import cell_to_string
 
 
+def snapshot_order_sql(columns: list[str], primary_key: str | None = "") -> str:
+    """ORDER BY first column plus PK so OFFSET pages cannot skip/duplicate rows."""
+    order_cols: list[str] = []
+    if columns:
+        order_cols.append(str(columns[0]))
+    pk = (primary_key or "").strip()
+    if pk and pk.lower() not in {c.lower() for c in order_cols}:
+        order_cols.append(pk)
+    if not order_cols:
+        raise RuntimeError("Snowflake table has no columns for stable pagination")
+    return quote_column_list(
+        [require_safe_identifier(str(c), preserve_case=True) for c in order_cols]
+    )
+
+
 def _use_warehouse(cur, warehouse: str) -> None:
     if not warehouse:
         return
@@ -105,6 +120,7 @@ def read_table_batch(
     known_total_rows: int | None = None,
     role: str = "",
     private_key: str = "",
+    cursor_primary_key: str | None = None,
 ) -> ReadBatch:
     account = normalize_account(host)
     schema = _snowflake_schema(schema)
@@ -131,22 +147,19 @@ def read_table_batch(
                     host=host, port=port, database=database, username=username, password=password,
                     schema=schema, connection_string=connection_string, warehouse=warehouse, table=table,
                     role=role,
+                    private_key=private_key,
                 )
             col_sql = (
                 quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
                 if columns
                 else "*"
             )
-            # Stable LIMIT/OFFSET requires ORDER BY (PK-or-first-column pattern).
+            # Stable LIMIT/OFFSET requires ORDER BY (first column + PK tiebreak).
             order_cols = list(columns or [])
             if not order_cols:
                 cur.execute(f"SELECT * FROM {table_ref} LIMIT 0")  # nosec B608
                 order_cols = [desc[0] for desc in (cur.description or [])]
-            if not order_cols:
-                raise RuntimeError("Snowflake table has no columns for stable pagination")
-            order_sql = quote_column_list(
-                [require_safe_identifier(str(order_cols[0]), preserve_case=True)]
-            )
+            order_sql = snapshot_order_sql(order_cols, primary_key=cursor_primary_key)
             cur.execute(
                 f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                 f"ORDER BY {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"

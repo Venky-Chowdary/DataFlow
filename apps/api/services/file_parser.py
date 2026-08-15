@@ -305,8 +305,9 @@ def store_upload(filename: str, content: bytes) -> dict:
     elif fmt == "jsonl":
         headers, rows, row_count = parse_jsonl(content)
     elif fmt == "excel":
-        from services.excel_parser import parse_excel_preview
+        from services.excel_parser import parse_excel_preview, require_xlsx
 
+        require_xlsx(filename)
         headers, rows, row_count = parse_excel_preview(content)
     elif fmt == "parquet":
         headers, rows, row_count, arrow_schema = _parse_parquet_preview(content)
@@ -1276,6 +1277,9 @@ class FileParser:
         elif file_type == "ndjson":
             return cls.parse_jsonl(content)
         elif file_type == "excel":
+            from services.excel_parser import require_xlsx
+
+            require_xlsx(filename)
             return cls.parse_excel(raw_bytes)
         elif file_type == "parquet":
             return cls.parse_parquet(raw_bytes)

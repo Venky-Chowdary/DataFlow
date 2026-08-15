@@ -189,7 +189,9 @@ def _read_batch_impl(
             read_table_batch,
             read_table_cursor_batch,
         )
+        from services.connector_auth import snowflake_session_kwargs
 
+        session = snowflake_session_kwargs(cfg)
         if cursor_column:
             return read_table_cursor_batch(
                 host=cfg["host"],
@@ -200,13 +202,13 @@ def _read_batch_impl(
                 schema=cfg.get("schema", "PUBLIC"),
                 connection_string=cfg.get("connection_string", ""),
                 warehouse=cfg.get("warehouse", ""),
-                role=cfg.get("role", ""),
                 table=table,
                 cursor_column=cursor_column,
                 cursor_after=cursor_after,
                 columns=columns,
                 limit=limit,
                 cursor_primary_key=cursor_primary_key,
+                **session,
             )
         return read_table_batch(
             host=cfg["host"],
@@ -217,12 +219,13 @@ def _read_batch_impl(
             schema=cfg.get("schema", "PUBLIC"),
             connection_string=cfg.get("connection_string", ""),
             warehouse=cfg.get("warehouse", ""),
-            role=cfg.get("role", ""),
             table=table,
             columns=columns,
             offset=offset,
             limit=limit,
             known_total_rows=known_total_rows,
+            cursor_primary_key=cursor_primary_key,
+            **session,
         )
     if src_type == "bigquery":
         from connectors.bigquery_reader import read_table_batch, read_table_cursor_batch

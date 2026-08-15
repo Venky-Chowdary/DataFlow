@@ -125,6 +125,7 @@ def write_mapped_rows(
         password=password,
         database=database,
         table=table_name,
+        private_key=str(_kwargs.get("private_key") or ""),
         **host_key_settings(_kwargs),
     )
     if not cfg.host:

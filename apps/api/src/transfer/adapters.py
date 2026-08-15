@@ -585,6 +585,13 @@ def resolve_connector_config(
     # Ensure generic SQLAlchemy paths (introspection, schema drift, duplicate-key
     # probes) use the same credentials as the explicit user/pass fields.
     sync_credentials_into_connection_string(cfg)
+    # Merge can restore topology ``both`` from a saved connector. Strip it once
+    # here so every downstream Snowflake/Redshift path sees a login role or "".
+    from services.connector_auth import engine_login_role
+
+    cfg["role"] = engine_login_role(cfg.get("auth_role"), cfg.get("role"))
+    if cfg.get("auth_role"):
+        cfg["auth_role"] = engine_login_role(cfg.get("auth_role"))
     return cfg
 
 
@@ -830,6 +837,9 @@ def _introspect_table_schema_rich(
         catalog_type=cfg.get("type", ""),
         auth_source=cfg.get("auth_source", ""),
         api_key=cfg.get("api_key", ""),
+        role=str(cfg.get("role") or ""),
+        auth_role=str(cfg.get("auth_role") or ""),
+        private_key=str(cfg.get("private_key") or ""),
         strict_namespace=strict_namespace,
     )
     if info.get("ok") and info.get("columns"):
@@ -1079,6 +1089,7 @@ def read_source_database(
 
     if db_type == "snowflake":
         from connectors.snowflake_reader import read_table_batch
+        from services.connector_auth import snowflake_session_kwargs
 
         table = endpoint.table
         if not table:
@@ -1094,7 +1105,12 @@ def read_source_database(
             warehouse=cfg.get("warehouse", ""),
             table=table,
             limit=limit,
-            role=cfg.get("role", ""),
+            cursor_primary_key=str(
+                (endpoint.extra or {}).get("primary_key")
+                or cfg.get("primary_key")
+                or ""
+            ),
+            **snowflake_session_kwargs(cfg),
         )
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
@@ -1686,6 +1702,9 @@ def _write_destination_database(
         ),
         "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog"),
     }
+    from .connector_dispatch import writer_extra_kwargs
+
+    common.update(writer_extra_kwargs(db_type, cfg=cfg, dest=endpoint, common=common))
     if db_type in {
         "s3",
         "minio",

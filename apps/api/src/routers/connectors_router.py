@@ -142,17 +142,19 @@ async def test_connection(request: TestConnectionRequest):
     from ..transfer.connector_registry import humanize_connection_error, probe_file_source
 
     try:
-
-        if (request.type or "").lower() in file_source_types():
+        driver = resolve_driver_type(request.type)
+        # Resolve catalog twins (excel_workbook → excel) before the file-source
+        # check. Checking the raw tile id skipped probe_file_source and claimed
+        # "No connectivity probe" for Excel/CSV upload aliases.
+        if (request.type or "").lower() in file_source_types() or driver in file_source_types():
             path = (request.connection_string or request.host or request.database or "").strip()
-            ok, msg = probe_file_source(request.type or "", path)
+            kind = driver if driver in file_source_types() else (request.type or "")
+            ok, msg = probe_file_source(kind, path)
             return {
                 "success": ok,
                 "message": msg,
-                "details": {"format": request.type, "mode": "file_source", "path": path},
+                "details": {"format": kind, "mode": "file_source", "path": path},
             }
-
-        driver = resolve_driver_type(request.type)
 
         from services.connector_auth import engine_login_role, infer_auth_mode, validate_probe_auth
 

@@ -850,7 +850,6 @@ def download_sftp_object(path: Path, cfg: dict[str, Any], bucket: str, key: str)
     from connectors.sftp_common import (
         connect_sftp,
         parse_sftp_config,
-        split_remote_path,
     )
 
     merged = dict(cfg)
@@ -864,8 +863,7 @@ def download_sftp_object(path: Path, cfg: dict[str, Any], bucket: str, key: str)
     if not sftp_cfg.path:
         raise ValueError("SFTP remote path is required")
 
-    directory, filename = split_remote_path(sftp_cfg.path)
-    remote_path = sftp_cfg.path if directory else f"/{filename}"
+    remote_path = sftp_cfg.path
     transport, sftp = connect_sftp(sftp_cfg)
     try:
         with open(path, "wb") as f:
