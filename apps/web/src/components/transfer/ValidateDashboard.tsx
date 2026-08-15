@@ -1407,10 +1407,27 @@ export function ValidateDashboard({
       return;
     }
     if (action.kind === "review_mappings" || action.kind === "rerun_mapping"
-      || action.kind === "confirm_or_remap" || action.kind === "confirm_add") {
+      || action.kind === "confirm_add") {
       onReviewMappings?.(
         action.column ? { focusSource: action.column } : undefined,
       );
+      return;
+    }
+    if (action.kind === "confirm_or_remap") {
+      pendingVerifyRef.current = true;
+      pushRemediation(
+        action.label || "Confirm this pair",
+        action.column
+          ? `Confirm false-friend pair on ${action.column} — re-running Validate.`
+          : "Confirm false-friend pair(s) — re-running Validate.",
+        "Applied — re-running validation",
+        [
+          "Confirm this pair stamps false_friend_confirmed.",
+          "Approve eligible does not clear qty≠amt / user≠customer.",
+          "Re-validate after confirm — Execute unlocks only when gates pass.",
+        ],
+      );
+      onApplyAction?.(action);
       return;
     }
     if (action.kind === "reload_dest_schema") {

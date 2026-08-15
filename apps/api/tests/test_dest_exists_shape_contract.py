@@ -193,3 +193,4 @@ def test_explain_gate_g15_uses_primary_action() -> None:
     )
     assert confirm_g["suggested_actions"][0]["kind"] == "confirm_or_remap"
     assert confirm_g["suggested_actions"][0]["column"] == "order_qty"
+    assert confirm_g["suggested_actions"][0]["label"] == "Confirm this pair"

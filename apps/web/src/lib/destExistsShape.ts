@@ -32,7 +32,7 @@ export interface DestExistsPrimaryCta {
 
 const ACTION_LABEL: Record<string, string> = {
   review_map: "Open Map to remap extra columns",
-  confirm_or_remap: "Confirm or remap false-friend pairs",
+  confirm_or_remap: "Confirm this pair",
   reload_dest_schema: "Reload destination schema",
   confirm_add: "Review ADD COLUMN proposals",
   continue_validate: "Continue — dest-only columns stay off SET",

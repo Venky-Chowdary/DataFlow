@@ -823,6 +823,48 @@ export function confirmFalseFriendMapping(m: EditableMapping): EditableMapping {
   };
 }
 
+/**
+ * Validate-step confirm for G15. Named sources win; empty list confirms every
+ * unconfirmed false-friend. Approve-all must not call this.
+ */
+export function confirmFalseFriendsBySource(
+  mappings: EditableMapping[],
+  sources?: string[] | null,
+): {
+  mappings: EditableMapping[];
+  confirmed: string[];
+  blocked: string[];
+  unmatched: string[];
+} {
+  const named = (sources || []).map((s) => String(s || "").trim()).filter(Boolean);
+  const want = new Set(named.map((s) => s.toLowerCase()));
+  const confirmed: string[] = [];
+  const blocked: string[] = [];
+  const seen = new Set<string>();
+
+  const next = mappings.map((m) => {
+    const src = String(m.source || "").trim();
+    if (!src) return m;
+    const key = src.toLowerCase();
+    const targeted = want.size === 0
+      ? isFalseFriendReview(m) && !m.falseFriendConfirmed
+      : want.has(key);
+    if (!targeted) return m;
+    if (!isFalseFriendReview(m) || m.falseFriendConfirmed) return m;
+    seen.add(key);
+    const stamped = confirmFalseFriendMapping(m);
+    if (stamped.falseFriendConfirmed) {
+      confirmed.push(src);
+      return stamped;
+    }
+    blocked.push(src);
+    return stamped;
+  });
+
+  const unmatched = named.filter((s) => !seen.has(s.toLowerCase()));
+  return { mappings: next, confirmed, blocked, unmatched };
+}
+
 /** Operator changed the dest name — drop stale false-friend kind until rematch. */
 export function applyOperatorRemapDest(m: EditableMapping, target: string): EditableMapping {
   const next = String(target || "").trim();

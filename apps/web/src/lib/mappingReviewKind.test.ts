@@ -13,6 +13,7 @@ import {
   buildPreflightMappings,
   classifyMappingReview,
   confirmFalseFriendMapping,
+  confirmFalseFriendsBySource,
   countApproveEligible,
   editableFromPipelineMappings,
   mappingHealthSummary,
@@ -150,5 +151,25 @@ describe("Map review kind — false-friend operator surface", () => {
     const restored = editableFromPipelineMappings(wire);
     assert.equal(restored[0].falseFriendConfirmed, true);
     assert.equal(restored[0].approved, true);
+  });
+
+  it("Validate confirm_or_remap stamps only the named false-friend", () => {
+    const rows = [qtyAmt(), userCustomer(), {
+      source: "order_id",
+      target: "order_id",
+      confidence: 0.99,
+      approved: false,
+      requiresReview: false,
+    }];
+    const named = confirmFalseFriendsBySource(rows, ["order_qty"]);
+    assert.deepEqual(named.confirmed, ["order_qty"]);
+    assert.equal(named.mappings[0].falseFriendConfirmed, true);
+    assert.equal(named.mappings[1].falseFriendConfirmed, undefined);
+    assert.equal(named.unmatched.length, 0);
+    const all = confirmFalseFriendsBySource(rows);
+    assert.deepEqual(all.confirmed, ["order_qty", "user_id"]);
+    const miss = confirmFalseFriendsBySource(rows, ["loyalty_tier"]);
+    assert.deepEqual(miss.confirmed, []);
+    assert.deepEqual(miss.unmatched, ["loyalty_tier"]);
   });
 });

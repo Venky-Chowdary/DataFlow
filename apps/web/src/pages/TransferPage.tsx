@@ -21,6 +21,7 @@ import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
 import { ContractBindField } from "../components/contracts/ContractBindField";
 import { contractBindFromPolicies } from "../lib/contractBind";
+import { destExistsPrimaryCta, shapeContractFromPreflight } from "../lib/destExistsShape";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
@@ -102,6 +103,7 @@ import {
 } from "../lib/sourceStreams";
 import {
   approveMappingsHonestly,
+  confirmFalseFriendsBySource,
   buildPreflightMappings,
   confidenceThresholdForMode,
   editableFromPipelineMappings,
@@ -2901,6 +2903,46 @@ export function TransferPage({
     await executePreflight(next);
   };
 
+  /**
+   * G15 Validate door — stamp false_friend_confirmed in place and re-run.
+   * Approve eligible must not call this. Remap still lives on Map.
+   */
+  const confirmFalseFriendsAndRevalidate = async (sources?: string[]) => {
+    const { mappings: next, confirmed, blocked, unmatched } = confirmFalseFriendsBySource(
+      columnMappings,
+      sources,
+    );
+    if (blocked.length && !confirmed.length) {
+      toast({
+        title: "Cannot confirm this pair yet",
+        message: `${blocked.slice(0, 3).join(", ")} still needs Accept risk or a type remap on Map.`,
+        tone: "warning",
+      });
+      if (blocked[0]) setMapFocusSource(blocked[0]);
+      setStep(STEP_MAP);
+      return;
+    }
+    if (!confirmed.length) {
+      toast({
+        title: unmatched.length ? "Column is not a false-friend" : "No false-friend pair to confirm",
+        message: unmatched.length
+          ? `${unmatched.slice(0, 3).join(", ")} is not waiting on Confirm this pair. Open Map to remap.`
+          : "Open Map to remap, or re-run Validate if the pair was already confirmed.",
+        tone: "warning",
+      });
+      if (unmatched[0] || sources?.[0]) setMapFocusSource(unmatched[0] || sources?.[0] || "");
+      setStep(STEP_MAP);
+      return;
+    }
+    setColumnMappings(next);
+    toast({
+      title: "Pair confirmed — re-validating",
+      message: `Confirmed ${confirmed.slice(0, 3).join(", ")}${confirmed.length > 3 ? "…" : ""}. Re-running Validate.`,
+      tone: "success",
+    });
+    await executePreflight(next);
+  };
+
   const approveAllAndPreflight = async () => {
     const approved = approveMappingsHonestly(columnMappings);
     setColumnMappings(approved);
@@ -3289,6 +3331,29 @@ export function TransferPage({
               : "Review mappings, then re-run Validate.",
           tone: "info",
         });
+        break;
+      case "confirm_or_remap":
+        void confirmFalseFriendsAndRevalidate(action.column ? [action.column] : undefined);
+        break;
+      case "confirm_add":
+        if (action.column) setMapFocusSource(action.column);
+        setStep(STEP_MAP);
+        toast({
+          title: "Opened Map step",
+          message: "Review ADD COLUMN proposals, then re-run Validate.",
+          tone: "info",
+        });
+        break;
+      case "reload_dest_schema":
+        void loadDestinationSchema();
+        toast({
+          title: "Reloading destination schema",
+          message: "Re-introspecting dest columns, then return to Validate.",
+          tone: "info",
+        });
+        break;
+      case "continue_validate":
+        void executePreflight();
         break;
       case "check_connection":
         window.location.hash = "#/connectors";
@@ -3762,7 +3827,11 @@ export function TransferPage({
         primaryFixLabel: "Fix bad data…",
       };
     }
-    const action = firstBlocker?.suggested_actions?.[0];
+    const g15Cta = destExistsPrimaryCta(shapeContractFromPreflight(preflight));
+    const action = firstBlocker?.suggested_actions?.[0]
+      || (g15Cta
+        ? { kind: g15Cta.kind, label: g15Cta.label, column: g15Cta.column }
+        : undefined);
     if (!action) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
 
     switch (action.kind) {
@@ -3771,6 +3840,31 @@ export function TransferPage({
       case "add_transform":
       case "map_column":
         return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
+      case "confirm_or_remap":
+        return {
+          onPrimaryFix: () => {
+            void confirmFalseFriendsAndRevalidate(action.column ? [action.column] : undefined);
+          },
+          primaryFixLabel: action.label || "Confirm this pair",
+        };
+      case "confirm_add":
+        return {
+          onPrimaryFix: () => {
+            if (action.column) setMapFocusSource(action.column);
+            setStep(STEP_MAP);
+          },
+          primaryFixLabel: action.label,
+        };
+      case "reload_dest_schema":
+        return {
+          onPrimaryFix: () => { void loadDestinationSchema(); },
+          primaryFixLabel: action.label,
+        };
+      case "continue_validate":
+        return {
+          onPrimaryFix: () => { void executePreflight(); },
+          primaryFixLabel: action.label,
+        };
       case "normalize_control_chars":
       case "open_bad_data_fix":
         return {

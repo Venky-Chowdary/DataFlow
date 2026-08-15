@@ -34,6 +34,7 @@ describe("destExistsShape", () => {
     });
     assert.equal(cta?.kind, "confirm_or_remap");
     assert.equal(cta?.column, "order_qty");
+    assert.equal(cta?.label, "Confirm this pair");
   });
 
   it("maps G15 primary_action to one Validate button", () => {

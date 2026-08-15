@@ -831,7 +831,7 @@ def _g15_suggested_actions(action: str, details: dict[str, Any] | None = None) -
     ]
     kind_map = {
         "review_map": ("review_mappings", "Open Map to remap extra columns"),
-        "confirm_or_remap": ("confirm_or_remap", "Confirm or remap false-friend pairs"),
+        "confirm_or_remap": ("confirm_or_remap", "Confirm this pair"),
         "reload_dest_schema": ("reload_dest_schema", "Reload destination schema"),
         "confirm_add": ("confirm_add", "Review ADD COLUMN proposals"),
         "continue_validate": ("continue_validate", "Continue — dest-only columns stay off SET"),
