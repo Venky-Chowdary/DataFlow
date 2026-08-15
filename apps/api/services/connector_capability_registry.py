@@ -366,6 +366,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "Use the region-specific endpoint and verify bucket permissions.",
             "Large objects should be split into parts. S3 has no native UPDATE — "
             "upsert sync modes are not supported (overwrite object key only).",
+            "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -386,6 +387,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "Use HMAC keys or service-account JSON for authentication.",
             "Bucket names are global and unique.",
             "Object overwrite only — no row-level upsert/MERGE.",
+            "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -405,6 +407,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "Object overwrite only — no row-level upsert/MERGE.",
             "Use Azure Storage Account key or service principal.",
+            "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
     },

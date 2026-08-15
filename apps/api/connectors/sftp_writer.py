@@ -1,10 +1,9 @@
-"""SFTP object writer — upload JSON/JSONL/CSV exports."""
+"""SFTP object writer — upload JSON/JSONL/CSV/Parquet exports."""
 
 from __future__ import annotations
 
 import csv
 import io
-import json
 import logging
 import sys
 import uuid
@@ -12,9 +11,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string
 
-from connectors.object_store_common import resolve_object_store_write_dest_types
+from connectors.object_store_common import (
+    resolve_object_store_write_dest_types,
+    serialize_object_store_body,
+)
 from connectors.sftp_common import (
     connect_sftp,
     host_key_settings,
@@ -209,7 +211,7 @@ def write_mapped_rows(
 
     directory, filename = split_remote_path(cfg.path)
     ext = (filename.rsplit(".", 1)[-1] if "." in filename else "").lower()
-    if ext in ("csv", "jsonl", "json", "tsv"):
+    if ext in ("csv", "jsonl", "json", "tsv", "parquet"):
         fmt = ext
     else:
         fmt = "csv"
@@ -222,19 +224,33 @@ def write_mapped_rows(
         len(data_rows) - len(mapped_rows),
     )
 
-    records = mapped_rows_to_json_records(mapped_rows, target_cols, dest_types)
-
-    if fmt == "csv" or fmt == "tsv":
-        delimiter = "\t" if fmt == "tsv" else ","
+    if fmt == "tsv":
+        records = mapped_rows_to_json_records(mapped_rows, target_cols, dest_types)
         buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=target_cols, delimiter=delimiter, extrasaction="ignore")
+        writer = csv.DictWriter(buf, fieldnames=target_cols, delimiter="\t", extrasaction="ignore")
         writer.writeheader()
         writer.writerows([{c: cell_to_string(v) for c, v in r.items()} for r in records])
         body = buf.getvalue().encode("utf-8")
-    elif fmt == "jsonl":
-        body = "\n".join(json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False) for r in records).encode("utf-8")
     else:
-        body = json.dumps(records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False).encode("utf-8")
+        try:
+            body, _content_type = serialize_object_store_body(
+                key=filename if filename.lower().endswith(f".{fmt}") else f"export.{fmt}",
+                mapped_rows=mapped_rows,
+                target_cols=target_cols,
+                dest_types=dest_types,
+            )
+        except Exception as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=cfg.host,
+                checksum="",
+                chunks_completed=0,
+                error=f"SFTP serialize failed: {exc}",
+                rejected_details=list(rejected_details),
+            )
+    written = len(mapped_rows)
 
     try:
         transport, sftp = connect_sftp(cfg)
@@ -271,13 +287,13 @@ def write_mapped_rows(
             transport.close()
 
         if on_checkpoint:
-            on_checkpoint(1, 1, len(records))
+            on_checkpoint(1, 1, written)
 
         _final_abort = reject_on_strict_policy(policy, rejected_details, "SFTP")
         if _final_abort:
             return WriteResult(
                 ok=False,
-                rows_written=len(records),
+                rows_written=written,
                 table_name=filename,
                 target_schema=cfg.host,
                 checksum="",
@@ -290,7 +306,7 @@ def write_mapped_rows(
 
         return WriteResult(
             ok=True,
-            rows_written=len(records),
+            rows_written=written,
             table_name=filename,
             target_schema=cfg.host,
             checksum=row_checksum(

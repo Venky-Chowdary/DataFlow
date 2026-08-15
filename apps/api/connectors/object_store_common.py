@@ -26,18 +26,20 @@ __all__ = [
     "purge_object_store_parts",
     "read_object_from_store",
     "resolve_object_store_write_dest_types",
+    "serialize_object_store_body",
     "resolve_object_write_key",
     "resolve_object_write_layout",
     "_object_version_token",
 ]
 
-_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv)$", re.IGNORECASE)
+OBJECT_STORE_EXPORT_EXTS = (".json", ".jsonl", ".csv", ".parquet")
+_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv|parquet)$", re.IGNORECASE)
 
 
 def normalize_object_base_key(table_name: str, schema: str = "") -> str:
     """Canonical object key from table/schema (single-chunk layout)."""
     key = (table_name or schema or "exports/dataflow_export.json").strip()
-    if not key.endswith((".json", ".jsonl", ".csv")):
+    if not key.lower().endswith(OBJECT_STORE_EXPORT_EXTS):
         key = f"{key.rstrip('/')}/export.json"
     return key
 
@@ -384,3 +386,50 @@ def resolve_object_store_write_dest_types(
         studio_types=destination_column_types,
         product="Object-store",
     )
+
+
+def serialize_object_store_body(
+    *,
+    key: str,
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+) -> tuple[bytes, str]:
+    """Serialize one object-store chunk — JSON / JSONL / CSV / Parquet.
+
+    Parquet uses the shared Arrow coerce SSOT (same cells as Iceberg). JSON/CSV
+    still go through ``mapped_rows_to_json_records`` so DF_MISSING keys stay
+    omitted. Default extension remains JSON for backward compatibility.
+    """
+    import csv
+    import io
+    import json
+
+    from connectors.writer_common import mapped_rows_to_json_records
+    from services.value_serializer import cell_to_string, json_default
+
+    dest_types = dest_types or {}
+    key_l = (key or "").lower()
+    if key_l.endswith(".parquet"):
+        from services.arrow_write import mapped_rows_to_parquet_bytes
+
+        return mapped_rows_to_parquet_bytes(mapped_rows, target_cols, dest_types)
+
+    records = mapped_rows_to_json_records(mapped_rows, target_cols, dest_types)
+    if key_l.endswith(".csv"):
+        buf = io.StringIO()
+        writer = csv.DictWriter(buf, fieldnames=target_cols, extrasaction="ignore")
+        writer.writeheader()
+        for record in records:
+            writer.writerow({k: cell_to_string(v) for k, v in record.items()})
+        return buf.getvalue().encode("utf-8"), "text/csv"
+    if key_l.endswith(".jsonl"):
+        body = "\n".join(
+            json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False)
+            for r in records
+        ).encode("utf-8")
+        return body, "application/x-ndjson"
+    body = json.dumps(
+        records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
+    ).encode("utf-8")
+    return body, "application/json"

@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-import csv
-import io
-import json
 from dataclasses import dataclass
 from typing import Any, Callable
-
-from services.value_serializer import cell_to_string, json_default
 
 from connectors.adls_common import blob_service_client
 from connectors.object_store_common import (
@@ -16,6 +11,7 @@ from connectors.object_store_common import (
     purge_object_store_parts,
     resolve_object_store_write_dest_types,
     resolve_object_write_layout,
+    serialize_object_store_body,
 )
 from connectors.writer_common import (
     WriteResult as _WriteResult,
@@ -25,7 +21,6 @@ from connectors.writer_common import (
     _rejected_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
-    mapped_rows_to_json_records,
     resolve_target_columns,
     row_checksum,
     transform_error_policy,
@@ -151,22 +146,25 @@ def write_mapped_rows(
             rejected_details=list(rejected_details),
         )
 
-    records = mapped_rows_to_json_records(mapped_rows, target_cols, dest_types)
-
-    if key.endswith(".csv"):
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=target_cols, extrasaction="ignore")
-        writer.writeheader()
-        for record in records:
-            writer.writerow({k: cell_to_string(v) for k, v in record.items()})
-        body = buf.getvalue().encode("utf-8")
-        content_type = "text/csv"
-    elif key.endswith(".jsonl"):
-        body = "\n".join(json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False) for r in records).encode("utf-8")
-        content_type = "application/x-ndjson"
-    else:
-        body = json.dumps(records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False).encode("utf-8")
-        content_type = "application/json"
+    try:
+        body, content_type = serialize_object_store_body(
+            key=key,
+            mapped_rows=mapped_rows,
+            target_cols=target_cols,
+            dest_types=dest_types,
+        )
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=key,
+            target_schema=container,
+            checksum="",
+            chunks_completed=0,
+            error=f"ADLS serialize failed: {exc}",
+            rejected_details=list(rejected_details),
+        )
+    written = len(mapped_rows)
 
     try:
         client = blob_service_client(cfg)
@@ -216,13 +214,13 @@ def write_mapped_rows(
                 )
         checksum = row_checksum(mapped_rows, target_cols, dest_db_type="adls")
         if on_checkpoint:
-            on_checkpoint(1, 1, len(records))
+            on_checkpoint(1, 1, written)
         warn_out = (errors[:10] + purge_warnings)[:20]
         _final_abort = reject_on_strict_policy(policy, rejected_details, "ADLS")
         if _final_abort:
             return WriteResult(
                 ok=False,
-                rows_written=len(records),
+                rows_written=written,
                 table_name=key,
                 target_schema=container,
                 checksum=checksum,
@@ -237,7 +235,7 @@ def write_mapped_rows(
             )
         return WriteResult(
             ok=True,
-            rows_written=len(records),
+            rows_written=written,
             table_name=key,
             target_schema=container,
             checksum=checksum,
