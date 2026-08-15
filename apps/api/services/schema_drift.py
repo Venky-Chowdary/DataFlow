@@ -147,6 +147,61 @@ def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     return False
 
 
+def _semantic_rename_pairs(
+    dropped: list[str],
+    added: list[str],
+    old_cols: dict[str, str],
+    new_cols: dict[str, str],
+    *,
+    dest_db: str = "",
+) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+    """Pair dropped↔added columns that are the same field under a new name.
+
+    Type compatibility is necessary but not sufficient. ``AMT`` → ``quantity``
+    is a drop+add, not a rename — Fivetran treats it as a new column and
+    leaves the old one stale. We require the shared mapper to pin the pair
+    without a measure/identity/entity false-friend.
+    """
+    from services.semantic_mapper import (
+        _entity_conflict_requires_review,
+        _identity_leaf_mismatch,
+        _measure_kind_mismatch,
+        map_columns,
+    )
+
+    remaining_dropped = list(dropped)
+    remaining_added = list(added)
+    if not remaining_dropped or not remaining_added:
+        return remaining_dropped, remaining_added, []
+
+    mapped = map_columns(remaining_dropped, remaining_added)
+    by_source = {str(m.get("source")): m for m in mapped}
+    used_added: set[str] = set()
+    pairs: list[tuple[str, str]] = []
+    for d in list(remaining_dropped):
+        row = by_source.get(d) or {}
+        a = str(row.get("target") or "")
+        if not a or a not in remaining_added or a in used_added:
+            continue
+        if row.get("create_new"):
+            continue
+        if _is_type_narrow(old_cols[d], new_cols[a], dest_db=dest_db):
+            continue
+        if (
+            _measure_kind_mismatch(d, a)
+            or _identity_leaf_mismatch(d, a)
+            or _entity_conflict_requires_review(d, a)
+        ):
+            continue
+        if float(row.get("confidence") or 0) < 0.72:
+            continue
+        pairs.append((d, a))
+        used_added.add(a)
+    remaining_dropped = [c for c in remaining_dropped if c not in {p[0] for p in pairs}]
+    remaining_added = [c for c in remaining_added if c not in used_added]
+    return remaining_dropped, remaining_added, pairs
+
+
 def compatibility_of(classification: dict[str, Any] | None) -> str:
     """Confluent BACKWARD/FORWARD/FULL/NONE for physical SQL transfer.
 
@@ -214,41 +269,23 @@ def classify_schema_change(
     added = sorted(new_names - old_names)
     dropped = sorted(old_names - new_names)
 
-    # Heuristic rename: match dropped↔added by compatible (non-narrowing) types.
-    # Single-pair keeps the classic path; multi-column uses greedy type matching
-    # so N renames are not misclassified as N drops + N adds (false breaking).
+    # Semantic rename: pair dropped↔added by mapper score, not type-only.
+    # Type-only pairing is the Fivetran hole (AMT drop + quantity add looks
+    # like a rename because both are DECIMAL). Require a real name match and
+    # refuse measure/identity/entity false-friends.
     renamed_pairs: list[tuple[str, str]] = []
     if dropped and added:
-        remaining_dropped = list(dropped)
-        remaining_added = list(added)
-        # Prefer exact logical-type matches, then any non-narrow pair.
-        for prefer_exact in (True, False):
-            for d in list(remaining_dropped):
-                best: str | None = None
-                for a in remaining_added:
-                    if _is_type_narrow(old_cols[d], new_cols[a], dest_db=dest_db):
-                        continue
-                    same = normalize_logical_type(old_cols[d]) == normalize_logical_type(
-                        new_cols[a]
-                    )
-                    if prefer_exact and not same:
-                        continue
-                    if not prefer_exact and same:
-                        continue
-                    best = a
-                    break
-                if best is None:
-                    continue
-                renamed_pairs.append((d, best))
-                breaking.append({
-                    "kind": "rename",
-                    "column": d,
-                    "to": best,
-                    "old_type": old_cols[d],
-                    "new_type": new_cols[best],
-                })
-                remaining_dropped.remove(d)
-                remaining_added.remove(best)
+        remaining_dropped, remaining_added, renamed_pairs = _semantic_rename_pairs(
+            dropped, added, old_cols, new_cols, dest_db=dest_db
+        )
+        for d, a in renamed_pairs:
+            breaking.append({
+                "kind": "rename",
+                "column": d,
+                "to": a,
+                "old_type": old_cols[d],
+                "new_type": new_cols[a],
+            })
         dropped = remaining_dropped
         added = remaining_added
 

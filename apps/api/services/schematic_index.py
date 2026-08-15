@@ -13,7 +13,14 @@ import re
 from functools import lru_cache
 from pathlib import Path
 
-_CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "schematic_index.cache.pkl"
+# Bump when synonym / identity-kind rules change so stale pickles cannot
+# keep over-collapsed pairs (user_id→customer_id, sku→product_id).
+_CACHE_VERSION = 3
+_CACHE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "data"
+    / f"schematic_index.v{_CACHE_VERSION}.cache.pkl"
+)
 
 # Enterprise data-warehouse prefixes/suffixes seen in real schemas
 _PREFIXES = (
@@ -153,7 +160,9 @@ _DOMAIN_LEAVES = frozenset({
 # Identity-kind leaves are not interchangeable. Synonym retrieval lists
 # ``key`` / ``pk`` / ``uuid`` under canonical ``id``, which would otherwise
 # boost ``customer_id`` onto warehouse ``customer_key`` at 0.97.
-IDENTITY_KIND_LEAVES = frozenset({"id", "key", "pk", "code", "uuid", "guid", "oid"})
+IDENTITY_KIND_LEAVES = frozenset({
+    "id", "key", "pk", "code", "uuid", "guid", "oid", "sku",
+})
 # Back-compat alias used by older call sites.
 _GENERIC_LEAVES = _DOMAIN_LEAVES | _ENTITY_STOPWORDS
 
@@ -238,6 +247,16 @@ def schematic_match_boost(source: str, target: str) -> float | None:
         return None
     src_q = _entity_qualifiers(src_tokens)
     tgt_q = _entity_qualifiers(tgt_tokens)
+    # Distinct entities (user ≠ customer, client ≠ customer) must not inherit
+    # a 0.95 boost just because the synonym dictionary over-collapsed them.
+    if (
+        src_q
+        and tgt_q
+        and src_q.isdisjoint(tgt_q)
+        and not _qualifier_stems_overlap(src_q, tgt_q)
+        and not _qualifiers_synonymous(src_q, tgt_q)
+    ):
+        return None
 
     src_canon = lookup_schematic(source)
     tgt_canon = lookup_schematic(target)

@@ -764,6 +764,27 @@ def _normalize(name: str) -> str:
     return re.sub(r"_+", "_", s).rstrip("_")
 
 
+def _folded_ident(name: str) -> str:
+    """Case- and underscore-insensitive identifier (UserID ≡ userid ≡ user_id)."""
+    return _normalize(name).replace("_", "")
+
+
+def _dest_fold_collisions(target_columns: list[str]) -> set[str]:
+    """Destination names that share a folded identifier with a sibling column.
+
+    Postgres/Snowflake fold ``UserID`` and ``userid`` onto one slot; MySQL
+    keeps both. Either way Map must not auto-approve a pin onto one of them.
+    """
+    buckets: dict[str, list[str]] = {}
+    for tgt in target_columns:
+        buckets.setdefault(_folded_ident(tgt), []).append(tgt)
+    collided: set[str] = set()
+    for names in buckets.values():
+        if len(names) > 1:
+            collided.update(names)
+    return collided
+
+
 def _exact_name_unambiguous(
     source: str, target: str, target_columns: list[str]
 ) -> bool:
@@ -774,12 +795,12 @@ def _exact_name_unambiguous(
     within the review band even when the winner is a literal name equality, so
     a gap test alone marks re-runs of a table DataFlow itself created as
     ambiguous forever. Name equality is only genuinely ambiguous when a second
-    destination column normalizes to the same name.
+    destination column folds to the same identifier (``UserID`` vs ``userid``).
     """
-    src_norm = _normalize(source)
-    if not src_norm or _normalize(target) != src_norm:
+    src_fold = _folded_ident(source)
+    if not src_fold or _folded_ident(target) != src_fold:
         return False
-    return sum(1 for t in target_columns if _normalize(t) == src_norm) == 1
+    return sum(1 for t in target_columns if _folded_ident(t) == src_fold) == 1
 
 
 def _expand_abbrev(token: str) -> str:
@@ -899,6 +920,11 @@ _MEASURE_KIND_TOKENS = frozenset({
     "freight", "salary", "commission", "bonus", "payment", "unit",
 })
 _MONEY_LEAVES = frozenset({"amount", "total", "balance", "price", "cost"})
+# Count/quantity is not money. Fivetran/Airbyte-class operators lose trust when
+# ``order_qty`` auto-pins onto ``order_amt`` because both share ``order``.
+_COUNT_LEAVES = frozenset({"quantity", "count", "units", "pieces"})
+# created vs updated is polarity, not a license to ADD a sibling timestamp.
+_TEMPORAL_POLARITY = frozenset({"created", "updated", "modified", "deleted", "inserted"})
 # Below G4 strict (~0.85) even if Map forgets requires_review.
 _AMBIGUOUS_PAIR_CAP = 0.78
 
@@ -1048,21 +1074,47 @@ def _measure_kind_mismatch(source: str, target: str) -> bool:
 
     ``tax_amt`` vs ``tax_amount`` shares ``tax``. ``tax_amt`` vs ``total_amount``
     looks like a compound amount bucket because ``total`` is a domain leaf —
-    that must not auto-pin as identity.
+    that must not auto-pin as identity. ``order_qty`` vs ``order_amt`` shares
+    the entity but not the measure family (count ≠ money).
     """
     src = _measure_kind_tokens(source)
-    if not src:
-        return False
     tgt = _measure_kind_tokens(target)
-    return src.isdisjoint(tgt)
+    if src and src.isdisjoint(tgt):
+        return True
+    src_money = bool(_money_leaves(source))
+    tgt_money = bool(_money_leaves(target))
+    src_count = bool(_count_leaves(source))
+    tgt_count = bool(_count_leaves(target))
+    return (src_money and tgt_count) or (src_count and tgt_money)
 
 
 def _money_leaves(name: str) -> set[str]:
     return {t for t in _semantic_form(name).split("_") if t} & _MONEY_LEAVES
 
 
+def _count_leaves(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _COUNT_LEAVES
+
+
 def _shared_money_family(source: str, target: str) -> bool:
     return bool(_money_leaves(source) and _money_leaves(target))
+
+
+def _entity_conflict_requires_review(source: str, target: str) -> bool:
+    """True when both sides name different entities (user ≠ customer).
+
+    Schematic index collapse (``user_id`` → canonical ``customer_id``) must
+    not skip G4. Shared money families still propose with review elsewhere.
+    """
+    if _shared_money_family(source, target):
+        return False
+    return _entity_agreement(source, target) == 0.0
+
+
+def _temporal_polarity_conflict(source: str, target: str) -> bool:
+    src = {t for t in _semantic_form(source).split("_") if t} & _TEMPORAL_POLARITY
+    tgt = {t for t in _semantic_form(target).split("_") if t} & _TEMPORAL_POLARITY
+    return bool(src and tgt and src != tgt)
 
 
 def _reason_forces_review(reason: str) -> bool:
@@ -1271,6 +1323,12 @@ def _score_pair(
         if _measure_kind_mismatch(source, target):
             adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
             review_bits.append("measure-kind mismatch")
+        if _entity_conflict_requires_review(source, target):
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append("entity qualifier conflict")
+        if _temporal_polarity_conflict(source, target):
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append("temporal polarity conflict")
         if review_bits:
             reason = f"{reason} · {' · '.join(review_bits)} — review required"
         return adjusted, reason
@@ -1304,6 +1362,18 @@ def _score_pair(
             return _finish(
                 min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
                 "Conflicting entity qualifiers on same measure — review required",
+            )
+        if _identity_kind_leaves(source) or _identity_kind_leaves(target):
+            # user_id vs customer_id is a dest candidate, not a license to ADD
+            # a sibling column. Propose below G4 — never invent, never auto-pin.
+            return _finish(
+                min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
+                "Conflicting entity qualifiers on identity — review required",
+            )
+        if _temporal_polarity_conflict(source, target):
+            return _finish(
+                min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
+                "Conflicting temporal polarity — review required",
             )
         return _finish(min(0.42, form_ratio * 0.55), "Conflicting entity qualifiers")
 
@@ -1695,6 +1765,7 @@ def map_columns(
             pair_scores[(source, target)] = (score, reason)
 
     assigned_sources: set[str] = set()
+    dest_collisions = _dest_fold_collisions(target_columns)
     optimal = _optimal_assignment(source_columns, target_columns, pair_scores)
     for source in source_columns:
         assigned = optimal.get(source)
@@ -1730,8 +1801,17 @@ def map_columns(
         elif reason.startswith("Exact") and score_gap >= 0.08:
             # Decisive Exact with compatible types — review not required.
             requires_review = False
-        if _reason_forces_review(reason) or _identity_leaf_mismatch(source, target) or _measure_kind_mismatch(source, target):
+        if (
+            _reason_forces_review(reason)
+            or _identity_leaf_mismatch(source, target)
+            or _measure_kind_mismatch(source, target)
+            or _entity_conflict_requires_review(source, target)
+        ):
             requires_review = True
+        if target in dest_collisions:
+            requires_review = True
+            score = min(float(score), _AMBIGUOUS_PAIR_CAP)
+            reason = f"{reason} · destination identifier collision — review required"
         assigned_sources.add(source)
         used_targets.add(target)
         mappings.append(
@@ -1823,7 +1903,11 @@ def map_columns(
                 if (
                     _identity_leaf_mismatch(source, near_tgt)
                     or _measure_kind_mismatch(source, near_tgt)
+                    or _entity_conflict_requires_review(source, near_tgt)
                 ):
+                    requires_review = True
+                    near_score = min(float(near_score), _AMBIGUOUS_PAIR_CAP)
+                if near_tgt in dest_collisions:
                     requires_review = True
                     near_score = min(float(near_score), _AMBIGUOUS_PAIR_CAP)
                 mappings.append(
@@ -1989,8 +2073,11 @@ def map_columns(
             _reason_forces_review(best_reason)
             or _identity_leaf_mismatch(source, best_target)
             or _measure_kind_mismatch(source, best_target)
+            or _entity_conflict_requires_review(source, best_target)
+            or best_target in dest_collisions
         ):
             requires_review = True
+            best_score = min(float(best_score), _AMBIGUOUS_PAIR_CAP)
         mappings.append(
             {
                 "source": source,

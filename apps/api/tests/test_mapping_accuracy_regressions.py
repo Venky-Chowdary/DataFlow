@@ -127,6 +127,45 @@ def test_email_addr_does_not_double_expand():
     assert "address_address" not in _semantic_form("email_addr")
 
 
+def test_order_qty_does_not_auto_pin_order_amt():
+    """Quantity is not money — the shared ``order`` qualifier must not skip G4."""
+    out = map_columns(["order_qty"], ["order_amt"])
+    assert len(out) == 1
+    row = out[0]
+    assert row["target"] == "order_amt"
+    assert row.get("create_new") is not True
+    assert row.get("requires_review") is True
+    assert float(row["confidence"]) < 0.85
+
+
+def test_user_id_does_not_auto_pin_customer_id():
+    """CRM user_id is not customer_id. Synonym collapse must not skip G4."""
+    out = map_columns(["user_id"], ["customer_id"])
+    assert len(out) == 1
+    row = out[0]
+    assert row.get("create_new") is not True
+    assert row.get("requires_review") is True
+    assert float(row["confidence"]) < 0.85
+
+
+def test_dest_userid_collision_requires_review():
+    """UserID vs userid is a dest identifier collision — never auto-approve."""
+    out = map_columns(["user_id"], ["UserID", "userid"])
+    assert len(out) == 1
+    row = out[0]
+    assert row["target"] in {"UserID", "userid"}
+    assert row.get("create_new") is not True
+    assert row.get("requires_review") is True
+    assert float(row["confidence"]) < 0.85
+
+
+def test_sku_does_not_auto_pin_product_id_when_sku_exists():
+    out = map_columns(["sku"], ["product_sku", "product_id"])
+    by = {m["source"]: m for m in out}
+    assert by["sku"]["target"] == "product_sku"
+    assert by["sku"].get("requires_review") is not True
+
+
 def test_objectid_still_avoids_decimal_id():
     samples = [
         "693486a0f0d881be6f0c470e",

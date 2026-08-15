@@ -36,3 +36,6 @@ def test_schematic_refuses_id_vs_key_identity_false_friend():
     assert schematic_match_boost("employee_id", "employee_key") is None
     # Same leaf still boosts when the index agrees.
     assert schematic_match_boost("cust_id", "customer_id") is not None
+    assert schematic_match_boost("user_id", "customer_id") is None
+    assert schematic_match_boost("client_id", "customer_id") is None
+    assert schematic_match_boost("sku", "product_id") is None
