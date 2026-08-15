@@ -430,17 +430,6 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
           { value: "9 / 9", label: "Preflight required" },
           { value: "MATCH", label: "Dest-engine checksum" },
         ]}
-        aside={
-          <aside className="lp-sales-hero-aside" aria-label="Enterprise control snapshot">
-            <p>Control snapshot</p>
-            <p className="lp-sales-hero-note">
-              Identity · SSO enforced<br />
-              Secrets · BYOK wrapped<br />
-              Agents · MCP under RBAC<br />
-              Reconcile · dest-engine MATCH
-            </p>
-          </aside>
-        }
       />
 
       <MarketingReveal>
@@ -786,27 +775,18 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
       <MarketingInkHero
-        kicker="Legal"
-        title={kind === "privacy" ? "Privacy" : "Terms of service"}
+        tone="doc"
+        kicker={kind === "privacy" ? "Privacy" : "Terms"}
+        title={kind === "privacy" ? "Privacy policy" : "Terms of service"}
+        meta={
+          kind === "privacy"
+            ? "Last updated August 2026 · privacy@datawrap.ai · You are the controller of connected data"
+            : "Last updated August 2026 · legal@datawrap.ai · A signed MSA supersedes where it conflicts"
+        }
         lead={
           kind === "privacy"
             ? "How Datawrap handles workspace data, credentials, and audit logs — written for security and legal review."
-            : "The agreement that governs use of the Datawrap platform, including Transfer Studio, pipelines, and MCP."
-        }
-        slas={
-          kind === "privacy"
-            ? [
-                { value: "You", label: "Controller of connected data" },
-                { value: "Us", label: "Processor on instruction" },
-                { value: "BYOK", label: "Enterprise secret wrap" },
-                { value: "2026", label: "Last updated August" },
-              ]
-            : [
-                { value: "MSA", label: "Order form can supersede" },
-                { value: "DPA", label: "Available with Enterprise" },
-                { value: "DE", label: "Governing law Delaware" },
-                { value: "2026", label: "Last updated August" },
-              ]
+            : "The agreement that governs use of Transfer Studio, pipelines, Pilot, and MCP."
         }
       />
 
@@ -907,17 +887,6 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           { value: "9 / 9", label: "Gates before write" },
           { value: "RBAC", label: "Studio · Pilot · MCP" },
         ]}
-        aside={
-          <aside className="lp-sales-hero-aside" aria-label="Runtime security posture">
-            <p>Runtime posture</p>
-            <p className="lp-sales-hero-note">
-              Preflight · 9 / 9<br />
-              Write · quarantine surfaced<br />
-              Reconcile · checksum MATCH<br />
-              Agents · no raw dest passwords
-            </p>
-          </aside>
-        }
       />
 
       <MarketingReveal>
@@ -1046,14 +1015,6 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           { value: "SQLA", label: "Generic SQL drivers" },
           { value: "DLQ", label: "Quarantine replay" },
         ]}
-        aside={
-          <aside className="lp-sales-hero-aside" aria-label="Stack preview">
-            <p>Proven families</p>
-            <p className="lp-sales-hero-note">
-              PostgreSQL · MySQL · SQL Server · Oracle · Snowflake · BigQuery · S3 · Kafka · Salesforce
-            </p>
-          </aside>
-        }
       />
 
       <MarketingReveal>

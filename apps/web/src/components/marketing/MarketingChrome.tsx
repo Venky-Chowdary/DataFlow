@@ -308,27 +308,40 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
               <p className="lp-footer-tagline">
                 Anywhere to anywhere — wrapped with proof.
               </p>
+              <p className="lp-footer-proof">
+                Catalog tiles are not transfer-live. CDC stays at-least-once upsert until a route proves dest-owned exactly-once.
+              </p>
             </div>
             <div>
               <h4>Product</h4>
               <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>Transfer Studio</a>
               <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>Job Theater</a>
               <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>Pipelines</a>
+              <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>Query Playground</a>
               <a href={link("pricing")} onClick={(e) => { e.preventDefault(); go("pricing"); }}>Pricing</a>
+            </div>
+            <div>
+              <h4>Solutions</h4>
+              <a href={link("solution-migrations")} onClick={(e) => { e.preventDefault(); go("solution-migrations"); }}>Migrations</a>
+              <a href={link("solution-warehouse")} onClick={(e) => { e.preventDefault(); go("solution-warehouse"); }}>Warehouses</a>
+              <a href={link("solution-sync")} onClick={(e) => { e.preventDefault(); go("solution-sync"); }}>Sync</a>
+              <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>Integrations</a>
+              <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>Enterprise</a>
             </div>
             <div>
               <h4>Resources</h4>
               <a href={link("help")} onClick={(e) => { e.preventDefault(); go("help"); }}>Documentation</a>
               <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
-              <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>Enterprise</a>
-              <a href={link("contact")} onClick={(e) => { e.preventDefault(); go("contact"); }}>Contact</a>
+              <a href={link("customers")} onClick={(e) => { e.preventDefault(); go("customers"); }}>Customers</a>
+              <a href={link("contact")} onClick={(e) => { e.preventDefault(); go("contact"); }}>Contact sales</a>
+              <button type="button" className="lp-footer-link" onClick={onGetStarted}>Get started</button>
             </div>
             <div>
-              <h4>Account</h4>
-              <button type="button" className="lp-footer-link" onClick={onLogin}>Log in</button>
-              <button type="button" className="lp-footer-link" onClick={onGetStarted}>Get started</button>
+              <h4>Legal</h4>
               <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
               <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
+              <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
+              <button type="button" className="lp-footer-link" onClick={onLogin}>Log in</button>
             </div>
           </div>
 

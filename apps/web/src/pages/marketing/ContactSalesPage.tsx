@@ -152,16 +152,27 @@ export function ContactSalesPage({
           <div className="lp-sales-hero-copy">
             <p className="lp-sales-kicker">Contact sales</p>
             <h1>Talk to a solutions engineer.</h1>
-            <p>
-              Scope Map → G1–G9 → quarantine → dest-engine checksum on your sources and
-              destinations. Reply within one business day — not a drip campaign.
+            <p className="lp-sales-hero-lead">
+              Scope Map → G1–G9 → quarantine → dest-engine checksum on your stack. Reply
+              within one business day — not a drip campaign.
             </p>
             <p className="lp-sales-hero-mail">
               <a className="lp-sales-mail" href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">
                 sales@datawrap.io
               </a>
-              <span>Reply in one business day. No SOC 2 certificate is claimed.</span>
+              <span>One business day. No SOC 2 certificate is claimed.</span>
             </p>
+            <ol className="lp-sales-hero-steps">
+              {NEXT_STEPS.map((s) => (
+                <li key={s.n}>
+                  <span>{s.n}</span>
+                  <div>
+                    <strong>{s.title}</strong>
+                    <p>{s.body}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
           </div>
 
           {sent ? (
@@ -192,7 +203,7 @@ export function ContactSalesPage({
             <form className="lp-sales-form" onSubmit={submit} noValidate>
               <header className="lp-sales-form-head">
                 <h2>Request a scoped pilot</h2>
-                <p>Required: name, work email, company. Stack is optional.</p>
+                <p>Name, work email, and company. Stack is optional.</p>
               </header>
 
               <div className="lp-sales-fields">
@@ -238,38 +249,40 @@ export function ContactSalesPage({
                     autoComplete="organization"
                   />
                 </label>
-                <label>
-                  Role
-                  <select
-                    className="lp-sales-input"
-                    value={role}
-                    onChange={(e) => setRole(e.target.value)}
-                    autoComplete="organization-title"
-                  >
-                    <option value="">Optional</option>
-                    <option value="platform">Data platform / engineering lead</option>
-                    <option value="analytics">Analytics / BI</option>
-                    <option value="cdo">CDO / CIO</option>
-                    <option value="security">Security / compliance</option>
-                    <option value="procurement">Procurement</option>
-                    <option value="other">Other</option>
-                  </select>
-                </label>
-                <label>
-                  Phone <em>Optional</em>
-                  <input
-                    className="lp-sales-input"
-                    type="tel"
-                    value={phone}
-                    onChange={(e) => setPhone(e.target.value)}
-                    autoComplete="tel"
-                    placeholder="+1 …"
-                  />
-                </label>
               </div>
 
               <details className="lp-sales-more">
-                <summary>Add stack details <em>optional</em></summary>
+                <summary>Role, phone, and stack <em>optional</em></summary>
+                <div className="lp-sales-fields">
+                  <label>
+                    Role
+                    <select
+                      className="lp-sales-input"
+                      value={role}
+                      onChange={(e) => setRole(e.target.value)}
+                      autoComplete="organization-title"
+                    >
+                      <option value="">Optional</option>
+                      <option value="platform">Data platform / engineering lead</option>
+                      <option value="analytics">Analytics / BI</option>
+                      <option value="cdo">CDO / CIO</option>
+                      <option value="security">Security / compliance</option>
+                      <option value="procurement">Procurement</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                  <label>
+                    Phone
+                    <input
+                      className="lp-sales-input"
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      autoComplete="tel"
+                      placeholder="+1 …"
+                    />
+                  </label>
+                </div>
                 <ChipGrid label="Sources" options={SOURCES} value={sources} onChange={setSources} />
                 <ChipGrid
                   label="Destinations"
@@ -342,32 +355,22 @@ export function ContactSalesPage({
         </div>
       </section>
 
-      <section className="lp-sales-follow" aria-label="What happens next">
-        <div className="lp-mkt-wrap lp-sales-follow-inner">
-          <ol className="lp-sales-next">
-            {NEXT_STEPS.map((s) => (
-              <li key={s.n}>
-                <span>{s.n}</span>
-                <div>
-                  <strong>{s.title}</strong>
-                  <p>{s.body}</p>
-                </div>
-              </li>
-            ))}
-          </ol>
-          <div className="lp-sales-rail-box">
-            <h3>What we will not claim on the call</h3>
-            <ul>
-              <li>Catalog count as transfer-live</li>
-              <li>Platform-wide exactly-once</li>
-              <li>SOC 2 / ISO certificate (controls exist; audit is not done)</li>
-              <li>Informatica continue-on-error as success</li>
-            </ul>
-            <div className="lp-sales-rail-links">
-              <button type="button" onClick={() => onNavigate("security")}>Security</button>
-              <button type="button" onClick={() => onNavigate("enterprise")}>Enterprise</button>
-              <button type="button" onClick={() => onNavigate("pricing")}>Pricing</button>
-            </div>
+      <section className="lp-sales-follow" aria-label="Honesty on the call">
+        <div className="lp-mkt-wrap lp-sales-honesty">
+          <div>
+            <p className="lp-sales-kicker lp-sales-kicker--ink">Honesty</p>
+            <h2>What we will not claim on the call</h2>
+          </div>
+          <ul>
+            <li>Catalog count as transfer-live</li>
+            <li>Platform-wide exactly-once</li>
+            <li>SOC 2 / ISO certificate — controls exist; audit is not done</li>
+            <li>Informatica continue-on-error as success</li>
+          </ul>
+          <div className="lp-sales-rail-links">
+            <button type="button" onClick={() => onNavigate("security")}>Security</button>
+            <button type="button" onClick={() => onNavigate("enterprise")}>Enterprise</button>
+            <button type="button" onClick={() => onNavigate("pricing")}>Pricing</button>
           </div>
         </div>
       </section>

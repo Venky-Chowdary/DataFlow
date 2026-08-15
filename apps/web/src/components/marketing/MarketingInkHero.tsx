@@ -7,6 +7,8 @@ export function MarketingInkHero({
   slas,
   actions,
   aside,
+  tone = "ink",
+  meta,
 }: {
   kicker: string;
   title: ReactNode;
@@ -14,9 +16,12 @@ export function MarketingInkHero({
   slas?: { value: string; label: string }[];
   actions?: ReactNode;
   aside?: ReactNode;
+  /** ink = dark product hero. doc = light document header (Privacy / Terms). */
+  tone?: "ink" | "doc";
+  meta?: ReactNode;
 }) {
   const slaList = slas?.length ? (
-    <ul className={`lp-sales-hero-slas${aside ? "" : " lp-sales-hero-slas--panel"}`}>
+    <ul className="lp-sales-hero-slas">
       {slas.map((s) => (
         <li key={s.label}>
           <strong>{s.value}</strong>
@@ -27,16 +32,24 @@ export function MarketingInkHero({
   ) : null;
 
   return (
-    <section className="lp-sales-hero lp-sales-hero--page" aria-label={kicker}>
+    <section
+      className={[
+        "lp-sales-hero",
+        tone === "doc" ? "lp-sales-hero--doc" : "lp-sales-hero--ink",
+        aside ? "lp-sales-hero--split" : "lp-sales-hero--page",
+      ].join(" ")}
+      aria-label={kicker}
+    >
       <div className="lp-mkt-wrap lp-sales-hero-inner">
         <div className="lp-sales-hero-copy">
           <p className="lp-sales-kicker">{kicker}</p>
           <h1>{title}</h1>
-          <p>{lead}</p>
+          {meta ? <p className="lp-sales-hero-meta">{meta}</p> : null}
+          <p className="lp-sales-hero-lead">{lead}</p>
           {actions}
-          {aside ? slaList : null}
+          {slaList}
         </div>
-        {aside ?? slaList}
+        {aside}
       </div>
     </section>
   );
