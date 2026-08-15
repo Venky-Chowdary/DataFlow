@@ -12710,7 +12710,7 @@ html:has(.lp) {
     radial-gradient(700px 360px at 88% 20%, rgba(13, 148, 136, 0.16), transparent 50%),
     linear-gradient(180deg, #0c1b2e 0%, #07111f 70%, #050b14 100%);
   color: #fff;
-  padding: clamp(28px, 4vw, 40px) 0 clamp(32px, 4vw, 48px);
+  padding: clamp(28px, 4vw, 40px) 0 clamp(48px, 5vw, 64px);
 }
 
 .lp-sales-hero-inner {
