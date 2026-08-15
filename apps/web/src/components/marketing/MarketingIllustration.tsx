@@ -151,7 +151,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <g className="lp-cust-tile" style={{ "--i": 1 } as CSSProperties}>
           <rect x="240" y="24" width="216" height="120" rx="14" fill="#0f766e" />
           <text x="256" y="54" fontSize="11" fill="#99f6e4" fontWeight="700">PREFLIGHT</text>
-          <text x="256" y="88" fontSize="22" fill="#fff" fontWeight="700">G1–G8</text>
+          <text x="256" y="88" fontSize="22" fill="#fff" fontWeight="700">G1–G9</text>
           <text x="256" y="112" fontSize="12" fill="#ccfbf1">gates before every write</text>
         </g>
         <g className="lp-cust-tile" style={{ "--i": 2 } as CSSProperties}>

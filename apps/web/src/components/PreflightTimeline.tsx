@@ -126,7 +126,7 @@ export function PreflightTimeline({
     .find((g) => g.id === "g9_data_integrity")?.message || "";
   const sampleUniqueness = /population uniqueness not proven/i.test(g9Msg);
   const headline = running
-    ? "Engine running G1–G8…"
+    ? "Engine running G1–G9…"
     : decision === "approve" && result.passed && sampleUniqueness
       ? "Execute-ready · uniqueness sample-only"
       : decision === "approve" && result.passed
@@ -311,7 +311,7 @@ export function PreflightTimeline({
           <div className="df2-validate-stage-core">
             <Spinner size="sm" label="" />
             <h3>Validating route</h3>
-            <p>Engine evaluating G1–G8 · {formatElapsed(elapsedMs)} elapsed</p>
+            <p>Engine evaluating G1–G9 · {formatElapsed(elapsedMs)} elapsed</p>
             <div className="df2-preflight-progress is-indeterminate" role="status">
               <div className="df2-mapping-progress-meta">
                 <strong>{formatElapsed(elapsedMs)}</strong>

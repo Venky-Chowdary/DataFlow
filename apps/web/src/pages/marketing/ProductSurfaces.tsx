@@ -396,7 +396,7 @@ export function TransferStudioPage({
       liveFrames={PRODUCT_FRAMES.transfer}
       liveTitle="Transfer Studio in the live workspace"
       stats={[
-        { value: "G1–G8", label: "Real preflight gates" },
+        { value: "G1–G9", label: "Real preflight gates" },
         { value: "Any→any", label: "Route coverage" },
         { value: "≥0.85", label: "Default confidence floor" },
         { value: "Proof", label: "Checksum after write" },
@@ -422,7 +422,7 @@ export function TransferStudioPage({
             { label: "Connect", sub: "Drivers · files" },
             { label: "Profile", sub: "Types · keys" },
             { label: "Map", sub: "Semantics · confidence", accent: true },
-            { label: "Preflight", sub: "G1–G8", accent: true },
+            { label: "Preflight", sub: "G1–G9", accent: true },
             { label: "Write", sub: "Quarantine" },
             { label: "Prove", sub: "Checksums" },
           ]}
@@ -472,7 +472,7 @@ export function TransferStudioPage({
         </ProofCallout>
       </Chapter>
 
-      <Chapter id="ts-gates" kicker="Preflight · G1–G8" title="nine core gates from the real engine — fail-fast before write">
+      <Chapter id="ts-gates" kicker="Preflight · G1–G9" title="nine core gates from the real engine — fail-fast before write">
         <div className="lp-mkt-prose">
           <p>
             These are not marketing labels. They map to <code>GateId</code> in Datawrap&apos;s preflight package.
@@ -485,7 +485,7 @@ export function TransferStudioPage({
       <Chapter id="ts-write" kicker="Execute" title="Write path: quarantine, then prove">
         <AlgoBlock
           title="Load + reconcile"
-          lead="After G1–G8 pass, the engine chunks rows, applies mapped transforms, writes with the chosen mode, and isolates bad rows. Success is not “job finished” — it is checksum-matched proof."
+          lead="After G1–G9 pass, the engine chunks rows, applies mapped transforms, writes with the chosen mode, and isolates bad rows. Success is not “job finished” — it is checksum-matched proof."
           steps={[
             {
               name: "Chunk + transform",
@@ -577,7 +577,7 @@ export function JobTheaterPage({
         <PacketFlow
           nodes={[
             { label: "Queue", sub: "Accepted plan" },
-            { label: "Preflight", sub: "G1–G8", accent: true },
+            { label: "Preflight", sub: "G1–G9", accent: true },
             { label: "Write", sub: "Batches", accent: true },
             { label: "Quarantine", sub: "Bad rows" },
             { label: "Reconcile", sub: "Checksums" },
@@ -693,7 +693,7 @@ export function PipelinesPage({
             { label: "Plan", sub: "Studio map" },
             { label: "Schedule", sub: "Cron · cadence", accent: true },
             { label: "Tick", sub: "Enqueue job" },
-            { label: "Preflight", sub: "G1–G8", accent: true },
+            { label: "Preflight", sub: "G1–G9", accent: true },
             { label: "Sync", sub: "Mode · watermark" },
             { label: "Proof", sub: "Theater" },
           ]}
@@ -714,7 +714,7 @@ export function PipelinesPage({
               detail: "For incremental mode, read the last high-water mark; select only new/changed rows.",
             },
             {
-              name: "Run G1–G8",
+              name: "Run G1–G9",
               detail: "Full preflight every tick. Schema drift or confidence regressions block instead of writing wrong shapes.",
             },
             {
@@ -830,7 +830,7 @@ export function QueryPlaygroundPage({
             },
             {
               name: "Promote",
-              detail: "Handoff creates/updates a Studio plan — mapping + G1–G8 still required before write.",
+              detail: "Handoff creates/updates a Studio plan — mapping + G1–G9 still required before write.",
             },
           ]}
         />
@@ -898,7 +898,7 @@ export function DataPilotPage({
             },
             {
               name: "Explain failure",
-              detail: "Translate G1–G8 blockers into plain language (e.g. G4 confidence, G5 dry-run cast failures).",
+              detail: "Translate G1–G9 blockers into plain language (e.g. G4 confidence, G5 dry-run cast failures).",
             },
             {
               name: "Propose fix",
@@ -961,7 +961,7 @@ export function McpServerPage({
             { label: "Agent", sub: "Cursor · Claude" },
             { label: "MCP", sub: "Tools · auth", accent: true },
             { label: "RBAC", sub: "Workspace roles" },
-            { label: "Engine", sub: "Map · G1–G8", accent: true },
+            { label: "Engine", sub: "Map · G1–G9", accent: true },
             { label: "Job", sub: "Theater" },
             { label: "Audit", sub: "Immutable log" },
           ]}
@@ -986,7 +986,7 @@ export function McpServerPage({
               detail: "Agent supplies connector IDs + mode; ambiguous maps still require review flags.",
             },
             {
-              name: "Preflight G1–G8",
+              name: "Preflight G1–G9",
               detail: "Identical gates as Studio. Blockers return structured evidence to the agent.",
             },
             {
@@ -1161,7 +1161,7 @@ export function WarehouseSolutionPage({
               <ul className="lp-wh-list">
                 <li>Write rights and role checks before any bulk path starts</li>
                 <li>Slot / capacity estimates surfaced for operators</li>
-                <li>Same G1–G8 contract as Studio migrations — no warehouse shortcut</li>
+                <li>Same G1–G9 contract as Studio migrations — no warehouse shortcut</li>
               </ul>
             </div>
             <aside className="lp-wh-panel" aria-label="Preflight snapshot">

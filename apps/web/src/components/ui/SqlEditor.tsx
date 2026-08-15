@@ -1,10 +1,6 @@
 import { useMemo, useRef } from "react";
-import {
-  diagnoseSql,
-  tokenizeSql,
-  type SqlDiagnosis,
-  type SqlToken,
-} from "../../lib/sqlEditorModel";
+import { highlightSql } from "../../lib/queryHighlight";
+import { diagnoseSql, type SqlDiagnosis } from "../../lib/sqlEditorModel";
 
 interface SqlEditorProps {
   id: string;
@@ -20,10 +16,13 @@ interface SqlEditorProps {
   required?: boolean;
 }
 
-function tokenClass(kind: SqlToken["kind"]): string {
-  return `df2-sql-tok df2-sql-tok-${kind}`;
-}
-
+/**
+ * Compact Studio / schedule extract editor.
+ *
+ * Highlight HTML comes from `highlightSql` (Query Playground SSOT). This
+ * wrapper keeps gutter + extract diagnosis — it does not own a second
+ * tokenizer and does not pull playground run/explain chrome into Studio.
+ */
 export function SqlEditor({
   id,
   label,
@@ -37,7 +36,7 @@ export function SqlEditor({
   rows = 8,
   required,
 }: SqlEditorProps) {
-  const tokens = useMemo(() => tokenizeSql(value), [value]);
+  const highlighted = useMemo(() => highlightSql(value), [value]);
   const diagnosis: SqlDiagnosis = useMemo(
     () => diagnoseSql(value, { mode, dialect, bound }),
     [value, mode, dialect, bound],
@@ -69,12 +68,14 @@ export function SqlEditor({
           ))}
         </div>
         <div className="df2-sql-surface">
-          <pre className="df2-sql-highlight" aria-hidden ref={highlightRef}>
-            {tokens.map((tok, i) => (
-              <span key={i} className={tokenClass(tok.kind)}>{tok.text}</span>
-            ))}
-            {value.endsWith("\n") ? "\n" : null}
-          </pre>
+          <pre
+            className="df2-sql-highlight"
+            aria-hidden
+            ref={highlightRef}
+            dangerouslySetInnerHTML={{
+              __html: `${highlighted}${value.endsWith("\n") || !value ? "\n" : ""}`,
+            }}
+          />
           <textarea
             id={id}
             className="df2-sql-input"

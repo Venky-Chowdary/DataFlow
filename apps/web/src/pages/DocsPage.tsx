@@ -103,7 +103,7 @@ function DocsHero({
         </span>
         <h2 className="df2-docs-hero-title">Move any schema anywhere — proven.</h2>
         <p className="df2-docs-hero-sub">
-          One governed path — map, preflight G1–G8, write with quarantine, and checksum reconcile —
+          One governed path — map, preflight G1–G9, write with quarantine, and checksum reconcile —
           so every surface (Studio, Pipelines, Pilot, MCP) proves the load.
         </p>
         <div className="df2-docs-hero-actions">

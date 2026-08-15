@@ -1547,7 +1547,7 @@ export function ValidateDashboard({
             </span>
             <h3>
               {running
-                ? "Engine running G1–G8…"
+                ? "Engine running G1–G9…"
                 : preflight
                   ? executiveSummary?.title ?? (
                     decision === "approve" && preflight.passed

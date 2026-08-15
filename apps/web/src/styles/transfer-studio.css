@@ -325,18 +325,6 @@
 
 .df2-sql-input::placeholder { color: #64748b; }
 
-.df2-sql-tok-keyword { color: #5eead4; font-weight: 650; }
-.df2-sql-tok-type { color: #7dd3fc; }
-.df2-sql-tok-func { color: #93c5fd; }
-.df2-sql-tok-string { color: #fbbf24; }
-.df2-sql-tok-comment { color: #94a3b8; font-style: italic; }
-.df2-sql-tok-number { color: #c4b5fd; }
-.df2-sql-tok-bind { color: #f472b6; font-weight: 650; }
-.df2-sql-tok-ident { color: #e2e8f0; }
-.df2-sql-tok-op,
-.df2-sql-tok-punct { color: #cbd5e1; }
-.df2-sql-tok-error { color: #fca5a5; text-decoration: wavy underline; }
-
 .df2-sql-editor-status {
   display: flex;
   flex-wrap: wrap;

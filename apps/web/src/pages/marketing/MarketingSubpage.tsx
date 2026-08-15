@@ -1316,7 +1316,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           <div className="lp-sec-agent-visual" aria-hidden>
             <div className="lp-sec-agent-chip">MCP call</div>
             <div className="lp-sec-agent-path">
-              <span>Auth</span><i /><span>Map</span><i /><span>G1–G8</span><i /><span>Prove</span>
+              <span>Auth</span><i /><span>Map</span><i /><span>G1–G9</span><i /><span>Prove</span>
             </div>
             <div className="lp-sec-agent-chip is-ok">No raw passwords</div>
           </div>
@@ -1453,7 +1453,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           <aside className="lp-int-honesty-panel">
             <h3>Every route still runs</h3>
             <div><span>01</span><em>Semantic map</em></div>
-            <div><span>02</span><em>G1–G8 preflight</em></div>
+            <div><span>02</span><em>G1–G9 preflight</em></div>
             <div><span>03</span><em>Quarantine write</em></div>
             <div><span>04</span><em>Checksum prove</em></div>
           </aside>

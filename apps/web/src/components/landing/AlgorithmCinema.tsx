@@ -2,7 +2,7 @@
  * AlgorithmCinema — product-feeling animated stages that carry the
  * Datawrap story on marketing pages. These are NOT decorative dots;
  * each stage renders a concrete slice of the real engine: semantic
- * mapping, G1–G8 preflight, checksum proof, and CDC handoff.
+ * mapping, G1–G9 preflight, checksum proof, and CDC handoff.
  *
  * Guardrails:
  *  - All motion honors prefers-reduced-motion (final state is rendered).
@@ -181,7 +181,7 @@ export function MappingCinema() {
 /* ─── 2) GateCinema ──────────────────────────────────────────────── */
 
 /**
- * Local copy of the 8 preflight gate titles. We intentionally do NOT
+ * Local copy of the 9 preflight gate titles. We intentionally do NOT
  * import from `pages/marketing/productPageShared` to avoid pulling a
  * page-tree module into the landing component tree (circular risk).
  * The engine truth still lives in `packages/preflight` — this list is
@@ -196,11 +196,12 @@ const GATE_TITLES: { id: string; title: string; algorithm: string }[] = [
   { id: "G6", title: "Target DDL", algorithm: "Write plan valid against target object" },
   { id: "G7", title: "Capacity", algorithm: "Estimate vs destination limits" },
   { id: "G8", title: "Reconciliation plan", algorithm: "Row count + checksum strategy ready" },
+  { id: "G9", title: "Data integrity", algorithm: "Encoding · identity keys · precision" },
 ];
 
 export function GateCinema() {
   const { ref, inView } = useInView<HTMLElement>("80px 0px");
-  const tick = useVisibleCycle(10, 1100, inView);
+  const tick = useVisibleCycle(11, 1100, inView);
 
   const active = Math.min(tick, GATE_TITLES.length - 1);
   const g5Active = active === 4;
@@ -211,7 +212,7 @@ export function GateCinema() {
   return (
     <figure ref={ref} className="lp-cinema-stage lp-cinema-gate" aria-label="Preflight gates animation">
       <div className="lp-cinema-gate-grid">
-        <ol className="lp-cinema-gate-list" aria-label="Preflight G1–G8">
+        <ol className="lp-cinema-gate-list" aria-label="Preflight G1–G9">
           {GATE_TITLES.map((g, i) => {
             const state =
               i < active ? "pass" : i === active ? (g5Active ? "block" : "active") : "pending";

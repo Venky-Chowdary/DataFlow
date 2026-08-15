@@ -131,7 +131,7 @@ const SURFACES: {
     id: "studio",
     label: "Studio",
     title: "Transfer Studio plans every load",
-    body: "Connect source and destination, review semantic maps with confidence scores, pass eight preflight gates, then write with quarantine. The same path Pilot and MCP reuse — no silent shortcut.",
+    body: "Connect source and destination, review semantic maps with confidence scores, pass nine preflight gates, then write with quarantine. The same path Pilot and MCP reuse — no silent shortcut.",
     route: "product-transfer",
     cta: "Open Transfer Studio",
   },
@@ -227,7 +227,7 @@ function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNav
               <strong>{current.title}</strong>
               <ul>
                 <li>Semantic map</li>
-                <li>G1–G8 preflight</li>
+                <li>G1–G9 preflight</li>
                 <li>Quarantine + checksum</li>
               </ul>
             </div>
@@ -264,7 +264,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <span className="lp-hero-title-b">anywhere — proven.</span>
             </h1>
             <p className="lp-hero-sub">
-              Semantic mapping, eight preflight gates, quarantine, and checksum reconcile on every
+              Semantic mapping, nine preflight gates, quarantine, and checksum reconcile on every
               load — Transfer Studio, Pipelines, Pilot, and MCP.
             </p>
             <div className="lp-hero-cta">
@@ -387,7 +387,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               </div>
               <h3>Eight fail-fast gates</h3>
               <p>
-                G1–G8 run before any write. Dry-run isolates coerce failures into quarantine with
+                G1–G9 run before any write. Dry-run isolates coerce failures into quarantine with
                 column, value, and reason — never silent drops.
               </p>
               <ul>

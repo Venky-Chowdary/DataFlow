@@ -556,6 +556,7 @@
 .qe-tok--function { color: #7dd3fc; }
 .qe-tok--ident { color: #e2e8f0; }
 .qe-tok--punct { color: #94a3b8; }
+.qe-tok--bind { color: #f472b6; font-weight: 650; }
 .qe-tok--key { color: #67e8f9; font-weight: 600; }
 
 .df2-query-editor-shell[data-invalid="true"] .df2-query-editor-wrap--powered {

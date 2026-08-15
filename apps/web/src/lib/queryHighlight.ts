@@ -17,6 +17,8 @@ const SQL_KEYWORDS = new Set(
     "AVG", "MIN", "MAX", "OVER", "PARTITION", "ROW_NUMBER", "RANK", "DENSE_RANK",
     "ASC", "DESC", "NULLS", "FIRST", "LAST", "USING", "NATURAL", "INTERSECT",
     "EXCEPT", "RETURNING", "WINDOW", "FILTER", "LATERAL", "RECURSIVE",
+    "CALL", "EXEC", "EXECUTE", "PROCEDURE", "FUNCTION", "BEGIN", "DECLARE",
+    "RETURNS", "RETURN",
   ].map((k) => k.toLowerCase()),
 );
 
@@ -95,6 +97,17 @@ export function highlightSql(code: string): string {
       } else {
         out += wrap("ident", word);
       }
+      i = j;
+      continue;
+    }
+    // :bind (not PostgreSQL :: casts) and T-SQL @bind (not @@globals)
+    if (
+      ((code[i] === ":" && code[i + 1] !== ":") || (code[i] === "@" && code[i + 1] !== "@"))
+      && /[A-Za-z_]/.test(code[i + 1] || "")
+    ) {
+      let j = i + 2;
+      while (j < n && /[A-Za-z0-9_]/.test(code[j])) j += 1;
+      out += wrap("bind", code.slice(i, j));
       i = j;
       continue;
     }

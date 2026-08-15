@@ -16,10 +16,10 @@ const STEPS = [
   {
     id: "validate",
     kicker: "02 · Validate",
-    title: "Eight gates before a row moves",
+    title: "Nine gates before a row moves",
     body: "Preflight fails fast on type, PK, cursor, and dest-exists shape. skip_preflight never comes from chat or the public Studio execute path.",
     bars: [
-      { label: "G1–G8 pass", width: 88, tone: "ok" },
+      { label: "G1–G9 pass", width: 88, tone: "ok" },
       { label: "G14 dest NOT NULL", width: 54, tone: "warn" },
       { label: "G15 shape named", width: 76, tone: "info" },
     ],

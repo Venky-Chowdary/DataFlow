@@ -10507,7 +10507,7 @@
 
 /* =========================================================================
  * Algorithm Cinema — full-bleed dark stages that carry the Datawrap story
- * (semantic mapping, G1–G8 preflight, checksum proof, CDC handoff).
+ * (semantic mapping, G1–G9 preflight, checksum proof, CDC handoff).
  *
  * All stages honor prefers-reduced-motion via the component (final state
  * renders). CSS deliberately keeps token colors and Datawrap brand.

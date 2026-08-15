@@ -146,7 +146,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "overview",
         title: "What is Datawrap?",
-        body: "Datawrap is a universal data transfer platform. Transfer Studio maps schemas across systems, runs eight preflight gates before any production write, and proves every load with checksum reconciliation. Datawrap Pilot and MCP bring the same governed engine to chat and agent workflows.",
+        body: "Datawrap is a universal data transfer platform. Transfer Studio maps schemas across systems, runs nine preflight gates before any production write, and proves every load with checksum reconciliation. Datawrap Pilot and MCP bring the same governed engine to chat and agent workflows.",
       },
       {
         id: "surfaces",

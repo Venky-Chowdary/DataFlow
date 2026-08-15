@@ -3,16 +3,17 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { bindNamesFromTokens, diagnoseSql, tokenizeSql } from "./sqlEditorModel.ts";
+import { highlightSql } from "./queryHighlight.ts";
+import { extractBindParams } from "./sqlIntel.ts";
+import { diagnoseSql } from "./sqlEditorModel.ts";
 
 describe("sqlEditorModel", () => {
-  it("colors keywords, binds, strings, and comments", () => {
-    const tokens = tokenizeSql("CALL get_orders(:since) -- night\n-- x\nSELECT 'ok'");
-    const kinds = tokens.filter((t) => t.kind !== "ws").map((t) => t.kind);
-    assert.ok(kinds.includes("keyword"));
-    assert.ok(kinds.includes("bind"));
-    assert.ok(kinds.includes("comment"));
-    assert.deepEqual(bindNamesFromTokens(tokens), ["since"]);
+  it("highlights via queryHighlight SSOT (keywords, binds, comments)", () => {
+    const html = highlightSql("CALL get_orders(:since) -- night\nSELECT 'ok'");
+    assert.match(html, /qe-tok--keyword/);
+    assert.match(html, /qe-tok--bind/);
+    assert.match(html, /qe-tok--comment/);
+    assert.deepEqual(extractBindParams("CALL get_orders(:since) -- night"), ["since"]);
   });
 
   it("refuses stacked statements and DML in query mode", () => {
