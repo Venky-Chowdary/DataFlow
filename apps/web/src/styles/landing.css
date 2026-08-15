@@ -12728,13 +12728,19 @@ html:has(.lp) {
   min-height: 100%;
 }
 
-.lp-sales-hero--page .lp-sales-hero-inner:not(:has(aside)) {
+.lp-sales-hero--page .lp-sales-hero-inner:not(:has(aside, .lp-sales-hero-slas--panel)) {
   grid-template-columns: 1fr;
 }
 
-.lp-sales-hero--page .lp-sales-hero-slas {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  max-width: 720px;
+.lp-sales-hero-slas--panel {
+  grid-template-columns: 1fr 1fr;
+  margin: 0;
+  height: 100%;
+  align-content: center;
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid rgba(94, 234, 212, 0.2);
+  background: rgba(7, 17, 31, 0.35);
 }
 
 .lp-sales-kicker {

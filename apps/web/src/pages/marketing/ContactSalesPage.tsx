@@ -156,24 +156,6 @@ export function ContactSalesPage({
               Scope Map → G1–G9 → quarantine → dest-engine checksum on your sources and
               destinations. Reply within one business day — not a drip campaign.
             </p>
-            <ul className="lp-sales-hero-slas">
-              <li>
-                <strong>&lt; 1 day</strong>
-                <span>Engineer reply</span>
-              </li>
-              <li>
-                <strong>G1–G9</strong>
-                <span>Same gates as production</span>
-              </li>
-              <li>
-                <strong>{TRANSFER_READY_DRIVERS}</strong>
-                <span>TRANSFER_READY drivers</span>
-              </li>
-              <li>
-                <strong>MATCH</strong>
-                <span>Checksum you can archive</span>
-              </li>
-            </ul>
             <p className="lp-sales-hero-mail">
               <a className="lp-sales-mail" href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">
                 sales@datawrap.io

@@ -15,6 +15,17 @@ export function MarketingInkHero({
   actions?: ReactNode;
   aside?: ReactNode;
 }) {
+  const slaList = slas?.length ? (
+    <ul className={`lp-sales-hero-slas${aside ? "" : " lp-sales-hero-slas--panel"}`}>
+      {slas.map((s) => (
+        <li key={s.label}>
+          <strong>{s.value}</strong>
+          <span>{s.label}</span>
+        </li>
+      ))}
+    </ul>
+  ) : null;
+
   return (
     <section className="lp-sales-hero lp-sales-hero--page" aria-label={kicker}>
       <div className="lp-mkt-wrap lp-sales-hero-inner">
@@ -23,18 +34,9 @@ export function MarketingInkHero({
           <h1>{title}</h1>
           <p>{lead}</p>
           {actions}
-          {slas?.length ? (
-            <ul className="lp-sales-hero-slas">
-              {slas.map((s) => (
-                <li key={s.label}>
-                  <strong>{s.value}</strong>
-                  <span>{s.label}</span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
+          {aside ? slaList : null}
         </div>
-        {aside}
+        {aside ?? slaList}
       </div>
     </section>
   );
