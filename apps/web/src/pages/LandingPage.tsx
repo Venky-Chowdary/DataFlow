@@ -10,6 +10,7 @@ import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection
 import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
 import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
+import { BACKEND_SUITE, EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS } from "../lib/provenEvidence";
 import type { PublicRoute } from "../lib/publicNavigation";
 
 export interface LandingHomeProps {
@@ -159,6 +160,14 @@ const SURFACES: {
     route: "product-mcp",
     cta: "Read MCP docs",
   },
+  {
+    id: "query",
+    label: "Query",
+    title: "Playground is read-only. Dest SQL lives in Studio.",
+    body: "Query Playground runs SELECT/WITH against saved connectors. Destination INSERT/MERGE and dest CALL are Transfer Studio write modes — binds only, quarantine on failure, not CDC.",
+    route: "product-query",
+    cta: "Open Query Playground",
+  },
 ];
 
 function Reveal({ children, className = "" }: { children: ReactNode; className?: string }) {
@@ -264,8 +273,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <span className="lp-hero-title-b">anywhere — proven.</span>
             </h1>
             <p className="lp-hero-sub">
-              Semantic mapping, nine preflight gates, quarantine, and checksum reconcile on every
-              load — Transfer Studio, Pipelines, Pilot, and MCP.
+              Semantic mapping, nine preflight gates, quarantine, dest query/CALL, and dest-engine
+              checksum on every load — Transfer Studio, Pipelines, Pilot, and MCP.{" "}
+              {TRANSFER_READY_DRIVERS} TRANSFER_READY drivers. Catalog tiles are not live.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -277,9 +287,13 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               </button>
             </div>
             <p className="lp-hero-meta">
-              Snowflake · BigQuery · S3 · PostgreSQL
+              {TRANSFER_READY_DRIVERS} TRANSFER_READY
               <span aria-hidden>·</span>
-              0 silent drops by design
+              G1–G9
+              <span aria-hidden>·</span>
+              dest-engine MATCH
+              <span aria-hidden>·</span>
+              0 silent drops
             </p>
           </div>
           <div className="lp-hero-visual lp-hero-visual--stage">
@@ -385,7 +399,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 <span className="lp-home-arch-step-num">02</span>
                 <span className="lp-home-arch-step-tag">Preflight</span>
               </div>
-              <h3>Eight fail-fast gates</h3>
+              <h3>Nine fail-fast gates</h3>
               <p>
                 G1–G9 run before any write. Dry-run isolates coerce failures into quarantine with
                 column, value, and reason — never silent drops.
@@ -429,6 +443,125 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
       </section>
 
       <ObservabilityInAction />
+
+      <section className="lp-home-market" id="vs-market" aria-label="How Datawrap differs">
+        <div className="lp-home-market-inner">
+          <Reveal className="lp-home-section-head">
+            <p className="lp-section-kicker">Versus the market</p>
+            <h2>More advanced than connector-count marketing.</h2>
+            <p>
+              Fivetran and Airbyte win on catalog breadth. Informatica wins on designer SQL.
+              Datawrap wins on proof: semantic maps you review, nine gates that can block write,
+              quarantine instead of continue-on-error, dest query/CALL with binds, dest-engine checksum.
+            </p>
+          </Reveal>
+          <div className="lp-home-market-grid">
+            <article>
+              <span>Fivetran / Airbyte</span>
+              <h3>Managed ELT, schema sync</h3>
+              <p>
+                Fully-managed connectors and incremental sync. Job complete is a status. Failed
+                coerce is rarely a first-class quarantine with replay.
+              </p>
+            </article>
+            <article>
+              <span>Informatica CDI</span>
+              <h3>Target Pre/Post-load SQL</h3>
+              <p>
+                Connected CALL and SQL override are real. Optional continue-on-error can treat a
+                failed statement as success. We refuse that — failed dest SQL quarantines.
+              </p>
+            </article>
+            <article>
+              <span>Databricks Lakeflow</span>
+              <h3>Cursor-column lakehouse ingest</h3>
+              <p>
+                Excellent at table ingest into Delta. Dest stored-procedure write and dest-engine
+                COUNT/checksum are not their writer. We sit in front as the governed path.
+              </p>
+            </article>
+            <article className="is-ours">
+              <span>Datawrap</span>
+              <h3>Map · G1–G9 · quarantine · MATCH</h3>
+              <p>
+                Extra source columns stay on Map. Dest INSERT/MERGE and dest CALL use binds only.
+                CDC default is at-least-once upsert until a route proves dest-owned exactly-once.{" "}
+                {TRANSFER_READY_DRIVERS} TRANSFER_READY drivers — catalog tiles are not claimed live.
+              </p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section className="lp-home-depth" id="engine-depth" aria-label="Engine capabilities">
+        <div className="lp-home-depth-inner">
+          <Reveal className="lp-home-section-head">
+            <p className="lp-section-kicker">What the engine actually does</p>
+            <h2>Every surface runs the same algorithms.</h2>
+            <p>
+              Studio, Pipelines, Pilot, and MCP do not get a shortcut. These are product facts —
+              not a feature wall invented for this page.
+            </p>
+          </Reveal>
+          <ul className="lp-home-depth-list">
+            <li>
+              <strong>Semantic map</strong>
+              <p>Role, qualifier, and type fit. False friends stay in review. Extra source = G13.</p>
+            </li>
+            <li>
+              <strong>Nine preflight gates</strong>
+              <p>G1–G9 fail-fast. skip_preflight never from chat or public Studio execute.</p>
+            </li>
+            <li>
+              <strong>Source query / CALL</strong>
+              <p>Read-only SELECT or one CALL/EXEC, spooled once. CDC on callable is refused.</p>
+            </li>
+            <li>
+              <strong>Dest query / CALL</strong>
+              <p>One INSERT/MERGE/UPDATE or one CALL per row. Missing binds quarantine.</p>
+            </li>
+            <li>
+              <strong>Quarantine</strong>
+              <p>Column + value + reason. Never a silent drop into “job complete.”</p>
+            </li>
+            <li>
+              <strong>Dest-engine proof</strong>
+              <p>COUNT and checksum from the destination — not writer-stamped scan().count().</p>
+            </li>
+          </ul>
+        </div>
+      </section>
+
+      <section className="lp-home-measured" id="measured" aria-label="Measured evidence">
+        <div className="lp-home-measured-inner">
+          <Reveal className="lp-home-section-head">
+            <p className="lp-section-kicker">Measured {EVIDENCE_AS_OF}</p>
+            <h2>Numbers from named fixtures — not a marketing floor.</h2>
+            <p>
+              Every figure here is recorded in the readiness report. We do not invent 99% accuracy
+              or 700+ live connectors.
+            </p>
+          </Reveal>
+          <dl className="lp-home-measured-grid">
+            <div>
+              <dt>{TRANSFER_READY_DRIVERS}</dt>
+              <dd>TRANSFER_READY drivers after the honesty filter</dd>
+            </div>
+            <div>
+              <dt>{BACKEND_SUITE.passed.toLocaleString("en-US")}</dt>
+              <dd>Backend tests passed · {BACKEND_SUITE.failed} failed · {BACKEND_SUITE.skipped.toLocaleString("en-US")} skipped</dd>
+            </div>
+            <div>
+              <dt>48</dt>
+              <dd>Live schema-drift cases on PostgreSQL, MySQL, SQL Server, Oracle</dd>
+            </div>
+            <div>
+              <dt>9</dt>
+              <dd>Core preflight gates G1–G9 before every write</dd>
+            </div>
+          </dl>
+        </div>
+      </section>
 
       {/* 5) Product surfaces — tabbed like Airbyte CLI/SDK/API/MCP */}
       <SurfaceTabs onNavigate={onNavigate} onGetStarted={onGetStarted} />
@@ -561,7 +694,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <p>
               Native connectors for warehouses, object storage, databases, and apps. Map once,
               validate before write, quarantine bad rows, and keep a checksum — one catalog,
-              one governed path.
+              one governed path. <strong>{TRANSFER_READY_DRIVERS} TRANSFER_READY drivers</strong> are
+              transfer-live. Catalog tiles that are not certified stay Planned.
             </p>
           </Reveal>
         </div>

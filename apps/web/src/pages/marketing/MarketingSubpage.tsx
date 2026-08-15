@@ -1,4 +1,4 @@
-import { useState, type CSSProperties, type FormEvent } from "react";
+import { type CSSProperties } from "react";
 import { DtIcon } from "../../components/DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
 import {
@@ -7,6 +7,7 @@ import {
 } from "../../components/landing/AlgorithmCinema";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingIllustration } from "../../components/marketing/MarketingIllustration";
+import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import { isHelpDocRoute } from "../../lib/helpDocs";
@@ -14,9 +15,11 @@ import {
   EVIDENCE_AS_OF,
   MARKETING_PROOF_HIGHLIGHTS,
   MARKETING_STACK,
+  TRANSFER_READY_DRIVERS,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
+import { ContactSalesPage } from "./ContactSalesPage";
 import {
   DataPilotPage,
   JobTheaterPage,
@@ -85,7 +88,7 @@ export function MarketingSubpage({ route, onGetStarted, onLogin, onNavigate }: {
     case "customers":
       return <CustomersPage onNavigate={onNavigate} />;
     case "contact":
-      return <ContactPage onNavigate={onNavigate} />;
+      return <ContactSalesPage onNavigate={onNavigate} />;
     case "privacy":
       return <LegalPage kind="privacy" />;
     case "terms":
@@ -129,7 +132,12 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       cta: "Start free",
       action: onGetStarted,
       tone: "starter" as const,
-      features: ["Transfer Studio", "9 preflight gates", "Quarantine + checksum", "Community support"],
+      features: [
+        "Transfer Studio — table, dest query, dest CALL",
+        "G1–G9 fail-fast + quarantine",
+        "Dest-engine COUNT + checksum",
+        `${TRANSFER_READY_DRIVERS} TRANSFER_READY drivers`,
+      ],
     },
     {
       name: "Team",
@@ -140,7 +148,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       action: () => onNavigate("contact"),
       tone: "team" as const,
       featured: true,
-      features: ["Everything in Starter", "Scheduled pipelines", "Datawrap Pilot", "Email support"],
+      features: ["Everything in Starter", "Scheduled pipelines", "Datawrap Pilot", "Shared connectors + email support"],
     },
     {
       name: "Enterprise",
@@ -155,9 +163,10 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
   ];
 
   const compareRows = [
-    { feature: "Transfer Studio", starter: true, team: true, enterprise: true },
-    { feature: "Preflight gates & quarantine", starter: true, team: true, enterprise: true },
-    { feature: "Checksum proof", starter: true, team: true, enterprise: true },
+    { feature: "Transfer Studio (table / dest query / dest CALL)", starter: true, team: true, enterprise: true },
+    { feature: "G1–G9 preflight & quarantine", starter: true, team: true, enterprise: true },
+    { feature: "Dest-engine checksum MATCH", starter: true, team: true, enterprise: true },
+    { feature: "Source query / stored procedure read", starter: true, team: true, enterprise: true },
     { feature: "Pipelines & schedules", starter: false, team: true, enterprise: true },
     { feature: "Datawrap Pilot", starter: false, team: true, enterprise: true },
     { feature: "MCP for agents", starter: false, team: false, enterprise: true },
@@ -167,49 +176,17 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
 
   return (
     <div className="lp-mkt-page lp-page-pricing lp-pricing-v2">
-      <section className="lp-pricing-hero" aria-label="Pricing">
-        <div className="lp-pricing-hero-waves" aria-hidden>
-          <span className="lp-wave lp-wave--a" />
-          <span className="lp-wave lp-wave--b" />
-          <span className="lp-wave lp-wave--c" />
-          <span className="lp-wave-grid" />
-          <span className="lp-wave-glow lp-wave-glow--1" />
-          <span className="lp-wave-glow lp-wave-glow--2" />
-          <svg className="lp-wave-svg" viewBox="0 0 1440 320" preserveAspectRatio="none">
-            <path
-              className="lp-wave-path lp-wave-path--1"
-              d="M0,192 C240,128 360,256 600,192 C840,128 960,64 1200,128 C1320,160 1380,176 1440,160 L1440,320 L0,320 Z"
-            />
-            <path
-              className="lp-wave-path lp-wave-path--2"
-              d="M0,224 C180,160 420,288 720,224 C1020,160 1200,96 1440,176 L1440,320 L0,320 Z"
-            />
-            <path
-              className="lp-wave-path lp-wave-path--3"
-              d="M0,256 C300,200 540,300 780,240 C1020,180 1260,220 1440,200 L1440,320 L0,320 Z"
-            />
-          </svg>
-          <svg className="lp-wave-flow" viewBox="0 0 400 200" preserveAspectRatio="xMidYMid meet">
-            <path d="M20 100 C80 40, 140 160, 200 100 S320 40, 380 100" fill="none" stroke="rgba(94,234,212,0.55)" strokeWidth="2.5" strokeLinecap="round" />
-            <path d="M20 130 C90 70, 150 180, 210 120 S320 70, 380 120" fill="none" stroke="rgba(245,158,11,0.4)" strokeWidth="2" strokeLinecap="round" />
-            <path d="M20 70 C100 20, 160 120, 220 70 S310 20, 380 70" fill="none" stroke="rgba(45,212,191,0.35)" strokeWidth="1.75" strokeLinecap="round" />
-            <circle cx="200" cy="100" r="6" fill="#2dd4bf" />
-            <circle cx="200" cy="100" r="14" fill="none" stroke="rgba(45,212,191,0.35)" strokeWidth="2" />
-          </svg>
-        </div>
-        <div className="lp-pricing-hero-inner">
-          <p className="lp-pricing-hero-kicker">
-            <span className="lp-pricing-hero-dot" aria-hidden />
-            Pricing
-          </p>
-          <h1>
-            Plans that scale with
-            <span className="lp-pricing-hero-em"> proof</span>
-          </h1>
-          <p className="lp-pricing-hero-lead">
-            Semantic mapping, nine core gates, quarantine, and checksum reconcile — included from first
-            pilot to regulated pipelines. Pay for cadence and security, not seats.
-          </p>
+      <MarketingInkHero
+        kicker="Pricing"
+        title={<>Plans that scale with proof — not MAR surprises.</>}
+        lead={
+          <>
+            Fivetran bills Monthly Active Rows. Informatica bills consumption modules. Datawrap
+            prices cadence and security. Semantic map, G1–G9, quarantine, dest query/CALL, and
+            dest-engine checksum ship in Starter — not behind Enterprise.
+          </>
+        }
+        actions={
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
               Start for free
@@ -222,8 +199,14 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
               Talk to sales
             </button>
           </div>
-        </div>
-      </section>
+        }
+        slas={[
+          { value: "Free", label: "Starter forever" },
+          { value: "G1–G9", label: "In every plan" },
+          { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY drivers" },
+          { value: "Custom", label: "Team & Enterprise" },
+        ]}
+      />
 
       <MarketingReveal>
         <section className="lp-pricing-v2-plans" aria-label="Plans">
@@ -316,14 +299,66 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         </section>
       </MarketingReveal>
 
+      <section className="lp-sales-compare" aria-label="How pricing differs from the market">
+        <div className="lp-sales-compare-inner">
+          <header>
+            <p className="lp-sales-kicker lp-sales-kicker--ink">Versus the market</p>
+            <h2>Pay for cadence — not for every changed row.</h2>
+            <p>
+              Fivetran MAR and Informatica IPU make cost a function of churn. We quote connectors
+              and schedule. Proof is not an add-on SKU.
+            </p>
+          </header>
+          <div className="lp-sales-table-wrap">
+            <table className="lp-sales-table">
+              <thead>
+                <tr>
+                  <th scope="col">Dimension</th>
+                  <th scope="col">Fivetran</th>
+                  <th scope="col">Informatica CDI</th>
+                  <th scope="col">Datawrap</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <th scope="row">Meter</th>
+                  <td>Monthly Active Rows per connector</td>
+                  <td>IPU / consumption modules</td>
+                  <td>Cadence + security tier — quote when you scale</td>
+                </tr>
+                <tr>
+                  <th scope="row">Proof</th>
+                  <td>Sync status and logs</td>
+                  <td>Session logs</td>
+                  <td>Dest-engine COUNT + checksum in Starter</td>
+                </tr>
+                <tr>
+                  <th scope="row">Failed rows</th>
+                  <td>Retry / skip</td>
+                  <td>Optional continue-on-error</td>
+                  <td>Quarantine + replay — never a silent drop</td>
+                </tr>
+                <tr>
+                  <th scope="row">Dest SQL</th>
+                  <td>Table / stream writers</td>
+                  <td>Target Pre/Post-load</td>
+                  <td>Dest query and dest CALL in every plan</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <MarketingReveal>
         <section className="lp-pricing-v2-cta">
           <div className="lp-pricing-v2-cta-inner">
             <div>
               <h3>Procurement, MSA, or a security pack?</h3>
               <p>
-                Enterprise deals ship with negotiated MSA, DPA, SOC&nbsp;2 posture pack, and a
-                pre-populated security questionnaire — reviewed by a solutions engineer.
+                Enterprise deals ship with a negotiated MSA, DPA, and a pre-populated security
+                questionnaire. Controls exist; no SOC&nbsp;2 or ISO certificate is claimed until a
+                third-party audit exists.
               </p>
             </div>
             <div className="lp-pricing-v2-cta-actions">
@@ -371,94 +406,44 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
 
   return (
     <div className="lp-mkt-page lp-mkt-enterprise-v2">
-      <section className="lp-ent-hero" aria-label="Enterprise">
-        <div className="lp-ent-hero-waves" aria-hidden>
-          <span className="lp-wave-grid" />
-          <span className="lp-wave-glow lp-wave-glow--1" />
-          <span className="lp-wave-glow lp-wave-glow--2" />
-          <svg className="lp-wave-svg" viewBox="0 0 1440 320" preserveAspectRatio="none">
-            <path
-              className="lp-wave-path lp-wave-path--1"
-              d="M0,192 C240,128 360,256 600,192 C840,128 960,64 1200,128 C1320,160 1380,176 1440,160 L1440,320 L0,320 Z"
-            />
-            <path
-              className="lp-wave-path lp-wave-path--2"
-              d="M0,224 C180,160 420,288 720,224 C1020,160 1200,96 1440,176 L1440,320 L0,320 Z"
-            />
-          </svg>
-        </div>
-        <div className="lp-ent-hero-inner">
-          <div className="lp-ent-hero-copy">
-            <p className="lp-pricing-hero-kicker">
-              <span className="lp-pricing-hero-dot" aria-hidden />
-              Enterprise
-            </p>
-            <h1>
-              Controls that travel with
-              <span className="lp-pricing-hero-em"> every load</span>
-            </h1>
-            <p className="lp-ent-hero-lead">
-              SSO, RBAC, BYOK, and tenant isolation on the same Transfer Studio engine your operators
-              already trust. No parallel “enterprise-only” path that skips gates.
-            </p>
-            <div className="lp-hero-cta">
-              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-                Contact sales
-              </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={onGetStarted}>
-                Start a pilot
-              </button>
-            </div>
-            <ul className="lp-ent-hero-proof">
-              <li>SSO enforced</li>
-              <li>9 / 9 preflight</li>
-              <li>Checksum MATCH</li>
-            </ul>
+      <MarketingInkHero
+        kicker="Enterprise"
+        title={<>Controls that travel with every load.</>}
+        lead={
+          <>
+            SSO, RBAC, BYOK, and tenant isolation on the same Transfer Studio engine. No parallel
+            “enterprise-only” path that skips G1–G9. Informatica-class procurement, Fivetran-class
+            clarity, Datawrap proof on the dest.
+          </>
+        }
+        actions={
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+              Contact sales
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={onGetStarted}>
+              Start a pilot
+            </button>
           </div>
-          <aside className="lp-ent-hero-stage" aria-label="Enterprise control plane preview">
-            <div className="lp-ent-stage-chrome">
-              <span className="lp-ent-stage-dots" aria-hidden>
-                <i /><i /><i />
-              </span>
-              <em>datawrap.company.com · SSO enforced</em>
-            </div>
-            <div className="lp-ent-stage-body">
-              <div className="lp-ent-stage-rail">
-                <span className="is-active">Workspaces</span>
-                <span>Identity</span>
-                <span>Keys</span>
-                <span>Audit</span>
-              </div>
-              <div className="lp-ent-stage-main">
-                <header className="lp-ent-stage-head">
-                  <strong>Tenant posture</strong>
-                  <span className="lp-ent-stage-pill">Live</span>
-                </header>
-                <div className="lp-ent-stage-cards">
-                  <article>
-                    <span>Workspace A</span>
-                    <strong>Analytics ops</strong>
-                    <p>Preflight 9/9 · checksum match</p>
-                    <div className="lp-ent-stage-bar"><i style={{ width: "92%" }} /></div>
-                  </article>
-                  <article>
-                    <span>Workspace B</span>
-                    <strong>Regulated loads</strong>
-                    <p>Region pinned · tenant isolated</p>
-                    <div className="lp-ent-stage-bar"><i style={{ width: "78%" }} /></div>
-                  </article>
-                </div>
-                <div className="lp-ent-stage-rows">
-                  <div><span>Identity</span><em>SAML · Okta</em></div>
-                  <div><span>Secrets</span><em>BYOK · AWS KMS</em></div>
-                  <div><span>Agents</span><em>MCP under RBAC</em></div>
-                  <div className="is-ok"><span>Reconcile</span><em>MATCH</em></div>
-                </div>
-              </div>
-            </div>
+        }
+        slas={[
+          { value: "SSO", label: "SAML / OIDC" },
+          { value: "BYOK", label: "Customer keys" },
+          { value: "9 / 9", label: "Preflight required" },
+          { value: "MATCH", label: "Dest-engine checksum" },
+        ]}
+        aside={
+          <aside className="lp-sales-hero-aside" aria-label="Enterprise control snapshot">
+            <p>Control snapshot</p>
+            <p className="lp-sales-hero-note">
+              Identity · SSO enforced<br />
+              Secrets · BYOK wrapped<br />
+              Agents · MCP under RBAC<br />
+              Reconcile · dest-engine MATCH
+            </p>
           </aside>
-        </div>
-      </section>
+        }
+      />
 
       <MarketingReveal>
         <section className="lp-ent-metrics" aria-label="Enterprise capabilities at a glance">
@@ -559,46 +544,51 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
 function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
   return (
     <div className="lp-mkt-page lp-cust-v3">
-      <section className="lp-cust3-hero" aria-label="Customers">
-        <div className="lp-shell lp-cust3-hero-inner">
-          <p className="lp-mkt-kicker">Customers</p>
-          <h1>
-            Every load leaves
-            <em> proof</em>
-          </h1>
-          <p className="lp-cust3-lead">
-            Load Snowflake, BigQuery, Redshift, and your lake the way operators actually work:
-            map once, validate before write, quarantine bad rows, and keep a checksum finance
-            can archive.
-          </p>
+      <MarketingInkHero
+        kicker="Customers"
+        title={<>Every load leaves proof — not a logo wall.</>}
+        lead={
+          <>
+            We do not invent customer marks. What we publish is measured: schema drift, identity
+            carry, retry safety, and dest-engine reconcile on named engines. Book a pilot on{" "}
+            <em>your</em> sources and destinations.
+          </>
+        }
+        actions={
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
               Book a pilot
             </button>
-            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("enterprise")}>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
               Enterprise overview
             </button>
           </div>
-        </div>
-      </section>
+        }
+        slas={[
+          { value: "9", label: "Core preflight gates" },
+          { value: "48", label: "Live schema-drift cases" },
+          { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY drivers" },
+          { value: "0", label: "Silent drops by design" },
+        ]}
+      />
 
-      <section className="lp-cust3-metrics" aria-label="Product scale">
+      <section className="lp-cust3-metrics" aria-label="Who this is for">
         <div className="lp-shell lp-cust3-metrics-row">
           <div>
-            <strong>8</strong>
-            <span>Preflight gates before every write</span>
+            <strong>Migrations</strong>
+            <span>Oracle / SQL Server cutover with identity and FK carry</span>
           </div>
           <div>
             <strong>Warehouses</strong>
-            <span>Snowflake, BigQuery, Redshift, Databricks</span>
+            <span>Snowflake, BigQuery, Redshift, Databricks — MERGE + MATCH</span>
           </div>
           <div>
             <strong>Lakes</strong>
             <span>Amazon S3, ADLS, Google Cloud Storage</span>
           </div>
           <div>
-            <strong>0</strong>
-            <span>Silent drops by design</span>
+            <strong>CDC</strong>
+            <span>At-least-once upsert until a route proves dest-owned EOS</span>
           </div>
         </div>
       </section>
@@ -668,351 +658,6 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           </div>
         </div>
       </section>
-    </div>
-  );
-}
-
-const CONTACT_SOURCES = ["PostgreSQL", "MySQL", "MongoDB", "Salesforce", "S3", "Kafka", "Other"] as const;
-const CONTACT_DESTINATIONS = ["Snowflake", "BigQuery", "Redshift", "PostgreSQL", "Other"] as const;
-
-const CONTACT_STEPS = [
-  { id: 1 as const, label: "Stack", hint: "Sources & scale" },
-  { id: 2 as const, label: "You", hint: "How we reach you" },
-];
-
-function ContactPickGrid({
-  label,
-  options,
-  value,
-  onChange,
-}: {
-  label: string;
-  options: readonly string[];
-  value: string[];
-  onChange: (next: string[]) => void;
-}) {
-  const toggle = (opt: string) => {
-    onChange(value.includes(opt) ? value.filter((v) => v !== opt) : [...value, opt]);
-  };
-  return (
-    <fieldset className="lp-ct6-pick">
-      <legend>{label}</legend>
-      <div className="lp-ct6-pick-grid">
-        {options.map((opt) => (
-          <button
-            key={opt}
-            type="button"
-            className={`lp-ct6-pick-item${value.includes(opt) ? " is-on" : ""}`}
-            onClick={() => toggle(opt)}
-            aria-pressed={value.includes(opt)}
-          >
-            {opt}
-          </button>
-        ))}
-      </div>
-    </fieldset>
-  );
-}
-
-function ContactPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
-  const [step, setStep] = useState<1 | 2>(1);
-  const [sent, setSent] = useState(false);
-  const [sources, setSources] = useState<string[]>([]);
-  const [destinations, setDestinations] = useState<string[]>([]);
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [company, setCompany] = useState("");
-  const [role, setRole] = useState("");
-  const [volume, setVolume] = useState("");
-  const [region, setRegion] = useState("");
-  const [timeframe, setTimeframe] = useState("");
-  const [message, setMessage] = useState("");
-  const [honeypot, setHoneypot] = useState("");
-
-  const canAdvance =
-    step === 1
-      ? sources.length > 0 && destinations.length > 0 && Boolean(volume && region && timeframe)
-      : Boolean(name.trim() && email.trim() && company.trim());
-
-  const goNext = () => {
-    if (!canAdvance || step !== 1) return;
-    setStep(2);
-  };
-
-  const goBack = () => {
-    if (step === 2) setStep(1);
-  };
-
-  const submit = (e: FormEvent) => {
-    e.preventDefault();
-    if (honeypot.trim()) {
-      setSent(true);
-      return;
-    }
-    if (step !== 2 || !canAdvance) return;
-    // eslint-disable-next-line no-console
-    console.info("[marketing/contact] pilot request", {
-      sources,
-      destinations,
-      volume,
-      region,
-      timeframe,
-      name: name.trim(),
-      email: email.trim(),
-      company: company.trim(),
-      role: role.trim(),
-      message: message.trim().slice(0, 1200),
-      submittedAt: new Date().toISOString(),
-    });
-    setSent(true);
-  };
-
-  return (
-    <div className="lp-mkt-page lp-contact-v6">
-      <div className="lp-ct6">
-        <header className="lp-ct6-top">
-          <div className="lp-ct6-top-inner">
-            <div className="lp-ct6-top-copy">
-              <p className="lp-ct6-kicker">Contact sales</p>
-              <h1>Request a pilot</h1>
-              <p className="lp-ct6-lead">
-                Scoped on your stack — Map → Preflight → Prove. A solutions engineer replies within one
-                business day.
-              </p>
-            </div>
-            <aside className="lp-ct6-top-aside" aria-label="What you get">
-              <div>
-                <strong>&lt;1 day</strong>
-                <span>Engineer reply</span>
-              </div>
-              <div>
-                <strong>9 gates</strong>
-                <span>Same as production</span>
-              </div>
-              <div>
-                <strong>Σ MATCH</strong>
-                <span>Checksum proof</span>
-              </div>
-            </aside>
-          </div>
-        </header>
-
-        <div className="lp-ct6-shell">
-          {!sent ? (
-            <form className="lp-ct6-form" onSubmit={submit} noValidate>
-              <nav className="lp-ct6-steps" aria-label="Form progress">
-                {CONTACT_STEPS.map((s) => {
-                  const state = s.id < step ? "done" : s.id === step ? "active" : "pending";
-                  return (
-                    <div key={s.id} className={`lp-ct6-step is-${state}`}>
-                      <span className="lp-ct6-step-index" aria-hidden>
-                        {state === "done" ? "✓" : s.id}
-                      </span>
-                      <div className="lp-ct6-step-copy">
-                        <strong>{s.label}</strong>
-                        <em>{s.hint}</em>
-                      </div>
-                    </div>
-                  );
-                })}
-              </nav>
-
-                {step === 1 ? (
-                  <div className="lp-ct6-body">
-                    <div className="lp-ct6-body-head">
-                      <h2>Your stack</h2>
-                      <p>Pick sources, destinations, and scale. You can refine on the call.</p>
-                    </div>
-                    <div className="lp-ct6-picks">
-                      <ContactPickGrid
-                        label="Sources"
-                        options={CONTACT_SOURCES}
-                        value={sources}
-                        onChange={setSources}
-                      />
-                      <ContactPickGrid
-                        label="Destinations"
-                        options={CONTACT_DESTINATIONS}
-                        value={destinations}
-                        onChange={setDestinations}
-                      />
-                    </div>
-                    <div className="lp-ct6-fields lp-ct6-fields--3">
-                      <label>
-                        Daily volume
-                        <select
-                          className="lp-ct6-input"
-                          value={volume}
-                          onChange={(e) => setVolume(e.target.value)}
-                          required
-                        >
-                          <option value="">Select…</option>
-                          <option value="lt-1m">&lt; 1M rows/day</option>
-                          <option value="1m-100m">1M – 100M rows/day</option>
-                          <option value="100m-1b">100M – 1B rows/day</option>
-                          <option value="gt-1b">&gt; 1B rows/day</option>
-                        </select>
-                      </label>
-                      <label>
-                        Region
-                        <select
-                          className="lp-ct6-input"
-                          value={region}
-                          onChange={(e) => setRegion(e.target.value)}
-                          required
-                        >
-                          <option value="">Select…</option>
-                          <option value="us">US</option>
-                          <option value="eu">EU</option>
-                          <option value="apac">APAC</option>
-                          <option value="other">Other</option>
-                        </select>
-                      </label>
-                      <label>
-                        Timeframe
-                        <select
-                          className="lp-ct6-input"
-                          value={timeframe}
-                          onChange={(e) => setTimeframe(e.target.value)}
-                          required
-                        >
-                          <option value="">Select…</option>
-                          <option value="pilot">Pilot now</option>
-                          <option value="prod-30d">Production in 30 days</option>
-                          <option value="evaluating">Still evaluating</option>
-                        </select>
-                      </label>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="lp-ct6-body">
-                    <div className="lp-ct6-body-head">
-                      <h2>How we reach you</h2>
-                      <p>One engineer reply with a scoped plan — never a drip campaign.</p>
-                    </div>
-                    <div className="lp-ct6-fields lp-ct6-fields--2">
-                      <label>
-                        First name
-                        <input
-                          className="lp-ct6-input"
-                          value={name}
-                          onChange={(e) => setName(e.target.value)}
-                          required
-                          autoComplete="given-name"
-                        />
-                      </label>
-                      <label>
-                        Work email
-                        <input
-                          className="lp-ct6-input"
-                          type="email"
-                          value={email}
-                          onChange={(e) => setEmail(e.target.value)}
-                          required
-                          autoComplete="email"
-                          placeholder="name@company.com"
-                        />
-                      </label>
-                      <label>
-                        Company
-                        <input
-                          className="lp-ct6-input"
-                          value={company}
-                          onChange={(e) => setCompany(e.target.value)}
-                          required
-                          autoComplete="organization"
-                        />
-                      </label>
-                      <label>
-                        Role
-                        <input
-                          className="lp-ct6-input"
-                          value={role}
-                          onChange={(e) => setRole(e.target.value)}
-                          placeholder="Data platform lead"
-                          autoComplete="organization-title"
-                        />
-                      </label>
-                      <label className="lp-ct6-span-all">
-                        Anything else? <em>Optional</em>
-                        <textarea
-                          className="lp-ct6-input lp-ct6-textarea"
-                          value={message}
-                          onChange={(e) => setMessage(e.target.value)}
-                          rows={2}
-                          placeholder="Compliance constraints, cutover windows, deadlines…"
-                        />
-                      </label>
-                      <label className="lp-ct6-hp" aria-hidden="true">
-                        Do not fill
-                        <input
-                          className="lp-ct6-input"
-                          tabIndex={-1}
-                          autoComplete="off"
-                          value={honeypot}
-                          onChange={(e) => setHoneypot(e.target.value)}
-                        />
-                      </label>
-                    </div>
-                  </div>
-                )}
-
-                <div className="lp-ct6-nav">
-                  <div className="lp-ct6-nav-left">
-                    {step === 2 ? (
-                      <button type="button" className="lp-ct6-back" onClick={goBack}>
-                        ← Back
-                      </button>
-                    ) : (
-                      <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
-                    )}
-                  </div>
-                  {step === 1 ? (
-                    <button
-                      type="button"
-                      className="lp-btn lp-btn--brand lp-btn--lg"
-                      onClick={goNext}
-                      disabled={!canAdvance}
-                    >
-                      Continue
-                    </button>
-                  ) : (
-                    <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg" disabled={!canAdvance}>
-                      Request pilot
-                    </button>
-                  )}
-                </div>
-              </form>
-          ) : (
-            <div className="lp-ct6-success" role="status">
-              <div className="lp-ct6-success-mark" aria-hidden>
-                <DtIcon name="check" size={28} />
-              </div>
-              <h2>Request received</h2>
-              <p>
-                A solutions engineer will reply within one business day
-                {sources.length > 0 ? ` about ${sources.slice(0, 2).join(", ")}` : ""}
-                {destinations.length > 0 ? ` → ${destinations.slice(0, 2).join(", ")}` : ""}.
-              </p>
-              <p className="lp-ct6-success-mail">
-                Or write us now at{" "}
-                <a href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">sales@datawrap.io</a>
-              </p>
-              <div className="lp-ct6-success-actions">
-                <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("help")}>
-                  Browse docs
-                </button>
-                <button type="button" className="lp-btn lp-btn--outline" onClick={() => onNavigate("pricing")}>
-                  See pricing
-                </button>
-                <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("enterprise")}>
-                  Enterprise
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
     </div>
   );
 }
@@ -1214,48 +859,44 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
 
   return (
     <div className="lp-mkt-page lp-sec-v2">
-      <section className="lp-sec-hero" aria-label="Security">
-        <div className="lp-sec-hero-waves" aria-hidden>
-          <span className="lp-wave-grid" />
-          <span className="lp-wave-glow lp-wave-glow--1" />
-          <span className="lp-wave-glow lp-wave-glow--2" />
-        </div>
-        <div className="lp-sec-hero-inner">
-          <div className="lp-sec-hero-copy">
-            <p className="lp-pricing-hero-kicker">
-              <span className="lp-pricing-hero-dot" aria-hidden />
-              Security
-            </p>
-            <h1>
-              Security that moves with
-              <span className="lp-pricing-hero-em"> the data</span>
-            </h1>
-            <p className="lp-sec-hero-lead">
-              Isolation, encryption, residency, and checksum proof — the same governed path your
-              transfers already use. Agents inherit it too.
-            </p>
-            <div className="lp-hero-cta">
-              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-                Request security pack
-              </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
-                Enterprise overview
-              </button>
-            </div>
+      <MarketingInkHero
+        kicker="Security"
+        title={<>Security that moves with the data.</>}
+        lead={
+          <>
+            Isolation, encryption, residency, and dest-engine checksum — the same path Transfer
+            Studio already uses. Agents inherit it. No SOC&nbsp;2 or ISO certificate is claimed
+            until a third-party audit exists.
+          </>
+        }
+        actions={
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
+              Request security pack
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("enterprise")}>
+              Enterprise overview
+            </button>
           </div>
-          <aside className="lp-sec-hero-panel" aria-label="Runtime security posture">
-            <header>
-              <strong>Runtime posture</strong>
-              <span>Live</span>
-            </header>
-            <div className="lp-sec-hero-row is-ok"><span>Preflight</span><em>9 / 9</em></div>
-            <div className="lp-sec-hero-row is-ok"><span>Write</span><em>quarantine surfaced</em></div>
-            <div className="lp-sec-hero-row is-ok"><span>Reconcile</span><em>checksum MATCH</em></div>
-            <div className="lp-sec-hero-row is-ok"><span>Agents</span><em>MCP under RBAC</em></div>
-            <div className="lp-sec-hero-row"><span>Audit</span><em>jobs · maps · keys</em></div>
+        }
+        slas={[
+          { value: "TLS", label: "In transit" },
+          { value: "BYOK", label: "Connector secrets" },
+          { value: "9 / 9", label: "Gates before write" },
+          { value: "RBAC", label: "Studio · Pilot · MCP" },
+        ]}
+        aside={
+          <aside className="lp-sales-hero-aside" aria-label="Runtime security posture">
+            <p>Runtime posture</p>
+            <p className="lp-sales-hero-note">
+              Preflight · 9 / 9<br />
+              Write · quarantine surfaced<br />
+              Reconcile · checksum MATCH<br />
+              Agents · no raw dest passwords
+            </p>
           </aside>
-        </div>
-      </section>
+        }
+      />
 
       <MarketingReveal>
         <section className="lp-sec-badges" aria-label="Compliance posture">
@@ -1356,47 +997,42 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
 
   return (
     <div className="lp-mkt-page lp-int-v2">
-      <section className="lp-int-hero" aria-label="Connectors">
-        <div className="lp-int-hero-bg" aria-hidden>
-          <span className="lp-wave-grid" />
-          <span className="lp-wave-glow lp-wave-glow--1" />
-          <span className="lp-wave-glow lp-wave-glow--2" />
-        </div>
-        <div className="lp-int-hero-inner">
-          <div className="lp-int-hero-copy">
-            <p className="lp-pricing-hero-kicker">
-              <span className="lp-pricing-hero-dot" aria-hidden />
-              Connection catalog
-            </p>
-            <h1>
-              Connect the systems
-              <span className="lp-pricing-hero-em"> you already run.</span>
-            </h1>
-            <p className="lp-int-hero-lead">
-              Load Snowflake, BigQuery, Redshift, and Databricks. Land files on S3, ADLS, and
-              GCS. Connect PostgreSQL, MySQL, SQL Server, Oracle, MongoDB, and the apps your
-              revenue team already runs — one catalog, one governed path. Every production load
-              still maps, validates, quarantines bad rows, and returns a checksum.
-            </p>
-            <div className="lp-hero-cta">
-              <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
-                Open connector catalog
-              </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("help")}>
-                Driver docs
-              </button>
-            </div>
+      <MarketingInkHero
+        kicker="Connection catalog"
+        title={<>Connect the systems you already run — {TRANSFER_READY_DRIVERS} transfer-live.</>}
+        lead={
+          <>
+            Catalog tiles are not transfer-live. {TRANSFER_READY_DRIVERS} drivers are{" "}
+            <code>TRANSFER_READY</code>. Warehouse and SaaS tiles without a named matrix stay
+            Planned. Every production load still maps, gates, quarantines, and returns a dest-engine
+            checksum.
+          </>
+        }
+        actions={
+          <div className="lp-hero-cta">
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
+              Open connector catalog
+            </button>
+            <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("help")}>
+              Driver docs
+            </button>
           </div>
-          <div className="lp-int-hero-stack" aria-hidden>
-            {["postgresql", "snowflake", "bigquery", "mongodb", "kafka", "s3", "mysql", "salesforce"].map((id) => (
-              <span key={id} className="lp-int-hero-tile">
-                <ConnectorIcon id={id} size={28} />
-                <em>{id}</em>
-              </span>
-            ))}
-          </div>
-        </div>
-      </section>
+        }
+        slas={[
+          { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY" },
+          { value: "Native", label: "Warehouse MERGE" },
+          { value: "SQLA", label: "Generic SQL drivers" },
+          { value: "DLQ", label: "Quarantine replay" },
+        ]}
+        aside={
+          <aside className="lp-sales-hero-aside" aria-label="Stack preview">
+            <p>Proven families</p>
+            <p className="lp-sales-hero-note">
+              PostgreSQL · MySQL · SQL Server · Oracle · Snowflake · BigQuery · S3 · Kafka · Salesforce
+            </p>
+          </aside>
+        }
+      />
 
       <MarketingReveal>
         <section className="lp-int-strip" aria-label="Capability labels">
