@@ -13,6 +13,10 @@ from connectors.object_store_common import (
     resolve_object_write_layout,
     serialize_object_store_body,
 )
+from connectors.object_store_multipart import (
+    resolve_multipart_limits,
+    upload_object_store_bytes,
+)
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
@@ -183,10 +187,19 @@ def write_mapped_rows(
             container_client.create_container()
         # Staging→live before any purge: failed upload must not wipe the prior export.
         staging_key = object_staging_key(key)
+        extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+        threshold, part_size = resolve_multipart_limits(extra)
+        upload_kw = dict(
+            dialect="adls",
+            blob_client_factory=lambda k, _c=client, _n=container: _c.get_blob_client(_n, k),
+            body=body,
+            content_type=content_type,
+            threshold=threshold,
+            part_size=part_size,
+        )
+        upload_object_store_bytes(key=staging_key, **upload_kw)
+        upload_object_store_bytes(key=key, **upload_kw)
         staging_blob = client.get_blob_client(container, staging_key)
-        staging_blob.upload_blob(body, overwrite=True, content_type=content_type)
-        blob = client.get_blob_client(container, key)
-        blob.upload_blob(body, overwrite=True, content_type=content_type)
         try:
             staging_blob.delete_blob()
         except Exception:

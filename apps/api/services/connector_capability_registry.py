@@ -368,8 +368,11 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_unstructured": True,
         "common_issues": [
             "Use the region-specific endpoint and verify bucket permissions.",
-            "Large objects should be split into parts. S3 has no native UPDATE — "
-            "upsert sync modes are not supported (overwrite object key only).",
+            "Bodies at or above DATAFLOW_OBJECT_STORE_MULTIPART_THRESHOLD use "
+            "S3 multipart (abort on failure). Smaller objects stay on PutObject. "
+            "The export is still serialized in memory first — not a disk spill. "
+            "S3 has no native UPDATE — upsert sync modes are not supported "
+            "(overwrite object key only). Still at-least-once.",
             "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
@@ -390,7 +393,9 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "Use HMAC keys or service-account JSON for authentication.",
             "Bucket names are global and unique.",
-            "Object overwrite only — no row-level upsert/MERGE.",
+            "Large objects compose from component uploads; small objects stay "
+            "on upload_from_string. Still serialized in memory. Object overwrite "
+            "only — no row-level upsert/MERGE. Still at-least-once.",
             "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
@@ -409,7 +414,9 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "supports_unstructured": True,
         "common_issues": [
-            "Object overwrite only — no row-level upsert/MERGE.",
+            "Large objects use stage_block + commit_block_list; small objects "
+            "stay on upload_blob. Still serialized in memory. Object overwrite "
+            "only — no row-level upsert/MERGE. Still at-least-once.",
             "Use Azure Storage Account key or service principal.",
             "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
@@ -431,7 +438,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "MinIO is S3-compatible; use the MinIO endpoint and region.",
             "Bucket policies may differ from AWS S3.",
-            "Object overwrite only — no row-level upsert/MERGE.",
+            "Large objects use the same S3 multipart path as AWS. "
+            "Object overwrite only — no row-level upsert/MERGE. Still at-least-once.",
         ],
         "recommended_batch_size": 1000,
     },

@@ -1551,6 +1551,16 @@ def _write_destination_database(
         ),
         "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog"),
     }
+    if db_type in {
+        "s3",
+        "minio",
+        "gcs",
+        "gcp_storage",
+        "adls",
+        "azure_blob",
+        "azure_data_lake",
+    }:
+        common["dest_extra"] = dict(cfg.get("extra") or {})
 
     if db_type == "snowflake":
         from connectors.snowflake_writer import write_mapped_rows

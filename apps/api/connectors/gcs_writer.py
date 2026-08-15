@@ -15,6 +15,10 @@ from connectors.object_store_common import (
     resolve_object_write_layout,
     serialize_object_store_body,
 )
+from connectors.object_store_multipart import (
+    resolve_multipart_limits,
+    upload_object_store_bytes,
+)
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     apply_write_quarantine_matrix,
@@ -209,9 +213,18 @@ def write_mapped_rows(
                 ) from exc
         # Staging→live before any purge: failed upload must not wipe the prior export.
         staging_key = object_staging_key(key)
-        bucket_obj.blob(staging_key).upload_from_string(body, content_type=content_type)
-        blob = bucket_obj.blob(key)
-        blob.upload_from_string(body, content_type=content_type)
+        extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+        threshold, part_size = resolve_multipart_limits(extra)
+        upload_kw = dict(
+            dialect="gcs",
+            bucket_obj=bucket_obj,
+            body=body,
+            content_type=content_type,
+            threshold=threshold,
+            part_size=part_size,
+        )
+        upload_object_store_bytes(key=staging_key, **upload_kw)
+        upload_object_store_bytes(key=key, **upload_kw)
         try:
             bucket_obj.blob(staging_key).delete()
         except Exception:
