@@ -21,7 +21,7 @@ interface PageShellProps {
   className?: string;
   /** @deprecated All pages are full-width; kept for API compatibility */
   wide?: boolean;
-  /** Fit content in one viewport — scroll only inside .df2-scroll-pane regions */
+  /** Fit content in one viewport — scroll only inside the page body, not the app chrome */
   fit?: boolean;
   /**
    * When false, no chrome at all (Transfer Studio / Pilot immersive) — only the

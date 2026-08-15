@@ -89,11 +89,10 @@
   background: var(--df-surface, #fff) !important;
 }
 
-.df2-app .df2-content,
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio),
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) > .df2-screen-panel,
 .df2-app .df2-page-untitled.df2-page-fluid {
-  min-height: 100%;
+  min-height: min-content;
 }
 
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
@@ -318,7 +317,47 @@
   border-color: color-mix(in srgb, var(--df-brand, #0d9488) 30%, var(--df-border, #e2e8f0));
 }
 
-/* ── 3. Deterministic content scroll (no :has() / inline-style races) ─────── */
+/* ── 3. Workspace chrome lock — only the content pane scrolls ───────────────
+   Linear / Slack / Airbyte Cloud: sidebar + topbar (Workspace breadcrumb
+   + search) stay put. html/body never grow a second document scrollbar
+   while the app is mounted. Marketing (.lp) keeps document scroll.
+   .df2-main is a flex column, not a scrollport. */
+html:has(.df2-app),
+html:has(.df2-app) body,
+html:has(.df2-app) #root {
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.df2-app {
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  min-height: 100dvh !important;
+  overflow: hidden !important;
+}
+
+.df2-app .df2-main {
+  flex: 1 1 0 !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: 100% !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.df2-app .df2-topbar,
+.df2-app .df2-api-offline-banner {
+  flex: 0 0 auto !important;
+}
+
+.df2-app .df2-content {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+}
+
 .df2-app .df2-main .df2-content.df2-content-scroll {
   overflow-y: auto !important;
   overflow-x: clip;
@@ -329,6 +368,31 @@
 
 .df2-app .df2-main .df2-content.df2-content-fixed {
   overflow: hidden !important;
+}
+
+/* Page chrome stays at the top of the content scrollport — lists/cards move. */
+.df2-app .df2-content.df2-content-scroll .df2-toolbar,
+.df2-app .df2-content.df2-content-scroll .df2-page-actionbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--df-surface, #fff);
+}
+
+.df2-app .df2-content.df2-content-scroll .df2-context-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--df-surface, #fff);
+}
+
+.df2-app .df2-content.df2-content-scroll .df2-settings-nav {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* ── 4. Page identity lives in the topbar breadcrumb (Workspace > Page) ─────
