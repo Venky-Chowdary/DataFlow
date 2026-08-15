@@ -4,7 +4,7 @@
   "platform_exactly_once_claimed": false,
   "delivery_default": "at_least_once",
   "measured_floor": 1.0,
-  "pass": 10,
+  "pass": 15,
   "fail": 0,
   "skip": 0,
   "cases": [
@@ -51,6 +51,51 @@
       "eligible": true,
       "reason": "dest_owned_watermark_txn",
       "wired": true,
+      "pass": true
+    },
+    {
+      "id": "duckdb_cdc_wired",
+      "dest": "duckdb",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "oracle_cdc_wired",
+      "dest": "oracle",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "snowflake_cdc_wired",
+      "dest": "snowflake",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "azure_sql_alias_wired",
+      "dest": "azure_sql_database",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "sqlite_callable_refused",
+      "dest": "sqlite",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_refuses_callable_source",
+      "wired": false,
       "pass": true
     },
     {
