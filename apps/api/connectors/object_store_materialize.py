@@ -41,14 +41,21 @@ _SAMPLE_LIMIT = 50
 
 
 def source_from_writer(_kwargs: dict[str, Any], extra: dict[str, Any] | None) -> dict[str, Any]:
-    """Records + source-spill settings from a writer ``**_kwargs`` / dest_extra."""
+    """Records + source-spill settings from a writer ``**_kwargs`` / dest_extra.
+
+    Engine-owned ``source_spool`` wins so materialize does not re-ingest.
+    """
     from connectors.source_row_spool import resolve_source_spill_max
 
+    source_spool = _kwargs.get("source_spool")
+    if source_spool is not None and not hasattr(source_spool, "iter_bundles"):
+        source_spool = None
     records = _kwargs.get("records")
-    if not isinstance(records, list):
+    if source_spool is not None or not isinstance(records, list):
         records = None
     return {
         "records": records,
+        "source_spool": source_spool,
         "source_spill_max": resolve_source_spill_max(extra),
     }
 
@@ -357,6 +364,7 @@ def materialize_object_store_export(
     empty_cells_as_null: bool = False,
     records: list[dict[str, Any]] | None = None,
     source_spill_max: int | None = None,
+    source_spool: Any = None,
 ) -> ObjectStoreMaterializeResult:
     """Map, quarantine, and encode without retaining the source matrix.
 
@@ -386,13 +394,17 @@ def materialize_object_store_export(
     dest_types = dest_types or {}
     column_types = column_types or {}
     tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
-    spool = SourceRowSpool(
-        spill_max_size=int(source_spill_max or resolve_source_spill_max())
-    )
-    if records is not None:
-        spool.ingest_records(headers, records, mappings)
+    close_spool = source_spool is None
+    if source_spool is not None:
+        spool = source_spool
     else:
-        spool.ingest_matrix(headers, data_rows or [], mappings)
+        spool = SourceRowSpool(
+            spill_max_size=int(source_spill_max or resolve_source_spill_max())
+        )
+        if records is not None:
+            spool.ingest_records(headers, records, mappings)
+        else:
+            spool.ingest_matrix(headers, data_rows or [], mappings)
     headers = spool.headers
     source_row_count = spool.row_count
 
@@ -510,4 +522,5 @@ def materialize_object_store_export(
         encoder.abort()
         raise
     finally:
-        spool.close()
+        if close_spool:
+            spool.close()

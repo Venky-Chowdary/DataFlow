@@ -98,6 +98,7 @@ def _sf_materialize_mapped_batch(
     destination_column_nullability: Any = None,
     allow_logical_fallback: bool = True,
     records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
     extra: dict[str, Any] | None = None,
     materialize_batch: int | None = None,
 ) -> _SfMaterializedBatch:
@@ -126,6 +127,7 @@ def _sf_materialize_mapped_batch(
         headers=headers,
         data_rows=data_rows,
         records=records,
+        source_spool=source_spool,
         extra=extra,
         batch_size=materialize_batch,
         mappings=mappings,
@@ -252,6 +254,7 @@ def _sf_rematerialize_if_physical_differs(
     destination_column_nullability: Any = None,
     force_remap: bool = False,
     records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
     extra: dict[str, Any] | None = None,
     materialize_batch: int | None = None,
 ) -> _SfMaterializedBatch | None:
@@ -288,6 +291,7 @@ def _sf_rematerialize_if_physical_differs(
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
         records=records,
+        source_spool=source_spool,
         extra=extra,
         materialize_batch=materialize_batch,
     )
@@ -1191,6 +1195,7 @@ def write_mapped_rows(
             destination_column_nullability=dest_nullability,
             allow_logical_fallback=True,
             records=_sql_src["records"],
+            source_spool=_sql_src.get("source_spool"),
             extra=_sql_extra,
             materialize_batch=_sql_src["materialize_batch"],
         )
@@ -1534,6 +1539,7 @@ def write_mapped_rows(
                     destination_column_nullability=dest_nullability,
                     force_remap=_force_remap,
                     records=_sql_src["records"],
+                    source_spool=_sql_src.get("source_spool"),
                     extra=_sql_extra,
                     materialize_batch=_sql_src["materialize_batch"],
                 )
@@ -1678,6 +1684,7 @@ def write_mapped_rows(
                     destination_column_nullability=dest_nullability,
                     force_remap=_force_remap,
                     records=_sql_src["records"],
+                    source_spool=_sql_src.get("source_spool"),
                     extra=_sql_extra,
                     materialize_batch=_sql_src["materialize_batch"],
                 )

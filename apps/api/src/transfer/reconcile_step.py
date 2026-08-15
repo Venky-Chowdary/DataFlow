@@ -70,6 +70,57 @@ def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
     }
 
 
+def _compute_source_checksum_from_spool(
+    source_spool: Any,
+    columns: list[str],
+    mappings: list[dict],
+    source_schema: dict[str, str] | None,
+    target_cols: list[str] | None,
+    *,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+    validation_mode: str = "strict",
+    destination_pk_columns: list[str] | None = None,
+) -> tuple[str, str]:
+    """Remap Gate-8 from the engine spool in bundles — never rebuild ``records``."""
+    from connectors.sql_write_materialize import resolve_sql_materialize_batch
+    from services.fingerprint_accumulator import FingerprintAccumulator
+    from services.reconciliation import _iter_fingerprints
+
+    if target_cols is None:
+        target_cols, _ = resolve_target_columns(
+            mappings, source_schema or {}, preserve_case=True
+        )
+    headers = list(getattr(source_spool, "headers", None) or columns)
+    acc = FingerprintAccumulator()
+    policy = transform_error_policy_for_validation_mode(validation_mode)
+    for start, chunk in source_spool.iter_bundles(resolve_sql_materialize_batch()):
+        mapped, _rejected = map_rows_for_fingerprint(
+            headers=headers,
+            data_rows=chunk,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=source_schema or {},
+            error_policy=policy,
+            dest_types=dest_types or {},
+            preserve_case=True,
+            dest_kind=dest_db_type or "",
+            destination_pk_columns=destination_pk_columns,
+            row_number_start=start,
+            struct_already_materialized=True,
+        )
+        acc.add_many(
+            _iter_fingerprints(
+                mapped,
+                target_cols,
+                dest_db_type=dest_db_type,
+                dest_types=dest_types,
+            )
+        )
+        del mapped
+    return acc.digest(), SOURCE_DIGEST_REMAPPED_ROWS
+
+
 def _compute_source_checksum(
     records: list[dict],
     columns: list[str],
@@ -82,19 +133,34 @@ def _compute_source_checksum(
     dest_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
+    source_spool: Any = None,
 ) -> tuple[str, str]:
     """Return ``(digest, provenance)`` for the source side of Gate-8.
 
-    When source ``records`` are available, always remap and fingerprint them.
-    Preferring the writer checksum first made Gate-8 circular: dest digest was
-    compared to the writer's own ack, not to the remapped source population.
+    When source ``records`` or an engine ``source_spool`` are available, always
+    remap and fingerprint them. Preferring the writer checksum first made
+    Gate-8 circular: dest digest was compared to the writer's own ack, not to
+    the remapped source population.
 
-    The writer checksum remains the fallback when no records were supplied, and
-    the provenance is returned with it so the report can say so. That fallback
-    is not a corner case: a streaming pass hands over no rows, which is exactly
-    how the large tables move, and labelling those runs ``full_checksum`` claimed
-    two independent digests had agreed when only one digest existed.
+    The writer checksum remains the fallback when no records or spool were
+    supplied, and the provenance is returned with it so the report can say so.
+    That fallback is not a corner case: a streaming pass hands over no rows,
+    which is exactly how the large tables move, and labelling those runs
+    ``full_checksum`` claimed two independent digests had agreed when only one
+    digest existed.
     """
+    if source_spool is not None and getattr(source_spool, "row_count", 0):
+        return _compute_source_checksum_from_spool(
+            source_spool,
+            columns,
+            mappings,
+            source_schema,
+            target_cols,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+            validation_mode=validation_mode,
+            destination_pk_columns=destination_pk_columns,
+        )
     if not records:
         return str(writer_checksum or ""), SOURCE_DIGEST_WRITER_ACK
     _, data_rows = records_to_matrix(records, columns)
@@ -820,6 +886,7 @@ def run_reconciliation(
     source_schema: dict[str, str] | None = None,
     validation_mode: str = "strict",
     source_endpoint: EndpointConfig | None = None,
+    source_spool: Any = None,
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
     # Destination facts a row checksum cannot prove (generator watermarks today).
@@ -1195,7 +1262,9 @@ def run_reconciliation(
     # otherwise leave it empty and decline the comparison further down rather
     # than compare two different scopes.
     source_checksum_scope_note = ""
-    if resumed_from and not (resume_full_source_rows and records):
+    if resumed_from and not (
+        resume_full_source_rows and (records or source_spool is not None)
+    ):
         source_checksum_scope_note = (
             f"Resumed after {resumed_from:,} previously committed row(s): this pass "
             "read only the remaining slice, so no source digest covering the whole "
@@ -1220,6 +1289,7 @@ def run_reconciliation(
             dest_types=dest_types,
             validation_mode=validation_mode,
             destination_pk_columns=[str(c) for c in pk_cols if c] or None,
+            source_spool=source_spool,
         )
         digest_provenance["source"] = source_checksum_provenance
 

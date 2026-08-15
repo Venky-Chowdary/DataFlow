@@ -2893,7 +2893,9 @@ class UniversalTransferEngine:
                         if conflict_columns:
                             write_mode = "upsert"
                         # Keep full population — no positional slice.
-                        resume_full_records = list(records)
+                        # Engine record spill owns the population; do not
+                        # duplicate the dict list for resume.
+                        resume_full_records = []
                         resume_skipped_rows = 0
                         dest_summary_resume_note = (
                             f"Idempotent resume after {skip_n:,} prior row(s) — "
@@ -2966,6 +2968,10 @@ class UniversalTransferEngine:
                         job_id=job_id,
                         skip_preflight=request.skip_preflight,
                         sync_mode=request.sync_mode,
+                        release_records=True,
+                        retain_engine_spill=True,
+                        collect_mirror_keys=effective_sync_lower
+                        in ("full_refresh_mirror", "mirror"),
                     )
 
                 if effective_sync_lower == "scd2" and conflict_columns:
@@ -3049,6 +3055,11 @@ class UniversalTransferEngine:
                         ),
                     )
                     if dest_summary.get("promote_blocked"):
+                        from connectors.engine_record_spill import ENGINE_SPILL_SUMMARY_KEY
+
+                        _blocked_spill = dest_summary.pop(ENGINE_SPILL_SUMMARY_KEY, None)
+                        if _blocked_spill is not None:
+                            _blocked_spill.close()
                         # Strict/maximum + staging: primary untouched; persist DLQ then fail.
                         _persist_job_quarantine(
                             job_id,
@@ -3094,6 +3105,8 @@ class UniversalTransferEngine:
                         effective_sync_lower in ("full_refresh_mirror", "mirror")
                         and conflict_columns
                     ):
+                        from connectors.engine_record_spill import MIRROR_PK_SUMMARY_KEY
+
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,
                             records,
@@ -3101,6 +3114,11 @@ class UniversalTransferEngine:
                             schema,
                             mappings,
                             conflict_columns,
+                            source_pk_tuples=dest_summary.pop(
+                                MIRROR_PK_SUMMARY_KEY, None
+                            )
+                            if isinstance(dest_summary, dict)
+                            else None,
                         )
                         dest_summary["mirror"] = mirror_summary
                         rows_written = mirror_summary.get("active_rows", rows_written)
@@ -3257,24 +3275,42 @@ class UniversalTransferEngine:
                         dest_summary.setdefault(
                             "primary_key_columns", list(conflict_columns)
                         )
+                from connectors.engine_record_spill import ENGINE_SPILL_SUMMARY_KEY
+
+                spill_holder = (
+                    dest_summary.pop(ENGINE_SPILL_SUMMARY_KEY, None)
+                    if isinstance(dest_summary, dict)
+                    else None
+                )
                 if resume_skipped_rows and isinstance(dest_summary, dict):
                     dest_summary["resumed_from"] = resume_skipped_rows
-                    dest_summary["resume_full_source_rows"] = len(resume_full_records)
-                recon = run_reconciliation(
-                    endpoint=request.destination,
-                    # Full population, so the source digest and row ledger cover
-                    # what the destination actually holds after the resume.
-                    records=resume_full_records or records,
-                    columns=columns,
-                    rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum")
-                    or dest_summary.get("active_checksum", ""),
-                    dest_summary=dest_summary,
-                    mappings=mappings,
-                    source_schema=schema,
-                    validation_mode=request.validation_mode,
-                    source_endpoint=request.source,
-                )
+                    dest_summary["resume_full_source_rows"] = int(
+                        (dest_summary.get("engine_record_spill") or {}).get(
+                            "unexpanded_row_count"
+                        )
+                        or len(resume_full_records)
+                        or len(records)
+                    )
+                try:
+                    recon = run_reconciliation(
+                        endpoint=request.destination,
+                        # Full population via spool when the engine released
+                        # the dict list; otherwise the in-memory records.
+                        records=resume_full_records or records,
+                        columns=columns,
+                        rows_written=rows_written,
+                        writer_checksum=dest_summary.get("checksum")
+                        or dest_summary.get("active_checksum", ""),
+                        dest_summary=dest_summary,
+                        mappings=mappings,
+                        source_schema=schema,
+                        validation_mode=request.validation_mode,
+                        source_endpoint=request.source,
+                        source_spool=getattr(spill_holder, "spool", None),
+                    )
+                finally:
+                    if spill_holder is not None:
+                        spill_holder.close()
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):

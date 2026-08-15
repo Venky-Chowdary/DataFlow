@@ -620,6 +620,7 @@ def write_mapped_rows(
             allow_logical_fallback=True,
             empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
             records=_sql_src["records"],
+            source_spool=_sql_src.get("source_spool"),
             extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
             materialize_batch=_sql_src["materialize_batch"],
         )
@@ -989,6 +990,7 @@ def write_mapped_rows(
                     ),
                     empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
                     records=_sql_src["records"],
+                    source_spool=_sql_src.get("source_spool"),
                     extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
                     materialize_batch=_sql_src["materialize_batch"],
                 )

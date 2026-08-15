@@ -1388,13 +1388,25 @@ def write_destination_database(
     from services.row_conservation import CENSUS_KEY, prepare_keyed_upsert
     from src.transfer.connector_capabilities import resolve_driver_type
 
+    from connectors.engine_record_spill import (
+        ENGINE_SPILL_SUMMARY_KEY,
+        MIRROR_PK_SUMMARY_KEY,
+        mirror_pk_sources,
+        spill_engine_write_records,
+        spool_write_kinds,
+    )
+
     cfg = resolve_connector_config(endpoint)
     rows_before = precount_destination(endpoint, cfg)
     write_mode = str(options.get("write_mode") or "")
     conflict_columns = list(options.get("conflict_columns") or [])
+    collect_mirror_keys = bool(options.pop("collect_mirror_keys", False))
+    release_records = bool(options.pop("release_records", False))
+    retain_engine_spill = bool(options.pop("retain_engine_spill", False))
+    options.pop("source_spool", None)
+    db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
     census_payload = None
     if write_mode.lower() == "upsert" and conflict_columns:
-        db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
         records, census_payload = prepare_keyed_upsert(
             records,
             key_columns=conflict_columns,
@@ -1405,13 +1417,49 @@ def write_destination_database(
             table_name=resolve_dest_table(db_type, endpoint, "dt_import"),
             dest_nonempty=bool(rows_before),
         )
-    rows_written, ddl_log, summary = _write_destination_database(
-        endpoint, records, columns, schema, mappings, **options
-    )
+    spill = None
+    if db_type in spool_write_kinds():
+        extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+        pk_sources = (
+            mirror_pk_sources(conflict_columns, mappings)
+            if collect_mirror_keys and conflict_columns
+            else None
+        )
+        spill = spill_engine_write_records(
+            records,
+            columns,
+            mappings,
+            extra=extra,
+            collect_pk_sources=pk_sources,
+            clear_records=release_records,
+        )
+        options["source_spool"] = spill.spool
+    try:
+        rows_written, ddl_log, summary = _write_destination_database(
+            endpoint, records, columns, schema, mappings, **options
+        )
+    except Exception:
+        if spill is not None:
+            spill.close()
+        raise
     if rows_before is not None and isinstance(summary, dict):
         summary.setdefault(PRECOUNT_KEY, int(rows_before))
     if census_payload is not None and isinstance(summary, dict):
         summary[CENSUS_KEY] = census_payload
+    if spill is not None and isinstance(summary, dict):
+        summary["engine_record_spill"] = {
+            "spilled": spill.spilled,
+            "source_row_count": spill.source_row_count,
+            "unexpanded_row_count": spill.unexpanded_row_count,
+        }
+        if spill.mirror_pk_tuples is not None:
+            summary[MIRROR_PK_SUMMARY_KEY] = spill.mirror_pk_tuples
+        if retain_engine_spill:
+            summary[ENGINE_SPILL_SUMMARY_KEY] = spill
+        else:
+            spill.close()
+    elif spill is not None:
+        spill.close()
     return rows_written, ddl_log, summary
 
 
@@ -1430,6 +1478,7 @@ def _write_destination_database(
     skip_preflight: bool = False,
     error_policy: str | None = None,
     sync_mode: str = "",
+    source_spool: Any = None,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
 
@@ -1465,9 +1514,13 @@ def _write_destination_database(
     # SourceRowSpool — do not build a second full matrix here (STRUCT
     # explode would copy again).
     _spool_kinds = OBJECT_STORE_WRITE_KINDS | SQL_SPOOL_WRITE_KINDS
-    if db_type in _spool_kinds:
-        headers = columns or (list(records[0].keys()) if records else [])
+    if source_spool is not None and hasattr(source_spool, "headers"):
+        headers = list(source_spool.headers or columns or [])
         data_rows: list[list[Any]] = []
+        records = []
+    elif db_type in _spool_kinds:
+        headers = columns or (list(records[0].keys()) if records else [])
+        data_rows = []
     else:
         headers, data_rows = records_to_matrix(records, columns)
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
@@ -1523,7 +1576,8 @@ def _write_destination_database(
         "table_name": table_name,
         "headers": headers,
         "data_rows": data_rows,
-        "records": records if db_type in _spool_kinds else None,
+        "records": None if source_spool is not None else (records if db_type in _spool_kinds else None),
+        "source_spool": source_spool,
         "mappings": mappings,
         "column_types": column_types,
         "on_checkpoint": on_checkpoint,

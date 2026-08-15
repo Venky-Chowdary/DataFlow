@@ -1206,6 +1206,8 @@ def map_rows_for_fingerprint(
     contract_primary_key: str | None = None,
     empty_cells_as_null: bool = False,
     destination_column_nullability: dict[str, bool] | None = None,
+    row_number_start: int = 1,
+    struct_already_materialized: bool = False,
 ) -> tuple[list[tuple], list[dict[str, Any]]]:
     """Map rows for Gate-8 fingerprints with write-path quarantine parity.
 
@@ -1232,6 +1234,8 @@ def map_rows_for_fingerprint(
         destination_column_nullability=destination_column_nullability,
         stream_contracts=stream_contracts,
         contract_primary_key=contract_primary_key,
+        row_number_start=row_number_start,
+        struct_already_materialized=struct_already_materialized,
     )
     rejected_details = list(rejected or [])
     type_map = dict(dest_types or {}) or dict(column_types or {})

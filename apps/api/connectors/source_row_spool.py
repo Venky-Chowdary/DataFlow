@@ -15,8 +15,9 @@ Algorithm (Spark external spill / Beam bundle):
 4. Materialize reads ``batch_size`` rows, maps, quarantines, encodes, drops
    the bundle.
 
-Honesty: engine ``records`` stay in RAM until the write returns. This is not
-a source-file stream (file_stream already chunks) and not exactly-once.
+Honesty: when the engine opts into ``release_records``, the dict list is
+cleared after ingest. This is not a source-file stream (file_stream already
+chunks) and not exactly-once.
 Sparse CDC ``DF_MISSING`` survives as the durable wire spelling.
 """
 

@@ -20,10 +20,11 @@ This module is the single algorithm:
 
 Honesty: the mapped image for a warehouse write is still held until the
 write returns (COPY/INSERT/MERGE need the tuples; dest LSN / ON CONFLICT
-apply on the written batch). This is not a source-file stream and not
-exactly-once. CDC default remains at-least-once upsert. Catalog tiles ≠
-transfer-live. Fail/FAIL_JOB still collect every reject in the engine
-batch before the writer refuses the primary write.
+apply on the written batch). Engine ``records`` are spilled before this
+module runs when the adapter passed ``source_spool``. This is not a
+source-file stream and not exactly-once. CDC default remains at-least-once
+upsert. Catalog tiles ≠ transfer-live. Fail/FAIL_JOB still collect every
+reject in the engine batch before the writer refuses the primary write.
 """
 
 from __future__ import annotations
@@ -69,12 +70,20 @@ def resolve_sql_materialize_batch(extra: dict[str, Any] | None = None) -> int:
 def sql_source_from_writer(
     _kwargs: dict[str, Any], extra: dict[str, Any] | None
 ) -> dict[str, Any]:
-    """Records + spill / bundle settings from a writer ``**_kwargs`` / dest_extra."""
+    """Records + spill / bundle settings from a writer ``**_kwargs`` / dest_extra.
+
+    An engine-owned ``source_spool`` wins: writers must not re-ingest
+    ``records`` (that would replay STRUCT explode onto a second file).
+    """
+    source_spool = _kwargs.get("source_spool")
+    if source_spool is not None and not hasattr(source_spool, "iter_bundles"):
+        source_spool = None
     records = _kwargs.get("records")
-    if not isinstance(records, list):
+    if source_spool is not None or not isinstance(records, list):
         records = None
     return {
         "records": records,
+        "source_spool": source_spool,
         "source_spill_max": resolve_source_spill_max(extra),
         "materialize_batch": resolve_sql_materialize_batch(extra),
     }

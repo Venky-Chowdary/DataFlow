@@ -515,6 +515,7 @@ def apply_inferred_soft_deletes(
     *,
     soft_delete_column: str = SOFT_DELETE_COLUMN,
     batch_size: int = 10_000,
+    source_pk_tuples: list[tuple[Any, ...]] | None = None,
 ) -> dict[str, Any]:
     """Soft-delete destination rows that are no longer in ``records``.
 
@@ -547,7 +548,11 @@ def apply_inferred_soft_deletes(
                         break
         pk_sources.append(pk_source)
 
-    tuples = _source_pk_tuples(records, pk_sources)
+    tuples = (
+        list(source_pk_tuples)
+        if source_pk_tuples is not None
+        else _source_pk_tuples(records, pk_sources)
+    )
     if not tuples:
         raise ValueError(
             "mirror sync could not build a non-empty source key set from the primary key"

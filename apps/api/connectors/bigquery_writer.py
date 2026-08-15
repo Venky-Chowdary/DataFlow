@@ -978,6 +978,7 @@ def write_mapped_rows(
             headers=headers,
             data_rows=data_rows,
             records=_sql_src["records"],
+            source_spool=_sql_src.get("source_spool"),
             extra=_sql_extra,
             batch_size=_sql_src["materialize_batch"],
             mappings=mappings,
