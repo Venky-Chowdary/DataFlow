@@ -13,8 +13,6 @@ assumed.
 
 from __future__ import annotations
 
-import pytest
-
 from services.reconcile_coverage import (
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
@@ -46,13 +44,21 @@ def test_writer_ack_provenance_cannot_claim_full_checksum():
     assert report["phase"] == "post_write_writer_ack"
 
 
-@pytest.mark.parametrize(
-    "provenance", [SOURCE_DIGEST_REMAPPED_ROWS, SOURCE_DIGEST_ENGINE_POPULATION]
-)
-def test_independently_read_digests_earn_full_checksum(provenance: str):
-    report = _report(provenance)
-    assert report["assurance_level"] == "full_checksum"
-    assert report["phase"] == "post_write_verified"
+def test_write_pass_fingerprint_is_not_full_checksum():
+    from services.reconcile_coverage import SOURCE_DIGEST_WRITE_PASS
+
+    report = _report(SOURCE_DIGEST_WRITE_PASS)
+    assert report["assurance_level"] == "write_pass_dest_readback"
+    assert report["coverage"] == "write_pass_dest_readback"
+    assert report.get("migration_proven") is False
+    assert report["phase"] == "post_write_write_pass"
+
+
+def test_buffered_remapped_rows_and_engine_population_earn_full_checksum():
+    for provenance in (SOURCE_DIGEST_REMAPPED_ROWS, SOURCE_DIGEST_ENGINE_POPULATION):
+        report = _report(provenance)
+        assert report["assurance_level"] == "full_checksum"
+        assert report["phase"] == "post_write_verified"
 
 
 def test_provenance_beats_the_message_text():

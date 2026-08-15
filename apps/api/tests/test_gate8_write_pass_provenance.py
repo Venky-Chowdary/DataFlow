@@ -38,12 +38,14 @@ def test_inline_write_pass_is_remapped_not_writer_ack(monkeypatch):
         source_schema={"C_CUSTKEY": "DECIMAL(38,0)"},
         validation_mode="strict",
     )
-    assert report["source_checksum_provenance"] == "remapped_source_rows"
+    assert report["source_checksum_provenance"] == "write_pass_fingerprints"
     assert report["source_checksum"] == "abc123independent"
-    assert report.get("assurance_level") in {"full_checksum", "row_count"}
-    assert not str(report.get("message") or "").lower().startswith("row fidelity verified") or (
-        report.get("assurance_level") == "full_checksum"
-    )
+    assert report.get("assurance_level") in {
+        "write_pass_dest_readback",
+        "row_count",
+    }
+    assert report.get("assurance_level") != "full_checksum"
+    assert "row fidelity verified" not in str(report.get("message") or "").lower()
 
 
 def test_writer_ack_message_does_not_claim_row_fidelity(monkeypatch):

@@ -65,6 +65,7 @@ def is_unproven_export(out: dict[str, Any], msg: str) -> bool:
 #: case for exactly the large tables where the claim matters most.
 SOURCE_DIGEST_WRITER_ACK: Final[str] = "writer_ack"
 SOURCE_DIGEST_REMAPPED_ROWS: Final[str] = "remapped_source_rows"
+SOURCE_DIGEST_WRITE_PASS: Final[str] = "write_pass_fingerprints"
 SOURCE_DIGEST_ENGINE_POPULATION: Final[str] = "engine_population"
 
 

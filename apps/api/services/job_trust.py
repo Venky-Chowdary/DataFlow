@@ -57,7 +57,16 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
     assurance = str(recon.get("assurance_level") or recon.get("coverage") or "").strip().lower()
     if assurance == "full_checksum":
         return True
-    if assurance == "row_count":
+    if assurance in {
+        "row_count",
+        "writer_ack",
+        "sample",
+        "write_pass_dest_readback",
+        "none",
+    }:
+        return False
+    provenance = str(recon.get("source_checksum_provenance") or "").strip().lower()
+    if provenance in {"writer_ack", "write_pass_fingerprints"}:
         return False
     phase = str(recon.get("phase") or "").strip().lower()
     if "writer_ack" in phase or "sample" in phase or "skipped" in phase or "row_count" in phase:
@@ -117,6 +126,8 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
         recon_score = 45.0
     elif writer_ack:
         recon_score = 58.0
+    elif assurance == "write_pass_dest_readback" or "write_pass" in phase:
+        recon_score = 82.0
     elif sample:
         recon_score = 68.0
     elif is_append_delta_proof(recon):
@@ -142,6 +153,11 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
         r_note = "Pre-write / pending Gate-8 — not independent post-write proof."
     elif writer_ack:
         r_note = "Writer acknowledgment only — independent read-back not captured."
+    elif assurance == "write_pass_dest_readback" or "write_pass" in phase:
+        r_note = (
+            "Dest read-back matches the write-pass fingerprint — source warehouse "
+            "was not independently re-read. Not migration_proven."
+        )
     elif sample:
         r_note = "Sample-verified Gate-8 — not full independent checksum."
     elif is_append_delta_proof(recon):
@@ -234,13 +250,19 @@ def compute_job_trust(job: dict[str, Any] | None) -> dict[str, Any]:
         outcome = 78.0
         outcome_note = "Completed with quarantine — not full fidelity."
     elif status in {"completed", "success"}:
-        # Terminal success without Gate-8 is not a perfect completeness score.
-        outcome = 100.0 if recon else 82.0
-        outcome_note = (
-            "Terminal success."
-            if recon
-            else "Terminal success — Gate-8 reconcile not on this job yet."
-        )
+        # Terminal success is not a certificate. Completeness tracks Gate-8 depth.
+        if recon and has_full_checksum_proof(recon):
+            outcome = 100.0
+            outcome_note = "Terminal success — Gate-8 independent checksum."
+        elif recon and str(recon.get("assurance_level") or "").lower() == "writer_ack":
+            outcome = 82.0
+            outcome_note = "Terminal success — Gate-8 writer acknowledgment only."
+        elif recon:
+            outcome = 88.0
+            outcome_note = "Terminal success — Gate-8 not independent full_checksum."
+        else:
+            outcome = 82.0
+            outcome_note = "Terminal success — Gate-8 reconcile not on this job yet."
     else:
         outcome = 55.0
         outcome_note = "In progress — score is provisional."

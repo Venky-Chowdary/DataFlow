@@ -221,6 +221,98 @@ def read_table_batch(
             conn.close()
 
 
+def read_table_scan_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table: str,
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 500,
+    known_total_rows: int | None = None,
+    scan_state: dict[str, Any],
+    conn: Any | None = None,
+) -> ReadBatch:
+    """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one login."""
+    from connectors.sql_snapshot_scan import close_table_scan
+
+    del schema
+    if not scan_state.get("started"):
+        table_ref = quote_table_ref(table, dialect="mysql")
+        safe_table = require_safe_identifier(table, preserve_case=True)
+        close_conn = conn is None
+        if conn is None:
+            conn = get_connection(
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                ssl=ssl,
+                purpose="read",
+            )
+        cur = conn.cursor()
+        try:
+            if known_total_rows is not None:
+                total = known_total_rows
+            else:
+                cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+                total = int(cur.fetchone()[0])
+            identity = reflection_cache.dsn_identity(
+                driver="mysql",
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                connection_string=connection_string,
+            )
+            order_by = _order_by_clause(cur, safe_table, columns, identity=identity)
+            types = _column_types(cur, safe_table, identity=identity)
+            col_list = _mysql_select_list(columns, types)
+            if col_list is None:
+                cur.execute(f"SELECT * FROM {table_ref} ORDER BY {order_by}")  # nosec B608
+            else:
+                cur.execute(f"SELECT {col_list} FROM {table_ref} ORDER BY {order_by}")  # nosec B608
+            headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
+        except Exception:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            try:
+                if close_conn:
+                    conn.close()
+            except Exception:
+                pass
+            raise
+        scan_state.update(
+            started=True,
+            conn=conn if close_conn else None,
+            cur=cur,
+            headers=headers,
+            total=total,
+            types=types,
+        )
+    cur = scan_state["cur"]
+    raw = cur.fetchmany(max(1, int(limit)))
+    headers = list(scan_state.get("headers") or [])
+    total = scan_state.get("total")
+    if not raw:
+        close_table_scan(scan_state)
+        return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+    types = list(scan_state.get("types") or [])
+    instant_cols = _instant_set_from_types(types)
+    rows = _wire_rows(raw, headers, instant_cols)
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+
+
 def read_table_cursor_batch(
     *,
     host: str,

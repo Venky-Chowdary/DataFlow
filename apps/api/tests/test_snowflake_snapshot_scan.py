@@ -118,3 +118,72 @@ def test_batch_reader_uses_scan_when_state_provided():
         )
     scan.assert_called_once()
     assert scan.call_args.kwargs["scan_state"] is state
+
+
+def test_mysql_and_postgres_batch_readers_use_scan_when_state_provided():
+    from src.transfer.batch_readers import _read_batch_impl
+
+    for src, module in (
+        ("mysql", "connectors.mysql_reader.read_table_scan_batch"),
+        ("postgresql", "connectors.postgresql_reader.read_table_scan_batch"),
+        ("redshift", "connectors.postgresql_reader.read_table_scan_batch"),
+    ):
+        state: dict = {"marker": src}
+        with patch(
+            module,
+            return_value=MagicMock(headers=["ID"], rows=[["1"]], total_rows=1),
+        ) as scan:
+            _read_batch_impl(
+                src,
+                {
+                    "host": "h",
+                    "port": 3306 if src == "mysql" else 5432,
+                    "database": "DB",
+                    "username": "u",
+                    "password": "p",
+                    "schema": "public",
+                },
+                "T",
+                ["ID"],
+                0,
+                5000,
+                scan_state=state,
+            )
+        scan.assert_called_once()
+        assert scan.call_args.kwargs["scan_state"] is state
+
+
+def test_warehouse_batch_readers_use_scan_when_state_provided():
+    from src.transfer.batch_readers import _read_batch_impl
+
+    for src, module in (
+        ("bigquery", "connectors.bigquery_reader.read_table_scan_batch"),
+        ("generic_sql", "connectors.generic_sql.read_table_scan_batch"),
+        ("sqlserver", "connectors.sqlserver_reader.read_table_scan_batch"),
+        ("oracle", "connectors.oracle_reader.read_table_scan_batch"),
+        ("databricks", "connectors.generic_sql.read_table_scan_batch"),
+    ):
+        state: dict = {"marker": src}
+        with patch(
+            module,
+            return_value=MagicMock(headers=["ID"], rows=[["1"]], total_rows=1),
+        ) as scan:
+            _read_batch_impl(
+                src,
+                {
+                    "host": "h",
+                    "port": 443,
+                    "database": "DB",
+                    "username": "u",
+                    "password": "p",
+                    "schema": "public",
+                    "type": src,
+                },
+                "T",
+                ["ID"],
+                0,
+                5000,
+                scan_state=state,
+            )
+        scan.assert_called_once()
+        assert scan.call_args.kwargs["scan_state"] is state

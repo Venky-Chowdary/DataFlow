@@ -104,7 +104,7 @@ def test_mysql_snapshot_captures_binlog_position():
 
     cdc = MySqlChangeStreamCdc({"host": "localhost", "database": "db"}, table="t", primary_key="id")
     with patch.object(cdc, "_current_binlog_position", return_value={"file": "bin.0001", "pos": 42, "table": "t"}):
-        with patch("connectors.mysql_change_stream.read_table_batch") as read:
+        with patch("connectors.mysql_change_stream.read_table_scan_batch") as read:
             class Batch:
                 headers = ["id"]
                 rows = [["1"]]
@@ -185,6 +185,29 @@ def test_strict_g8_fails_without_verifier_non_dest_only():
     assert report["passed"] is False
     assert report.get("assurance_level") == "none"
     assert "read-back" in report["message"].lower() or "verifier" in report["message"].lower()
+
+
+def test_balanced_g8_warehouse_without_verifier_is_unproven():
+    """Postgres-class dests must not green-pass on writer-ack when COUNT failed."""
+    from src.transfer.models import EndpointConfig
+    from src.transfer.reconcile_step import run_reconciliation
+
+    endpoint = EndpointConfig(kind="database", format="postgresql", database="db", table="t")
+    with patch("src.transfer.reconcile_step.verify_target", return_value=(-1, "")):
+        with patch("src.transfer.reconcile_step.resolve_connector_config", return_value={}):
+            report = run_reconciliation(
+                endpoint=endpoint,
+                records=[],
+                columns=["id"],
+                rows_written=5,
+                writer_checksum="abc",
+                dest_summary=dict(_MEASURED_SOURCE),
+                validation_mode="balanced",
+            )
+    assert report["passed"] is False
+    assert report.get("unproven") is True
+    assert report.get("migration_proven") is False
+    assert "read-back" in report["message"].lower() or "not migration_proven" in report["message"].lower()
 
 
 def test_strict_g8_writer_ack_for_dest_only():

@@ -19,6 +19,7 @@ from connectors.sql_identifiers import (
     quote_sql_identifier,
     require_safe_identifier,
 )
+from connectors.sql_snapshot_scan import close_table_scan
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
@@ -176,25 +177,6 @@ def read_table_batch(
 # One snapshot scan + fetchmany. OFFSET pages are O(n²) on Snowflake and each
 # read_table_batch() used to open a new login — 150k/5k looked like a 3-minute read.
 _SF_SCAN_ARRAYSIZE = 10_000
-
-
-def close_table_scan(scan_state: dict[str, Any] | None) -> None:
-    """Release the snapshot cursor/connection held by ``read_table_scan_batch``."""
-    if not scan_state:
-        return
-    cur = scan_state.pop("cur", None)
-    conn = scan_state.pop("conn", None)
-    scan_state.clear()
-    if cur is not None:
-        try:
-            cur.close()
-        except Exception as exc:
-            logging.getLogger(__name__).debug("Snowflake scan cursor close skipped: %s", exc)
-    if conn is not None:
-        try:
-            conn.close()
-        except Exception as exc:
-            logging.getLogger(__name__).debug("Snowflake scan connection close skipped: %s", exc)
 
 
 def read_table_scan_batch(

@@ -318,18 +318,32 @@ class SqlServerChangeTrackingCdc:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     handoff_version = self._current_version(cur)
-                    while True:
+                    from connectors.sql_snapshot_scan import fetch_scan_page
+
+                    held_scan = offset == 0
+                    if held_scan:
                         cur.execute(
                             f"""
                             SELECT *
                             FROM {qualified}
                             ORDER BY {self._bracket(pk)}
-                            OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
                             """,  # nosec B608
-                            (offset, self.batch_size),
                         )
+                    while True:
+                        if held_scan:
+                            rows = fetch_scan_page(cur, self.batch_size)
+                        else:
+                            cur.execute(
+                                f"""
+                                SELECT *
+                                FROM {qualified}
+                                ORDER BY {self._bracket(pk)}
+                                OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
+                                """,  # nosec B608
+                                (offset, self.batch_size),
+                            )
+                            rows = cur.fetchall() or []
                         cols = [d[0] for d in (cur.description or [])]
-                        rows = cur.fetchall() or []
                         if not rows:
                             break
                         records = [self._row_to_record(cols, row) for row in rows]

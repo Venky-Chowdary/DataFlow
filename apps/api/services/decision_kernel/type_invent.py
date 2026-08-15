@@ -949,7 +949,11 @@ def create_new_mapping_target_type(
     stamp = unicode_safe_target_carrier(
         stamp, dest_db=dest_db_type, source_db=source_db
     )
-    return refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
+    stamp = refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
+    inherited = inherit_measured_string_width(
+        stamp, src_type, dest_db=dest_db_type
+    )
+    return inherited or stamp
 
 
 def refuse_create_new_numeric_collapse(

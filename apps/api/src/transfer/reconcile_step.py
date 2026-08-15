@@ -23,6 +23,7 @@ from services.dest_precount import (
 from services.reconcile_coverage import (
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
+    SOURCE_DIGEST_WRITE_PASS,
     SOURCE_DIGEST_WRITER_ACK,
     WHOLE_TABLE_NOT_COMPARABLE,
     WRITTEN_BATCH_KEYS,
@@ -1306,7 +1307,7 @@ def run_reconciliation(
         # Phase F1 fingerprints are remapped source rows hashed during the write,
         # not the destination writer's ack copied onto both sides.
         source_checksum = str(writer_checksum)
-        source_checksum_provenance = SOURCE_DIGEST_REMAPPED_ROWS
+        source_checksum_provenance = SOURCE_DIGEST_WRITE_PASS
         digest_provenance["source"] = source_checksum_provenance
     else:
         source_checksum, source_checksum_provenance = _compute_source_checksum(
@@ -1720,6 +1721,40 @@ def run_reconciliation(
                 "sample_compare": sample_compare,
             })
         if rows_written_accounted == expected_written:
+            # Warehouse/SQL dests advertise an independent COUNT/digest. A
+            # missing verifier there is a Gate-8 failure, not a green writer-ack.
+            # dest_only / no-read sinks (email, Redis, Kafka) still ack.
+            _warehouse_readback = {
+                "postgresql",
+                "mysql",
+                "snowflake",
+                "bigquery",
+                "sqlserver",
+                "oracle",
+                "sqlite",
+                "generic_sql",
+                "databricks",
+                "mongodb",
+            }
+            dest_key = str(db_type or "").strip().lower()
+            if dest_key in _warehouse_readback and not dest_only:
+                return _finalize({
+                    "passed": False,
+                    "unproven": True,
+                    "message": (
+                        f"Writer acknowledged {rows_written:,} rows but Gate-8 has no "
+                        f"independent destination read-back for '{db_type}'. "
+                        "Not migration_proven."
+                    ),
+                    "source_rows": source_rows,
+                    "target_rows": -1,
+                    "source_checksum": source_checksum,
+                    "target_checksum": "",
+                    "rejected_rows": rejected_rows,
+                    "coerced_null_rows": coerced_null_rows,
+                    "rows_skipped": rows_skipped,
+                    "sample_compare": sample_compare,
+                })
             return _finalize({
                 "passed": True,
                 "message": (

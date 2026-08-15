@@ -281,6 +281,112 @@ def read_table_batch(
             shared.close()
 
 
+def read_table_scan_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table: str,
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 500,
+    known_total_rows: int | None = None,
+    scan_state: dict[str, Any],
+) -> ReadBatch:
+    """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one session."""
+    from psycopg2 import sql
+
+    from connectors.sql_snapshot_scan import close_table_scan
+    from services.source_snapshot import get_source_snapshot_conn
+
+    schema = schema or "public"
+    if not scan_state.get("started"):
+        shared = get_source_snapshot_conn()
+        close_conn = shared is None
+        if shared is None:
+            shared = get_connection(
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                ssl=ssl,
+            )
+        cur = shared.cursor()
+        try:
+            if known_total_rows is not None:
+                total = known_total_rows
+            else:
+                cur.execute(
+                    sql.SQL("SELECT COUNT(*) FROM {}.{}").format(
+                        sql.Identifier(schema),
+                        sql.Identifier(table),
+                    )
+                )
+                total = int(cur.fetchone()[0])
+            identity = reflection_cache.dsn_identity(
+                driver="postgresql",
+                host=host,
+                port=port,
+                database=database,
+                username=username,
+                connection_string=connection_string,
+            )
+            order_by = _order_by_clause(
+                cur, schema, table, columns, identity=identity
+            )
+            order_sql = sql.SQL(order_by)
+            col_sql = _select_list(cur, schema, table, columns, identity)
+            if col_sql is None:
+                query = sql.SQL("SELECT * FROM {}.{} ORDER BY {}").format(
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                    order_sql,
+                )
+            else:
+                query = sql.SQL("SELECT {} FROM {}.{} ORDER BY {}").format(
+                    col_sql,
+                    sql.Identifier(schema),
+                    sql.Identifier(table),
+                    order_sql,
+                )
+            cur.execute(query)
+            headers = [desc[0] for desc in cur.description] if cur.description else (columns or [])
+        except Exception:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            if close_conn:
+                try:
+                    shared.close()
+                except Exception:
+                    pass
+            raise
+        scan_state.update(
+            started=True,
+            conn=shared if close_conn else None,
+            cur=cur,
+            headers=headers,
+            total=total,
+        )
+    cur = scan_state["cur"]
+    raw = cur.fetchmany(max(1, int(limit)))
+    headers = list(scan_state.get("headers") or [])
+    total = scan_state.get("total")
+    if not raw:
+        close_table_scan(scan_state)
+        return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+    rows = [[_cell(v) for v in row] for row in raw]
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+
+
 def read_table_sample(
     *,
     host: str,

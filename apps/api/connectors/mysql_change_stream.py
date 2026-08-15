@@ -27,7 +27,7 @@ from services.cdc_schema_history import (
 )
 
 from connectors.mysql_conn import get_connection
-from connectors.mysql_reader import read_table_batch
+from connectors.mysql_reader import read_table_batch, read_table_scan_batch
 from connectors.sql_identifiers import quote_table_ref
 from services.cdc_cursor_gap import CdcBinlogGapError
 
@@ -371,8 +371,9 @@ class MySqlChangeStreamCdc:
         try:
             for table in tables_to_snapshot:
                 table_offset = offset if table == resume_table else 0
+                scan_state: dict = {}
                 while True:
-                    batch = read_table_batch(
+                    _read_kw = dict(
                         host=self.cfg.get("host") or "localhost",
                         port=self.cfg.get("port") or 3306,
                         database=self.database,
@@ -387,6 +388,12 @@ class MySqlChangeStreamCdc:
                         limit=self.batch_size,
                         conn=lock_conn if locked else None,
                     )
+                    if table_offset == 0 or scan_state.get("started"):
+                        batch = read_table_scan_batch(
+                            **_read_kw, scan_state=scan_state
+                        )
+                    else:
+                        batch = read_table_batch(**_read_kw)
                     if not batch.rows:
                         break
                     records = [dict(zip(batch.headers, row)) for row in batch.rows]

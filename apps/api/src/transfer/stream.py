@@ -1261,17 +1261,21 @@ def _stream_database_transfer_impl(
         return default
 
     _probe_started = time.perf_counter()
-    # Snowflake snapshot without a keyset must not OFFSET-page (O(n²) + new login
-    # per chunk). One SELECT + fetchmany, started on this first write page.
-    sf_src_scan: dict[str, Any] = {}
-    _sf_scan_kw: dict[str, Any] = (
-        {"scan_state": sf_src_scan} if src_type == "snowflake" and not incremental else {}
+    # Warehouse/SQL snapshot without a keyset must not OFFSET-page (O(n²) +
+    # new login per chunk). One SELECT + fetchmany, started on this first page.
+    from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES as _SNAPSHOT_SCAN_SOURCES
+
+    src_scan: dict[str, Any] = {}
+    _scan_kw: dict[str, Any] = (
+        {"scan_state": src_scan}
+        if src_type in _SNAPSHOT_SCAN_SOURCES and not incremental
+        else {}
     )
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
             **_cursor_read_args(watermark),
-            **_sf_scan_kw,
+            **_scan_kw,
         )
     )
     # This page is not thrown away — it becomes the first written batch.
@@ -1498,9 +1502,14 @@ def _stream_database_transfer_impl(
     # Bookmark the full primary key (including composite) so page boundaries
     # cannot skip tied leading-key values. Without a PK, fall back to OFFSET —
     # quadratic and slow, but it cannot skip rows.
-    from services.keyset_pagination import KEYSET_CAPABLE_SOURCES, max_keyset_bookmark
+    from services.keyset_pagination import (
+        KEYSET_CAPABLE_SOURCES,
+        max_keyset_bookmark,
+        safe_keyset_unique_columns,
+    )
 
     keyset_pk_cols = [c for c in pk_source_cols if c and c in columns]
+    pagination_warning = ""
     _pk_introspect_types = (
         "postgresql",
         "redshift",
@@ -1510,6 +1519,8 @@ def _stream_database_transfer_impl(
         "oracle",
         "sqlite",
         "generic_sql",
+        "bigquery",
+        "databricks",
     )
     # Property 6 — source catalog for create-new fidelity (any SQL sink that
     # consumes it). Always introspect SQL sources: a contract PK is not a
@@ -1528,14 +1539,17 @@ def _stream_database_transfer_impl(
                     c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
                 ]
             if not keyset_pk_cols:
-                for uk in _src_keys.get("unique_keys") or []:
-                    uk_cols = list(
-                        (uk.get("columns") if isinstance(uk, dict) else uk) or []
+                keyset_pk_cols = safe_keyset_unique_columns(
+                    _src_keys.get("unique_keys") or [],
+                    columns,
+                    _src_schema_nulls,
+                )
+                if not keyset_pk_cols and (_src_keys.get("unique_keys") or []):
+                    pagination_warning = (
+                        "Unique key is nullable, advisory, or expression-based — "
+                        "snapshot scan (one SELECT + fetchmany), not keyset. "
+                        "Nullable UK seek skips NULL rows."
                     )
-                    uk_cols = [c for c in uk_cols if c in columns]
-                    if uk_cols:
-                        keyset_pk_cols = uk_cols
-                        break
         except Exception as exc:
             logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
     if _src_keys or _src_schema_nulls or _src_schema_types:
@@ -1589,12 +1603,12 @@ def _stream_database_transfer_impl(
             chunk_idx,
         )
         use_keyset = False
-    pagination_mode = "keyset" if use_keyset else ("scan" if sf_src_scan else "offset")
-    if use_keyset and sf_src_scan.get("started"):
+    pagination_mode = "keyset" if use_keyset else ("scan" if src_scan else "offset")
+    if use_keyset and src_scan.get("started"):
         # First page already landed from the snapshot scan; later pages seek.
-        from connectors.snowflake_reader import close_table_scan
+        from connectors.sql_snapshot_scan import close_table_scan
 
-        close_table_scan(sf_src_scan)
+        close_table_scan(src_scan)
     # Phase F3 — PostgreSQL COPY TO STDOUT bulk export (full refresh, no filter).
     bulk_export_iter = None
     try:
@@ -1662,14 +1676,16 @@ def _stream_database_transfer_impl(
         logger.info(
             "Keyset pagination disabled for %s.%s — no unique bookmark (declare a "
             "primary_key on the stream contract to re-enable seek reads). Falling "
-            "back to OFFSET pagination.",
+            "back to %s.",
             src_type,
             table,
+            "snapshot scan" if src_scan else "OFFSET pagination",
         )
     elif not use_keyset:
         logger.info(
-            "OFFSET pagination for %s.%s — no keyset-capable unique bookmark "
-            "(quadratic cost on large tables).",
+            "%s pagination for %s.%s — no keyset-capable unique bookmark "
+            "(quadratic cost on large tables when OFFSET).",
+            "Snapshot-scan" if src_scan else "OFFSET",
             src_type,
             table,
         )
@@ -1903,8 +1919,8 @@ def _stream_database_transfer_impl(
                     database=src_db,
                     known_total_rows=total_rows,
                     **(
-                        {"scan_state": sf_src_scan}
-                        if src_type == "snowflake" and sf_src_scan
+                        {"scan_state": src_scan}
+                        if src_type in _SNAPSHOT_SCAN_SOURCES and src_scan
                         else {}
                     ),
                 )
@@ -2454,14 +2470,14 @@ def _stream_database_transfer_impl(
                 dispatcher.abort()
                 raise
     finally:
-        if sf_src_scan:
+        if src_scan:
             try:
-                from connectors.snowflake_reader import close_table_scan
+                from connectors.sql_snapshot_scan import close_table_scan
 
-                close_table_scan(sf_src_scan)
+                close_table_scan(src_scan)
             except Exception as exc:
                 logging.getLogger(__name__).debug(
-                    "Snowflake source scan close skipped: %s", exc, exc_info=exc
+                    "Source snapshot scan close skipped: %s", exc, exc_info=exc
                 )
         for state in (sf_conn_state, pg_conn_state):
             conn = state.get("conn")
@@ -2550,6 +2566,7 @@ def _stream_database_transfer_impl(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=write_pass_fp.total
         )
         dest_summary["checksum_mode"] = "inline_write_pass"
+        dest_summary["source_independently_reread"] = False
         dest_summary["checksum_note"] = (
             "Source fingerprints accumulated during the write pass (Phase F1) — "
             "no second source scan. Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 for "
@@ -2629,14 +2646,18 @@ def _stream_database_transfer_impl(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
         )
         dest_summary["checksum_mode"] = "source_reread"
+        dest_summary["source_independently_reread"] = True
     else:
         final_checksum = write_pass_fp.digest() if write_pass_fp.total else last_checksum
         dest_summary["checksum_mode"] = "inline_write_pass" if write_pass_fp.total else "writer_last_batch"
+        dest_summary["source_independently_reread"] = False
 
     dest_summary["checksum"] = final_checksum or last_checksum
     # Phase F2 — operator-visible pagination honesty (OFFSET cliff vs keyset).
     dest_summary["pagination_mode"] = pagination_mode
-    if pagination_mode == "offset":
+    if pagination_warning:
+        dest_summary["pagination_warning"] = pagination_warning
+    elif pagination_mode == "offset":
         dest_summary["pagination_warning"] = (
             "OFFSET pagination — quadratic cost and full scans on some warehouses; "
             "declare a primary key to enable keyset seek reads."

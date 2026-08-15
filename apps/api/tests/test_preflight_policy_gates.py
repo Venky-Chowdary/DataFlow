@@ -9,6 +9,51 @@ from src.services.preflight_service import (
 )
 
 
+def test_readiness_caps_when_g9_uniqueness_is_sample_only():
+    from services.preflight_service import apply_readiness_honesty_caps
+
+    capped = apply_readiness_honesty_caps({
+        "passed": True,
+        "passed_count": 14,
+        "total_gates": 14,
+        "readiness_score": 100.0,
+        "gates": [
+            {"id": "g1_source", "status": "pass", "message": "ok", "details": {}},
+            {
+                "id": "g9_data_integrity",
+                "status": "pass",
+                "message": "Integrity checks passed (Validate sample only — population uniqueness not proven)",
+                "details": {"coverage": "sample"},
+            },
+        ],
+    })
+    assert capped["readiness_score"] == 92.0
+    assert capped["population_uniqueness_proven"] is False
+    assert capped["readiness_cap_reason"] == "g9_sample_uniqueness"
+
+
+def test_readiness_caps_when_g5_dry_run_is_sample_only():
+    from services.preflight_service import apply_readiness_honesty_caps
+
+    capped = apply_readiness_honesty_caps({
+        "passed": True,
+        "passed_count": 14,
+        "total_gates": 14,
+        "readiness_score": 100.0,
+        "gates": [
+            {
+                "id": "g5_dry_run",
+                "status": "pass",
+                "message": "Dry-run passed on 1000 sample rows",
+                "details": {"sample_cap": 1000, "coverage": "sample"},
+            },
+            {"id": "g9_data_integrity", "status": "pass", "message": "ok", "details": {}},
+        ],
+    })
+    assert capped["readiness_score"] == 92.0
+    assert "g5_sample_dry_run" in capped["readiness_cap_reason"]
+
+
 def test_cdc_policy_blocks_without_cursor_and_primary_key():
     gates = run_transfer_policy_gates(
         sync_mode="cdc",

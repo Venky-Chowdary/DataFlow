@@ -226,6 +226,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       assurance === "sample"
       || phase.includes("sample_verified")
       || /sample-verified|sample verified/i.test(msg);
+    const writePass =
+      assurance === "write_pass_dest_readback"
+      || phase.includes("write_pass");
     const appendDelta = isAppendDeltaProof(recon);
     const fullChecksum =
       assurance === "full_checksum"
@@ -236,6 +239,7 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
         && String(recon.source_checksum) === String(recon.target_checksum)
         && !writerAck
         && !sample
+        && !writePass
         && !unproven
         && !appendDelta
       );
@@ -255,6 +259,8 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       reconScore = 45;
     } else if (writerAck) {
       reconScore = 58;
+    } else if (writePass) {
+      reconScore = 82;
     } else if (sample) {
       reconScore = 68;
     } else if (appendDelta) {
@@ -277,6 +283,8 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       rNote = "Pre-write / pending Gate-8 — not independent post-write proof.";
     } else if (writerAck) {
       rNote = "Writer acknowledgment only — independent read-back not captured.";
+    } else if (writePass) {
+      rNote = "Dest read-back matches the write-pass fingerprint — source warehouse was not independently re-read. Not migration_proven.";
     } else if (sample) {
       rNote = "Sample-verified Gate-8 — not full independent checksum.";
     } else if (appendDelta) {

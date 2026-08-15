@@ -118,6 +118,13 @@ async function verifyProofFile(
   return verifySignedProofPack(pack);
 }
 
+/** Dest was re-read; source digest is the in-process write-pass — not migration_proven. */
+export function isGate8WritePassDestReadback(report: Gate8Reconciliation): boolean {
+  const assurance = String(report.assurance_level || report.coverage || "").toLowerCase();
+  const phase = String(report.phase || "").toLowerCase();
+  return assurance === "write_pass_dest_readback" || phase.includes("write_pass");
+}
+
 /** True when evidence is writer-ack only — not independent source/target Verified. */
 export function isGate8WriterAckOnly(report: Gate8Reconciliation): boolean {
   const phase = String(report.phase || "").toLowerCase();
@@ -294,6 +301,9 @@ export function classifyGate8Status(
   }
   if (isGate8WriterAckOnly(report)) {
     return { label: "Writer ack", tone: "warn", fullPass: false };
+  }
+  if (isGate8WritePassDestReadback(report)) {
+    return { label: "Write-pass + dest read-back", tone: "warn", fullPass: false };
   }
   // A positional / unproven-identity compare is not keyed fidelity proof —
   // labelling it "Passed" is the false-proof the engine explicitly refuses.

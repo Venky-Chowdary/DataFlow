@@ -2986,6 +2986,165 @@ def read_table_batch(
         release_engine(engine)
 
 
+def read_table_scan_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table: str,
+    type: str = "",
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 100_000,
+    known_total_rows: int | None = None,
+    scan_state: dict[str, Any],
+) -> ReadBatch:
+    """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one login.
+
+    Covers SQL Server, Oracle, Databricks, and other SQLAlchemy dialects that
+    previously opened a new connection and OFFSET-paged every chunk.
+    """
+    from connectors.sql_snapshot_scan import close_table_scan
+
+    if not SQLALCHEMY_AVAILABLE:
+        raise RuntimeError("SQLAlchemy is not installed")
+
+    if not scan_state.get("started"):
+        cfg = _cfg_from_params(
+            host,
+            port,
+            database,
+            username,
+            password,
+            schema,
+            connection_string,
+            ssl,
+            type=type,
+        )
+        engine = _engine(cfg)
+        schema_name = _schema_name(cfg)
+        dialect = _dialect_key(cfg)
+        conn = engine.connect()
+        try:
+            if (cfg.get("type") or "").lower() == "risingwave":
+                with contextlib.suppress(Exception):
+                    conn.execute(sa.text("FLUSH"))
+            try:
+                table_obj = _reflect_table(engine, table, schema_name, columns)
+                selected_cols = list(table_obj.c)
+                if columns:
+                    selected_cols = [
+                        table_obj.c[c] for c in columns if c in table_obj.c
+                    ]
+                pk_cols = (
+                    [c for c in table_obj.primary_key.columns]
+                    if table_obj.primary_key is not None
+                    else []
+                )
+                order_cols = (
+                    list(pk_cols)
+                    if pk_cols
+                    else [selected_cols[0]]
+                    if selected_cols
+                    else []
+                )
+                stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
+                if order_cols:
+                    stmt = stmt.order_by(*order_cols)
+                result = conn.execution_options(stream_results=True).execute(stmt)
+                headers = [c.name for c in selected_cols]
+                serialize = True
+            except Exception:
+                headers, result = _open_raw_table_scan(
+                    conn, table, schema_name, dialect=dialect
+                )
+                selected_cols = []
+                serialize = False
+            if known_total_rows is not None:
+                total = known_total_rows
+            else:
+                total = _count_table_raw(
+                    conn, table, schema_name, dialect=dialect
+                )
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            release_engine(engine)
+            raise
+        scan_state.update(
+            started=True,
+            engine=engine,
+            conn=conn,
+            result=result,
+            headers=headers,
+            total=total,
+            selected_cols=selected_cols,
+            dialect=dialect,
+            serialize=serialize,
+        )
+
+    result = scan_state.get("result")
+    headers = list(scan_state.get("headers") or [])
+    total = scan_state.get("total")
+    raw = result.fetchmany(max(1, int(limit))) if result is not None else []
+    if not raw:
+        close_table_scan(scan_state)
+        return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+    if scan_state.get("serialize"):
+        selected_cols = list(scan_state.get("selected_cols") or [])
+        dialect = str(scan_state.get("dialect") or "ansi")
+        rows = [_serialize_source_row(row, selected_cols, dialect) for row in raw]
+    else:
+        rows = [
+            [cell_to_string(value, preserve_sql_null=True) for value in row]
+            for row in raw
+        ]
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+
+
+def _open_raw_table_scan(
+    conn: Any,
+    table: str,
+    schema: str | None,
+    *,
+    dialect: str = "ansi",
+) -> tuple[list[str], Any]:
+    """Open one OFFSET-free SELECT for engines with thin reflection."""
+    from connectors.sql_identifiers import quote_table_ref
+    from services.dialect_profiles import (
+        denormalize_result_key,
+        quote_char_for,
+        zero_row_probe_sql,
+    )
+
+    qualified = quote_table_ref(table, schema, dialect=dialect)
+    base = f"SELECT * FROM {qualified}"  # nosec B608
+    probe = conn.execute(sa.text(zero_row_probe_sql(dialect, qualified)))
+    headers = list(probe.keys())
+    if not headers:
+        return [], None
+    q = quote_char_for(dialect) or '"'
+    order_header = _orderable_header(dialect, headers, probe)
+    if order_header is None:
+        order_col = "ROWID"
+    else:
+        order_name = denormalize_result_key(dialect, str(order_header))
+        if q == "[":
+            order_col = f"[{order_name.replace(']', ']]')}]"
+        else:
+            order_col = quote_sql_identifier(order_name, q)
+    sql = f"{base} ORDER BY {order_col}"  # nosec B608
+    result = conn.execute(sa.text(sql))
+    return list(result.keys()), result
+
+
 def read_table_cursor_batch(
     *,
     host: str,

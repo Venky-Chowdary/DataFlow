@@ -233,5 +233,41 @@ KEYSET_CAPABLE_SOURCES = frozenset(
         # Salesforce SOQL caps OFFSET at 2000 rows — Id seek is the only way to
         # page a large SObject, so keyset is mandatory rather than an optimization.
         "salesforce",
+        # Databricks reads go through generic_sql; a declared PK must seek.
+        "databricks",
     }
 )
+
+
+def safe_keyset_unique_columns(
+    unique_keys: list[Any] | None,
+    columns: list[str],
+    nullable: dict[str, bool] | None = None,
+) -> list[str]:
+    """Unique-key columns that are safe to seek — never a nullable/advisory UK.
+
+    Keyset on a nullable unique index skips NULL/tied rows (silent loss).
+    Advisory / NOT ENFORCED keys and expression indexes cannot bookmark.
+    Unknown nullability defaults to nullable (fail closed).
+    """
+    colset = {c for c in (columns or []) if c}
+    nulls = nullable or {}
+    for uk in unique_keys or []:
+        if isinstance(uk, dict):
+            if uk.get("enforced") is False:
+                continue
+            if uk.get("primary"):
+                continue
+            if uk.get("expression") or uk.get("expression_columns"):
+                continue
+            uk_cols = [c for c in (uk.get("columns") or []) if c in colset]
+        elif isinstance(uk, (list, tuple)):
+            uk_cols = [c for c in uk if c in colset]
+        else:
+            continue
+        if not uk_cols:
+            continue
+        if any(bool(nulls.get(c, True)) for c in uk_cols):
+            continue
+        return uk_cols
+    return []

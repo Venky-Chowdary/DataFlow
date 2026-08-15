@@ -808,18 +808,32 @@ class SqlServerNativeCdc:
                 self._resolve_capture_instance(cur)
                 handoff = self._max_lsn(cur) or self._min_lsn(cur)
                 self._maybe_record_capture_schema(cur, offset=handoff)
-                while True:
+                from connectors.sql_snapshot_scan import fetch_scan_page
+
+                held_scan = offset == 0
+                if held_scan:
                     cur.execute(
                         f"""
                         SELECT *
                         FROM {qualified}
                         ORDER BY {pk}
-                        OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
                         """,  # nosec B608
-                        (offset, self.batch_size),
                     )
+                while True:
+                    if held_scan:
+                        rows = fetch_scan_page(cur, self.batch_size)
+                    else:
+                        cur.execute(
+                            f"""
+                            SELECT *
+                            FROM {qualified}
+                            ORDER BY {pk}
+                            OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
+                            """,  # nosec B608
+                            (offset, self.batch_size),
+                        )
+                        rows = cur.fetchall() or []
                     cols = [d[0] for d in (cur.description or [])]
-                    rows = cur.fetchall() or []
                     if not rows:
                         break
                     records = [
@@ -876,18 +890,18 @@ class SqlServerNativeCdc:
                     )
                     qualified = _qualified_ref(self.schema, table_name)
                     offset = 0
+                    from connectors.sql_snapshot_scan import fetch_scan_page
+
+                    cur.execute(
+                        f"""
+                        SELECT *
+                        FROM {qualified}
+                        ORDER BY {pk}
+                        """,  # nosec B608
+                    )
                     while True:
-                        cur.execute(
-                            f"""
-                            SELECT *
-                            FROM {qualified}
-                            ORDER BY {pk}
-                            OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
-                            """,  # nosec B608
-                            (offset, self.batch_size),
-                        )
+                        rows = fetch_scan_page(cur, self.batch_size)
                         cols = [d[0] for d in (cur.description or [])]
-                        rows = cur.fetchall() or []
                         if not rows:
                             break
                         records = [

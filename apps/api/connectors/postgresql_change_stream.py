@@ -1050,15 +1050,17 @@ class PostgreSqlChangeStreamCdc:
                             preserve_case=True,
                         )
                         col_sql = quote_column_list(self.columns, quote_char='"')
+                        from connectors.sql_snapshot_scan import fetch_scan_page
+
                         query = (
                             f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                            f"ORDER BY {order_by} LIMIT %s OFFSET %s"
+                            f"ORDER BY {order_by}"
                         )
                         offset = 0
                         headers: list[str] = list(self.columns or [])
+                        cur.execute(query)
                         while True:
-                            cur.execute(query, (self.batch_size, offset))
-                            fetched = cur.fetchall()
+                            fetched = fetch_scan_page(cur, self.batch_size)
                             if not fetched:
                                 break
                             if cur.description:

@@ -35,7 +35,7 @@ def test_mysql_snapshot_batches_carry_binlog_resume_token() -> None:
         patch.object(cdc, "_current_binlog_position", return_value={"file": "mysql-bin.000001", "pos": 4}),
         patch.object(cdc, "_ensure_decode_schema"),
         patch(
-            "connectors.mysql_change_stream.read_table_batch",
+            "connectors.mysql_change_stream.read_table_scan_batch",
             side_effect=[batch1, batch2, empty],
         ),
     ):
@@ -115,7 +115,7 @@ def test_mysql_locked_snapshot_handoff_stamps_gtid() -> None:
             return_value=_Conn(),
         ),
         patch(
-            "connectors.mysql_change_stream.read_table_batch",
+            "connectors.mysql_change_stream.read_table_scan_batch",
             side_effect=[batch, empty],
         ),
     ):

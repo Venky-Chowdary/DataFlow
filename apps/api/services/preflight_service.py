@@ -411,6 +411,49 @@ VALIDATION_CONFIDENCE_THRESHOLDS = {
 }
 
 
+def apply_readiness_honesty_caps(out: dict[str, Any]) -> dict[str, Any]:
+    """Cap Validate readiness when G9 uniqueness is sample-only.
+
+    Gate pass-ratio can be 100% while population uniqueness is unproven.
+    Fivetran/Airbyte do not call that certified-ready. Execute may still
+    proceed; the score must not look like a migration certificate.
+    """
+    payload = out if isinstance(out, dict) else {}
+    reasons: list[str] = []
+    for gate in payload.get("gates") or []:
+        if not isinstance(gate, dict):
+            continue
+        gid = str(gate.get("id") or "").lower()
+        details = gate.get("details") if isinstance(gate.get("details"), dict) else {}
+        coverage = str(details.get("coverage") or "").lower()
+        msg = str(gate.get("message") or "").lower()
+        if "g9" in gid or "data_integrity" in gid:
+            if (
+                coverage == "sample"
+                or "population uniqueness not proven" in msg
+                or "validate sample only" in msg
+            ):
+                reasons.append("g9_sample_uniqueness")
+        if "g5" in gid or "dry_run" in gid:
+            if (
+                coverage == "sample"
+                or details.get("sample_cap") is not None
+                or "sample" in msg
+                or gid == "g5_dry_run"
+            ):
+                reasons.append("g5_sample_dry_run")
+    if reasons:
+        try:
+            score = float(payload.get("readiness_score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        payload["readiness_score"] = min(score, 92.0)
+        if "g9_sample_uniqueness" in reasons:
+            payload["population_uniqueness_proven"] = False
+        payload["readiness_cap_reason"] = "+".join(dict.fromkeys(reasons))
+    return payload
+
+
 def confidence_threshold_for_mode(validation_mode: str | None) -> float:
     try:
         from services.validation_mode_contract import confidence_floor_for_mode
@@ -2112,7 +2155,7 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
-    return apply_root_causes_to_preflight(out)
+    return apply_root_causes_to_preflight(apply_readiness_honesty_caps(out))
 
 
 def probe_destination(endpoint) -> tuple[bool, str]:

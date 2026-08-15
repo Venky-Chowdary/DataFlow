@@ -118,6 +118,52 @@ def test_file_export_unproven_caps_trust() -> None:
     assert "unproven" in factor["note"].lower()
 
 
+def test_writer_ack_completeness_is_not_100() -> None:
+    trust = compute_job_trust({
+        "status": "completed",
+        "records_processed": 150_000,
+        "rejected_rows": 0,
+        "reconciliation": {
+            "passed": True,
+            "assurance_level": "writer_ack",
+            "phase": "post_write_writer_ack",
+            "source_checksum": "abc",
+        },
+    })
+    completeness = next(f for f in trust["factors"] if f["id"] == "completeness")
+    assert completeness["score"] <= 82
+    assert "writer" in completeness["note"].lower()
+
+
+def test_write_pass_dest_readback_is_not_full_checksum_grade_a() -> None:
+    trust = compute_job_trust({
+        "status": "completed",
+        "records_processed": 150_000,
+        "rejected_rows": 0,
+        "reconciliation": {
+            "passed": True,
+            "assurance_level": "write_pass_dest_readback",
+            "coverage": "write_pass_dest_readback",
+            "phase": "post_write_write_pass",
+            "source_checksum": "aaa",
+            "target_checksum": "aaa",
+            "source_checksum_provenance": "write_pass_fingerprints",
+            "migration_proven": False,
+        },
+    })
+    assert trust["grade"] != "A"
+    assert not has_full_checksum_proof({
+        "passed": True,
+        "assurance_level": "write_pass_dest_readback",
+        "source_checksum": "aaa",
+        "target_checksum": "aaa",
+        "source_checksum_provenance": "remapped_source_rows",
+    })
+    factor = next(f for f in trust["factors"] if f["id"] == "reconcile")
+    assert factor["score"] <= 82
+    assert "not independently" in factor["note"].lower() or "write-pass" in factor["note"].lower()
+
+
 def test_has_full_checksum_proof() -> None:
     assert has_full_checksum_proof({
         "passed": True,
@@ -129,6 +175,13 @@ def test_has_full_checksum_proof() -> None:
         "passed": True,
         "assurance_level": "writer_ack",
         "source_checksum": "x",
+    })
+    assert not has_full_checksum_proof({
+        "passed": True,
+        "assurance_level": "write_pass_dest_readback",
+        "source_checksum": "x",
+        "target_checksum": "x",
+        "source_checksum_provenance": "write_pass_fingerprints",
     })
     assert not has_full_checksum_proof({"passed": True})
     append = {

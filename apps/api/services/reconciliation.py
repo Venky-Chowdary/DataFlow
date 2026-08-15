@@ -30,6 +30,7 @@ from services.decision_kernel.findings import (
 from services.readback_projection import project_readback
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
+    SOURCE_DIGEST_WRITE_PASS,
     WRITTEN_BATCH_KEYS,
     append_row_count_report,
     extra_rows_note,
@@ -196,6 +197,26 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         vetoed = apply_fidelity_veto(out)
         if vetoed.get("coverage") == "coerced" or vetoed.get("phase") == "post_write_failed":
             return vetoed
+        provenance = str(out.get("source_checksum_provenance") or "")
+        # Write-pass fingerprints hash remapped cells in-process. Dest may be
+        # independently SELECT'd, but the source warehouse was not re-read —
+        # Fivetran/HVR Compare would not call that full_checksum / migration_proven.
+        if provenance == SOURCE_DIGEST_WRITE_PASS:
+            rows = out.get("target_rows") or out.get("source_rows") or 0
+            out["phase"] = "post_write_write_pass"
+            out["post_write_pending"] = False
+            out["preview"] = False
+            out["coverage"] = "write_pass_dest_readback"
+            out["assurance_level"] = "write_pass_dest_readback"
+            out["migration_proven"] = False
+            out["population_proof"] = False
+            if str(out.get("message") or "").lower().startswith("row fidelity verified"):
+                out["message"] = (
+                    f"Destination read-back matches the write-pass fingerprint "
+                    f"({rows} rows). Source warehouse was not independently "
+                    "re-read — not migration_proven."
+                )
+            return out
         out["phase"] = "post_write_verified"
         out["post_write_pending"] = False
         out["preview"] = False

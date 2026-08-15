@@ -104,6 +104,22 @@ describe("Gate-8 pre-write simulation honesty", () => {
     );
   });
 
+  it("classifyGate8Status never labels write-pass dest read-back as Passed", () => {
+    const view = classifyGate8Status({
+      passed: true,
+      phase: "post_write_write_pass",
+      assurance_level: "write_pass_dest_readback",
+      coverage: "write_pass_dest_readback",
+      source_checksum: "aaa",
+      target_checksum: "aaa",
+      migration_proven: false,
+      message: "Destination read-back matches the write-pass fingerprint (150000 rows).",
+    });
+    assert.equal(view.fullPass, false);
+    assert.equal(view.tone, "warn");
+    assert.match(view.label, /write-pass/i);
+  });
+
   it("classifyGate8Status never labels writer-ack as Passed", () => {
     const view = classifyGate8Status({
       passed: true,

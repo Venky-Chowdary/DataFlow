@@ -87,6 +87,35 @@ def test_mapping_pipeline_refuses_frontend_sample_bigint_stamp():
     assert by_src["C_ACCTBAL"]["target_type"].upper().replace(" ", "") == "NUMERIC(12,2)"
 
 
+# Same TPC-H numeric cliffs on other dest engines — one algorithm, one matrix.
+CREATE_NEW_NUMERIC_MATRIX = (
+    ("DECIMAL(38,0)", "mysql", "DECIMAL(38,0)"),
+    ("DECIMAL(12,2)", "mysql", "DECIMAL(12,2)"),
+    ("VARCHAR(25)", "mysql", "VARCHAR(25)"),
+    ("DECIMAL(38,0)", "snowflake", "NUMBER(38,0)"),
+    ("DECIMAL(12,2)", "snowflake", "NUMBER(12,2)"),
+    ("VARCHAR(25)", "snowflake", "VARCHAR(25)"),
+    ("DECIMAL(38,0)", "bigquery", "BIGNUMERIC(38,0)"),
+    ("DECIMAL(12,2)", "bigquery", "BIGNUMERIC(12,2)"),
+)
+
+
+def test_create_new_numeric_matrix_preserves_declared_typmod():
+    failed: list[str] = []
+    for src, dest, expected in CREATE_NEW_NUMERIC_MATRIX:
+        stamped = create_new_mapping_target_type(
+            src, dest, samples=["1", "150000", "9999.99"], source_db="snowflake"
+        )
+        collapse = is_precision_collapse_coercion(
+            src, stamped, dest_db=dest, dest_table_exists=False
+        )
+        got = stamped.upper().replace(" ", "")
+        want = expected.upper().replace(" ", "")
+        if got != want or collapse:
+            failed.append(f"{src}→{dest} got {stamped} want {expected} collapse={collapse}")
+    assert failed == [], f"{len(failed)}/{len(CREATE_NEW_NUMERIC_MATRIX)} failed: {failed}"
+
+
 def test_writer_create_new_refuses_sample_bigint_stamp():
     from connectors.writer_common import resolve_target_columns
 
