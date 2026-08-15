@@ -148,9 +148,9 @@
   --df-radius-md: 8px;
   --df-radius-lg: 10px;
   --df-radius-xl: 14px;
-  --df-radius-card: 10px;
-  --df-radius-panel: 12px;
-  --df-radius-tile: 10px;
+  --df-radius-card: 8px;
+  --df-radius-panel: 8px;
+  --df-radius-tile: 8px;
 
   /* Buttons + form controls share one height so toolbars never look ragged */
   --df-btn-height: 36px;

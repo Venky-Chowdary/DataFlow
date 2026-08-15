@@ -33,7 +33,7 @@
   --lp-measure: 40rem;
   --lp-shadow-editorial: 0 1px 0 rgba(15, 23, 42, 0.04), 0 24px 64px rgba(10, 61, 58, 0.08);
   --lp-shadow-soft: 0 1px 0 rgba(15, 23, 42, 0.04);
-  --lp-radius-card: 16px;
+  --lp-radius-card: 8px;
   background:
     radial-gradient(ellipse 90% 55% at 50% -10%, rgba(13, 148, 136, 0.07), transparent 55%),
     linear-gradient(180deg, #fbfcfd 0%, var(--lp-bg) 38%, #eef2f5 100%);
@@ -8601,4 +8601,193 @@
   .lp-footer--compact .lp-footer-grid {
     grid-template-columns: 1fr 1fr !important;
   }
+}
+
+/* ── Fluent surfaces — one shell, one card, no decorative drift ──
+   Microsoft/Google density: 8px radius, hairline border, no lift,
+   no per-tile gradients. Every marketing section uses --lp-shell. */
+
+.lp-sales-compare-inner,
+.lp-sales-compare > .lp-mkt-wrap,
+.lp-sales-faq > .lp-mkt-wrap {
+  width: var(--lp-shell) !important;
+  max-width: none !important;
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+
+.lp-sales-compare,
+.lp-sales-faq {
+  padding: 48px 0 !important;
+}
+
+.lp-sales-compare header,
+.lp-sales-faq h2,
+.lp-pricing-v2-compare-head,
+.lp-ent-section-head,
+.lp-cust3-section-head,
+.lp-sec-section-head,
+.lp-int-section-head {
+  max-width: 40rem;
+}
+
+.lp-sales-table-wrap,
+.lp-pricing-v2-table-wrap {
+  margin-top: 20px;
+  border: 1px solid var(--lp-line) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+  background: #fff;
+  box-shadow: none !important;
+}
+
+.lp-sales-table,
+.lp-pricing-v2-table {
+  font-size: 13.5px !important;
+}
+
+.lp-sales-table thead th,
+.lp-pricing-v2-table thead th {
+  background: #f8fafc !important;
+  color: #475569 !important;
+  font-size: 11px !important;
+  letter-spacing: 0.06em;
+}
+
+.lp-sales-table tbody td:last-child {
+  background: #f8fffd;
+  color: #0f766e;
+  font-weight: 650;
+}
+
+.lp :is(
+  .lp-pricing-card,
+  .lp-pricing-principle,
+  .lp-ent-capability,
+  .lp-sec-layer-card,
+  .lp-int-family-card,
+  .lp-mkt-evidence-card,
+  .lp-home-market-grid article,
+  .lp-home-depth-list li,
+  .lp-sales-form,
+  .lp-sales-success,
+  .lp-sales-rail-box,
+  .lp-ent-panel
+) {
+  border: 1px solid var(--lp-line) !important;
+  border-radius: 8px !important;
+  background: #fff !important;
+  box-shadow: none !important;
+  transform: none !important;
+  filter: none !important;
+  color: var(--lp-ink) !important;
+}
+
+.lp :is(
+  .lp-pricing-card,
+  .lp-ent-capability,
+  .lp-sec-layer-card,
+  .lp-int-family-card,
+  .lp-mkt-evidence-card,
+  .lp-home-market-grid article
+):hover {
+  transform: none !important;
+  box-shadow: none !important;
+  border-color: #d0d6de !important;
+}
+
+.lp-pricing-card.is-featured {
+  border-color: #0d9488 !important;
+  background: #fff !important;
+  box-shadow: none !important;
+  transform: none !important;
+}
+
+.lp-pricing-card-flag {
+  top: 12px !important;
+  left: auto !important;
+  right: 12px !important;
+  background: #0f766e !important;
+  color: #fff !important;
+  border-radius: 4px !important;
+  letter-spacing: 0.04em !important;
+}
+
+.lp-home-market-grid article.is-ours {
+  border-color: #0d9488 !important;
+  background: #fff !important;
+}
+
+.lp-ent-capability:nth-child(n),
+.lp-sec-layer-card:nth-child(n),
+.lp-int-family-card:nth-child(n) {
+  background: #fff !important;
+  border-color: var(--lp-line) !important;
+  color: var(--lp-ink) !important;
+}
+
+.lp-ent-capability:nth-child(n) > span,
+.lp-ent-capability:nth-child(n) h3,
+.lp-sec-layer-card:nth-child(n) h3,
+.lp-sec-layer-card:nth-child(n) .lp-sec-layer-num,
+.lp-sec-layer-card:nth-child(n) em {
+  color: inherit !important;
+}
+
+.lp-ent-capability:nth-child(n) p,
+.lp-sec-layer-card:nth-child(n) p {
+  color: var(--lp-muted) !important;
+}
+
+.lp-ent-capability > span,
+.lp-sec-layer-num,
+.lp-sec-layer-tag {
+  color: #0f766e !important;
+}
+
+.lp-sec-layer-card::before {
+  display: none !important;
+}
+
+.lp-int-honesty {
+  border-radius: 8px !important;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+
+.lp-int-honesty-panel {
+  border-radius: 8px !important;
+  background: #0c1b2e !important;
+}
+
+.lp-pricing-v2-cta-inner,
+.lp-ent-cta-inner,
+.lp-cust3-cta-inner,
+.lp-int-cta {
+  border-radius: 8px !important;
+  box-shadow: none !important;
+}
+
+.lp-pricing-v2-cta-inner,
+.lp-ent-cta-band,
+.lp-cust3-cta,
+.lp-int-cta {
+  background: #0c1b2e !important;
+}
+
+.lp-btn {
+  border-radius: 6px !important;
+}
+
+.lp-btn--brand {
+  box-shadow: none !important;
+}
+
+.lp-btn--brand:hover {
+  transform: none !important;
+}
+
+.lp-reveal {
+  opacity: 1 !important;
+  transform: none !important;
 }

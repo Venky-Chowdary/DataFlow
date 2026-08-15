@@ -8132,8 +8132,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-connectors-feature-card
 ) {
   background: #fff !important;
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border, #e4e8ee) !important;
+  border-radius: var(--df-radius-card, 8px) !important;
   box-shadow: none !important;
+}
+
+.df2-app .df2-card-head,
+.df2-app .df2-section-head {
+  background: #fff !important;
+  border-bottom: 1px solid var(--df-border, #e4e8ee);
 }
 
 /* Never clip shadows/borders on shell cards — scroll inner bodies only */

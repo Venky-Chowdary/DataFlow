@@ -298,7 +298,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       </MarketingReveal>
 
       <section className="lp-sales-compare" aria-label="How pricing differs from the market">
-        <div className="lp-sales-compare-inner">
+        <div className="lp-mkt-wrap">
           <header>
             <p className="lp-sales-kicker lp-sales-kicker--ink">Versus the market</p>
             <h2>Pay for cadence — not for every changed row.</h2>
