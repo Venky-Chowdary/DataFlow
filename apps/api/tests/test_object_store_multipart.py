@@ -339,7 +339,7 @@ def test_capability_mentions_multipart_honesty():
 
     s3 = " ".join(CAPABILITY_REGISTRY["s3"]["common_issues"])
     assert "multipart" in s3.lower()
-    assert "in memory" in s3.lower() or "serialized in memory" in s3.lower()
+    assert "spill" in s3.lower()
     assert "at-least-once" in s3.lower()
     gcs = " ".join(CAPABILITY_REGISTRY["gcs"]["common_issues"])
     assert "compose" in gcs.lower()

@@ -140,6 +140,33 @@ def omit_missing_fields(
     return out
 
 
+def mapped_row_to_json_record(
+    row: tuple | list,
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """One object-store JSON record — omit ``DF_MISSING`` keys (Kafka-class)."""
+    from services.value_serializer import is_missing_sentinel
+
+    dest_types = dest_types or {}
+    rec: dict[str, Any] = {}
+    for col, val in zip(target_cols, row):
+        if is_missing_sentinel(val):
+            continue
+        rec[col] = to_json_value(val, col, dest_types)
+    return rec
+
+
+def iter_mapped_json_records(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+):
+    """Yield JSON records without materializing the full list."""
+    for row in mapped_rows:
+        yield mapped_row_to_json_record(row, target_cols, dest_types)
+
+
 def mapped_rows_to_json_records(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -150,18 +177,7 @@ def mapped_rows_to_json_records(
     Dense CSV still gets empty cells for omitted keys via DictWriter fieldnames;
     JSON/JSONL must never emit ``\"col\": null`` for STOP_COLUMN / sparse CDC.
     """
-    from services.value_serializer import is_missing_sentinel
-
-    dest_types = dest_types or {}
-    records: list[dict[str, Any]] = []
-    for row in mapped_rows:
-        rec: dict[str, Any] = {}
-        for col, val in zip(target_cols, row):
-            if is_missing_sentinel(val):
-                continue
-            rec[col] = to_json_value(val, col, dest_types)
-        records.append(rec)
-    return records
+    return list(iter_mapped_json_records(mapped_rows, target_cols, dest_types))
 
 
 def project_quarantine_source_values(

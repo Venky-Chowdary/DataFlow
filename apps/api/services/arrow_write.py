@@ -206,16 +206,15 @@ def coerce_arrow_cell(
     return str(value)
 
 
-def mapped_rows_to_parquet_bytes(
+def write_mapped_rows_parquet(
     mapped_rows: list[tuple],
     target_cols: list[str],
-    dest_types: dict[str, str] | None = None,
+    dest_types: dict[str, str] | None,
+    dest: Any,
     *,
     dialect: str = "parquet",
-) -> tuple[bytes, str]:
-    """Typed Parquet body + MIME. Raises on coerce failure (never silent NULL)."""
-    import io
-
+) -> str:
+    """Write typed Parquet to a file-like. Raises on coerce failure (never silent NULL)."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -230,6 +229,22 @@ def mapped_rows_to_parquet_bytes(
         for col, val, at in zip(target_cols, row, arrow_types):
             columns[col].append(coerce_arrow_cell(val, at, pa, dialect=dialect))
     table = pa.table(columns, schema=schema)
+    pq.write_table(table, dest, compression="snappy")
+    return "application/vnd.apache.parquet"
+
+
+def mapped_rows_to_parquet_bytes(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+    *,
+    dialect: str = "parquet",
+) -> tuple[bytes, str]:
+    """Typed Parquet body + MIME. Raises on coerce failure (never silent NULL)."""
+    import io
+
     buf = io.BytesIO()
-    pq.write_table(table, buf, compression="snappy")
-    return buf.getvalue(), "application/vnd.apache.parquet"
+    mime = write_mapped_rows_parquet(
+        mapped_rows, target_cols, dest_types, buf, dialect=dialect
+    )
+    return buf.getvalue(), mime

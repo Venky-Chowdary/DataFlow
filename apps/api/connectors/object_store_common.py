@@ -26,7 +26,9 @@ __all__ = [
     "purge_object_store_parts",
     "read_object_from_store",
     "resolve_object_store_write_dest_types",
+    "ObjectStoreExport",
     "serialize_object_store_body",
+    "serialize_object_store_export",
     "resolve_object_write_key",
     "resolve_object_write_layout",
     "_object_version_token",
@@ -388,6 +390,157 @@ def resolve_object_store_write_dest_types(
     )
 
 
+@dataclass
+class ObjectStoreExport:
+    """Serialized export that may live in RAM or on a rolled spool file."""
+
+    content_type: str
+    size: int
+    spilled: bool
+    _spool: Any = None
+
+    def rewind(self) -> None:
+        if self._spool is not None:
+            self._spool.seek(0)
+
+    def read_all(self) -> bytes:
+        self.rewind()
+        data = self._spool.read() if self._spool is not None else b""
+        self.rewind()
+        return data
+
+    def iter_parts(self, part_size: int):
+        """Yield 1-indexed ``(part_number, chunk)`` from the spool."""
+        from connectors.object_store_multipart import iter_object_store_parts
+
+        self.rewind()
+        yield from iter_object_store_parts(
+            part_size=part_size, source=self._spool, size=self.size
+        )
+
+    def close(self) -> None:
+        spool = self._spool
+        self._spool = None
+        if spool is None:
+            return
+        try:
+            spool.close()
+        except Exception:
+            pass
+
+
+def _write_json_array(spool: Any, records) -> None:
+    import json
+
+    from services.value_serializer import json_default
+
+    it = iter(records)
+    try:
+        first = next(it)
+    except StopIteration:
+        spool.write(b"[]")
+        return
+
+    def _emit(rec: dict, *, comma: bool) -> None:
+        dumped = json.dumps(
+            rec, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
+        )
+        indented = "\n".join(
+            (f"  {line}" if line else line) for line in dumped.split("\n")
+        )
+        if comma:
+            spool.write(b",\n")
+        spool.write(indented.encode("utf-8"))
+
+    spool.write(b"[\n")
+    _emit(first, comma=False)
+    for rec in it:
+        _emit(rec, comma=True)
+    spool.write(b"\n]")
+
+
+def serialize_object_store_export(
+    *,
+    key: str,
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+    spill_max_size: int = 8 * 1024 * 1024,
+) -> ObjectStoreExport:
+    """Serialize JSON / JSONL / CSV / Parquet into a spool that rolls to disk.
+
+    JSON/JSONL/CSV write one record at a time (no full ``dumps`` of the array).
+    Parquet still builds an Arrow table, then writes that table to the spool
+    instead of holding a second parquet-bytes copy. ``mapped_rows`` stay in RAM
+    — this is not a source-stream spill.
+    """
+    import csv
+    import io
+    import json
+    import tempfile
+
+    from connectors.writer_common import iter_mapped_json_records
+    from services.value_serializer import cell_to_string, json_default
+
+    dest_types = dest_types or {}
+    key_l = (key or "").lower()
+    spool = tempfile.SpooledTemporaryFile(max_size=max(1, int(spill_max_size)), mode="w+b")
+    try:
+        if key_l.endswith(".parquet"):
+            from services.arrow_write import write_mapped_rows_parquet
+
+            content_type = write_mapped_rows_parquet(
+                mapped_rows, target_cols, dest_types, spool
+            )
+        else:
+            records = iter_mapped_json_records(mapped_rows, target_cols, dest_types)
+            if key_l.endswith(".csv"):
+                text = io.TextIOWrapper(spool, encoding="utf-8", newline="", write_through=True)
+                try:
+                    writer = csv.DictWriter(
+                        text, fieldnames=target_cols, extrasaction="ignore"
+                    )
+                    writer.writeheader()
+                    for record in records:
+                        writer.writerow({k: cell_to_string(v) for k, v in record.items()})
+                    text.flush()
+                finally:
+                    text.detach()
+                content_type = "text/csv"
+            elif key_l.endswith(".jsonl"):
+                first = True
+                for record in records:
+                    if not first:
+                        spool.write(b"\n")
+                    spool.write(
+                        json.dumps(
+                            record,
+                            default=json_default,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        ).encode("utf-8")
+                    )
+                    first = False
+                content_type = "application/x-ndjson"
+            else:
+                _write_json_array(spool, records)
+                content_type = "application/json"
+        size = int(spool.tell())
+        spool.seek(0)
+        return ObjectStoreExport(
+            content_type=content_type,
+            size=size,
+            spilled=size > max(1, int(spill_max_size)),
+            _spool=spool,
+        )
+    except Exception:
+        try:
+            spool.close()
+        except Exception:
+            pass
+        raise
+
+
 def serialize_object_store_body(
     *,
     key: str,
@@ -398,38 +551,16 @@ def serialize_object_store_body(
     """Serialize one object-store chunk — JSON / JSONL / CSV / Parquet.
 
     Parquet uses the shared Arrow coerce SSOT (same cells as Iceberg). JSON/CSV
-    still go through ``mapped_rows_to_json_records`` so DF_MISSING keys stay
-    omitted. Default extension remains JSON for backward compatibility.
+    still omit ``DF_MISSING`` keys. Default extension remains JSON.
     """
-    import csv
-    import io
-    import json
-
-    from connectors.writer_common import mapped_rows_to_json_records
-    from services.value_serializer import cell_to_string, json_default
-
-    dest_types = dest_types or {}
-    key_l = (key or "").lower()
-    if key_l.endswith(".parquet"):
-        from services.arrow_write import mapped_rows_to_parquet_bytes
-
-        return mapped_rows_to_parquet_bytes(mapped_rows, target_cols, dest_types)
-
-    records = mapped_rows_to_json_records(mapped_rows, target_cols, dest_types)
-    if key_l.endswith(".csv"):
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=target_cols, extrasaction="ignore")
-        writer.writeheader()
-        for record in records:
-            writer.writerow({k: cell_to_string(v) for k, v in record.items()})
-        return buf.getvalue().encode("utf-8"), "text/csv"
-    if key_l.endswith(".jsonl"):
-        body = "\n".join(
-            json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False)
-            for r in records
-        ).encode("utf-8")
-        return body, "application/x-ndjson"
-    body = json.dumps(
-        records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
-    ).encode("utf-8")
-    return body, "application/json"
+    export = serialize_object_store_export(
+        key=key,
+        mapped_rows=mapped_rows,
+        target_cols=target_cols,
+        dest_types=dest_types,
+        spill_max_size=64 * 1024 * 1024,
+    )
+    try:
+        return export.read_all(), export.content_type
+    finally:
+        export.close()

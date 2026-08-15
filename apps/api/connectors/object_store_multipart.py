@@ -1,10 +1,11 @@
 """Object-store multipart upload — S3 / GCS / ADLS SSOT.
 
-Transfer writers still serialize the export in memory, then land it with
-staging→live. A single ``PutObject`` / ``upload_from_string`` / ``upload_blob``
-times out or hits the 5 GiB S3 single-PUT ceiling on large bodies.
+Writers serialize into a ``SpooledTemporaryFile`` (rolls to disk above the
+spill cap), then land staging→live. A single ``PutObject`` times out or hits
+the 5 GiB S3 single-PUT ceiling on large bodies.
 
-This module splits that already-serialized body into parts:
+Multipart splits the serialized export into parts — from bytes or from the
+spool, one part in RAM at a time:
 
 - S3 / MinIO: ``CreateMultipartUpload`` → ``UploadPart`` → ``Complete``.
   Failure **aborts** the upload (no silent leftover parts billed as storage).
@@ -15,16 +16,16 @@ This module splits that already-serialized body into parts:
 Small bodies stay on the single-request path so existing tests and tiny
 exports do not pay a multipart round-trip.
 
-Honesty: this is **not** a streaming spill. Peak RAM is still the serialized
-body. Still at-least-once (staging + live). Not exactly-once. Not row-level
-MERGE. Not a live cloud matrix.
+Honesty: ``mapped_rows`` stay in RAM. Parquet still builds an Arrow table.
+This is not a source-stream spill. Still at-least-once (staging + live).
+Not exactly-once. Not row-level MERGE. Not a live cloud matrix.
 """
 
 from __future__ import annotations
 
 import base64
 import math
-from typing import Any, Callable, Iterator
+from typing import Any, BinaryIO, Callable, Iterator
 
 from services.brand_env import getenv_brand
 
@@ -54,14 +55,28 @@ def resolve_multipart_limits(extra: dict[str, Any] | None = None) -> tuple[int, 
     return max(1, threshold), max(1, part_size)
 
 
+def resolve_spill_max(extra: dict[str, Any] | None = None) -> int:
+    """Bytes kept in the serialize spool before rolling to a temp file."""
+    extra = extra if isinstance(extra, dict) else {}
+    raw = (
+        extra.get("spill_max")
+        or extra.get("object_store_spill_max")
+        or getenv_brand("DATAFLOW_OBJECT_STORE_SPILL_MAX", "")
+        or ""
+    )
+    if raw:
+        return max(1, int(raw))
+    return resolve_multipart_limits(extra)[0]
+
+
 def should_use_object_store_multipart(
-    body: bytes,
+    body: bytes | int,
     *,
     threshold: int | None = None,
     part_size: int | None = None,
 ) -> bool:
     """Multipart only when the body needs at least two parts at/above threshold."""
-    n = len(body)
+    n = int(body) if isinstance(body, int) else len(body)
     limit = DEFAULT_MULTIPART_THRESHOLD if threshold is None else int(threshold)
     size = DEFAULT_MULTIPART_PART_SIZE if part_size is None else int(part_size)
     if n < max(1, limit):
@@ -70,16 +85,36 @@ def should_use_object_store_multipart(
 
 
 def iter_object_store_parts(
-    body: bytes,
+    body: bytes | None = None,
     *,
     part_size: int,
+    source: BinaryIO | None = None,
+    size: int | None = None,
 ) -> Iterator[tuple[int, bytes]]:
     """Yield 1-indexed ``(part_number, chunk)``. Last part may be short."""
-    size = max(1, int(part_size))
+    chunk_size = max(1, int(part_size))
+    if source is not None:
+        total = int(size) if size is not None else None
+        if total == 0:
+            return
+        n_parts = math.ceil(total / chunk_size) if total is not None else None
+        if n_parts is not None and n_parts > S3_MAX_PARTS:
+            raise ValueError(
+                f"Object store multipart would need {n_parts} parts "
+                f"(max {S3_MAX_PARTS}). Increase part size."
+            )
+        idx = 1
+        while True:
+            chunk = source.read(chunk_size)
+            if not chunk:
+                break
+            yield idx, chunk
+            idx += 1
+        return
     if not body:
         return
     total = len(body)
-    n_parts = math.ceil(total / size)
+    n_parts = math.ceil(total / chunk_size)
     if n_parts > S3_MAX_PARTS:
         raise ValueError(
             f"Object store multipart would need {n_parts} parts "
@@ -87,17 +122,29 @@ def iter_object_store_parts(
         )
     view = memoryview(body)
     for idx in range(n_parts):
-        start = idx * size
-        chunk = view[start : start + size].tobytes()
+        start = idx * chunk_size
+        chunk = view[start : start + chunk_size].tobytes()
         yield idx + 1, chunk
+
+
+def _iter_upload_parts(
+    body: bytes | None,
+    export: Any,
+    part_size: int,
+) -> Iterator[tuple[int, bytes]]:
+    if export is not None:
+        yield from export.iter_parts(part_size)
+        return
+    yield from iter_object_store_parts(body or b"", part_size=part_size)
 
 
 def upload_object_store_bytes(
     dialect: str,
     *,
-    body: bytes,
+    body: bytes | None = None,
+    export: Any = None,
     key: str,
-    content_type: str,
+    content_type: str = "",
     client: Any = None,
     bucket: str = "",
     bucket_obj: Any = None,
@@ -105,7 +152,7 @@ def upload_object_store_bytes(
     threshold: int | None = None,
     part_size: int | None = None,
 ) -> dict[str, Any]:
-    """Upload ``body`` with single-request or multipart. Returns method metadata."""
+    """Upload bytes or a spilled export. Returns method metadata."""
     engine = (dialect or "").strip().lower()
     if engine in {"minio", "amazon_s3"}:
         engine = "s3"
@@ -114,35 +161,70 @@ def upload_object_store_bytes(
     if engine in {"azure_blob", "azure_data_lake", "azure_datalake"}:
         engine = "adls"
 
+    if export is not None:
+        n = int(export.size)
+        content_type = content_type or str(export.content_type or "")
+    else:
+        n = len(body or b"")
     use_mp = should_use_object_store_multipart(
-        body, threshold=threshold, part_size=part_size
+        n, threshold=threshold, part_size=part_size
     )
     size = DEFAULT_MULTIPART_PART_SIZE if part_size is None else int(part_size)
+    payload = None if use_mp else (export.read_all() if export is not None else body)
     if engine == "s3":
         if not use_mp:
-            client.put_object(Bucket=bucket, Key=key, Body=body, ContentType=content_type)
+            client.put_object(Bucket=bucket, Key=key, Body=payload, ContentType=content_type)
             return {"method": "put_object", "parts": 1, "engine": "s3"}
         return _upload_s3_multipart(
-            client, bucket=bucket, key=key, body=body, content_type=content_type, part_size=size
+            client,
+            bucket=bucket,
+            key=key,
+            body=body,
+            export=export,
+            content_type=content_type,
+            part_size=size,
         )
     if engine == "gcs":
         if not use_mp:
-            bucket_obj.blob(key).upload_from_string(body, content_type=content_type)
+            bucket_obj.blob(key).upload_from_string(payload, content_type=content_type)
             return {"method": "upload_from_string", "parts": 1, "engine": "gcs"}
         return _upload_gcs_compose(
-            bucket_obj, key=key, body=body, content_type=content_type, part_size=size
+            bucket_obj,
+            key=key,
+            body=body,
+            export=export,
+            content_type=content_type,
+            part_size=size,
         )
     if engine == "adls":
         if blob_client_factory is None:
             raise ValueError("ADLS multipart requires blob_client_factory")
         blob = blob_client_factory(key)
         if not use_mp:
-            blob.upload_blob(body, overwrite=True, content_type=content_type)
+            blob.upload_blob(payload, overwrite=True, content_type=content_type)
             return {"method": "upload_blob", "parts": 1, "engine": "adls"}
         return _upload_adls_blocks(
-            blob, body=body, content_type=content_type, part_size=size
+            blob, body=body, export=export, content_type=content_type, part_size=size
         )
     raise ValueError(f"Unsupported object-store multipart dialect: {dialect!r}")
+
+
+def land_object_store_export(
+    dialect: str,
+    *,
+    export: Any,
+    staging_key: str,
+    live_key: str,
+    threshold: int | None = None,
+    part_size: int | None = None,
+    **upload_kw: Any,
+) -> None:
+    """Staging→live from one spool. Rewinds between puts. Does not close ``export``."""
+    common = dict(upload_kw)
+    common.update(export=export, threshold=threshold, part_size=part_size)
+    upload_object_store_bytes(dialect, key=staging_key, **common)
+    export.rewind()
+    upload_object_store_bytes(dialect, key=live_key, **common)
 
 
 def _upload_s3_multipart(
@@ -150,7 +232,8 @@ def _upload_s3_multipart(
     *,
     bucket: str,
     key: str,
-    body: bytes,
+    body: bytes | None = None,
+    export: Any = None,
     content_type: str,
     part_size: int,
 ) -> dict[str, Any]:
@@ -162,7 +245,7 @@ def _upload_s3_multipart(
         raise RuntimeError("S3 CreateMultipartUpload returned no UploadId")
     parts: list[dict[str, Any]] = []
     try:
-        for number, chunk in iter_object_store_parts(body, part_size=part_size):
+        for number, chunk in _iter_upload_parts(body, export, part_size):
             resp = client.upload_part(
                 Bucket=bucket,
                 Key=key,
@@ -202,14 +285,15 @@ def _upload_gcs_compose(
     bucket_obj: Any,
     *,
     key: str,
-    body: bytes,
+    body: bytes | None = None,
+    export: Any = None,
     content_type: str,
     part_size: int,
 ) -> dict[str, Any]:
     component_keys: list[str] = []
     intermediates: list[str] = []
     try:
-        for number, chunk in iter_object_store_parts(body, part_size=part_size):
+        for number, chunk in _iter_upload_parts(body, export, part_size):
             ck = _gcs_component_key(key, f"{number:05d}")
             bucket_obj.blob(ck).upload_from_string(chunk, content_type=content_type)
             component_keys.append(ck)
@@ -275,12 +359,13 @@ def _adls_block_id(number: int) -> str:
 def _upload_adls_blocks(
     blob: Any,
     *,
-    body: bytes,
+    body: bytes | None = None,
+    export: Any = None,
     content_type: str,
     part_size: int,
 ) -> dict[str, Any]:
     block_ids: list[str] = []
-    for number, chunk in iter_object_store_parts(body, part_size=part_size):
+    for number, chunk in _iter_upload_parts(body, export, part_size):
         bid = _adls_block_id(number)
         blob.stage_block(bid, chunk)
         block_ids.append(bid)
