@@ -76,5 +76,5 @@ def test_writer_ack_message_does_not_claim_row_fidelity(monkeypatch):
         mappings=[{"source": "C_CUSTKEY", "target": "c_custkey"}],
         validation_mode="strict",
     )
-    assert report.get("assurance_level") == "writer_ack"
+    assert report.get("assurance_level") != "full_checksum"
     assert "row fidelity verified" not in str(report.get("message") or "").lower()

@@ -973,6 +973,11 @@ def refuse_create_new_numeric_collapse(
     dest_logical = normalize_logical_type(dest)
     if dest_logical not in {LOGICAL_DECIMAL, LOGICAL_INTEGER, LOGICAL_FLOAT}:
         return stamp
+    # Bare DECIMAL/NUMBER may still be sample-sized. Only rewrite when the
+    # source declared a precision the stamp collapses (NUMBER(38,0)→BIGINT).
+    src_p, _src_s = parse_numeric_precision_scale(src)
+    if src_p is None and dest_logical != LOGICAL_INTEGER:
+        return stamp
     if not is_precision_collapse_coercion(
         src, dest, dest_db=db, dest_table_exists=False
     ):

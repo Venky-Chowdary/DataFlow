@@ -924,15 +924,19 @@ def run_reconciliation(
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
         stamped = _finalize_reconcile(payload, dest_summary=dest_summary)
-        if str(stamped.get("assurance_level") or "") == "writer_ack":
-            msg = str(stamped.get("message") or "")
-            if msg.lower().startswith("row fidelity verified"):
-                rows = stamped.get("target_rows") or stamped.get("source_rows") or 0
-                stamped["message"] = (
-                    f"Writer acknowledgment for {rows} row(s) — source digest was "
-                    "the write-pass hash, not an independent dest read-back. "
-                    "Not migration_proven."
-                )
+        msg = str(stamped.get("message") or "")
+        assurance = str(stamped.get("assurance_level") or "")
+        # Writer-ack / empty dest digest must never keep the reconcile() theatre
+        # line "Row fidelity verified — source and target checksums match".
+        if msg.lower().startswith("row fidelity verified") and assurance not in {
+            "full_checksum",
+        }:
+            rows = stamped.get("target_rows") or stamped.get("source_rows") or 0
+            stamped["message"] = (
+                f"Writer acknowledgment for {rows} row(s) — source digest was "
+                "the write-pass hash, not an independent dest read-back. "
+                "Not migration_proven."
+            )
         if vector_stamp_ctx:
             stamped = stamp_vector_census(
                 stamped,
