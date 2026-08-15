@@ -482,3 +482,144 @@ def test_pg_poll_continues_snapshot_instead_of_wal() -> None:
     assert lsn == "0/16B3600"
     assert slot == cdc.slot_name
     assert cdc.phase == "streaming"
+
+
+def test_logminer_fresh_snapshot_is_held_scan_not_row_number() -> None:
+    from connectors.oracle_logminer import OracleLogMinerCdc, decode_logminer_token
+
+    cdc = OracleLogMinerCdc(
+        {"host": "localhost", "username": "APP"},
+        table="orders",
+        primary_key="id",
+        schema="APP",
+        batch_size=2,
+    )
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [("ID",), ("AMOUNT",)]
+    cur.fetchone.side_effect = [(9000,)]
+    cur.fetchall.side_effect = [[("1", "10"), ("2", "20")], []]
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(cdc, "_conn", return_value=conn), patch.object(cdc, "_acquire_cdc_lease"):
+        batches = list(cdc.snapshot())
+
+    sqls = [str(c.args[0]) for c in cur.execute.call_args_list if c.args]
+    dump = [s for s in sqls if "FROM" in s.upper() and "V$DATABASE" not in s.upper()]
+    assert dump
+    assert all("ROW_NUMBER" not in s.upper() for s in dump)
+    assert all("OFFSET" not in s.upper() for s in dump)
+    assert decode_logminer_token(batches[0].resume_token)["last_pk"] == "2"
+    assert decode_logminer_token(batches[-1].resume_token)["phase"] == "streaming"
+    assert decode_logminer_token(batches[-1].resume_token)["scn"] == 9000
+    assert "last_pk" not in decode_logminer_token(batches[-1].resume_token) or not decode_logminer_token(
+        batches[-1].resume_token
+    ).get("last_pk")
+
+
+def test_logminer_keyset_resume_keeps_scn() -> None:
+    from connectors.oracle_logminer import (
+        OracleLogMinerCdc,
+        decode_logminer_token,
+        encode_logminer_token,
+    )
+
+    token = encode_logminer_token(
+        1000, table="ORDERS", phase="snapshot", offset=2, last_pk="2"
+    )
+    assert decode_logminer_token(token)["last_pk"] == "2"
+    cdc = OracleLogMinerCdc(
+        {"host": "localhost", "username": "APP"},
+        table="orders",
+        primary_key="id",
+        schema="APP",
+        batch_size=2,
+        resume_token=token,
+    )
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [("ID",), ("AMOUNT",)]
+    cur.fetchall.side_effect = [[("3", "30")], []]
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(cdc, "_conn", return_value=conn), patch.object(cdc, "_acquire_cdc_lease"):
+        batches = list(cdc.snapshot())
+
+    sqls = [str(c.args[0]) for c in cur.execute.call_args_list if c.args]
+    dump = [s for s in sqls if "FROM" in s.upper()]
+    assert dump
+    assert all("ROW_NUMBER" not in s.upper() for s in dump)
+    assert any("ROWNUM" in s.upper() and ">" in s for s in dump)
+    assert decode_logminer_token(batches[-1].resume_token)["scn"] == 1000
+    assert decode_logminer_token(batches[0].resume_token)["last_pk"] == "3"
+
+
+def test_logminer_legacy_offset_resume_uses_row_number() -> None:
+    from connectors.oracle_logminer import OracleLogMinerCdc, encode_logminer_token
+
+    token = encode_logminer_token(1000, table="ORDERS", phase="snapshot", offset=2)
+    cdc = OracleLogMinerCdc(
+        {"host": "localhost", "username": "APP"},
+        table="orders",
+        primary_key="id",
+        schema="APP",
+        batch_size=2,
+        resume_token=token,
+    )
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [("ID",), ("AMOUNT",), ("DF_RN",)]
+    cur.fetchall.side_effect = [[("3", "30", 3)], []]
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(cdc, "_conn", return_value=conn), patch.object(cdc, "_acquire_cdc_lease"):
+        list(cdc.snapshot())
+
+    sqls = [str(c.args[0]) for c in cur.execute.call_args_list if c.args]
+    assert any("ROW_NUMBER" in s.upper() for s in sqls)
+
+
+def test_logminer_incremental_chunk_uses_keyset_not_row_number() -> None:
+    from connectors.oracle_logminer import OracleLogMinerCdc
+
+    cdc = OracleLogMinerCdc(
+        {"host": "localhost", "username": "APP"},
+        table="orders",
+        primary_key="id",
+        schema="APP",
+        batch_size=2,
+    )
+
+    class _Sig:
+        primary_key = "id"
+        chunk_size = 2
+        last_pk = "2"
+        table = "orders"
+
+    conn = MagicMock()
+    cur = MagicMock()
+    cur.description = [("ID",), ("AMOUNT",)]
+    cur.fetchall.return_value = [("3", "30")]
+    conn.__enter__ = MagicMock(return_value=conn)
+    conn.__exit__ = MagicMock(return_value=False)
+    conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
+    conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
+
+    with patch.object(cdc, "_conn", return_value=conn):
+        records, new_last, done = cdc._fetch_incremental_chunk(_Sig())
+
+    sqls = [str(c.args[0]) for c in cur.execute.call_args_list if c.args]
+    assert any(">" in s and "ROWNUM" in s.upper() for s in sqls)
+    assert all("ROW_NUMBER" not in s.upper() for s in sqls)
+    assert records[0]["ID"] == "3"
+    assert new_last == "3"
+    assert done is True
