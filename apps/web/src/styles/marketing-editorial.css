@@ -1606,6 +1606,7 @@
 
 /* ── Pricing editorial ──────────────────────────────────────────── */
 .lp-mkt-page.lp-pricing-v2,
+.lp-mkt-page.lp-sales,
 .lp-mkt-page.lp-contact-v2,
 .lp-mkt-page.lp-contact-v3,
 .lp-mkt-page.lp-contact-v4,
@@ -1617,7 +1618,8 @@
 .lp-mkt-page.lp-cust-v2,
 .lp-mkt-page.lp-cust-v3,
 .lp-mkt-page.lp-sec-v2,
-.lp-mkt-page.lp-int-v2 {
+.lp-mkt-page.lp-int-v2,
+.lp-mkt-page.lp-mkt-page-rich {
   max-width: none !important;
   width: 100% !important;
   margin: 0 !important;

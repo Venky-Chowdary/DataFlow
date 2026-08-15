@@ -290,56 +290,57 @@ export function ContactSalesPage({
                 </label>
               </div>
 
-              <ChipGrid label="Sources" options={SOURCES} value={sources} onChange={setSources} />
-              <ChipGrid
-                label="Destinations"
-                options={DESTINATIONS}
-                value={destinations}
-                onChange={setDestinations}
-              />
-
-              <div className="lp-sales-fields lp-sales-fields--3">
-                <label>
-                  Daily volume
-                  <select className="lp-sales-input" value={volume} onChange={(e) => setVolume(e.target.value)}>
-                    <option value="">Optional</option>
-                    <option value="lt-1m">&lt; 1M rows/day</option>
-                    <option value="1m-100m">1M – 100M rows/day</option>
-                    <option value="100m-1b">100M – 1B rows/day</option>
-                    <option value="gt-1b">&gt; 1B rows/day</option>
-                  </select>
-                </label>
-                <label>
-                  Region
-                  <select className="lp-sales-input" value={region} onChange={(e) => setRegion(e.target.value)}>
-                    <option value="">Optional</option>
-                    <option value="us">US</option>
-                    <option value="eu">EU</option>
-                    <option value="apac">APAC</option>
-                    <option value="other">Other</option>
-                  </select>
-                </label>
-                <label>
-                  Timeframe
-                  <select className="lp-sales-input" value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
-                    <option value="">Optional</option>
-                    <option value="pilot">Pilot now</option>
-                    <option value="prod-30d">Production in 30 days</option>
-                    <option value="evaluating">Still evaluating</option>
-                  </select>
-                </label>
-              </div>
-
-              <label className="lp-sales-span">
-                What must the first load prove? <em>Optional</em>
-                <textarea
-                  className="lp-sales-input lp-sales-textarea"
-                  value={message}
-                  onChange={(e) => setMessage(e.target.value)}
-                  rows={2}
-                  placeholder="Cutover window, dest stored procedure, incremental cursor…"
+              <details className="lp-sales-more">
+                <summary>Add stack details <em>optional</em></summary>
+                <ChipGrid label="Sources" options={SOURCES} value={sources} onChange={setSources} />
+                <ChipGrid
+                  label="Destinations"
+                  options={DESTINATIONS}
+                  value={destinations}
+                  onChange={setDestinations}
                 />
-              </label>
+                <div className="lp-sales-fields lp-sales-fields--3">
+                  <label>
+                    Daily volume
+                    <select className="lp-sales-input" value={volume} onChange={(e) => setVolume(e.target.value)}>
+                      <option value="">Optional</option>
+                      <option value="lt-1m">&lt; 1M rows/day</option>
+                      <option value="1m-100m">1M – 100M rows/day</option>
+                      <option value="100m-1b">100M – 1B rows/day</option>
+                      <option value="gt-1b">&gt; 1B rows/day</option>
+                    </select>
+                  </label>
+                  <label>
+                    Region
+                    <select className="lp-sales-input" value={region} onChange={(e) => setRegion(e.target.value)}>
+                      <option value="">Optional</option>
+                      <option value="us">US</option>
+                      <option value="eu">EU</option>
+                      <option value="apac">APAC</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </label>
+                  <label>
+                    Timeframe
+                    <select className="lp-sales-input" value={timeframe} onChange={(e) => setTimeframe(e.target.value)}>
+                      <option value="">Optional</option>
+                      <option value="pilot">Pilot now</option>
+                      <option value="prod-30d">Production in 30 days</option>
+                      <option value="evaluating">Still evaluating</option>
+                    </select>
+                  </label>
+                </div>
+                <label className="lp-sales-span">
+                  What must the first load prove? <em>Optional</em>
+                  <textarea
+                    className="lp-sales-input lp-sales-textarea"
+                    value={message}
+                    onChange={(e) => setMessage(e.target.value)}
+                    rows={2}
+                    placeholder="Cutover window, dest stored procedure, incremental cursor…"
+                  />
+                </label>
+              </details>
 
               <label className="lp-sales-hp" aria-hidden="true">
                 Do not fill

@@ -13006,6 +13006,29 @@ html:has(.lp) {
   color: #0f766e;
 }
 
+.lp-sales-more {
+  margin: 4px 0 12px;
+  border: 1px solid #e4e8ee;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 0 12px;
+}
+
+.lp-sales-more summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 10px 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: #0f766e;
+}
+
+.lp-sales-more summary::-webkit-details-marker { display: none; }
+.lp-sales-more summary em { font-weight: 500; color: #64748b; }
+.lp-sales-more[open] summary { border-bottom: 1px solid #e4e8ee; margin-bottom: 10px; }
+
+.lp-sales-form { position: relative; }
+
 .lp-sales-hp {
   position: absolute;
   left: -9999px;
