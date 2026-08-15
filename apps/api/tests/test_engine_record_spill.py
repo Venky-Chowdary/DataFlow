@@ -276,3 +276,41 @@ def test_object_store_materialize_uses_engine_spool(monkeypatch):
         mat.export.close()
     finally:
         spill.close()
+
+
+def test_fingerprints_from_spool_match_gate8_digest():
+    from connectors.engine_record_spill import fingerprints_from_spool
+    from services.reconciliation import FingerprintAccumulator
+
+    records = [{"id": "1", "note": "a"}, {"id": "2", "note": "b"}]
+    mappings = [
+        {"source": "id", "target": "id"},
+        {"source": "note", "target": "note"},
+    ]
+    columns = ["id", "note"]
+    digest, _prov = _compute_source_checksum(
+        records,
+        columns,
+        mappings,
+        {"id": "TEXT", "note": "TEXT"},
+        "",
+        dest_db_type="postgresql",
+        dest_types={"id": "TEXT", "note": "TEXT"},
+    )
+    spill = spill_engine_write_records(list(records), columns, mappings, extra={})
+    try:
+        acc = FingerprintAccumulator()
+        acc.add_many(
+            fingerprints_from_spool(
+                spill.spool,
+                mappings,
+                ["id", "note"],
+                column_types={"id": "TEXT", "note": "TEXT"},
+                dest_db_type="postgresql",
+                dest_types={"id": "TEXT", "note": "TEXT"},
+                error_policy="fail",
+            )
+        )
+        assert acc.digest() == digest
+    finally:
+        spill.close()

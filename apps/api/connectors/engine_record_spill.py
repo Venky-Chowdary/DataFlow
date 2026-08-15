@@ -22,13 +22,16 @@ Algorithm (Spark external spill / Beam bundle):
    (``FingerprintAccumulator``). Mirror uses the key set.
 
 Honesty: SQL/warehouse writers still hold the mapped image until
-COPY/INSERT/MERGE returns. SCD2 is a separate path and still uses the
-dict list. This is not a source-file stream and not exactly-once. CDC
-default remains at-least-once upsert. Catalog tiles ≠ transfer-live.
+COPY/INSERT/MERGE returns unless they iterate finished bundles.
+File-stream spool destinations reuse this spill so the chunk never
+becomes a second ``records_to_matrix`` copy. SCD2 is a separate path
+and still uses the dict list. This is not exactly-once. CDC default
+remains at-least-once upsert. Catalog tiles ≠ transfer-live.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -133,3 +136,71 @@ def spill_engine_write_records(
         unexpanded_row_count=unexpanded,
         mirror_pk_tuples=mirror_keys,
     )
+
+
+def iter_fingerprints_from_spool(
+    source_spool: Any,
+    mappings: list[dict[str, Any]],
+    target_cols: list[str],
+    *,
+    headers: list[str] | None = None,
+    column_types: dict[str, str] | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+    error_policy: str | None = None,
+    destination_pk_columns: list[str] | None = None,
+    empty_cells_as_null: bool = False,
+    batch_size: int | None = None,
+) -> Iterator[tuple[str, str]]:
+    """Remap Gate-8 / file-stream fingerprints from the spool in bundles.
+
+    Same algorithm as the engine remap: ``struct_already_materialized=True``,
+    1-based spool starts (do not add 1 again). Peak mapped RAM is one bundle.
+    Callers that need a digest add these tuples to ``FingerprintAccumulator``.
+    """
+    from connectors.sql_write_materialize import resolve_sql_materialize_batch
+    from connectors.writer_common import map_rows_for_fingerprint, row_fingerprints
+
+    headers = list(
+        headers
+        or getattr(source_spool, "headers", None)
+        or []
+    )
+    bundle_n = (
+        max(1, int(batch_size))
+        if batch_size is not None
+        else resolve_sql_materialize_batch(None)
+    )
+    for start, chunk in source_spool.iter_bundles(bundle_n):
+        mapped, _rejected = map_rows_for_fingerprint(
+            headers=headers,
+            data_rows=chunk,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types or {},
+            error_policy=error_policy,
+            dest_types=dest_types or {},
+            preserve_case=True,
+            dest_kind=dest_db_type or "",
+            destination_pk_columns=destination_pk_columns,
+            empty_cells_as_null=empty_cells_as_null,
+            row_number_start=start,
+            struct_already_materialized=True,
+        )
+        yield from row_fingerprints(
+            mapped,
+            target_cols,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
+        del mapped
+
+
+def fingerprints_from_spool(
+    source_spool: Any,
+    mappings: list[dict[str, Any]],
+    target_cols: list[str],
+    **kwargs: Any,
+) -> list[tuple[str, str]]:
+    """Collect spool fingerprints for a single file-stream chunk (worker-local)."""
+    return list(iter_fingerprints_from_spool(source_spool, mappings, target_cols, **kwargs))

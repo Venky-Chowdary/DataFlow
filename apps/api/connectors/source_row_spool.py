@@ -15,9 +15,10 @@ Algorithm (Spark external spill / Beam bundle):
 4. Materialize reads ``batch_size`` rows, maps, quarantines, encodes, drops
    the bundle.
 
-Honesty: when the engine opts into ``release_records``, the dict list is
-cleared after ingest. This is not a source-file stream (file_stream already
-chunks) and not exactly-once.
+Honesty: when the engine or file-stream opts into ``release_records`` /
+``clear_records``, the dict list is cleared after ingest. File-stream
+chunks still exist; this removes the second matrix copy on spool
+destinations. Not exactly-once.
 Sparse CDC ``DF_MISSING`` survives as the durable wire spelling.
 """
 
@@ -62,23 +63,23 @@ def resolve_source_spill_max(extra: dict[str, Any] | None = None) -> int:
     return DEFAULT_SOURCE_SPILL_MAX
 
 
-def matrix_row_from_record(record: dict[str, Any], columns: list[str]) -> list[Any]:
-    """One source record → one matrix row. Absent key is DF_MISSING, not NULL."""
+def matrix_cell_from_record(record: dict[str, Any], col: str) -> Any:
+    """One source cell. Absent key is DF_MISSING, not NULL or empty string."""
     from services.value_serializer import cell_to_string
 
-    row: list[Any] = []
-    for col in columns:
-        if col not in record:
-            row.append(DF_MISSING_SENTINEL)
-            continue
-        val = record[col]
-        if is_missing_sentinel(val):
-            row.append(DF_MISSING_SENTINEL)
-        elif val is None:
-            row.append(None)
-        else:
-            row.append(cell_to_string(val))
-    return row
+    if col not in record:
+        return DF_MISSING_SENTINEL
+    val = record[col]
+    if is_missing_sentinel(val):
+        return DF_MISSING_SENTINEL
+    if val is None:
+        return None
+    return cell_to_string(val)
+
+
+def matrix_row_from_record(record: dict[str, Any], columns: list[str]) -> list[Any]:
+    """One source record → one matrix row. Absent key is DF_MISSING, not NULL."""
+    return [matrix_cell_from_record(record, col) for col in columns]
 
 
 def iter_matrix_rows(

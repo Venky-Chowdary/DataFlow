@@ -83,41 +83,28 @@ def _compute_source_checksum_from_spool(
     destination_pk_columns: list[str] | None = None,
 ) -> tuple[str, str]:
     """Remap Gate-8 from the engine spool in bundles — never rebuild ``records``."""
-    from connectors.sql_write_materialize import resolve_sql_materialize_batch
+    from connectors.engine_record_spill import iter_fingerprints_from_spool
     from services.fingerprint_accumulator import FingerprintAccumulator
-    from services.reconciliation import _iter_fingerprints
 
     if target_cols is None:
         target_cols, _ = resolve_target_columns(
             mappings, source_schema or {}, preserve_case=True
         )
-    headers = list(getattr(source_spool, "headers", None) or columns)
     acc = FingerprintAccumulator()
     policy = transform_error_policy_for_validation_mode(validation_mode)
-    for start, chunk in source_spool.iter_bundles(resolve_sql_materialize_batch()):
-        mapped, _rejected = map_rows_for_fingerprint(
-            headers=headers,
-            data_rows=chunk,
-            mappings=mappings,
-            target_cols=target_cols,
+    acc.add_many(
+        iter_fingerprints_from_spool(
+            source_spool,
+            mappings,
+            target_cols,
+            headers=list(getattr(source_spool, "headers", None) or columns),
             column_types=source_schema or {},
-            error_policy=policy,
+            dest_db_type=dest_db_type or "",
             dest_types=dest_types or {},
-            preserve_case=True,
-            dest_kind=dest_db_type or "",
+            error_policy=policy,
             destination_pk_columns=destination_pk_columns,
-            row_number_start=start,
-            struct_already_materialized=True,
         )
-        acc.add_many(
-            _iter_fingerprints(
-                mapped,
-                target_cols,
-                dest_db_type=dest_db_type,
-                dest_types=dest_types,
-            )
-        )
-        del mapped
+    )
     return acc.digest(), SOURCE_DIGEST_REMAPPED_ROWS
 
 

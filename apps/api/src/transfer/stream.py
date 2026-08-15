@@ -249,6 +249,8 @@ def _write_batch(
     skip_preflight: bool = False,
     source_schema_catalog: dict[str, Any] | None = None,
     empty_cells_as_null: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
 ) -> tuple[int, str, dict]:
     # Live dest nullability for write-time NOT NULL escalate (G3 / adapters parity).
     dest_nullability = dict(
@@ -265,6 +267,11 @@ def _write_batch(
         or (cfg.get("extra") or {}).get("destination_column_types")
         or {}
     )
+    source_handoff: dict[str, Any] = {}
+    if source_spool is not None:
+        source_handoff["source_spool"] = source_spool
+    if records is not None:
+        source_handoff["records"] = records
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
         from connectors.write_resilience import build_write_batch_key
@@ -304,6 +311,7 @@ def _write_batch(
             destination_column_types=dest_column_types,
             source_schema_catalog=source_schema_catalog,
             empty_cells_as_null=empty_cells_as_null,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -351,6 +359,7 @@ def _write_batch(
             destination_column_types=dest_column_types,
             empty_cells_as_null=empty_cells_as_null,
             source_schema_catalog=source_schema_catalog,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, "MySQL batch write failed")
@@ -438,6 +447,7 @@ def _write_batch(
             destination_column_types=dest_column_types,
             source_schema_catalog=source_schema_catalog,
             empty_cells_as_null=empty_cells_as_null,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, "SQLite batch write failed")
@@ -482,6 +492,7 @@ def _write_batch(
             skip_session_setup=skip_session_setup,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, "Snowflake batch write failed")
@@ -517,6 +528,7 @@ def _write_batch(
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, "BigQuery batch write failed")
@@ -591,6 +603,7 @@ def _write_batch(
             kwargs["file_batch_idx"] = chunk_idx
             kwargs["total_chunks"] = total_chunks
             kwargs["job_id"] = job_id or ""
+            kwargs.update(source_handoff)
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
             extra = getattr(dest, "extra", {}) or {}
             kwargs["content_column"] = extra.get("content_column")
@@ -645,6 +658,7 @@ def _write_batch(
             file_batch_idx=chunk_idx,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -687,6 +701,10 @@ def _write_batch(
                 else None
             ),
         }
+        from connectors.engine_record_spill import spool_write_kinds
+
+        if dest_type in spool_write_kinds():
+            common.update(source_handoff)
         extra = writer_extra_kwargs(dest_type, cfg=cfg, dest=dest, common=common)
         if dest_type == "iceberg":
             # Iceberg full-refresh overwrite must truncate once per job, not per chunk.
