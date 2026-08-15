@@ -248,6 +248,165 @@ def test_dest_types_signature_detects_carrier_change():
     )
 
 
+def test_sqlite_finished_bundles_peak_and_fail_scan_does_not_write():
+    from connectors.sqlite_writer import (
+        _sqlite_scan_finished_bundles,
+        iter_sqlite_finished_bundles,
+    )
+
+    rows = [["1", "10"], ["2", "bad"], ["3", "30"]]
+    sizes: list[int] = []
+    for finished in iter_sqlite_finished_bundles(
+        headers=["id", "amount"],
+        data_rows=rows,
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+        ],
+        target_cols=["id", "amount"],
+        column_types={"id": "INTEGER", "amount": "INTEGER"},
+        dest_types={"id": "INTEGER", "amount": "INTEGER"},
+        tgt_types=["INTEGER", "INTEGER"],
+        policy="quarantine",
+        conflict_columns=None,
+        write_mode="insert",
+        materialize_batch=1,
+    ):
+        sizes.append(len(finished.dense_rows) + len(finished.sparse_rows))
+        del finished
+    assert max(sizes) <= 1
+
+    writes: list[int] = []
+    acc, source_row_count, _tgt = _sqlite_scan_finished_bundles(
+        headers=["id", "amount"],
+        data_rows=rows,
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+        ],
+        target_cols=["id", "amount"],
+        column_types={"id": "INTEGER", "amount": "INTEGER"},
+        dest_types={"id": "INTEGER", "amount": "INTEGER"},
+        tgt_types=["INTEGER", "INTEGER"],
+        policy="fail",
+        conflict_columns=None,
+        write_mode="insert",
+        materialize_batch=1,
+    )
+    assert source_row_count == 3
+    assert acc.abort_error("fail")
+    assert writes == []
+    assert acc.writing is False
+
+
+def test_sqlite_write_streams_without_concat_helper(tmp_path, monkeypatch):
+    from connectors import sqlite_writer as sw
+
+    calls: list[str] = []
+
+    def _boom(*_a, **_k):
+        calls.append("concat")
+        raise AssertionError("write loop must not concatenate the mapped image")
+
+    monkeypatch.setattr(sw, "_sqlite_materialize_mapped_batch", _boom)
+    monkeypatch.setattr(
+        "connectors.sql_write_materialize.build_mapped_rows_from_source",
+        _boom,
+    )
+    db = tmp_path / "stream.db"
+    result = sw.write_mapped_rows(
+        host="",
+        port=0,
+        database=str(db),
+        username="",
+        password="",
+        schema="main",
+        connection_string="",
+        ssl=False,
+        table_name="notes",
+        headers=["id", "note"],
+        data_rows=[["1", "a"], ["2", "b"], ["3", "c"]],
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+        ],
+        column_types={"id": "INTEGER", "note": "TEXT"},
+        create_table=True,
+        error_policy="quarantine",
+        dest_extra={"sql_materialize_batch": 1},
+    )
+    assert result.ok is True, result.error
+    assert result.rows_written == 3
+    assert calls == []
+
+
+def test_generic_sql_finished_bundles_in_bundle_lww_not_cross_bundle():
+    from connectors.generic_sql import iter_generic_sql_finished_bundles
+
+    rows = [["1", "first"], ["1", "second"], ["1", "third"]]
+    finished = list(
+        iter_generic_sql_finished_bundles(
+            headers=["id", "note"],
+            data_rows=rows,
+            mappings=[
+                {"source": "id", "target": "id"},
+                {"source": "note", "target": "note"},
+            ],
+            target_cols=["id", "note"],
+            column_types={"id": "TEXT", "note": "TEXT"},
+            dest_types={"id": "TEXT", "note": "TEXT"},
+            policy="quarantine",
+            conflict_columns=["id"],
+            write_mode="upsert",
+            dest_db="sqlite",
+            dialect_label="SQLite",
+            materialize_batch=2,
+        )
+    )
+    assert [row[1] for row in finished[0].dense_rows] == ["second"]
+    assert [row[1] for row in finished[1].dense_rows] == ["third"]
+
+
+def test_sf_and_bq_finished_bundles_peak_is_batch():
+    from connectors.bigquery_writer import iter_bq_finished_bundles
+    from connectors.snowflake_writer import iter_sf_finished_bundles
+
+    rows = [[str(i), f"n{i}"] for i in range(5)]
+    common = dict(
+        headers=["id", "note"],
+        data_rows=rows,
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "note", "target": "note"},
+        ],
+        target_cols=["id", "note"],
+        column_types={"id": "TEXT", "note": "TEXT"},
+        dest_types={"id": "TEXT", "note": "TEXT"},
+        policy="quarantine",
+        conflict_columns=None,
+        write_mode="insert",
+        materialize_batch=2,
+    )
+    sf_sizes = [
+        len(f.dense_rows)
+        for f in iter_sf_finished_bundles(
+            **common,
+            logical_types=["TEXT", "TEXT"],
+        )
+    ]
+    bq_sizes = [
+        len(f.dense_rows)
+        for f in iter_bq_finished_bundles(
+            **common,
+            decimal_target_types=["STRING", "STRING"],
+        )
+    ]
+    assert sf_sizes == [2, 2, 1]
+    assert bq_sizes == [2, 2, 1]
+    assert max(sf_sizes) <= 2
+    assert max(bq_sizes) <= 2
+
+
 def test_accumulator_fingerprints_match_iter_fingerprints():
     rows = [("1", "a"), ("2", "b")]
     acc = SqlWriteAccumulator(

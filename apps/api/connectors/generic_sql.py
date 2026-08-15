@@ -3960,6 +3960,355 @@ def _upsert_batch(
     return 0
 
 
+def _generic_sql_engine_label(dest_db: str) -> str:
+    return {
+        "databricks": "Databricks",
+        "duckdb": "DuckDB",
+        "clickhouse": "ClickHouse",
+        "trino": "Trino",
+        "presto": "Presto",
+        "athena": "Athena",
+        "synapse": "Synapse",
+        "motherduck": "MotherDuck",
+    }.get(dest_db, dest_db.title() if dest_db else "SQL")
+
+
+def _generic_sql_map_kwargs(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    policy: Any,
+    dest_kind: str,
+    destination_pk_columns: list[str] | None,
+    destination_column_nullability: Any,
+    records: list[dict[str, Any]] | None,
+    source_spool: Any,
+    extra: dict[str, Any] | None,
+    materialize_batch: int | None,
+) -> dict[str, Any]:
+    return {
+        "headers": headers,
+        "data_rows": data_rows,
+        "mappings": mappings,
+        "target_cols": target_cols,
+        "column_types": column_types,
+        "dest_types": dest_types,
+        "error_policy": policy,
+        "preserve_case": True,
+        "dest_kind": dest_kind,
+        "destination_pk_columns": list(destination_pk_columns or []) or None,
+        "destination_column_nullability": destination_column_nullability,
+        "records": records,
+        "source_spool": source_spool,
+        "extra": extra,
+        "batch_size": materialize_batch,
+    }
+
+
+def _generic_promote_oracle_empties(
+    finished: Any,
+    *,
+    write_mode: str,
+    conflict_columns: list[str] | None,
+    dest_db: str,
+) -> Any:
+    """Oracle VARCHAR2 ''→NULL on dense MERGE SET is a wipe — promote to sparse omit."""
+    _db = str(dest_db or "").strip().lower()
+    if not (
+        write_mode == "upsert"
+        and conflict_columns
+        and (_db in {"oracle", "oracledb", "oracle_autonomous"} or _db.startswith("oracle"))
+    ):
+        return finished
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    kept_dense: list[tuple] = []
+    kept_nums: list[int] = []
+    nums = list(finished.dense_row_numbers or [])
+    for i, row in enumerate(finished.dense_rows):
+        if any(isinstance(v, str) and v == "" for v in row):
+            finished.sparse_rows.append(
+                tuple(
+                    DF_MISSING_SENTINEL if (isinstance(v, str) and v == "") else v
+                    for v in row
+                )
+            )
+            if i < len(nums):
+                finished.sparse_row_numbers.append(nums[i])
+        else:
+            kept_dense.append(row)
+            if i < len(nums):
+                kept_nums.append(nums[i])
+    finished.dense_rows = kept_dense
+    finished.dense_row_numbers = kept_nums
+    return finished
+
+
+def _generic_finish_mapped_bundle(
+    bundle: Any,
+    *,
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    mappings: list,
+    dest_db: str,
+    dialect_label: str,
+    sa_col_types: dict[str, Any] | None = None,
+    dialect_name: str = "",
+    db_type: str = "",
+) -> Any:
+    """Quarantine + in-bundle dedupe + optional SA bind. Peak RAM is this bundle."""
+    from connectors.sql_write_materialize import finish_sql_mapped_bundle
+    from connectors.writer_common import (
+        combined_mapped_rows_for_checksum,
+        materialize_missing_as_null_for_dense_write,
+    )
+
+    target_types = [str(dest_types.get(c, "") or "") for c in target_cols]
+    finished = finish_sql_mapped_bundle(
+        bundle,
+        target_cols=target_cols,
+        target_types=target_types,
+        policy=policy,
+        dialect_label=dialect_label,
+        dest_db=dest_db or "",
+        mappings=mappings,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+    )
+    finished = _generic_promote_oracle_empties(
+        finished,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+        dest_db=dest_db,
+    )
+    if not (write_mode == "upsert" and conflict_columns):
+        finished.dense_rows = materialize_missing_as_null_for_dense_write(
+            finished.dense_rows
+        )
+    finished.dense_dicts: list[dict[str, Any]] = []
+    finished.sparse_dicts: list[dict[str, Any]] = []
+    if sa_col_types is not None:
+        oracle_omit = write_mode == "upsert" and (
+            dialect_name in {"oracle", "oracledb", "oracle_autonomous"}
+            or str(dialect_name).startswith("oracle")
+            or str(db_type or "").lower().startswith("oracle")
+        )
+        finished.dense_rows, finished.dense_dicts, finished.dense_row_numbers = (
+            _generic_bind_tuple_rows(
+                finished.dense_rows,
+                finished.dense_row_numbers,
+                target_cols=target_cols,
+                dest_types=dest_types,
+                sa_col_types=sa_col_types,
+                dialect_name=dialect_name,
+                db_type=db_type,
+                rejected_details=finished.rejected_details,
+                policy=policy,
+                mappings=mappings,
+            )
+        )
+        finished.sparse_rows, finished.sparse_dicts, finished.sparse_row_numbers = (
+            _generic_bind_tuple_rows(
+                finished.sparse_rows,
+                finished.sparse_row_numbers,
+                target_cols=target_cols,
+                dest_types=dest_types,
+                sa_col_types=sa_col_types,
+                dialect_name=dialect_name,
+                db_type=db_type,
+                rejected_details=finished.rejected_details,
+                policy=policy,
+                mappings=mappings,
+                sparse=True,
+                oracle_upsert_omit_empty=oracle_omit,
+            )
+        )
+    finished.checksum_rows = combined_mapped_rows_for_checksum(
+        finished.dense_rows, finished.sparse_rows
+    )
+    finished.target_types = target_types
+    return finished
+
+
+def _generic_bind_tuple_rows(
+    rows: list[tuple],
+    row_numbers: list[int] | None,
+    *,
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    sa_col_types: dict[str, Any],
+    dialect_name: str,
+    db_type: str,
+    rejected_details: list,
+    policy: Any,
+    mappings: list,
+    sparse: bool = False,
+    oracle_upsert_omit_empty: bool = False,
+) -> tuple[list[tuple], list[dict[str, Any]], list[int]]:
+    """Bind one bundle to SQLAlchemy cells. Surviving tuples stay for checksum."""
+    from connectors.writer_common import append_write_quarantine_detail
+    from services.value_serializer import (
+        DF_MISSING_SENTINEL,
+        cell_to_string,
+        is_missing_sentinel,
+    )
+
+    kept_rows: list[tuple] = []
+    kept_dicts: list[dict[str, Any]] = []
+    kept_nums: list[int] = []
+    nums = list(row_numbers or [])
+    for idx, row in enumerate(rows):
+        cells: dict[str, Any] = {}
+        hold_out = False
+        src_row = nums[idx] if idx < len(nums) else idx + 1
+        for i in range(len(target_cols)):
+            col = target_cols[i]
+            raw = row[i] if i < len(row) else None
+            if sparse and is_missing_sentinel(raw):
+                cells[col] = DF_MISSING_SENTINEL
+                continue
+            if (
+                sparse
+                and oracle_upsert_omit_empty
+                and isinstance(raw, str)
+                and raw == ""
+            ):
+                cells[col] = DF_MISSING_SENTINEL
+                continue
+            try:
+                cells[col] = _to_sa_value(
+                    raw,
+                    str(dest_types.get(col) or "string"),
+                    sa_col_types.get(col),
+                    dialect_name,
+                    db_type,
+                )
+            except ValueError as exc:
+                sample = cell_to_string(raw)[:120]
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": src_row,
+                        "column": col,
+                        "target": col,
+                        "value": sample,
+                        "reason": (
+                            f"generic SQL bind refused {sample!r}: {exc} "
+                            "— quarantined (refuse silent NULL invent)"
+                        ),
+                        "policy": (
+                            "coerce_null" if policy == "coerce_null" else "write_quarantine"
+                        ),
+                        "chars": [],
+                    },
+                    mapped_row=row,
+                    target_cols=target_cols,
+                    mappings=mappings,
+                )
+                if policy == "coerce_null":
+                    cells[col] = DF_MISSING_SENTINEL if sparse else None
+                else:
+                    hold_out = True
+                    break
+        if hold_out:
+            continue
+        kept_rows.append(row)
+        kept_dicts.append(cells)
+        kept_nums.append(src_row)
+    return kept_rows, kept_dicts, kept_nums
+
+
+def iter_generic_sql_finished_bundles(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    dest_db: str,
+    dialect_label: str | None = None,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
+    sa_col_types: dict[str, Any] | None = None,
+    dialect_name: str = "",
+    db_type: str = "",
+) -> Any:
+    from connectors.sql_write_materialize import iter_finished_sql_bundles
+
+    label = dialect_label or _generic_sql_engine_label(dest_db)
+
+    def _finish(bundle):
+        return _generic_finish_mapped_bundle(
+            bundle,
+            target_cols=target_cols,
+            dest_types=dest_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            write_mode=write_mode,
+            mappings=mappings,
+            dest_db=dest_db,
+            dialect_label=label,
+            sa_col_types=sa_col_types,
+            dialect_name=dialect_name,
+            db_type=db_type,
+        )
+
+    yield from iter_finished_sql_bundles(
+        finish=_finish,
+        **_generic_sql_map_kwargs(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            policy=policy,
+            dest_kind=str(dest_db or "sql").lower(),
+            destination_pk_columns=destination_pk_columns,
+            destination_column_nullability=destination_column_nullability,
+            records=records,
+            source_spool=source_spool,
+            extra=extra,
+            materialize_batch=materialize_batch,
+        ),
+    )
+
+
+def _generic_scan_finished_bundles(**kwargs: Any) -> Any:
+    from connectors.sql_write_materialize import SqlWriteAccumulator
+
+    dest_db = str(kwargs.get("dest_db") or "sql")
+    label = kwargs.get("dialect_label") or _generic_sql_engine_label(dest_db)
+    acc = SqlWriteAccumulator(
+        target_cols=kwargs["target_cols"],
+        dest_db_type=dest_db,
+        dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {},
+        dialect_label=label,
+    )
+    source_row_count = 0
+    for finished in iter_generic_sql_finished_bundles(**kwargs):
+        acc.note_rejects(finished.rejected_details, finished.transform_errors)
+        source_row_count = finished.source_row_count
+        del finished
+    acc.stop_writing()
+    return acc, source_row_count
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -4266,102 +4615,15 @@ def write_mapped_rows(
 
     policy = transform_error_policy(error_policy)
     # Engine-honest dialect labels (Databricks/Delta via generic_sql share this path).
-    _engine_label = {
-        "databricks": "Databricks",
-        "duckdb": "DuckDB",
-        "clickhouse": "ClickHouse",
-        "trino": "Trino",
-        "presto": "Presto",
-        "athena": "Athena",
-        "synapse": "Synapse",
-        "motherduck": "MotherDuck",
-    }.get(dest_db, dest_db.title() if dest_db else "SQL")
-    from connectors.writer_common import apply_write_quarantine_matrix
+    _engine_label = _generic_sql_engine_label(dest_db)
 
-    # Partial Studio: defer Map materialize + strict abort until live DDL
-    # rematerialize (empty→Map VARCHAR noise must not fail batches that succeed
-    # against physical carriers). Create-new already refused above.
-    mapped_rows: list[tuple] = []
+    # Partial Studio: defer Map + strict abort until live DDL is settled.
+    # Create-new already refused above. The write loop maps once after settle.
     transform_errors: list[str] = []
     rejected_details: list[dict] = []
-    sparse_rows: list[tuple] = []
-    rows_for_checksum: list[tuple] = []
     _tgt_types: list[str] = [
         str(target_column_types.get(c, "") or "") for c in target_cols
     ]
-    if not studio_err:
-        from connectors.sql_write_materialize import (
-            build_mapped_rows_from_source,
-            sql_source_from_writer,
-        )
-
-        _sql_src = sql_source_from_writer(
-            _kwargs,
-            _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
-        )
-        _mapped = build_mapped_rows_from_source(
-            headers=headers,
-            data_rows=data_rows,
-            records=_sql_src["records"],
-            source_spool=_sql_src.get("source_spool"),
-            extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
-            batch_size=_sql_src["materialize_batch"],
-            mappings=mappings,
-            target_cols=target_cols,
-            column_types=column_types,
-            error_policy=policy,
-            dest_types=target_column_types,
-            preserve_case=True,
-            dest_kind=str(dest_db or type or "sql").lower(),
-            # Upsert conflict cols / dest PK — full composite for quarantine replay identity.
-            destination_pk_columns=list(conflict_columns or []) or None,
-            destination_column_nullability=_kwargs.get(
-                "destination_column_nullability"
-            ),
-        )
-        mapped_rows = _mapped.mapped_rows
-        transform_errors = _mapped.transform_errors
-        rejected_details = _mapped.rejected_details
-        _tgt_types = [str(target_column_types.get(c, "") or "") for c in target_cols]
-        mapped_rows = apply_write_quarantine_matrix(
-            mapped_rows,
-            target_cols,
-            _tgt_types,
-            rejected_details,
-            policy,
-            dialect_label=_engine_label,
-            mappings=mappings,
-            dest_db=dest_db or "",
-        )
-        rows_for_checksum = list(mapped_rows)
-        if write_mode == "upsert" and conflict_columns:
-            mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-        # Dense INSERT/MERGE: absent schemaless fields → SQL NULL (sparse keeps sentinel).
-        mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
-
-        _map_abort = reject_on_strict_policy(
-            policy, rejected_details, "SQL", transform_errors
-        )
-        if _map_abort:
-            return WriteResult(
-                ok=False,
-                rows_written=0,
-                table_name=table_name,
-                target_schema=schema or database,
-                checksum="",
-                chunks_completed=0,
-                error=_map_abort
-                or f"Transform errors: {'; '.join(transform_errors[:3])}",
-                rejected_rows=_rejected_row_count(
-                    data_rows,
-                    mapped_rows,
-                    rejected_details,
-                    policy,
-                    sparse_rows=sparse_rows,
-                ),
-                rejected_details=rejected_details,
-                warnings=transform_errors,
-            )
 
     # Built after rematerialize when live carriers differ — see rebuild below.
     table_obj = _build_table_for_write(
@@ -4624,84 +4886,8 @@ def write_mapped_rows(
             _tgt_overlaid = [
                 str(target_column_types.get(c, "") or "") for c in target_cols
             ]
-            # Rematerialize when live carriers differ, or first Map pass was deferred
-            # under partial Studio (empty→VARCHAR noise must not own the batch).
-            need_remap = carriers_differ or (bool(studio_err) and not mapped_rows)
-            if need_remap:
-                # Rematerialize from source against live DDL — matrix-only on
-                # already-coerced Map cells still invents empty→NULL / polarity.
-                from connectors.sql_write_materialize import (
-                    build_mapped_rows_from_source,
-                    sql_source_from_writer,
-                )
-
-                _sql_src = sql_source_from_writer(
-                    _kwargs,
-                    _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
-                )
-                _mapped = build_mapped_rows_from_source(
-                    headers=headers,
-                    data_rows=data_rows,
-                    records=_sql_src["records"],
-                    source_spool=_sql_src.get("source_spool"),
-                    extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
-                    batch_size=_sql_src["materialize_batch"],
-                    mappings=mappings,
-                    target_cols=target_cols,
-                    column_types=column_types,
-                    error_policy=policy,
-                    dest_types=target_column_types,
-                    preserve_case=True,
-                    dest_kind=str(dest_db or type or "sql").lower(),
-                    destination_pk_columns=list(conflict_columns or []) or None,
-                    destination_column_nullability=_kwargs.get(
-                        "destination_column_nullability"
-                    ),
-                )
-                mapped_rows = _mapped.mapped_rows
-                transform_errors = _mapped.transform_errors
-                rejected_details = _mapped.rejected_details
-                mapped_rows = apply_write_quarantine_matrix(
-                    mapped_rows,
-                    target_cols,
-                    _tgt_overlaid,
-                    rejected_details,
-                    policy,
-                    dialect_label=_engine_label,
-                    mappings=mappings,
-                    dest_db=dest_db or "",
-                )
-                sparse_rows = []
-                if write_mode == "upsert" and conflict_columns:
-                    mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-                mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
-                rows_for_checksum = list(mapped_rows)
-            else:
-                # Re-quarantine on physical DDL — Map VARCHAR empties that survived
-                # pre-overlay must refuse against live DATE/INT/FLOAT/BOOL.
-                mapped_rows = apply_write_quarantine_matrix(
-                    mapped_rows,
-                    target_cols,
-                    _tgt_overlaid,
-                    rejected_details,
-                    policy,
-                    dialect_label=_engine_label,
-                    mappings=mappings,
-                    dest_db=dest_db or "",
-                )
-                if sparse_rows:
-                    sparse_rows = apply_write_quarantine_matrix(
-                        sparse_rows,
-                        target_cols,
-                        _tgt_overlaid,
-                        rejected_details,
-                        policy,
-                        dialect_label=_engine_label,
-                        mappings=mappings,
-                        dest_db=dest_db or "",
-                    )
-            # SQLAlchemy Column types must match post-rematerialize carriers —
-            # stale Map VARCHAR table_obj risks silent driver coercion.
+            # Settle live carriers now. The write loop maps once against this image.
+            need_remap = carriers_differ or bool(studio_err)
             if types_changed or need_remap:
                 table_obj = _build_table_for_write(
                     engine,
@@ -4712,56 +4898,7 @@ def write_mapped_rows(
                     db_type=cfg.get("type", ""),
                     conflict_columns=conflict_columns,
                 )
-            _late_abort = reject_on_strict_policy(
-                policy, rejected_details, "SQL", transform_errors
-            )
-            if _late_abort:
-                return WriteResult(
-                    ok=False,
-                    rows_written=0,
-                    table_name=table_name,
-                    target_schema=schema or database,
-                    checksum="",
-                    chunks_completed=0,
-                    error=_late_abort,
-                    rejected_rows=_rejected_row_count(
-                        data_rows,
-                        mapped_rows,
-                        rejected_details,
-                        policy,
-                        sparse_rows=sparse_rows,
-                    ),
-                    rejected_details=rejected_details,
-                    warnings=transform_errors,
-                )
-        # After typed empties are quarantined against physical DDL (when known):
-        # Oracle VARCHAR2 ''→NULL on dense MERGE SET is still a wipe — promote
-        # remaining string empties to DF_MISSING sparse omit (leave-alone).
-        _db = str(cfg.get("type") or dest_db or "").strip().lower()
-        if (
-            write_mode == "upsert"
-            and conflict_columns
-            and (
-                _db in {"oracle", "oracledb", "oracle_autonomous"}
-                or _db.startswith("oracle")
-            )
-        ):
-            from services.value_serializer import DF_MISSING_SENTINEL
-
-            kept_dense: list[tuple] = []
-            for row in mapped_rows:
-                if any(isinstance(v, str) and v == "" for v in row):
-                    sparse_rows.append(
-                        tuple(
-                            DF_MISSING_SENTINEL
-                            if (isinstance(v, str) and v == "")
-                            else v
-                            for v in row
-                        )
-                    )
-                else:
-                    kept_dense.append(row)
-            mapped_rows = kept_dense
+            _tgt_types = _tgt_overlaid
     except Exception:
         logger.debug(
             "generic_sql physical column introspection failed",
@@ -4828,142 +4965,94 @@ def write_mapped_rows(
         for col in target_cols
     }
 
-    converted_rows: list[dict] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells: dict[str, Any] = {}
-        hold_out = False
-        for i in range(len(target_cols)):
-            col = target_cols[i]
-            try:
-                cells[col] = _to_sa_value(
-                    row[i],
-                    str(target_column_types.get(col) or "string"),
-                    sa_col_types.get(col),
-                    dialect_name,
-                    cfg.get("type", ""),
-                )
-            except ValueError as exc:
-                from connectors.writer_common import append_write_quarantine_detail
-                from services.value_serializer import cell_to_string
-
-                sample = cell_to_string(row[i])[:120]
-                append_write_quarantine_detail(
-                    rejected_details,
-                    {
-                        "row": row_idx + 1,
-                        "column": col,
-                        "target": col,
-                        "value": sample,
-                        "reason": (
-                            f"generic SQL bind refused {sample!r}: {exc} "
-                            "— quarantined (refuse silent NULL invent)"
-                        ),
-                        "policy": (
-                            "coerce_null" if policy == "coerce_null" else "write_quarantine"
-                        ),
-                        "chars": [],
-                    },
-                    mapped_row=row,
-                    target_cols=target_cols,
-                    mappings=mappings,
-                )
-                if policy == "coerce_null":
-                    cells[col] = None
-                else:
-                    hold_out = True
-                    break
-        if hold_out:
-            continue
-        converted_rows.append(cells)
-    sparse_converted: list[dict] = []
-    oracle_upsert_omit_empty = (
-        write_mode == "upsert"
-        and (
-            dialect_name in {"oracle", "oracledb", "oracle_autonomous"}
-            or str(dialect_name).startswith("oracle")
-            or str(cfg.get("type") or "").lower().startswith("oracle")
-        )
+    from connectors.sql_write_materialize import (
+        SqlWriteAccumulator,
+        ensure_sql_source_spool,
+        sql_source_from_writer,
     )
-    for row_idx, row in enumerate(sparse_rows):
-        cells = {}
-        hold_out = False
-        for i in range(len(target_cols)):
-            col = target_cols[i]
-            from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
 
-            raw = row[i] if i < len(row) else None
-            if is_missing_sentinel(raw):
-                cells[col] = DF_MISSING_SENTINEL
-                continue
-            # Oracle VARCHAR2 ''→NULL on upsert is a destination wipe — omit
-            # from SET (leave-alone) instead of inventing NULL clear.
-            if (
-                oracle_upsert_omit_empty
-                and isinstance(raw, str)
-                and raw == ""
-            ):
-                cells[col] = DF_MISSING_SENTINEL
-                continue
-            try:
-                cells[col] = _to_sa_value(
-                    raw,
-                    str(target_column_types.get(col) or "string"),
-                    sa_col_types.get(col),
-                    dialect_name,
-                    cfg.get("type", ""),
-                )
-            except ValueError as exc:
-                from connectors.writer_common import append_write_quarantine_detail
-                from services.value_serializer import cell_to_string
-
-                sample = cell_to_string(raw)[:120]
-                append_write_quarantine_detail(
-                    rejected_details,
-                    {
-                        "row": row_idx + 1,
-                        "column": col,
-                        "target": col,
-                        "value": sample,
-                        "reason": (
-                            f"generic SQL bind refused {sample!r}: {exc} "
-                            "— quarantined (refuse silent NULL invent)"
-                        ),
-                        "policy": (
-                            "coerce_null" if policy == "coerce_null" else "write_quarantine"
-                        ),
-                        "chars": [],
-                    },
-                    mapped_row=row,
-                    target_cols=target_cols,
-                    mappings=mappings,
-                )
-                if policy == "coerce_null":
-                    cells[col] = DF_MISSING_SENTINEL
-                else:
-                    hold_out = True
-                    break
-        if hold_out:
-            continue
-        sparse_converted.append(cells)
-
-    _bind_abort = reject_on_strict_policy(
-        policy, rejected_details, "SQL", transform_errors
+    extra = (
+        _kwargs.get("dest_extra")
+        if isinstance(_kwargs.get("dest_extra"), dict)
+        else {}
     )
-    if _bind_abort:
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table_name,
-            target_schema=schema or database,
-            checksum="",
-            chunks_completed=0,
-            error=_bind_abort,
-            rejected_rows=_rejected_row_count(
-                data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
-            ),
-            rejected_details=rejected_details,
-            warnings=transform_errors,
+    _sql_src = sql_source_from_writer(_kwargs, extra)
+    spool, close_spool = ensure_sql_source_spool(
+        headers=headers,
+        data_rows=data_rows,
+        records=_sql_src["records"],
+        mappings=mappings,
+        extra=extra,
+        source_spool=_sql_src.get("source_spool"),
+        spill_max=_sql_src.get("source_spill_max"),
+    )
+    source_row_count = int(getattr(spool, "row_count", 0) or 0)
+
+    def _cleanup_spool() -> None:
+        nonlocal close_spool
+        if not close_spool:
+            return
+        close_spool = False
+        try:
+            spool.close()
+        except Exception:
+            logger.debug("generic sql source spool close skipped", exc_info=True)
+
+    write_acc = SqlWriteAccumulator(
+        target_cols=target_cols,
+        dest_db_type=str(dest_db or type or "sql").lower(),
+        dest_types=target_column_types if isinstance(target_column_types, dict) else {},
+        dialect_label=_engine_label,
+    )
+    _generic_finish_kwargs = dict(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=target_column_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        dest_db=str(dest_db or type or "sql").lower(),
+        dialect_label=_engine_label,
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        records=None,
+        source_spool=spool,
+        extra=extra,
+        materialize_batch=_sql_src["materialize_batch"],
+        sa_col_types=sa_col_types,
+        dialect_name=str(dialect_name or ""),
+        db_type=str(cfg.get("type") or ""),
+    )
+    if policy == "fail":
+        scan_acc, source_row_count = _generic_scan_finished_bundles(
+            **_generic_finish_kwargs
         )
+        rejected_details = list(scan_acc.rejected_details)
+        transform_errors = list(scan_acc.transform_errors)
+        _bind_abort = scan_acc.abort_error(policy)
+        if _bind_abort:
+            _cleanup_spool()
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=schema or database,
+                checksum="",
+                chunks_completed=0,
+                error=_bind_abort,
+                rejected_rows=_rejected_row_count(
+                    data_rows,
+                    [],
+                    rejected_details,
+                    policy,
+                    source_row_count=source_row_count or None,
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
 
     written = 0
     chunks_completed = 0
@@ -4994,6 +5083,7 @@ def write_mapped_rows(
                 reflection_cache.invalidate_table(engine, schema_name, table_name)
 
             if not table_exists and not create_table:
+                _cleanup_spool()
                 return WriteResult(
                     ok=False,
                     rows_written=0,
@@ -5237,215 +5327,227 @@ def write_mapped_rows(
                 target_cols=list(target_cols),
             )
 
-            if sparse_converted and write_mode == "upsert" and conflict_columns:
-                from connectors.writer_common import row_has_missing_sentinel
-
-                sparse_written, sparse_skipped, sparse_checksum = (
-                    _generic_apply_sparse_upsert(
-                        conn,
-                        table_obj,
-                        target_cols,
-                        conflict_columns,
-                        sparse_converted,
-                        dialect_name=str(
-                            dest_db
-                            or getattr(getattr(engine, "dialect", None), "name", "")
-                            or ""
-                        ).lower(),
-                        rejected_details=rejected_details,
-                        policy=policy,
-                    )
-                )
-                written += sparse_written
-                rows_skipped += sparse_skipped
-                rows_for_checksum = [
-                    r for r in rows_for_checksum if not row_has_missing_sentinel(r)
-                ] + list(sparse_checksum)
-                conn.commit()
-
-            total = len(converted_rows)
-            chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
-            # The ledger is only needed when a replay could duplicate rows. An
-            # upsert keyed on conflict columns is already idempotent, so paying
-            # for a ledger round-trip per chunk there would be pure overhead.
+            collect_map_details = policy != "fail"
+            writing = True
+            chunk_idx = 0
+            row_offset = 0
+            chunks = max(1, (source_row_count + CHUNK_SIZE - 1) // CHUNK_SIZE) if source_row_count else 0
             ledger_table = None
-            if ledger_job_id and total and not (write_mode == "upsert" and conflict_columns):
+            if ledger_job_id and source_row_count and not (
+                write_mode == "upsert" and conflict_columns
+            ):
                 ledger_table = ensure_sqlalchemy_write_ledger(conn, schema=schema_name)
                 if ledger_table is not None:
                     conn.commit()
                 else:
                     ledger_unavailable = True
-            for chunk_idx in range(chunks):
-                start = chunk_idx * CHUNK_SIZE
-                batch = converted_rows[start : start + CHUNK_SIZE]
-                if not batch:
-                    break
-
-                try:
-                    already = (
-                        sqlalchemy_chunk_rows_written(
-                            conn,
-                            ledger_table,
-                            job_id=ledger_job_id,
-                            batch_key=ledger_batch_key,
-                            chunk_idx=chunk_idx,
-                        )
-                        if ledger_table is not None
-                        else None
-                    )
-                    if already is not None:
-                        # A previous attempt already committed this chunk. Replay
-                        # its recorded row count instead of re-inserting the rows.
-                        written += already
-                        ledger_chunks_skipped += 1
-                        chunks_completed = chunk_idx + 1
-                        if on_checkpoint:
-                            on_checkpoint(chunks_completed, chunks, written)
-                        continue
-                    chunk_written = 0
-                    if write_mode == "upsert" and conflict_columns:
-                        chunk_written = _upsert_batch(
+            for finished in iter_generic_sql_finished_bundles(**_generic_finish_kwargs):
+                if collect_map_details:
+                    rejected_details.extend(finished.rejected_details)
+                    transform_errors.extend(finished.transform_errors)
+                if writing and reject_on_strict_policy(
+                    policy, rejected_details, "SQL", transform_errors
+                ):
+                    writing = False
+                    write_acc.stop_writing()
+                if not writing:
+                    del finished
+                    continue
+                sparse_converted = list(getattr(finished, "sparse_dicts", None) or [])
+                if sparse_converted and write_mode == "upsert" and conflict_columns:
+                    sparse_written, sparse_skipped, sparse_checksum = (
+                        _generic_apply_sparse_upsert(
                             conn,
                             table_obj,
-                            batch,
-                            conflict_columns,
                             target_cols,
-                            dialect_name,
+                            conflict_columns,
+                            sparse_converted,
+                            dialect_name=str(
+                                dest_db
+                                or getattr(getattr(engine, "dialect", None), "name", "")
+                                or ""
+                            ).lower(),
                             rejected_details=rejected_details,
                             policy=policy,
                         )
-                        if DF_LSN_COL in target_cols:
-                            rows_skipped += len(batch) - chunk_written
-                        else:
-                            chunk_written = len(batch)
-                    else:
-                        result = conn.execute(table_obj.insert(), batch)
-                        chunk_written = max(
-                            0, getattr(result, "rowcount", None) or 0
-                        ) or len(batch)
-                    if ledger_table is not None:
-                        mark_sqlalchemy_chunk_committed(
-                            conn,
-                            ledger_table,
-                            job_id=ledger_job_id,
-                            batch_key=ledger_batch_key,
-                            chunk_idx=chunk_idx,
-                            rows_written=chunk_written,
-                            row_start=start,
-                            row_end=start + max(chunk_written - 1, 0),
-                            attempt=1,
-                        )
+                    )
+                    written += sparse_written
+                    rows_skipped += sparse_skipped
+                    write_acc.add_accepted(list(sparse_checksum))
                     conn.commit()
-                    written += chunk_written
-                except Exception as chunk_exc:
+                dense_dicts = list(getattr(finished, "dense_dicts", None) or [])
+                for offset in range(0, len(dense_dicts), CHUNK_SIZE) if dense_dicts else []:
+                    batch = dense_dicts[offset : offset + CHUNK_SIZE]
+                    start = row_offset + offset
                     try:
-                        conn.rollback()
-                    except Exception as rollback_exc:
-                        logger.debug(
-                            "chunk rollback failed: %s",
-                            rollback_exc,
-                            exc_info=rollback_exc,
+                        already = (
+                            sqlalchemy_chunk_rows_written(
+                                conn,
+                                ledger_table,
+                                job_id=ledger_job_id,
+                                batch_key=ledger_batch_key,
+                                chunk_idx=chunk_idx,
+                            )
+                            if ledger_table is not None
+                            else None
                         )
-                    # One bad temporal/numeric cell must not abort the whole chunk:
-                    # quarantine unfit rows (same contract as MySQL/Postgres writers).
-                    if is_sql_data_error(chunk_exc) and policy in {
-                        "quarantine",
-                        "coerce_null",
-                    }:
+                        if already is not None:
+                            written += already
+                            ledger_chunks_skipped += 1
+                            chunks_completed = chunk_idx + 1
+                            if on_checkpoint:
+                                on_checkpoint(
+                                    chunks_completed, max(chunks, chunk_idx + 1), written
+                                )
+                            chunk_idx += 1
+                            continue
                         chunk_written = 0
-                        for row_i, row in enumerate(batch):
-                            try:
-                                if write_mode == "upsert" and conflict_columns:
-                                    row_written = _upsert_batch(
-                                        conn,
-                                        table_obj,
-                                        [row],
-                                        conflict_columns,
-                                        target_cols,
-                                        dialect_name,
-                                        rejected_details=rejected_details,
-                                        policy=policy,
-                                    )
-                                    if DF_LSN_COL in target_cols:
-                                        if not row_written:
-                                            rows_skipped += 1
-                                    else:
-                                        row_written = 1
-                                else:
-                                    result = conn.execute(table_obj.insert(), [row])
-                                    row_written = 1 if getattr(result, "rowcount", None) is None else (max(0, result.rowcount or 0) or 1)
-                                conn.commit()
-                                chunk_written += row_written
-                            except Exception as row_exc:
-                                try:
-                                    conn.rollback()
-                                except Exception as rollback_exc:
-                                    logger.debug(
-                                        "row rollback failed: %s",
-                                        rollback_exc,
-                                        exc_info=rollback_exc,
-                                    )
-                                if not is_sql_data_error(row_exc):
-                                    raise
-                                col_name = extract_column_from_sql_error(row_exc) or "*"
-                                sample_val = ""
-                                if col_name != "*" and col_name in row:
-                                    sample_val = str(row.get(col_name, ""))[:120]
-                                from connectors.writer_common import (
-                                    append_write_quarantine_detail,
-                                )
-
-                                append_write_quarantine_detail(
-                                    rejected_details,
-                                    {
-                                        "row": start + row_i,
-                                        "column": col_name,
-                                        "value": sample_val,
-                                        "reason": str(row_exc)[:300],
-                                        "policy": policy,
-                                    },
-                                    mapped_row=row,
-                                    target_cols=target_cols,
-                                    mappings=mappings,
-                                )
-                                transform_errors.append(str(row_exc)[:200])
+                        if write_mode == "upsert" and conflict_columns:
+                            chunk_written = _upsert_batch(
+                                conn,
+                                table_obj,
+                                batch,
+                                conflict_columns,
+                                target_cols,
+                                dialect_name,
+                                rejected_details=rejected_details,
+                                policy=policy,
+                            )
+                            if DF_LSN_COL in target_cols:
+                                rows_skipped += len(batch) - chunk_written
+                            else:
+                                chunk_written = len(batch)
+                        else:
+                            result = conn.execute(table_obj.insert(), batch)
+                            chunk_written = max(
+                                0, getattr(result, "rowcount", None) or 0
+                            ) or len(batch)
                         if ledger_table is not None:
-                            # Row-by-row salvage already committed the good rows.
-                            # Record the surviving count so a retry skips them
-                            # instead of duplicating them, and so it does not
-                            # re-attempt the rows we know are unfit.
-                            try:
-                                mark_sqlalchemy_chunk_committed(
-                                    conn,
-                                    ledger_table,
-                                    job_id=ledger_job_id,
-                                    batch_key=ledger_batch_key,
-                                    chunk_idx=chunk_idx,
-                                    rows_written=chunk_written,
-                                    row_start=start,
-                                    row_end=start + max(chunk_written - 1, 0),
-                                    attempt=1,
-                                )
-                                conn.commit()
-                            except Exception as ledger_exc:
-                                try:
-                                    conn.rollback()
-                                except Exception:
-                                    pass
-                                logger.warning(
-                                    "write ledger update failed for chunk %s: %s",
-                                    chunk_idx,
-                                    ledger_exc,
-                                )
+                            mark_sqlalchemy_chunk_committed(
+                                conn,
+                                ledger_table,
+                                job_id=ledger_job_id,
+                                batch_key=ledger_batch_key,
+                                chunk_idx=chunk_idx,
+                                rows_written=chunk_written,
+                                row_start=start,
+                                row_end=start + max(chunk_written - 1, 0),
+                                attempt=1,
+                            )
+                        conn.commit()
                         written += chunk_written
-                    elif policy == "fail" or not is_sql_data_error(chunk_exc):
-                        raise
-                    else:
-                        # Unknown policy: fail closed — do not land partial bad batch.
-                        raise
-                chunks_completed = chunk_idx + 1
-                if on_checkpoint:
-                    on_checkpoint(chunks_completed, chunks, written)
+                    except Exception as chunk_exc:
+                        try:
+                            conn.rollback()
+                        except Exception as rollback_exc:
+                            logger.debug(
+                                "chunk rollback failed: %s",
+                                rollback_exc,
+                                exc_info=rollback_exc,
+                            )
+                        if is_sql_data_error(chunk_exc) and policy in {
+                            "quarantine",
+                            "coerce_null",
+                        }:
+                            chunk_written = 0
+                            for row_i, row in enumerate(batch):
+                                try:
+                                    if write_mode == "upsert" and conflict_columns:
+                                        row_written = _upsert_batch(
+                                            conn,
+                                            table_obj,
+                                            [row],
+                                            conflict_columns,
+                                            target_cols,
+                                            dialect_name,
+                                            rejected_details=rejected_details,
+                                            policy=policy,
+                                        )
+                                        if DF_LSN_COL in target_cols:
+                                            if not row_written:
+                                                rows_skipped += 1
+                                        else:
+                                            row_written = 1
+                                    else:
+                                        result = conn.execute(table_obj.insert(), [row])
+                                        row_written = (
+                                            1
+                                            if getattr(result, "rowcount", None) is None
+                                            else (max(0, result.rowcount or 0) or 1)
+                                        )
+                                    conn.commit()
+                                    chunk_written += row_written
+                                except Exception as row_exc:
+                                    try:
+                                        conn.rollback()
+                                    except Exception as rollback_exc:
+                                        logger.debug(
+                                            "row rollback failed: %s",
+                                            rollback_exc,
+                                            exc_info=rollback_exc,
+                                        )
+                                    if not is_sql_data_error(row_exc):
+                                        raise
+                                    col_name = extract_column_from_sql_error(row_exc) or "*"
+                                    sample_val = ""
+                                    if col_name != "*" and col_name in row:
+                                        sample_val = str(row.get(col_name, ""))[:120]
+                                    from connectors.writer_common import (
+                                        append_write_quarantine_detail,
+                                    )
+
+                                    append_write_quarantine_detail(
+                                        rejected_details,
+                                        {
+                                            "row": start + row_i,
+                                            "column": col_name,
+                                            "value": sample_val,
+                                            "reason": str(row_exc)[:300],
+                                            "policy": policy,
+                                        },
+                                        mapped_row=row,
+                                        target_cols=target_cols,
+                                        mappings=mappings,
+                                    )
+                                    transform_errors.append(str(row_exc)[:200])
+                            if ledger_table is not None:
+                                try:
+                                    mark_sqlalchemy_chunk_committed(
+                                        conn,
+                                        ledger_table,
+                                        job_id=ledger_job_id,
+                                        batch_key=ledger_batch_key,
+                                        chunk_idx=chunk_idx,
+                                        rows_written=chunk_written,
+                                        row_start=start,
+                                        row_end=start + max(chunk_written - 1, 0),
+                                        attempt=1,
+                                    )
+                                    conn.commit()
+                                except Exception as ledger_exc:
+                                    try:
+                                        conn.rollback()
+                                    except Exception:
+                                        pass
+                                    logger.warning(
+                                        "write ledger update failed for chunk %s: %s",
+                                        chunk_idx,
+                                        ledger_exc,
+                                    )
+                            written += chunk_written
+                        elif policy == "fail" or not is_sql_data_error(chunk_exc):
+                            raise
+                        else:
+                            raise
+                    chunks_completed = chunk_idx + 1
+                    if on_checkpoint:
+                        on_checkpoint(
+                            chunks_completed, max(chunks, chunk_idx + 1), written
+                        )
+                    chunk_idx += 1
+                write_acc.add_accepted(list(finished.dense_rows))
+                row_offset += len(dense_dicts)
+                del finished
 
             if identity_session is not None:
                 identity_session.close()
@@ -5486,7 +5588,11 @@ def write_mapped_rows(
                 error="; ".join(child_flush.get("errors") or ["child table flush failed"]),
                 rejected_rows=max(
                     _rejected_row_count(
-                        data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+                        data_rows,
+                        [()] * write_acc.accepted_row_count,
+                        rejected_details,
+                        policy,
+                        source_row_count=source_row_count or None,
                     ),
                     len(data_rows) - written - rows_skipped if data_rows else 0,
                 ),
@@ -5515,7 +5621,11 @@ def write_mapped_rows(
                 error=_final_abort,
                 rejected_rows=max(
                     _rejected_row_count(
-                        data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+                        data_rows,
+                        [()] * write_acc.accepted_row_count,
+                        rejected_details,
+                        policy,
+                        source_row_count=source_row_count or None,
                     ),
                     len(data_rows) - written - rows_skipped if data_rows else 0,
                 ),
@@ -5526,22 +5636,26 @@ def write_mapped_rows(
             )
 
         fid_report = _kwargs.get("_schema_fidelity_report")
+        meta_out = write_acc.gate8_meta(conflict_columns=conflict_columns or None)
+        if isinstance(fid_report, dict):
+            meta_out = dict(meta_out or {})
+            meta_out["schema_fidelity"] = fid_report
+        _cleanup_spool()
         return WriteResult(
             ok=True,
             rows_written=written,
             table_name=table_name,
             target_schema=schema or database,
-            checksum=row_checksum(
-                rows_for_checksum,
-                target_cols,
-                dest_db_type=str(cfg.get("type") or "generic_sql"),
-                dest_types=target_column_types,
-            ),
-            meta=({"schema_fidelity": fid_report} if isinstance(fid_report, dict) else {}),
+            checksum=write_acc.digest(),
+            meta=meta_out,
             chunks_completed=chunks_completed or chunks,
             rejected_rows=max(
                 _rejected_row_count(
-                    data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+                    data_rows,
+                    [()] * write_acc.accepted_row_count,
+                    rejected_details,
+                    policy,
+                    source_row_count=source_row_count or None,
                 ),
                 len(data_rows) - written - rows_skipped if data_rows else 0,
             ),
@@ -5551,23 +5665,23 @@ def write_mapped_rows(
             warnings=transform_errors,
         )
     except Exception as exc:
+        cleanup = locals().get("_cleanup_spool")
+        if callable(cleanup):
+            cleanup()
         return WriteResult(
             ok=False,
             rows_written=written,
             table_name=table_name,
             target_schema=schema or database,
-            checksum=row_checksum(
-                rows_for_checksum,
-                target_cols,
-                dest_db_type=str(cfg.get("type") or "generic_sql"),
-                dest_types=target_column_types,
-            )
-            if rows_for_checksum
-            else "",
+            checksum=write_acc.digest() if write_acc.accepted_row_count else "",
             chunks_completed=chunks_completed,
             error=str(exc),
             rejected_rows=_rejected_row_count(
-                data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+                data_rows,
+                [()] * write_acc.accepted_row_count,
+                rejected_details,
+                policy,
+                source_row_count=source_row_count or None,
             ),
             rejected_details=rejected_details,
             rows_skipped=rows_skipped,
@@ -5579,4 +5693,7 @@ def write_mapped_rows(
         # owed on every exit — success, early return, or exception.
         if identity_session is not None:
             identity_session.close()
+        cleanup = locals().get("_cleanup_spool")
+        if callable(cleanup):
+            cleanup()
         release_engine(engine)

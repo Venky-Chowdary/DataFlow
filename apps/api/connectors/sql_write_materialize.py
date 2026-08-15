@@ -22,15 +22,16 @@ This module is the single algorithm:
 5. ``fail`` / FAIL_JOB scan every bundle, collect every reject, then refuse
    the primary write — never INSERT a prefix and abort after commit.
 
-Honesty: dialect write loops that still call ``build_mapped_rows_from_source``
-concatenate the mapped image (retain contract for unit tests and writers
-not yet on the stream). PostgreSQL/Redshift and MySQL ``write_mapped_rows``
-iterate finished bundles after live DDL is settled and drop each bundle
-after COPY/INSERT. Engine ``records`` are spilled before this module runs
-when the adapter passed ``source_spool``. This is not a source-file stream
-and not exactly-once. CDC default remains at-least-once upsert. Cross-bundle
-duplicate PKs land via ON CONFLICT / dest LSN — we do not invent a forward
-seen-set that drops the later row. Catalog tiles ≠ transfer-live.
+Honesty: ``build_mapped_rows_from_source`` concatenates the mapped image
+(retain contract for unit tests). Production ``write_mapped_rows`` for
+PostgreSQL/Redshift, MySQL, SQLite, Snowflake, BigQuery, and generic SQL
+iterates finished bundles after live DDL is settled and drops each bundle
+after COPY/INSERT/MERGE. Engine ``records`` are spilled before this module
+runs when the adapter passed ``source_spool``. This is not a source-file
+stream and not exactly-once. CDC default remains at-least-once upsert.
+Cross-bundle duplicate PKs land via ON CONFLICT / dest LSN — we do not
+invent a forward seen-set that drops the later row. Catalog tiles ≠
+transfer-live.
 """
 
 from __future__ import annotations
