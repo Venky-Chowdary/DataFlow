@@ -30,7 +30,6 @@ from connectors.writer_common import (
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
     bind_sql_mapped_rows_with_quarantine,
-    build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
     materialize_missing_as_null_for_dense_write,
@@ -41,7 +40,6 @@ from connectors.writer_common import (
     quote_sql_identifier,
     resolve_target_columns,
     row_checksum,
-    sample_values_by_source_from_batch,
     sanitize_identifier,
     snowflake_lsn_match_predicate,
     sparse_present_bindings,
@@ -80,6 +78,7 @@ class _SfMaterializedBatch:
     target_types: list[str]
     dest_types: dict[str, str]
     rows_for_checksum: list[tuple]
+    source_row_count: int = 0
 
 
 def _sf_materialize_mapped_batch(
@@ -98,8 +97,15 @@ def _sf_materialize_mapped_batch(
     destination_pk_columns: list[str] | None = None,
     destination_column_nullability: Any = None,
     allow_logical_fallback: bool = True,
+    records: list[dict[str, Any]] | None = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
 ) -> _SfMaterializedBatch:
-    """Map + quarantine against ``dest_types`` (call again after live DDL overlay)."""
+    """Map + quarantine against ``dest_types`` (call again after live DDL overlay).
+
+    STRUCT flatten/explode streams through ``SourceRowSpool``.
+    """
+    from connectors.sql_write_materialize import build_mapped_rows_from_source
     from connectors.writer_common import (
         normalize_temporal_cells,
         quarantine_currency_markers_into_numeric,
@@ -116,9 +122,12 @@ def _sf_materialize_mapped_batch(
         quarantine_unfit_years,
     )
 
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+    _mapped = build_mapped_rows_from_source(
         headers=headers,
         data_rows=data_rows,
+        records=records,
+        extra=extra,
+        batch_size=materialize_batch,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
@@ -128,6 +137,10 @@ def _sf_materialize_mapped_batch(
         destination_pk_columns=list(destination_pk_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
     )
+    mapped_rows = _mapped.mapped_rows
+    transform_errors = _mapped.transform_errors
+    rejected_details = _mapped.rejected_details
+    source_row_count = _mapped.source_row_count
     sized_logical: list[str] = []
     for i, c in enumerate(target_cols):
         carrier = str(dest_types.get(c) or "").strip()
@@ -219,6 +232,7 @@ def _sf_materialize_mapped_batch(
         target_types=target_types,
         dest_types=dict(dest_types),
         rows_for_checksum=list(mapped_rows),
+        source_row_count=source_row_count,
     )
 
 
@@ -237,6 +251,9 @@ def _sf_rematerialize_if_physical_differs(
     write_mode: str,
     destination_column_nullability: Any = None,
     force_remap: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
 ) -> _SfMaterializedBatch | None:
     """Rebuild from source when live DDL carriers differ from Map stamps.
 
@@ -270,6 +287,9 @@ def _sf_rematerialize_if_physical_differs(
         live_dest_types=physical,
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
+        records=records,
+        extra=extra,
+        materialize_batch=materialize_batch,
     )
 
 
@@ -1041,6 +1061,12 @@ def write_mapped_rows(
 ) -> WriteResult:
     dest_nullability = _kwargs.get("destination_column_nullability")
     live_dest_types = _kwargs.get("destination_column_types")
+    from connectors.sql_write_materialize import sql_source_from_writer
+
+    _sql_extra = (
+        _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+    )
+    _sql_src = sql_source_from_writer(_kwargs, _sql_extra)
     del port, ssl, _kwargs
     from connectors.writer_common import resolve_writer_backfill
 
@@ -1097,7 +1123,11 @@ def write_mapped_rows(
             load_method="stub",
         )
 
-    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    from connectors.sql_write_materialize import sample_sql_source_values
+
+    batch_samples = sample_sql_source_values(
+        headers, data_rows, mappings, records=_sql_src["records"]
+    )
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
@@ -1160,6 +1190,9 @@ def write_mapped_rows(
             destination_pk_columns=list(conflict_columns or []) or None,
             destination_column_nullability=dest_nullability,
             allow_logical_fallback=True,
+            records=_sql_src["records"],
+            extra=_sql_extra,
+            materialize_batch=_sql_src["materialize_batch"],
         )
         mapped_rows = _batch.mapped_rows
         transform_errors = _batch.transform_errors
@@ -1500,6 +1533,9 @@ def write_mapped_rows(
                     write_mode=write_mode,
                     destination_column_nullability=dest_nullability,
                     force_remap=_force_remap,
+                    records=_sql_src["records"],
+                    extra=_sql_extra,
+                    materialize_batch=_sql_src["materialize_batch"],
                 )
                 if _re is not None:
                     dest_types = _re.dest_types
@@ -1641,6 +1677,9 @@ def write_mapped_rows(
                     write_mode=write_mode,
                     destination_column_nullability=dest_nullability,
                     force_remap=_force_remap,
+                    records=_sql_src["records"],
+                    extra=_sql_extra,
+                    materialize_batch=_sql_src["materialize_batch"],
                 )
                 if _re is not None:
                     dest_types = _re.dest_types

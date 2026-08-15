@@ -204,7 +204,8 @@ def iter_struct_materialized_rows(
 
     Header discovery still samples the first 50 rows (same as the list form).
     Explode yields one child row at a time — a 20k × 256 array cannot become
-    a 5.1M-row Python list. SQL writers that need a list call
+    a 5.1M-row Python list. Warehouse and object-store writers stream this
+    iterator through ``SourceRowSpool``. Callers that still need a list use
     :func:`materialize_struct_policies`.
     """
     from collections.abc import Iterator
@@ -314,8 +315,10 @@ def materialize_struct_policies(
     - ``explode_rows``: duplicate parent row per array element (capped).
     Parent JSON blob is always kept on flatten so nothing is silently dropped.
 
-    Object-store materialize uses :func:`iter_struct_materialized_rows` so the
-    expanded matrix is never retained. This list form stays for SQL writers.
+    Object-store and SQL/warehouse materialize use
+    :func:`iter_struct_materialized_rows` via ``SourceRowSpool`` so the
+    expanded matrix is never retained. This list form stays for callers
+    that still need a materialized matrix (tests, non-writer paths).
     """
     policies = struct_policies_from_mappings(mappings)
     if not policies or not headers:

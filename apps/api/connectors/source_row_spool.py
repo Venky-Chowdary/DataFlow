@@ -1,8 +1,9 @@
-"""Disk-backed source-row spool for object-store materialize.
+"""Disk-backed source-row spool for object-store and SQL/warehouse materialize.
 
 The engine still holds the current chunk's ``records`` (that contract does
 not change). This module removes the *second* full matrix — ``records_to_matrix``
-plus STRUCT explode/flatten — from the S3/GCS/ADLS/SFTP/Email path.
+plus STRUCT explode/flatten — from S3/GCS/ADLS/SFTP/Email and from
+PostgreSQL/Redshift/MySQL/Snowflake/BigQuery/SQLite/generic SQL.
 
 Algorithm (Spark external spill / Beam bundle):
 

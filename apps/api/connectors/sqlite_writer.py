@@ -27,7 +27,6 @@ from connectors.writer_common import (
     _rejected_row_count,
     apply_write_quarantine_matrix,
     bind_sql_mapped_rows_with_quarantine,
-    build_mapped_rows_with_details,
     filter_stale_lsn_rows,
     gate8_writer_meta,
     quote_sql_identifier,
@@ -522,9 +521,11 @@ def write_mapped_rows(
             error="SQLite path is required (database or connection_string).",
         )
 
-    from connectors.writer_common import sample_values_by_source_from_batch
+    from connectors.sql_write_materialize import sample_sql_source_values
 
-    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    batch_samples = sample_sql_source_values(
+        headers, data_rows, mappings, records=_kwargs.get("records") if isinstance(_kwargs.get("records"), list) else None
+    )
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
@@ -646,24 +647,37 @@ def write_mapped_rows(
             )
 
         if not studio_err:
-            mapped_rows, transform_errors, rejected_details = (
-                build_mapped_rows_with_details(
-                    headers=headers,
-                    data_rows=data_rows,
-                    mappings=mappings,
-                    target_cols=target_cols,
-                    column_types=column_types,
-                    dest_types=dest_types,
-                    error_policy=policy,
-                    preserve_case=True,
-                    dest_kind="sqlite",
-                    destination_pk_columns=list(conflict_columns or []) or None,
-                    destination_column_nullability=_kwargs.get(
-                        "destination_column_nullability"
-                    ),
-                    empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
-                )
+            from connectors.sql_write_materialize import (
+                build_mapped_rows_from_source,
+                sql_source_from_writer,
             )
+
+            _sql_src = sql_source_from_writer(
+                _kwargs,
+                _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+            )
+            _mapped = build_mapped_rows_from_source(
+                headers=headers,
+                data_rows=data_rows,
+                records=_sql_src["records"],
+                extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+                batch_size=_sql_src["materialize_batch"],
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                dest_types=dest_types,
+                error_policy=policy,
+                preserve_case=True,
+                dest_kind="sqlite",
+                destination_pk_columns=list(conflict_columns or []) or None,
+                destination_column_nullability=_kwargs.get(
+                    "destination_column_nullability"
+                ),
+                empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+            )
+            mapped_rows = _mapped.mapped_rows
+            transform_errors = _mapped.transform_errors
+            rejected_details = _mapped.rejected_details
             # Shared quarantine matrix — SQLite is PRODUCTION_SKU; never skip fit
             # checks that generic_sql / Postgres / BQ run (silent truncate / invent).
             mapped_rows = apply_write_quarantine_matrix(
@@ -843,24 +857,37 @@ def write_mapped_rows(
                         dest_types[c] = carrier
                     tgt_types.append(carrier)
                     target_types.append(sqlite_type(carrier) if carrier else "")
-                mapped_rows, transform_errors, rejected_details = (
-                    build_mapped_rows_with_details(
-                        headers=headers,
-                        data_rows=data_rows,
-                        mappings=mappings,
-                        target_cols=target_cols,
-                        column_types=column_types,
-                        dest_types=dest_types,
-                        error_policy=policy,
-                        preserve_case=True,
-                        dest_kind="sqlite",
-                        destination_pk_columns=list(conflict_columns or []) or None,
-                        destination_column_nullability=_kwargs.get(
-                            "destination_column_nullability"
-                        ),
-                        empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
-                    )
+                from connectors.sql_write_materialize import (
+                    build_mapped_rows_from_source,
+                    sql_source_from_writer,
                 )
+
+                _sql_src = sql_source_from_writer(
+                    _kwargs,
+                    _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+                )
+                _mapped = build_mapped_rows_from_source(
+                    headers=headers,
+                    data_rows=data_rows,
+                    records=_sql_src["records"],
+                    extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+                    batch_size=_sql_src["materialize_batch"],
+                    mappings=mappings,
+                    target_cols=target_cols,
+                    column_types=column_types,
+                    dest_types=dest_types,
+                    error_policy=policy,
+                    preserve_case=True,
+                    dest_kind="sqlite",
+                    destination_pk_columns=list(conflict_columns or []) or None,
+                    destination_column_nullability=_kwargs.get(
+                        "destination_column_nullability"
+                    ),
+                    empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+                )
+                mapped_rows = _mapped.mapped_rows
+                transform_errors = _mapped.transform_errors
+                rejected_details = _mapped.rejected_details
                 mapped_rows = apply_write_quarantine_matrix(
                     mapped_rows,
                     target_cols,

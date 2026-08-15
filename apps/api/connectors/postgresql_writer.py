@@ -40,7 +40,6 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
-    build_mapped_rows_with_details,
     flush_normalized_child_batches,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn,
@@ -841,6 +840,7 @@ class _PgMaterializedBatch:
     target_types: list[str]
     bind_types: list[str]
     rows_for_checksum: list[tuple]
+    source_row_count: int = 0
 
 
 def _pg_materialize_mapped_batch(
@@ -860,21 +860,33 @@ def _pg_materialize_mapped_batch(
     destination_column_nullability: Any = None,
     allow_logical_fallback: bool = True,
     empty_cells_as_null: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
 ) -> _PgMaterializedBatch:
     """Build mapped rows against ``dest_types`` then quarantine/bind.
 
-    Call again after live DDL overlay so Map stamps cannot coerce before
-    physical types win (BQ-class reorder — existing-table invent cliff).
+    STRUCT flatten/explode streams through ``SourceRowSpool`` — never
+    ``materialize_struct_policies`` (the 5.1M-row list form). Call again
+    after live DDL overlay so Map stamps cannot coerce before physical
+    types win (BQ-class reorder — existing-table invent cliff).
     """
+    from connectors.sql_write_materialize import build_mapped_rows_from_source
+
     target_types = []
     for i, c in enumerate(target_cols):
         carrier = str(dest_types.get(c) or "").strip()
         if not carrier and allow_logical_fallback:
             carrier = str(logical_types[i] if i < len(logical_types) else "").strip()
         target_types.append(pg_type(carrier, engine=engine) if carrier else "")
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+    _mapped = build_mapped_rows_from_source(
         headers=headers,
         data_rows=data_rows,
+        records=records,
+        source_spool=source_spool,
+        extra=extra,
+        batch_size=materialize_batch,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
@@ -886,6 +898,10 @@ def _pg_materialize_mapped_batch(
         destination_column_nullability=destination_column_nullability,
         empty_cells_as_null=bool(empty_cells_as_null),
     )
+    mapped_rows = _mapped.mapped_rows
+    transform_errors = _mapped.transform_errors
+    rejected_details = _mapped.rejected_details
+    source_row_count = _mapped.source_row_count
     mapped_rows = quarantine_currency_markers_into_numeric(
         mapped_rows, target_cols, target_types, rejected_details, policy
     )
@@ -1048,6 +1064,7 @@ def _pg_materialize_mapped_batch(
         target_types=target_types,
         bind_types=bind_types,
         rows_for_checksum=rows_for_checksum,
+        source_row_count=source_row_count,
     )
 
 
@@ -1343,8 +1360,11 @@ def write_mapped_rows(
                 error=require_driver("psycopg2", "psycopg2-binary"),
                 driver="none",
             )
+        _stub_rows = data_rows
+        if not _stub_rows and isinstance(_kwargs.get("records"), list):
+            _stub_rows = [list(r.values()) for r in _kwargs["records"]]
         rows, checksum, chunks = simulate_stub_write(
-            data_rows=data_rows, table_name=table_name, target_schema=schema or "public",
+            data_rows=_stub_rows, table_name=table_name, target_schema=schema or "public",
             on_checkpoint=on_checkpoint,
         )
         return WriteResult(
@@ -1354,9 +1374,18 @@ def write_mapped_rows(
 
     from psycopg2 import sql
 
-    from connectors.writer_common import sample_values_by_source_from_batch
+    from connectors.sql_write_materialize import (
+        sample_sql_source_values,
+        sql_source_from_writer,
+    )
 
-    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    _sql_src = sql_source_from_writer(
+        _kwargs,
+        _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+    )
+    batch_samples = sample_sql_source_values(
+        headers, data_rows, mappings, records=_sql_src["records"]
+    )
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
@@ -1440,6 +1469,7 @@ def write_mapped_rows(
     rows_for_checksum: list = []
     rejected_rows = 0
     coerced_null_rows = 0
+    source_row_count = 0
     # Strict-policy abort withheld from the Map-projected pass until live DDL
     # either confirms it or rematerializes it away.
     deferred_map_abort: str | None = None
@@ -1461,6 +1491,9 @@ def write_mapped_rows(
             destination_column_nullability=_kwargs.get("destination_column_nullability"),
             allow_logical_fallback=True,
             empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+            records=_sql_src["records"],
+            extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+            materialize_batch=_sql_src["materialize_batch"],
         )
         mapped_rows = _batch.mapped_rows
         sparse_rows = _batch.sparse_rows
@@ -1469,9 +1502,15 @@ def write_mapped_rows(
         target_types = _batch.target_types
         bind_types = _batch.bind_types
         rows_for_checksum = _batch.rows_for_checksum
+        source_row_count = _batch.source_row_count
 
         rejected_rows = _rejected_row_count(
-            data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+            data_rows,
+            mapped_rows,
+            rejected_details,
+            policy,
+            sparse_rows=sparse_rows,
+            source_row_count=source_row_count or None,
         )
         coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
         _map_abort = reject_on_strict_policy(
@@ -2119,6 +2158,9 @@ def write_mapped_rows(
                             "destination_column_nullability"
                         ),
                         empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+                        records=_sql_src["records"],
+                        extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+                        materialize_batch=_sql_src["materialize_batch"],
                     )
                     mapped_rows = _batch.mapped_rows
                     sparse_rows = _batch.sparse_rows
@@ -2127,6 +2169,7 @@ def write_mapped_rows(
                     target_types = _batch.target_types
                     bind_types = _batch.bind_types
                     rows_for_checksum = _batch.rows_for_checksum
+                    source_row_count = _batch.source_row_count
                     total = len(mapped_rows)
                     chunks = (
                         max(1, (total + chunk_size - 1) // chunk_size) if total else 0
@@ -2137,6 +2180,7 @@ def write_mapped_rows(
                         rejected_details,
                         policy,
                         sparse_rows=sparse_rows,
+                        source_row_count=source_row_count or None,
                     )
                     coerced_null_rows = _coerced_null_row_count(
                         rejected_details, policy
@@ -2524,7 +2568,7 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=chunks_completed or chunks,
                 error=child_flush_error,
-                rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+                rejected_rows=max(rejected_rows, (source_row_count or len(data_rows)) - written - rows_skipped),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
@@ -2541,7 +2585,7 @@ def write_mapped_rows(
                 checksum="",
                 chunks_completed=chunks_completed or chunks,
                 error=_final_abort,
-                rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+                rejected_rows=max(rejected_rows, (source_row_count or len(data_rows)) - written - rows_skipped),
                 rejected_details=rejected_details,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
@@ -2574,7 +2618,7 @@ def write_mapped_rows(
                 dest_types={c: target_types[i] for i, c in enumerate(target_cols)},
             ),
             chunks_completed=chunks_completed or chunks,
-            rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+            rejected_rows=max(rejected_rows, (source_row_count or len(data_rows)) - written - rows_skipped),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,

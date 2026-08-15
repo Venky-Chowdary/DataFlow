@@ -18,7 +18,6 @@ from connectors.writer_common import (
     assert_sparse_upsert_has_pk,
     bind_rows_keeping_numbers,
     bind_sql_mapped_rows_with_quarantine,
-    build_mapped_rows_with_details,
     dedupe_rows,
     dedupe_rows_by_pk_and_lsn_keeping_numbers,
     null_safe_merge_on,
@@ -623,9 +622,11 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    from connectors.writer_common import sample_values_by_source_from_batch
+    from connectors.sql_write_materialize import sample_sql_source_values
 
-    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    batch_samples = sample_sql_source_values(
+        headers, data_rows, mappings, records=_kwargs.get("records") if isinstance(_kwargs.get("records"), list) else None
+    )
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
@@ -965,9 +966,21 @@ def write_mapped_rows(
             for i, col in enumerate(target_cols)
         ]
 
-        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        from connectors.sql_write_materialize import (
+            build_mapped_rows_from_source,
+            sql_source_from_writer,
+        )
+
+        _sql_src = sql_source_from_writer(
+            _kwargs,
+            _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+        )
+        _mapped = build_mapped_rows_from_source(
             headers=headers,
             data_rows=data_rows,
+            records=_sql_src["records"],
+            extra=_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {},
+            batch_size=_sql_src["materialize_batch"],
             mappings=mappings,
             target_cols=target_cols,
             column_types=column_types,
@@ -977,6 +990,9 @@ def write_mapped_rows(
             destination_pk_columns=list(conflict_columns or []) or None,
             destination_column_nullability=dest_nullability,
         )
+        mapped_rows = _mapped.mapped_rows
+        transform_errors = _mapped.transform_errors
+        rejected_details = _mapped.rejected_details
         # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
         if physical_schema is None:
             try:

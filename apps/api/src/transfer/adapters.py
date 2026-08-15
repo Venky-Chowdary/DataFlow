@@ -1459,10 +1459,13 @@ def _write_destination_database(
     )
 
     from connectors.source_row_spool import OBJECT_STORE_WRITE_KINDS
+    from connectors.sql_write_materialize import SQL_SPOOL_WRITE_KINDS
 
-    # Object-store writers ingest records through SourceRowSpool — do not
-    # build a second full matrix here (STRUCT explode would copy again).
-    if db_type in OBJECT_STORE_WRITE_KINDS:
+    # Object-store and SQL/warehouse writers ingest records through
+    # SourceRowSpool — do not build a second full matrix here (STRUCT
+    # explode would copy again).
+    _spool_kinds = OBJECT_STORE_WRITE_KINDS | SQL_SPOOL_WRITE_KINDS
+    if db_type in _spool_kinds:
         headers = columns or (list(records[0].keys()) if records else [])
         data_rows: list[list[Any]] = []
     else:
@@ -1520,7 +1523,7 @@ def _write_destination_database(
         "table_name": table_name,
         "headers": headers,
         "data_rows": data_rows,
-        "records": records if db_type in OBJECT_STORE_WRITE_KINDS else None,
+        "records": records if db_type in _spool_kinds else None,
         "mappings": mappings,
         "column_types": column_types,
         "on_checkpoint": on_checkpoint,
