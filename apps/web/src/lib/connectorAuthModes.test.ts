@@ -39,6 +39,25 @@ describe("connector auth modes", () => {
     assert.match(String(host?.hint || ""), /404/i);
   });
 
+  it("rejects the Salesforce yourorg placeholder host", () => {
+    assert.match(
+      String(
+        validateConnectorPayload(
+          "salesforce",
+          { host: "https://yourorg.my.salesforce.com", apiKey: "00Dxx" },
+          "api_key",
+        ) || "",
+      ),
+      /yourorg|instance url/i,
+    );
+  });
+
+  it("gives file formats a file-path mode so Test cannot skip a path", () => {
+    for (const type of ["csv", "parquet", "avro", "pdf", "docx", "html"]) {
+      assert.equal(getAuthModes(type).some((m) => m.value === "file_path"), true, type);
+    }
+  });
+
   it("rejects empty required secrets instead of sending them to the driver", () => {
     assert.equal(
       validateConnectorPayload("postgresql", { host: "db.example", port: 5432, username: "u" }, "user_pass"),

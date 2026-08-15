@@ -24,6 +24,26 @@ _KNOWN_AUTH_MODES = frozenset({
 })
 
 
+SALESFORCE_PLACEHOLDER_HOST_MSG = (
+    "That Salesforce host is a form placeholder, not your org. "
+    "Paste your My Domain instance URL (https://<org>.my.salesforce.com) — "
+    "not yourorg.my.salesforce.com and not login.salesforce.com."
+)
+
+_SALESFORCE_PLACEHOLDER_HOSTS = frozenset({
+    "yourorg.my.salesforce.com",
+    "login.salesforce.com",
+})
+
+
+def _salesforce_placeholder_host(host: str) -> str | None:
+    raw = (host or "").strip().lower().rstrip("/")
+    raw = raw.removeprefix("https://").removeprefix("http://")
+    if raw in _SALESFORCE_PLACEHOLDER_HOSTS:
+        return SALESFORCE_PLACEHOLDER_HOST_MSG
+    return None
+
+
 def _snowflake_placeholder_host(host: str) -> str | None:
     from connectors.snowflake_conn import (
         SNOWFLAKE_PLACEHOLDER_HOST_MSG,
@@ -122,6 +142,10 @@ def validate_probe_auth(
             return "API key is required."
         if not host:
             return "Host is required for API key authentication."
+        if driver == "salesforce":
+            placeholder = _salesforce_placeholder_host(host)
+            if placeholder:
+                return placeholder
         return None
 
     if mode == "aws_keys":
@@ -164,6 +188,10 @@ def validate_probe_auth(
     if mode == "user_pass":
         if driver == "snowflake":
             placeholder = _snowflake_placeholder_host(host)
+            if placeholder:
+                return placeholder
+        if driver == "salesforce":
+            placeholder = _salesforce_placeholder_host(host)
             if placeholder:
                 return placeholder
         path_based = driver in _PATH_BASED

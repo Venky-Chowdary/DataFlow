@@ -733,8 +733,12 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         }
         if (resolved === "salesforce") {
           const h = String(fmt(values, "host") || "").toLowerCase();
-          if (h.includes("login.salesforce.com") || h.includes("test.salesforce.com")) {
-            return "Use your org instance URL (*.my.salesforce.com), not login.salesforce.com.";
+          if (
+            h.includes("login.salesforce.com") ||
+            h.includes("test.salesforce.com") ||
+            h.includes("yourorg.my.salesforce.com")
+          ) {
+            return "Use your org instance URL (*.my.salesforce.com), not login.salesforce.com or the yourorg placeholder.";
           }
         }
         if (resolved === "weaviate" || resolved === "milvus") {
@@ -785,7 +789,7 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
-  if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved)) return "file_path";
+  if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml", "pdf", "docx", "html"].includes(resolved)) return "file_path";
   return "user_pass";
 }
 

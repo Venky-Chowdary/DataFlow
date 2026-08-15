@@ -138,28 +138,18 @@ class TransferRequest(BaseModel):
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest):
     """Test a connector configuration before saving"""
-    from ..transfer.connector_registry import humanize_connection_error
+    from ..transfer.connector_capabilities import file_source_types
+    from ..transfer.connector_registry import humanize_connection_error, probe_file_source
 
     try:
-        if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
-            path = (request.connection_string or request.host or "").strip()
-            if path:
-                if "://" in path:
-                    return {
-                        "success": True,
-                        "message": f"{request.type.upper()} file source configured — data will be read from the provided URL or object-store URI.",
-                        "details": {"format": request.type, "mode": "file_source", "path": path},
-                    }
-                if not os.path.exists(path):
-                    return {
-                        "success": False,
-                        "message": f"Path not found: {path}. Create the directory or mount the volume before running.",
-                        "details": {"format": request.type, "mode": "file_source", "path": path},
-                    }
+
+        if (request.type or "").lower() in file_source_types():
+            path = (request.connection_string or request.host or request.database or "").strip()
+            ok, msg = probe_file_source(request.type or "", path)
             return {
-                "success": True,
-                "message": f"{request.type.upper()} file format supported — upload a sample file or provide a file path to validate parsing",
-                "details": {"format": request.type, "mode": "file_source"},
+                "success": ok,
+                "message": msg,
+                "details": {"format": request.type, "mode": "file_source", "path": path},
             }
 
         driver = resolve_driver_type(request.type)

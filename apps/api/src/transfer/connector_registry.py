@@ -7,11 +7,12 @@ duplicating driver→module maps.
 from __future__ import annotations
 
 import inspect
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
 
-from .connector_capabilities import _DRIVER_CAPS, default_port
+from .connector_capabilities import _DRIVER_CAPS, default_port, file_source_types
 
 
 @dataclass(frozen=True)
@@ -271,11 +272,77 @@ def assert_registry_matches_capabilities() -> None:
         raise RuntimeError(f"Registry drift — missing={missing}, extra={extra}")
 
 
+_OPERATOR_COPY_PREFIXES = (
+    "authentication failed",
+    "api authentication failed",
+    "snowflake ",
+    "that account host is a form placeholder",
+    "that is a snowflake account host",
+    "that salesforce host is a form placeholder",
+    "connector driver is not installed",
+    "host not found",
+    "cannot reach the host",
+    "cannot reach this railway",
+    "cannot reach the railway",
+    "railway private hostname",
+    "connection timed out",
+    "connection failed:",
+    "connection failed on railway",
+    "tls certificate",
+    "the server refused the tls",
+    "ssl/tls error",
+    "the connection string format is invalid",
+    "sftp authentication failed",
+    "sftp path not found",
+    "smtp authentication failed",
+    "email recipient is invalid",
+    "file or path not found",
+    "destination or resource not found",
+    "object storage connection failed",
+    "dynamodb connection failed",
+    "redis authentication failed",
+    "elasticsearch connection failed",
+    "database is locked",
+    "azure authentication failed",
+    "gcs authentication failed",
+    "gcs bucket not found",
+    "container not found",
+    "bigquery connection failed",
+    "this driver does not accept",
+    "needs a file path",
+    "path not found:",
+    "uri recorded",
+    "readable —",
+    "catalog support is not",
+)
+
+
+def _already_operator_copy(raw: str) -> bool:
+    text = (raw or "").strip().lower()
+    if not text:
+        return False
+    return any(text.startswith(prefix) for prefix in _OPERATOR_COPY_PREFIXES)
+
+
+def _with_cause(message: str, raw: str) -> str:
+    """Keep the driver code visible — never replace 250001/28000 with a slogan."""
+    snippet = " ".join(str(raw or "").strip().split())
+    if len(snippet) > 220:
+        snippet = snippet[:217] + "..."
+    if not snippet or snippet.lower() in message.lower():
+        return message
+    if _already_operator_copy(snippet):
+        return message
+    return f"{message} Driver: {snippet}"
+
+
 def humanize_connection_error(driver: str, raw: Any) -> str:
     """Convert low-level driver/connection errors into user-friendly messages."""
-    text = str(raw).lower()
+    raw_s = str(raw).strip()
+    if _already_operator_copy(raw_s):
+        return raw_s
+    text = raw_s.lower()
     driver = (driver or "").lower()
-    raw_s = str(raw)
 
     # Railway private DNS — guidance depends on whether THIS API is on Railway.
     if ".railway.internal" in text:
@@ -367,28 +434,42 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
         if driver in ("salesforce", "hubspot", "stripe", "rest_api"):
-            return "API authentication failed. Check the host/URL, API token/key, required scopes, and that the token is active."
+            return _with_cause(
+                "API authentication failed. Check the host/URL, API token/key, required scopes, and that the token is active.",
+                raw_s,
+            )
         if driver == "mongodb":
-            return (
+            return _with_cause(
                 "Authentication failed. Check the username/password and the Auth source field. "
-                "Use admin if the user is defined in the admin database, or the database name if the user is defined there."
+                "Use admin if the user is defined in the admin database, or the database name if the user is defined there.",
+                raw_s,
             )
         if driver == "snowflake":
             # Already-classified copy contains "password" / "login" — do not wrap
             # a 250001 as MFA. Keep the raw driver text.
-            return (
-                f"Snowflake refused this login. {raw_s.strip()} "
+            return _with_cause(
+                "Snowflake refused this login. "
                 "If this is a 250001, the host was reached — check username and password. "
                 "Use Programmatic access token or Key-pair only when Snowflake returns "
-                "an MFA / authentication-policy code (390195, 394508, 394504)."
+                "an MFA / authentication-policy code (390195, 394508, 394504).",
+                raw_s,
             )
         if driver == "bigquery":
-            return "Authentication failed. Check the service account JSON, project ID, and that the account has BigQuery permissions."
+            return _with_cause(
+                "Authentication failed. Check the service account JSON, project ID, and that the account has BigQuery permissions.",
+                raw_s,
+            )
         if driver in ("s3", "gcs", "adls"):
-            return "Authentication failed. Check access keys / service account, region, bucket/container, and permissions."
+            return _with_cause(
+                "Authentication failed. Check access keys / service account, region, bucket/container, and permissions.",
+                raw_s,
+            )
         if driver in ("postgresql", "mysql", "redshift", "mariadb", "generic_sql"):
-            return "Authentication failed. Check username, password, database, and that the user can log in from this host."
-        return "Authentication failed. Check username, password, and permissions."
+            return _with_cause(
+                "Authentication failed. Check username, password, database, and that the user can log in from this host.",
+                raw_s,
+            )
+        return _with_cause("Authentication failed. Check username, password, and permissions.", raw_s)
 
     # DNS / host unknown
     if re.search(r"name or service not known|nodename|getaddrinfo|dns|unknown host|cannot resolve|not known", text):
@@ -513,8 +594,44 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     return f"Connection failed: {raw}"
 
 
+def probe_file_source(fmt: str, path: str) -> tuple[bool, str]:
+    """Honest file Test — catalog support is not a successful connection."""
+    kind = (fmt or "").strip().lower()
+    location = (path or "").strip()
+    label = (kind or "file").upper()
+    if kind not in file_source_types():
+        return False, f"No file-source probe for {label}."
+    if not location:
+        return False, (
+            f"{label} needs a file path or object-store URI before Test can prove a read. "
+            "Catalog support is not a successful connection."
+        )
+    if "://" in location:
+        return False, (
+            f"{label} URI recorded. Test does not download remote objects — "
+            "that would claim Connected without a read. Use Transfer Validate to prove the file."
+        )
+    if not os.path.exists(location):
+        return False, f"Path not found: {location}. Create the file or mount the volume before Test."
+    try:
+        from .file_stream import peek_file_source
+
+        columns, _schema, total, _sample = peek_file_source(location, os.path.basename(location))
+        n_cols = len(columns or [])
+        return True, f"{label} readable — {int(total or 0)} rows, {n_cols} columns."
+    except Exception as exc:
+        return False, humanize_connection_error(kind, exc)
+
+
 def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     """Execute connectivity probe for a driver using resolved config."""
+    try:
+        return _run_probe_impl(db_type, cfg)
+    except Exception as exc:
+        return False, humanize_connection_error((db_type or "").lower(), exc)
+
+
+def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     import importlib
 
     from services.connector_auth import engine_login_role

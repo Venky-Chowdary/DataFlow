@@ -71,6 +71,11 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "html": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
 }
 
+
+def file_source_types() -> FrozenSet[str]:
+    """Catalog ids that are file sources — Test must not claim Connected without a path."""
+    return frozenset(_FILE_CAPS)
+
 # Catalog marketplace id → driver / format type
 CATALOG_ID_ALIASES: dict[str, str] = {
     "csv___tsv": "csv",

@@ -38,7 +38,10 @@ interface ConnectorModalProps {
 }
 
 function isFileFormat(type: string): boolean {
-  return ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(type);
+  return [
+    "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel",
+    "avro", "orc", "xml", "pdf", "docx", "html",
+  ].includes(type);
 }
 
 function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMode {
