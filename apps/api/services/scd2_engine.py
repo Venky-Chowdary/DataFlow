@@ -4,6 +4,18 @@ An SCD2 sync keeps a full history of every version of a row.  Each change to a
 non-key attribute closes the previous version (valid_to + is_current=False) and
 inserts a new current version (valid_from + is_current=True).  Re-running the
 same source snapshot produces no new rows.
+
+Source image (Fivetran / Airbyte incremental-deduped history / dbt snapshot
+check strategy): hash non-SCD attributes, expire the current version when
+the hash changes, insert a new current row. ``DF_MISSING`` hydrates from
+the live current version so STOP_COLUMN cannot invent NULL history.
+
+The source population is the shared ``SourceRowSpool`` — not
+``records_to_matrix``. Map + write-quarantine + PK identity run per
+bundle. ``apply_scd2`` fail-scans every reject, then merges one bundle
+at a time (same two-pass contract as stream SCD2). Peak mapped RAM is
+one bundle, not the full dict list. Not exactly-once. CDC default
+remains at-least-once upsert. Catalog tiles ≠ transfer-live.
 """
 
 from __future__ import annotations
@@ -341,37 +353,24 @@ def _active_checksum(
     )
 
 
-def prepare_scd2_mapped_rows(
+def _scd2_map_context(
     endpoint: Any,
-    records: list[dict[str, Any]],
     columns: list[str],
     schema: dict[str, str] | None,
     mappings: list[dict[str, Any]] | None,
     conflict_columns: list[str],
     *,
-    validation_mode: str = "strict",
+    validation_mode: str,
 ) -> dict[str, Any]:
-    """Map + PK-validate SCD2 rows without writing history.
-
-    Used for stream preflight (abort before any batch commits) and by
-    ``apply_scd2`` before merge. Returns ``ok=False`` when FAIL_JOB / strict
-    policy blocks a partial history write.
-    """
+    """Shared Map / dest-type / policy facts for prepare and apply."""
     from connectors.writer_common import (
-        apply_write_quarantine_matrix,
-        build_mapped_rows_with_details,
-        reject_on_strict_policy,
         sanitize_identifier,
-        transform_error_policy,
         transform_error_policy_for_validation_mode,
     )
-    from services.value_serializer import is_missing_sentinel
-    from src.transfer.adapters import records_to_matrix
     from src.transfer.connector_capabilities import resolve_driver_type
 
     if not conflict_columns:
         raise ValueError("SCD2 sync requires a primary key / conflict column")
-
     pk_columns = [c for c in conflict_columns if c]
     if not pk_columns:
         raise ValueError("SCD2 sync requires a primary key / conflict column")
@@ -390,66 +389,47 @@ def prepare_scd2_mapped_rows(
         dest_types[tgt] = stamped
         if tgt_raw != tgt:
             dest_types.pop(tgt_raw, None)
-    error_policy = transform_error_policy_for_validation_mode(validation_mode)
-    dest_kind = resolve_driver_type(getattr(endpoint, "format", "") or "")
+    return {
+        "pk_columns": pk_columns,
+        "target_cols": target_cols,
+        "effective_mappings": effective_mappings,
+        "dest_types": dest_types,
+        "target_types": [str(dest_types.get(c) or "") for c in target_cols],
+        "error_policy": transform_error_policy_for_validation_mode(validation_mode),
+        "dest_kind": resolve_driver_type(getattr(endpoint, "format", "") or ""),
+        "dest_nullability": dict(
+            (getattr(endpoint, "extra", None) or {}).get("schema_nullability") or {}
+        ),
+        "schema": schema or {},
+        "extra": (
+            getattr(endpoint, "extra", None)
+            if isinstance(getattr(endpoint, "extra", None), dict)
+            else {}
+        ),
+    }
 
-    _, data_rows = records_to_matrix(records, columns)
-    dest_nullability = dict(
-        (getattr(endpoint, "extra", None) or {}).get("schema_nullability") or {}
-    )
-    mapped_tuples, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=columns,
-        data_rows=data_rows,
-        mappings=effective_mappings,
-        target_cols=target_cols,
-        column_types=schema or {},
-        dest_types=dest_types,
-        error_policy=error_policy,
-        preserve_case=True,
-        dest_kind=dest_kind,
-        destination_pk_columns=list(pk_columns),
-        destination_column_nullability=dest_nullability,
-    )
-    # Same write-quarantine matrix as typed SQL writers — SCD2 history must not
-    # absorb VARCHAR/DECIMAL/temporal overflow that preflight samples missed.
-    target_types = [str(dest_types.get(c) or "") for c in target_cols]
-    if mapped_tuples and any(t.strip() for t in target_types):
-        policy = transform_error_policy(error_policy)
-        mapped_tuples = apply_write_quarantine_matrix(
-            mapped_tuples,
-            target_cols,
-            target_types,
-            rejected_details,
-            policy,
-            dialect_label=(dest_kind or "SCD2").strip() or "SCD2",
-            mappings=list(effective_mappings) or None,
-        )
-    # Keep DF_MISSING through prepare — apply_scd2 hydrates from the current
-    # version before hash/history insert (STOP_COLUMN must not invent NULL history).
-    abort = reject_on_strict_policy(error_policy, rejected_details, "SCD2")
-    if abort:
-        return {
-            "ok": False,
-            "error": abort,
-            "mapped_rows": [],
-            "primary_key_columns": pk_columns,
-            "target_columns": target_cols,
-            "rejected_details": list(rejected_details),
-            "rejected_rows": len(rejected_details),
-            "transform_errors": list(transform_errors)[:20],
-            "error_policy": error_policy,
-        }
 
-    mapped_rows: list[dict[str, Any]] = [dict(zip(target_cols, row)) for row in mapped_tuples]
+def _pk_validate_mapped_rows(
+    mapped_rows: list[dict[str, Any]],
+    pk_columns: list[str],
+    rejected_details: list[dict[str, Any]],
+    *,
+    row_numbers: list[int] | None = None,
+) -> list[dict[str, Any]]:
+    """Empty / DF_MISSING PK identity quarantines — never a silent skip."""
+    from services.value_serializer import is_missing_sentinel
 
-    # Empty PK identity must quarantine before history merge — never silent skip.
     pk_ok_rows: list[dict[str, Any]] = []
     for row_idx, row in enumerate(mapped_rows):
-        # DF_MISSING on a PK component is incomplete identity.
+        row_no = (
+            int(row_numbers[row_idx])
+            if row_numbers is not None and row_idx < len(row_numbers)
+            else row_idx + 1
+        )
         if any(is_missing_sentinel(row.get(c)) for c in pk_columns):
             rejected_details.append(
                 {
-                    "row": row_idx + 1,
+                    "row": row_no,
                     "column": ",".join(pk_columns),
                     "target": ",".join(pk_columns),
                     "value": "",
@@ -468,11 +448,10 @@ def prepare_scd2_mapped_rows(
                 parts.append("")
             else:
                 parts.append(str(raw).strip())
-        # Any blank PK component is incomplete identity (including composites).
         if not key or any(p == "" for p in parts):
             rejected_details.append(
                 {
-                    "row": row_idx + 1,
+                    "row": row_no,
                     "column": ",".join(pk_columns),
                     "target": ",".join(pk_columns),
                     "value": "",
@@ -483,11 +462,152 @@ def prepare_scd2_mapped_rows(
             )
             continue
         pk_ok_rows.append(row)
-    abort_pk = reject_on_strict_policy(error_policy, rejected_details, "SCD2")
-    if abort_pk:
+    return pk_ok_rows
+
+
+def _finish_scd2_map_bundle(
+    bundle: Any,
+    ctx: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Quarantine + PK-validate one mapped bundle. No last-write-wins drop."""
+    from connectors.writer_common import (
+        apply_write_quarantine_matrix_keeping_numbers,
+        transform_error_policy,
+    )
+
+    target_cols = list(ctx["target_cols"])
+    details = list(bundle.rejected_details)
+    errors = list(bundle.transform_errors)
+    mapped = list(bundle.mapped_rows)
+    nums = list(bundle.accepted_source_rows or [])
+    target_types = list(ctx["target_types"])
+    if mapped and any(t.strip() for t in target_types):
+        policy = transform_error_policy(ctx["error_policy"])
+        mapped, nums = apply_write_quarantine_matrix_keeping_numbers(
+            mapped,
+            target_cols,
+            target_types,
+            details,
+            policy,
+            dialect_label=(ctx["dest_kind"] or "SCD2").strip() or "SCD2",
+            mappings=list(ctx["effective_mappings"]) or None,
+            dest_db=str(ctx["dest_kind"] or ""),
+            source_row_numbers=nums or None,
+        )
+    dicts = [dict(zip(target_cols, row)) for row in mapped]
+    pk_ok = _pk_validate_mapped_rows(
+        dicts, list(ctx["pk_columns"]), details, row_numbers=nums or None
+    )
+    return pk_ok, details, errors
+
+
+def iter_scd2_prepared_bundles(
+    *,
+    columns: list[str],
+    ctx: dict[str, Any],
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    batch_size: int = 1_000,
+):
+    """Yield ``(pk_ok_rows, rejected_details, transform_errors)`` per spool bundle.
+
+    Reuses ``iter_mapped_bundles_from_source``. Does not last-write-wins
+    inside the bundle — SCD2 merge applies every PK-ok arrival in order
+    (intra-batch hash update after insert).
+    """
+    from connectors.sql_write_materialize import iter_mapped_bundles_from_source
+
+    for bundle in iter_mapped_bundles_from_source(
+        headers=columns,
+        mappings=ctx["effective_mappings"],
+        target_cols=list(ctx["target_cols"]),
+        column_types=ctx["schema"],
+        dest_types=ctx["dest_types"],
+        error_policy=ctx["error_policy"],
+        preserve_case=True,
+        dest_kind=ctx["dest_kind"],
+        destination_pk_columns=list(ctx["pk_columns"]),
+        destination_column_nullability=ctx["dest_nullability"],
+        records=None if source_spool is not None else records,
+        source_spool=source_spool,
+        extra=ctx.get("extra") or {},
+        batch_size=batch_size,
+    ):
+        pk_ok, details, errors = _finish_scd2_map_bundle(bundle, ctx)
+        yield pk_ok, details, errors
+        del bundle, pk_ok
+
+
+def prepare_scd2_mapped_rows(
+    endpoint: Any,
+    records: list[dict[str, Any]],
+    columns: list[str],
+    schema: dict[str, str] | None,
+    mappings: list[dict[str, Any]] | None,
+    conflict_columns: list[str],
+    *,
+    validation_mode: str = "strict",
+    source_spool: Any = None,
+    clear_records: bool = False,
+    retain_mapped: bool = True,
+    batch_size: int = 1_000,
+) -> dict[str, Any]:
+    """Map + PK-validate SCD2 rows without writing history.
+
+    Used for stream preflight (abort before any batch commits). Returns
+    ``ok=False`` when FAIL_JOB / strict policy blocks a partial history
+    write. Source cells come from the shared spool — never
+    ``records_to_matrix``. ``retain_mapped=False`` keeps only reject
+    details (apply's fail-scan). Hash is finalized in ``apply_scd2``
+    after DF_MISSING hydrate from the current version.
+    """
+    from connectors.sql_write_materialize import ensure_sql_source_spool
+    from connectors.writer_common import reject_on_strict_policy
+
+    ctx = _scd2_map_context(
+        endpoint,
+        columns,
+        schema,
+        mappings,
+        conflict_columns,
+        validation_mode=validation_mode,
+    )
+    pk_columns = list(ctx["pk_columns"])
+    target_cols = list(ctx["target_cols"])
+    error_policy = ctx["error_policy"]
+    spool, close_spool = ensure_sql_source_spool(
+        headers=columns,
+        records=None if source_spool is not None else records,
+        mappings=ctx["effective_mappings"],
+        extra=ctx.get("extra") or {},
+        source_spool=source_spool,
+    )
+    if clear_records and records is not None:
+        records.clear()
+    rejected_details: list[dict[str, Any]] = []
+    transform_errors: list[str] = []
+    pk_ok_rows: list[dict[str, Any]] = []
+    try:
+        for pk_ok, details, errors in iter_scd2_prepared_bundles(
+            columns=columns,
+            ctx=ctx,
+            source_spool=spool,
+            batch_size=batch_size,
+        ):
+            rejected_details.extend(details)
+            transform_errors.extend(errors)
+            if retain_mapped:
+                pk_ok_rows.extend(pk_ok)
+            del pk_ok
+    finally:
+        if close_spool:
+            spool.close()
+
+    abort = reject_on_strict_policy(error_policy, rejected_details, "SCD2")
+    if abort:
         return {
             "ok": False,
-            "error": abort_pk,
+            "error": abort,
             "mapped_rows": [],
             "primary_key_columns": pk_columns,
             "target_columns": target_cols,
@@ -497,7 +617,6 @@ def prepare_scd2_mapped_rows(
             "error_policy": error_policy,
         }
 
-    # Hash is finalized in apply_scd2 after DF_MISSING hydrate from current version.
     return {
         "ok": True,
         "mapped_rows": pk_ok_rows,
@@ -510,6 +629,69 @@ def prepare_scd2_mapped_rows(
     }
 
 
+def _merge_scd2_bundle(
+    conn: Any,
+    table_obj: Any,
+    qualified: str,
+    batch: list[dict[str, Any]],
+    pk_columns: list[str],
+    target_cols: list[str],
+    dialect_name: str,
+    timestamp: datetime,
+) -> tuple[int, int]:
+    """Expire + insert one PK-ok bundle. Intra-bundle last hash wins after insert."""
+    keys: set[str] = set()
+    for row in batch:
+        key = _compose_key(row, pk_columns)
+        if key and not all(p == "" for p in key.split(_KEY_SEP)):
+            keys.add(key)
+    current_snaps = _fetch_current_snapshots(
+        conn, qualified, pk_columns, target_cols, keys, dialect_name
+    )
+    current_hashes = {k: str(v.get("hash") or "") for k, v in current_snaps.items()}
+
+    to_insert: list[dict[str, Any]] = []
+    to_expire: set[str] = set()
+
+    for row in batch:
+        key = _compose_key(row, pk_columns)
+        if not key or all(p == "" for p in key.split(_KEY_SEP)):
+            continue
+        snap = current_snaps.get(key)
+        hydrated = _hydrate_scd2_omit(
+            row,
+            (snap or {}).get("attrs") if snap else None,
+            target_cols,
+        )
+        new_hash = _row_hash(hydrated, target_cols)
+        hydrated[ROW_HASH_COLUMN] = new_hash
+        if key in current_hashes and current_hashes[key] == new_hash:
+            continue
+        if key in current_hashes:
+            to_expire.add(key)
+        hydrated[VALID_FROM_COLUMN] = timestamp
+        hydrated[VALID_TO_COLUMN] = None
+        hydrated[IS_CURRENT_COLUMN] = True
+        to_insert.append(hydrated)
+
+    expired = 0
+    if to_expire:
+        expired = _expire_rows(
+            conn, qualified, pk_columns, to_expire, timestamp, dialect_name
+        )
+    inserted = _insert_rows(conn, table_obj, to_insert)
+    # Same-connection later bundles must see this bundle's current hash
+    # (the original in-memory update after insert).
+    for row in to_insert:
+        key = _compose_key(row, pk_columns)
+        current_hashes[key] = row[ROW_HASH_COLUMN]
+        current_snaps[key] = {
+            "hash": row[ROW_HASH_COLUMN],
+            "attrs": {c: row.get(c) for c in target_cols if c not in SCD2_COLUMNS},
+        }
+    return inserted, expired
+
+
 def apply_scd2(
     endpoint: Any,
     records: list[dict[str, Any]],
@@ -520,35 +702,50 @@ def apply_scd2(
     *,
     batch_size: int = 1_000,
     validation_mode: str = "strict",
+    source_spool: Any = None,
+    clear_records: bool = False,
 ) -> dict[str, Any]:
-    """Apply an SCD2 merge to ``records`` against the SQL destination.
+    """Apply an SCD2 merge against the SQL destination.
 
     ``conflict_columns`` is the destination primary key (one or more columns).
     Returns a summary dict with ``rows_written`` (new current versions),
     ``updated_rows`` (closed old versions), ``active_rows``, and ``active_checksum``.
+
+    Fail / FAIL_JOB: scan every spool bundle, collect every reject, then
+    refuse the history write — never expire/insert a prefix. Merge pass
+    remaps from the same spool one bundle at a time. Peak mapped RAM is
+    one bundle. Not exactly-once.
     """
 
     from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
+    from connectors.sql_write_materialize import ensure_sql_source_spool
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
 
-    prepared = prepare_scd2_mapped_rows(
+    ctx = _scd2_map_context(
         endpoint,
-        records,
         columns,
         schema,
         mappings,
         conflict_columns,
         validation_mode=validation_mode,
     )
-    pk_columns = list(prepared.get("primary_key_columns") or [])
-    target_cols = list(prepared.get("target_columns") or [])
-    rejected_details = list(prepared.get("rejected_details") or [])
-    transform_errors = list(prepared.get("transform_errors") or [])
-    if prepared.get("ok") is False:
+    pk_columns = list(ctx["pk_columns"])
+    target_cols = list(ctx["target_cols"])
+    spool, close_spool = ensure_sql_source_spool(
+        headers=columns,
+        records=None if source_spool is not None else records,
+        mappings=ctx["effective_mappings"],
+        extra=ctx.get("extra") or {},
+        source_spool=source_spool,
+    )
+    if clear_records and records is not None:
+        records.clear()
+
+    def _blocked(error: str, rejected: list[dict[str, Any]], errors: list[str]) -> dict[str, Any]:
         return {
             "ok": False,
-            "error": prepared.get("error"),
+            "error": error,
             "rows_written": 0,
             "updated_rows": 0,
             "active_rows": 0,
@@ -556,95 +753,83 @@ def apply_scd2(
             "mode": "scd2",
             "primary_key_columns": pk_columns,
             "target_columns": target_cols,
-            "rejected_details": rejected_details,
-            "rejected_rows": len(rejected_details),
-            "transform_errors": transform_errors[:20],
+            "rejected_details": list(rejected),
+            "rejected_rows": len(rejected),
+            "transform_errors": list(errors)[:20],
         }
 
-    mapped_rows: list[dict[str, Any]] = list(prepared.get("mapped_rows") or [])
-
-    db_type = resolve_driver_type(endpoint.format)
-    cfg = resolve_connector_config(endpoint)
-    table = endpoint.table or endpoint.collection or "dt_import"
-    schema_name = get_sql_schema(cfg)
-
-    engine = get_sqlalchemy_engine(cfg)
-    dialect_name = engine.dialect.name if engine.dialect else ""
-
-    column_types: dict[str, str] = {c: (schema or {}).get(c, "string") for c in target_cols}
-
     try:
-        table_obj = _build_scd_table(
-            engine, table, schema_name, target_cols, column_types, db_type
+        scan = prepare_scd2_mapped_rows(
+            endpoint,
+            [],
+            columns,
+            schema,
+            mappings,
+            conflict_columns,
+            validation_mode=validation_mode,
+            source_spool=spool,
+            retain_mapped=False,
+            batch_size=batch_size,
         )
-
-        timestamp = _now_utc()
-        inserted_total = 0
-        expired_total = 0
-        qualified = _qualified_name(table, schema_name)
-
-        with engine.begin() as conn:
-            for i in range(0, len(mapped_rows), batch_size):
-                batch = mapped_rows[i : i + batch_size]
-                keys: set[str] = set()
-                for r in batch:
-                    key = _compose_key(r, pk_columns)
-                    if key and not all(p == "" for p in key.split(_KEY_SEP)):
-                        keys.add(key)
-                current_snaps = _fetch_current_snapshots(
-                    conn, qualified, pk_columns, target_cols, keys, dialect_name
-                )
-                current_hashes = {
-                    k: str(v.get("hash") or "") for k, v in current_snaps.items()
-                }
-
-                to_insert: list[dict[str, Any]] = []
-                to_expire: set[str] = set()
-
-                for row in batch:
-                    key = _compose_key(row, pk_columns)
-                    if not key or all(p == "" for p in key.split(_KEY_SEP)):
-                        continue
-                    snap = current_snaps.get(key)
-                    hydrated = _hydrate_scd2_omit(
-                        row,
-                        (snap or {}).get("attrs") if snap else None,
-                        target_cols,
-                    )
-                    new_hash = _row_hash(hydrated, target_cols)
-                    hydrated[ROW_HASH_COLUMN] = new_hash
-                    if key in current_hashes and current_hashes[key] == new_hash:
-                        continue
-                    if key in current_hashes:
-                        to_expire.add(key)
-                    hydrated[VALID_FROM_COLUMN] = timestamp
-                    hydrated[VALID_TO_COLUMN] = None
-                    hydrated[IS_CURRENT_COLUMN] = True
-                    to_insert.append(hydrated)
-
-                if to_expire:
-                    expired_total += _expire_rows(
-                        conn, qualified, pk_columns, to_expire, timestamp, dialect_name
-                    )
-                inserted_total += _insert_rows(conn, table_obj, to_insert)
-
-                # Update in-memory current_hashes so duplicate keys within the same batch
-                # do not create multiple current versions.
-                for row in to_insert:
-                    k = _compose_key(row, pk_columns)
-                    current_hashes[k] = row[ROW_HASH_COLUMN]
-                    current_snaps[k] = {
-                        "hash": row[ROW_HASH_COLUMN],
-                        "attrs": {
-                            c: row.get(c) for c in target_cols if c not in SCD2_COLUMNS
-                        },
-                    }
-
-            active_rows, active_checksum = _active_checksum(
-                conn, qualified, target_cols, batch_size, dialect_name
+        rejected_details = list(scan.get("rejected_details") or [])
+        transform_errors = list(scan.get("transform_errors") or [])
+        if scan.get("ok") is False:
+            return _blocked(
+                str(scan.get("error") or "SCD2 map/Risk Contract blocked history merge"),
+                rejected_details,
+                transform_errors,
             )
+
+        db_type = resolve_driver_type(endpoint.format)
+        cfg = resolve_connector_config(endpoint)
+        table = endpoint.table or endpoint.collection or "dt_import"
+        schema_name = get_sql_schema(cfg)
+
+        engine = get_sqlalchemy_engine(cfg)
+        dialect_name = engine.dialect.name if engine.dialect else ""
+        column_types: dict[str, str] = {
+            c: (schema or {}).get(c, "string") for c in target_cols
+        }
+
+        try:
+            table_obj = _build_scd_table(
+                engine, table, schema_name, target_cols, column_types, db_type
+            )
+            timestamp = _now_utc()
+            inserted_total = 0
+            expired_total = 0
+            qualified = _qualified_name(table, schema_name)
+
+            with engine.begin() as conn:
+                for pk_ok, _details, _errors in iter_scd2_prepared_bundles(
+                    columns=columns,
+                    ctx=ctx,
+                    source_spool=spool,
+                    batch_size=batch_size,
+                ):
+                    if pk_ok:
+                        inserted, expired = _merge_scd2_bundle(
+                            conn,
+                            table_obj,
+                            qualified,
+                            pk_ok,
+                            pk_columns,
+                            target_cols,
+                            dialect_name,
+                            timestamp,
+                        )
+                        inserted_total += inserted
+                        expired_total += expired
+                    del pk_ok
+
+                active_rows, active_checksum = _active_checksum(
+                    conn, qualified, target_cols, batch_size, dialect_name
+                )
+        finally:
+            release_engine(engine)
     finally:
-        release_engine(engine)
+        if close_spool:
+            spool.close()
 
     return {
         "ok": True,

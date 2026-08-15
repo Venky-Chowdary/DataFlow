@@ -24,9 +24,10 @@ Algorithm (Spark external spill / Beam bundle):
 Honesty: SQL/warehouse writers still hold the mapped image until
 COPY/INSERT/MERGE returns unless they iterate finished bundles.
 File-stream spool destinations reuse this spill so the chunk never
-becomes a second ``records_to_matrix`` copy. SCD2 is a separate path
-and still uses the dict list. This is not exactly-once. CDC default
-remains at-least-once upsert. Catalog tiles ≠ transfer-live.
+becomes a second ``records_to_matrix`` copy. SCD2 history merge uses
+the same ``SourceRowSpool`` (fail-scan, then per-bundle expire/insert).
+This is not exactly-once. CDC default remains at-least-once upsert.
+Catalog tiles ≠ transfer-live.
 """
 
 from __future__ import annotations

@@ -2975,22 +2975,36 @@ class UniversalTransferEngine:
                     )
 
                 if effective_sync_lower == "scd2" and conflict_columns:
-                    scd2_summary = with_retry(
-                        lambda: apply_scd2(
-                            request.destination,
-                            records,
-                            columns,
-                            schema,
-                            mappings,
-                            conflict_columns,
-                            validation_mode=request.validation_mode,
-                        ),
-                        budget=RetryBudget(
-                            max_attempts=3,
-                            base_delay_seconds=0.5,
-                            max_delay_seconds=5.0,
-                        ),
+                    from connectors.engine_record_spill import spill_engine_write_records
+
+                    dest_extra = getattr(request.destination, "extra", None)
+                    scd2_spill = spill_engine_write_records(
+                        records,
+                        columns,
+                        mappings,
+                        extra=dest_extra if isinstance(dest_extra, dict) else {},
+                        clear_records=True,
                     )
+                    try:
+                        scd2_summary = with_retry(
+                            lambda: apply_scd2(
+                                request.destination,
+                                records,
+                                columns,
+                                schema,
+                                mappings,
+                                conflict_columns,
+                                validation_mode=request.validation_mode,
+                                source_spool=scd2_spill.spool,
+                            ),
+                            budget=RetryBudget(
+                                max_attempts=3,
+                                base_delay_seconds=0.5,
+                                max_delay_seconds=5.0,
+                            ),
+                        )
+                    finally:
+                        scd2_spill.close()
                     dest_summary = {
                         "table": request.destination.table
                         or request.destination.collection,

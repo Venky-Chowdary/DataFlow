@@ -581,3 +581,138 @@ def test_live_pg_scd2_active_checksum_streams_current_rows():
         with conn.cursor() as cur:
             cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
         conn.close()
+
+
+def test_scd2_prepare_never_calls_records_to_matrix(monkeypatch):
+    from src.services.scd2_engine import prepare_scd2_mapped_rows
+
+    def _blocked(*_a, **_k):
+        raise AssertionError("SCD2 must not build a retained records_to_matrix copy")
+
+    monkeypatch.setattr("src.transfer.adapters.records_to_matrix", _blocked)
+    monkeypatch.setattr("transfer.adapters.records_to_matrix", _blocked)
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        prepared = prepare_scd2_mapped_rows(
+            endpoint,
+            _records(),
+            columns=["id", "name", "price"],
+            schema={"id": "string", "name": "string", "price": "decimal"},
+            mappings=None,
+            conflict_columns=["id"],
+            validation_mode="balanced",
+        )
+        assert prepared.get("ok") is not False, prepared.get("error")
+        assert len(prepared.get("mapped_rows") or []) == 2
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
+def test_scd2_apply_clears_records_and_accepts_source_spool():
+    from connectors.engine_record_spill import spill_engine_write_records
+    from src.services.scd2_engine import apply_scd2
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        first_records = _records()
+        first = apply_scd2(
+            endpoint,
+            first_records,
+            columns=["id", "name", "price"],
+            schema={"id": "string", "name": "string", "price": "decimal"},
+            mappings=None,
+            conflict_columns=["id"],
+            clear_records=True,
+        )
+        assert first_records == []
+        assert first["rows_written"] == 2
+        changed = [
+            {"id": "1", "name": "A-updated", "price": "10.00"},
+            {"id": "2", "name": "B", "price": "20.00"},
+        ]
+        spill = spill_engine_write_records(
+            changed,
+            ["id", "name", "price"],
+            None,
+            extra={},
+            clear_records=True,
+        )
+        try:
+            assert changed == []
+            summary = apply_scd2(
+                endpoint,
+                [],
+                columns=["id", "name", "price"],
+                schema={"id": "string", "name": "string", "price": "decimal"},
+                mappings=None,
+                conflict_columns=["id"],
+                source_spool=spill.spool,
+            )
+        finally:
+            spill.close()
+        assert summary["rows_written"] == 1
+        assert summary["updated_rows"] == 1
+        assert summary["active_rows"] == 2
+    finally:
+        Path(db_path).unlink(missing_ok=True)
+
+
+def test_scd2_fail_scan_collects_every_reject_before_merge():
+    """FAIL_JOB must scan every bundle, then refuse — no prefix history."""
+    from services.migration_risk_contract import create_migration_risk_contract
+    from src.services.scd2_engine import apply_scd2
+
+    fd, db_path = tempfile.mkstemp(suffix=".db")
+    try:
+        endpoint = _sqlite_endpoint(Path(db_path))
+        c = create_migration_risk_contract(
+            column="price",
+            source_type="TEXT",
+            destination_type="DECIMAL",
+            approved_by="admin@dataflow.app",
+            reason="SCD2 fail-scan every bundle",
+            execution_policy="FAIL_JOB",
+        )
+        mappings = [
+            {"source": "id", "target": "id"},
+            {"source": "name", "target": "name"},
+            {
+                "source": "price",
+                "target": "price",
+                "transform": "decimal",
+                "target_type": "decimal",
+                "risk_contract": c.to_dict(),
+            },
+        ]
+        summary = apply_scd2(
+            endpoint,
+            [
+                {"id": "1", "name": "A", "price": "nope"},
+                {"id": "2", "name": "B", "price": "also-bad"},
+            ],
+            columns=["id", "name", "price"],
+            schema={"id": "string", "name": "string", "price": "decimal"},
+            mappings=mappings,
+            conflict_columns=["id"],
+            batch_size=1,
+        )
+        assert summary.get("ok") is False
+        assert int(summary.get("rows_written") or 0) == 0
+        assert int(summary.get("rejected_rows") or 0) >= 2
+        conn = sqlite3.connect(db_path)
+        try:
+            tables = {
+                r[0]
+                for r in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "products" in tables:
+                assert conn.execute("SELECT COUNT(*) FROM products").fetchone()[0] == 0
+        finally:
+            conn.close()
+    finally:
+        Path(db_path).unlink(missing_ok=True)
