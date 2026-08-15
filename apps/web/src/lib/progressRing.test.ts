@@ -3,7 +3,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { ringDasharray, stagePercent, validateRingPercent } from "./progressRing.js";
+import { launchStageState, ringDasharray, stagePercent, validateRingPercent } from "./progressRing.js";
 
 describe("progressRing", () => {
   it("closes the dash at 100% instead of leaving a mid-ring gap", () => {
@@ -48,5 +48,13 @@ describe("progressRing", () => {
     assert.equal(stagePercent(1, 4), 25);
     assert.equal(stagePercent(4, 4), 100);
     assert.equal(stagePercent(3, 3), 100);
+  });
+
+  it("marks every launch chip done at 100%, not stuck mid-ring", () => {
+    assert.equal(launchStageState(25, 0, 4), "done");
+    assert.equal(launchStageState(25, 1, 4), "active");
+    assert.equal(launchStageState(25, 2, 4), "pending");
+    assert.equal(launchStageState(100, 0, 4), "done");
+    assert.equal(launchStageState(100, 3, 4), "done");
   });
 });

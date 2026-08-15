@@ -28,6 +28,7 @@ export function ProgressRing({
   return (
     <div
       className={`df2-progress-ring tone-${tone}${indeterminate ? " is-indeterminate" : ""}${complete ? " is-complete" : ""} ${className}`.trim()}
+      style={{ width: size, height: size }}
       aria-hidden
     >
       <svg viewBox={`0 0 ${size} ${size}`}>

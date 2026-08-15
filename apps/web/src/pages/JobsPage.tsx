@@ -34,6 +34,7 @@ import {
 } from "../lib/transferConstants";
 import { jobStudioDataRules } from "../lib/studioDataRules";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
+import { clampPercent } from "../lib/progressRing";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
@@ -780,7 +781,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           </div>
                           {isLiveRow && job.progress_pct != null && (
                             <div className="df2-job-row-bar" aria-hidden>
-                              <i style={{ width: `${job.progress_pct}%` }} />
+                              <i style={{ width: `${clampPercent(job.progress_pct)}%` }} />
                             </div>
                           )}
                         </div>

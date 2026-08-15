@@ -24,7 +24,7 @@ import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail"
 import { ContractBindField } from "../components/contracts/ContractBindField";
 import { contractBindFromPolicies } from "../lib/contractBind";
 import { destExistsPrimaryCta, shapeContractFromPreflight } from "../lib/destExistsShape";
-import { stagePercent } from "../lib/progressRing";
+import { launchStageState, stagePercent } from "../lib/progressRing";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
@@ -6629,7 +6629,7 @@ export function TransferPage({
 
             <div className="df2-run-launch-stages" aria-label="Launch stages">
               {RUN_LAUNCH_STAGES.map((stage, idx) => {
-                const state = runStartupProgress >= (idx + 1) * 25 ? "done" : runStartupProgress >= idx * 25 ? "active" : "pending";
+                const state = launchStageState(runStartupProgress, idx, RUN_LAUNCH_STAGES.length);
                 return (
                   <span key={stage} className={`df2-run-launch-stage ${state}`}>
                     {stage}

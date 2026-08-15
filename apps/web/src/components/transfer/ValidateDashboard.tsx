@@ -1127,8 +1127,6 @@ export function ValidateDashboard({
     || String(proof?.quality_grade || "").toLowerCase() === "not_profiled";
   const quality = qualityNotProfiled ? null : Number(qualityRaw);
   const complianceRisk = proof?.compliance?.risk_score ?? 0;
-  const qualityGrade = (proof?.quality_grade ?? "").toLowerCase();
-  const confidenceBand = (proof?.confidence_band ?? "").toLowerCase();
   const localPreflight = isLocalPreflight(preflight);
   const proofWarnings = proof?.transfer_decision?.warnings ?? [];
   const reconciliation = proof?.reconciliation;
@@ -1588,16 +1586,12 @@ export function ValidateDashboard({
                 ? " root cause(s)"
                 : " blocked"}
             </span>
-            {displayBlockers.length > 0 && blockedCount > displayBlockers.length && (
-              <span
-                className="df2-vd-count skip"
-                title="Gate checks absorbed into root causes — not separate operator blockers"
-              >
-                <strong>{blockedCount}</strong> absorbed gates
-              </span>
-            )}
-            <span className="df2-vd-count skip"><strong>{skippedCount}</strong> skipped</span>
-            <span className="df2-vd-count total"><strong>{totalGates}</strong> total rules</span>
+            <span
+              className="df2-vd-count skip"
+              title={skippedCount > 0 ? "Skipped gates are N/A — they do not shrink a finished ring" : undefined}
+            >
+              <strong>{skippedCount}</strong> skipped
+            </span>
           </div>
 
           {!running && preflight && executiveSummary && !preflight.passed && (
@@ -1626,8 +1620,6 @@ export function ValidateDashboard({
               || preflight.snowflake_warehouse_advice?.message
               || (preflight.referential_integrity && preflight.referential_integrity.coverage
                 && preflight.referential_integrity.coverage !== "none")
-              || qualityGrade
-              || confidenceBand
             )
           ) && (
             <details className="df2-vd-hero-details">
@@ -1663,32 +1655,6 @@ export function ValidateDashboard({
                 );
               })}
             </div>
-            {(qualityGrade || confidenceBand) && (
-              <div className="df2-vd-proof-chips" aria-label="Proof grade">
-                {qualityGrade && qualityGrade !== "not_profiled" ? (
-                  <span className={`df2-vd-proof-chip grade-${qualityGrade}`} title="Overall proof quality grade from the engine">
-                    Quality · {qualityGrade}
-                  </span>
-                ) : qualityNotProfiled ? (
-                  <span className="df2-vd-proof-chip grade-review" title="Sample quality was not calculated for this run">
-                    Quality · not profiled
-                  </span>
-                ) : null}
-                {confidenceBand ? (
-                  <span
-                    className={`df2-vd-proof-chip band-${decision === "approve" ? confidenceBand : "review"}`}
-                    title="Mapping / evidence confidence band — not Execute clearance"
-                  >
-                    Confidence · {confidenceBand}
-                  </span>
-                ) : null}
-                {typeof semantic === "number" && semantic > 0 ? (
-                  <span className="df2-vd-proof-chip is-score" title="Semantic mapping score">
-                    Semantic · {(semantic * 100).toFixed(0)}%
-                  </span>
-                ) : null}
-              </div>
-            )}
             </details>
           )}
 

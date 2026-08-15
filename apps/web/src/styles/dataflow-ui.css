@@ -3824,6 +3824,10 @@ body {
 .df2-preflight-score svg { width: 100%; height: 100%; }
 .df2-score-track { fill: none; stroke: #e2e8f0; stroke-width: 6; }
 .df2-score-fill { fill: none; stroke: #0f766e; stroke-width: 6; stroke-linecap: round; }
+.df2-preflight-score.is-complete .df2-score-fill { stroke-linecap: butt; }
+.df2-preflight-score.is-indeterminate svg {
+  animation: df2-progress-ring-spin 1.1s linear infinite;
+}
 
 .df2-preflight-score-val {
   position: absolute;

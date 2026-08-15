@@ -4780,9 +4780,19 @@ th.df2-type-string .df2-type-badge {
   animation: df2-mapping-shimmer 1.2s linear infinite;
 }
 
+.df2-mapping-progress-track.is-indeterminate .df2-mapping-progress-fill {
+  width: 28%;
+  animation: df2-mapping-indet 1.15s ease-in-out infinite;
+}
+
 @keyframes df2-mapping-shimmer {
   0% { background-position: 200% 0; }
   100% { background-position: -200% 0; }
+}
+
+@keyframes df2-mapping-indet {
+  0% { transform: translateX(-30%); }
+  100% { transform: translateX(360%); }
 }
 
 .df2-preflight-progress {
@@ -8705,6 +8715,60 @@ button.df2-vd-assist-toggle:focus-visible {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
+}
+.df2-map-footer-ring {
+  flex-shrink: 0;
+}
+.df2-map-footer-ring .df2-progress-ring-label strong {
+  font-size: 10px;
+}
+.df2-map-pk-details {
+  position: relative;
+  flex-shrink: 0;
+}
+.df2-map-pk-details > summary {
+  cursor: pointer;
+  list-style: none;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--df-brand, #0d9488);
+  padding: 2px 0;
+}
+.df2-map-pk-details > summary::-webkit-details-marker { display: none; }
+.df2-map-pk-details-body {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 8;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 160px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+}
+.df2-map-stream-diverge.is-compact {
+  align-items: flex-start;
+  padding: 8px 12px;
+  gap: 8px;
+}
+.df2-map-stream-diverge.is-compact > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+}
+.df2-map-stream-diverge.is-compact > summary::-webkit-details-marker { display: none; }
+.df2-map-stream-diverge.is-compact > p {
+  margin: 6px 0 0 24px;
+  font-size: 12px;
+  color: #475569;
 }
 .df2-map-footer-status strong {
   color: #0f172a;

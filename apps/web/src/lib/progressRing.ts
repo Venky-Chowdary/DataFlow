@@ -40,3 +40,18 @@ export function stagePercent(completed: number, total: number): number {
   if (total <= 0) return 0;
   return clampPercent((Math.max(0, completed) / total) * 100);
 }
+
+/** Launch-chip state from real stage progress — 100% marks every chip done. */
+export function launchStageState(
+  progress: number,
+  index: number,
+  total: number,
+): "done" | "active" | "pending" {
+  if (total <= 0) return "pending";
+  if (clampPercent(progress) >= 100) return "done";
+  const doneAt = stagePercent(index + 1, total);
+  const startAt = stagePercent(index, total);
+  if (progress >= doneAt) return "done";
+  if (progress >= startAt) return "active";
+  return "pending";
+}

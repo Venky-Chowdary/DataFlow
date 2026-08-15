@@ -5046,6 +5046,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   stroke-linecap: butt;
 }
 
+.df2-theater-v3-ring.is-indeterminate svg {
+  animation: df2-progress-ring-spin 1.1s linear infinite;
+}
+
 .df2-progress-ring {
   position: relative;
   width: 56px;

@@ -590,7 +590,7 @@ export function ColumnReviewPanel({
           </div>
           <div className="df2-column-workbench-actions">
             {tableControls}
-            {filterCounts.review > 0 && (
+            {filterCounts.review > 0 && !compact && (
               <button type="button" className="df2-btn df2-btn-sm" onClick={focusIssues}>
                 <DtIcon name="alert" size={14} /> Issues ({filterCounts.review})
               </button>

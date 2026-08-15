@@ -7,6 +7,7 @@ import {
 } from "../../components/MappingProofDrawer";
 import { Dialog } from "../../components/ui/Dialog";
 import { Button } from "../../components/ui/Button";
+import { ProgressRing } from "../../components/ui/ProgressRing";
 import { DtIcon } from "../../components/DtIcon";
 import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
@@ -206,6 +207,14 @@ export function TransferMapStep({
     : mappingReviewCount > 0
       ? `${mappingReviewCount} need review`
       : `${approvedCount} ready`;
+  const approvedPct = columnMappings.length
+    ? Math.round((approvedCount / columnMappings.length) * 100)
+    : 0;
+  const showPkSuggest = Boolean(
+    requiresPrimaryKey
+    && !primaryKeyField
+    && (uniqueKeySuggestions.length > 0 || compositeKeySuggestions.length > 0),
+  );
 
   return (
     <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-map-step-panel">
@@ -251,16 +260,17 @@ export function TransferMapStep({
       </div>
 
       {extraSourceColumns.length > 0 && (
-        <div className="df2-map-stream-diverge" role="status">
-          <DtIcon name="layers" size={16} />
-          <div>
+        <details className="df2-map-stream-diverge is-compact" role="status">
+          <summary>
+            <DtIcon name="layers" size={16} />
             <strong>{destShapeHeadline || "Extra source columns — remap or omit"}</strong>
-            <p>
-              {extraSourceColumns.join(", ")} — dest-exists write is name-addressed.
-              These columns are not dropped. Use Remap dest or mark omit.
-            </p>
-          </div>
-        </div>
+            <span> · {extraSourceColumns.length}</span>
+          </summary>
+          <p>
+            {extraSourceColumns.join(", ")} — dest-exists write is name-addressed.
+            These columns are not dropped. Use Remap dest or mark omit.
+          </p>
+        </details>
       )}
 
       {streamNames.length > 1 && (
@@ -365,6 +375,14 @@ export function TransferMapStep({
       <div className="df2-card-footer df2-wizard-footer df2-map-footer">
         <button type="button" className="df2-btn" onClick={onBack}>← Back</button>
         <div className="df2-map-footer-status" aria-live="polite">
+          <ProgressRing
+            value={approvedPct}
+            size={36}
+            tone={mappingReviewCount > 0 ? "warn" : "ok"}
+            className="df2-map-footer-ring"
+          >
+            <strong>{approvedPct}</strong>
+          </ProgressRing>
           <span className={mappingReviewCount > 0 ? "is-warn" : "is-ok"} title={health.weak ? health.detail : undefined}>
             <strong>Mapping</strong> {mappingFooterLabel}
           </span>
@@ -377,44 +395,39 @@ export function TransferMapStep({
             }
           >
             <strong>Identity</strong> {identityFooterLabel}
-            {uniqueKeySuggestions.length > 0 && requiresPrimaryKey && !primaryKeyField && (
-              <>
-                {" · Try "}
-                {uniqueKeySuggestions.slice(0, 2).map((s, i) => (
+          </span>
+          {showPkSuggest && (
+            <details className="df2-map-pk-details">
+              <summary>Try PK</summary>
+              <div className="df2-map-pk-details-body">
+                {uniqueKeySuggestions.slice(0, 2).map((s) => (
                   <button
                     key={s.column}
                     type="button"
                     className="df2-map-footer-pk-suggest"
-                    title={`Unique in ${s.sampleRows}-row sample`}
+                    title={`Unique in ${s.sampleRows}-row sample — not full-table proof`}
                     onClick={() => {
                       onApplyPrimaryKey?.(s.column);
                       onOpenIdentitySettings?.();
                     }}
                   >
-                    {s.column}{i === 0 && uniqueKeySuggestions.length > 1 ? "," : ""}
+                    {s.column}
                   </button>
                 ))}
-              </>
-            )}
-
-            {compositeKeySuggestions.length > 0 && requiresPrimaryKey && !primaryKeyField && (
-              <span className="df2-map-pk-suggest">
-                Composite sample keys:{" "}
-                {compositeKeySuggestions.slice(0, 2).map((s, i) => (
+                {compositeKeySuggestions.slice(0, 2).map((s) => (
                   <button
                     key={s.columns.join(",")}
                     type="button"
-                    className="df2-linkish"
+                    className="df2-map-footer-pk-suggest"
+                    title={`Composite unique in ${s.sampleRows}-row sample`}
                     onClick={() => onApplyPrimaryKey?.(s.columns.join(","))}
-                    title={`Unique in ${s.sampleRows}-row sample`}
                   >
-                    {s.columns.join(" + ")}{i === 0 && compositeKeySuggestions.length > 1 ? "," : ""}
+                    {s.columns.join(" + ")}
                   </button>
                 ))}
-              </span>
-            )}
-
-          </span>
+              </div>
+            </details>
+          )}
         </div>
         <div className="df2-map-footer-actions">
           {onOpenIdentitySettings && (

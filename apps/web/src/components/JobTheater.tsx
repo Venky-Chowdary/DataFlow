@@ -24,6 +24,7 @@ import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
+import { ringDasharray } from "../lib/progressRing";
 import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
@@ -849,7 +850,7 @@ export function JobTheaterView({
 
       <div className={`df2-theater-v3-progress-block${reconciling ? " is-reconciling" : ""}`}>
         <div className="df2-theater-v3-progress-top">
-          <div className={`df2-theater-v3-ring ${isFailed ? "is-failed" : isComplete ? "is-done" : reconciling ? "is-reconcile" : ""}`} aria-hidden>
+          <div className={`df2-theater-v3-ring ${isFailed ? "is-failed" : isComplete ? "is-done" : reconciling ? "is-reconcile" : ""}${indeterminate && isRunning && !reconciling ? " is-indeterminate" : ""}`} aria-hidden>
             <svg viewBox="0 0 56 56">
               <circle cx="28" cy="28" r="24" className="track" />
               <circle
@@ -858,7 +859,7 @@ export function JobTheaterView({
                 r="24"
                 className="fill"
                 pathLength={100}
-                strokeDasharray={progress >= 100 ? "100 0" : `${progress} 100`}
+                strokeDasharray={ringDasharray(progress, { indeterminate: Boolean(indeterminate && isRunning && !reconciling) })}
                 transform="rotate(-90 28 28)"
               />
             </svg>
