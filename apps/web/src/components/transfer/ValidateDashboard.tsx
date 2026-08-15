@@ -41,6 +41,7 @@ import {
   extraSourceColumnsFromContract,
   shapeContractFromPreflight,
 } from "../../lib/destExistsShape";
+import { ringDasharray, validateRingPercent } from "../../lib/progressRing";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
@@ -1158,6 +1159,14 @@ export function ValidateDashboard({
         : decision === "review"
           ? "review"
           : "pending";
+  const heroRing = validateRingPercent({
+    running,
+    passed: preflight?.passed,
+    decision,
+    passedCount,
+    blockedCount,
+    readinessScore: readiness,
+  });
   const complianceAck = proof?.compliance?.acknowledgment as
     | { actor?: string; at?: string; reason?: string }
     | undefined;
@@ -1509,7 +1518,10 @@ export function ValidateDashboard({
   return (
     <section className={`df2-vd df2-vd-${heroTone}`} aria-label="Validation dashboard">
       <header className="df2-vd-hero">
-        <div className={`df2-vd-hero-ring tone-${heroTone}`} aria-hidden>
+        <div
+          className={`df2-vd-hero-ring tone-${heroTone}${heroRing.indeterminate ? " is-indeterminate" : ""}${!heroRing.indeterminate && heroRing.pct >= 100 ? " is-complete" : ""}`}
+          aria-hidden
+        >
           <svg viewBox="0 0 72 72">
             <circle cx="36" cy="36" r="30" className="df2-vd-hero-track" />
             <circle
@@ -1517,13 +1529,14 @@ export function ValidateDashboard({
               cy="36"
               r="30"
               className="df2-vd-hero-fill"
-              strokeDasharray={`${((running ? Math.min(92, 18 + elapsedMs / 80) : readiness) / 100) * 188.5} 188.5`}
+              pathLength={100}
+              strokeDasharray={ringDasharray(heroRing.pct, { indeterminate: heroRing.indeterminate })}
               transform="rotate(-90 36 36)"
             />
           </svg>
           <div className="df2-vd-hero-ring-label">
             <strong>
-              {running ? formatElapsed(elapsedMs) : Math.round(Number(readiness) || 0)}
+              {running ? formatElapsed(elapsedMs) : heroRing.pct}
               <small>{running ? "" : "%"}</small>
             </strong>
             <span>{heroReadyLabel}</span>
@@ -1613,8 +1626,12 @@ export function ValidateDashboard({
               || preflight.snowflake_warehouse_advice?.message
               || (preflight.referential_integrity && preflight.referential_integrity.coverage
                 && preflight.referential_integrity.coverage !== "none")
+              || qualityGrade
+              || confidenceBand
             )
           ) && (
+            <details className="df2-vd-hero-details">
+              <summary>Coverage & proof notes</summary>
             <div className="df2-vd-soft-hints" role="note">
               <p className="df2-vd-soft-hints-label">Constraint coverage & advisories</p>
               {preflight.referential_integrity?.note && (
@@ -1646,44 +1663,39 @@ export function ValidateDashboard({
                 );
               })}
             </div>
-          )}
-
-          {!running && preflight && (qualityGrade || confidenceBand) && (
-            <div className="df2-vd-proof-chips" aria-label="Proof grade">
-              {qualityGrade && qualityGrade !== "not_profiled" ? (
-                <span className={`df2-vd-proof-chip grade-${qualityGrade}`} title="Overall proof quality grade from the engine">
-                  Quality · {qualityGrade}
-                </span>
-              ) : qualityNotProfiled ? (
-                <span className="df2-vd-proof-chip grade-review" title="Sample quality was not calculated for this run">
-                  Quality · not profiled
-                </span>
-              ) : null}
-              {confidenceBand ? (
-                <span
-                  className={`df2-vd-proof-chip band-${decision === "approve" ? confidenceBand : "review"}`}
-                  title="Mapping / evidence confidence band — not Execute clearance"
-                >
-                  Confidence · {confidenceBand}
-                </span>
-              ) : null}
-              {typeof semantic === "number" && semantic > 0 ? (
-                <span className="df2-vd-proof-chip is-score" title="Semantic mapping score">
-                  Semantic · {(semantic * 100).toFixed(0)}%
-                </span>
-              ) : null}
-            </div>
+            {(qualityGrade || confidenceBand) && (
+              <div className="df2-vd-proof-chips" aria-label="Proof grade">
+                {qualityGrade && qualityGrade !== "not_profiled" ? (
+                  <span className={`df2-vd-proof-chip grade-${qualityGrade}`} title="Overall proof quality grade from the engine">
+                    Quality · {qualityGrade}
+                  </span>
+                ) : qualityNotProfiled ? (
+                  <span className="df2-vd-proof-chip grade-review" title="Sample quality was not calculated for this run">
+                    Quality · not profiled
+                  </span>
+                ) : null}
+                {confidenceBand ? (
+                  <span
+                    className={`df2-vd-proof-chip band-${decision === "approve" ? confidenceBand : "review"}`}
+                    title="Mapping / evidence confidence band — not Execute clearance"
+                  >
+                    Confidence · {confidenceBand}
+                  </span>
+                ) : null}
+                {typeof semantic === "number" && semantic > 0 ? (
+                  <span className="df2-vd-proof-chip is-score" title="Semantic mapping score">
+                    Semantic · {(semantic * 100).toFixed(0)}%
+                  </span>
+                ) : null}
+              </div>
+            )}
+            </details>
           )}
 
           {running && (
-            <>
-              <p className="df2-vd-hero-summary">
-                Evaluating source, destination, schema, mapping, dry-run, DDL, capacity, and reconcile.
-              </p>
-              <div className="df2-vd-progress is-indeterminate" role="status" aria-live="polite">
-                <span className="df2-vd-progress-fill" style={{ width: "40%" }} />
-              </div>
-            </>
+            <p className="df2-vd-hero-summary">
+              Evaluating source, destination, schema, mapping, dry-run, DDL, capacity, and reconcile. The timer is wall-clock — not a guessed percent.
+            </p>
           )}
           {!running && preflight?.passed && (
             <p className="df2-vd-hero-summary">

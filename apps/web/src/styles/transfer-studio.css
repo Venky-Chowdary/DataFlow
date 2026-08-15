@@ -7122,9 +7122,27 @@ th.df2-type-string .df2-type-badge {
   stroke-linecap: round;
   transition: stroke-dasharray 0.5s ease;
 }
+.df2-vd-hero-ring.is-complete .df2-vd-hero-fill { stroke-linecap: butt; }
 .df2-vd-hero-ring.tone-review .df2-vd-hero-fill { stroke: #d97706; }
 .df2-vd-hero-ring.tone-block .df2-vd-hero-fill { stroke: #dc2626; }
-.df2-vd-hero-ring.tone-live .df2-vd-hero-fill { stroke: #0ea5e9; }
+.df2-vd-hero-ring.tone-live .df2-vd-hero-fill { stroke: #0f766e; }
+.df2-vd-hero-ring.tone-live.is-indeterminate svg {
+  animation: df2-progress-ring-spin 1.1s linear infinite;
+}
+.df2-vd-hero-details {
+  margin-top: 8px;
+  border-top: 1px solid var(--df-border, #e4e8ee);
+  padding-top: 8px;
+}
+.df2-vd-hero-details > summary {
+  cursor: pointer;
+  font-size: var(--df-fs-xs, 11px);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-muted, #64748b);
+}
+.df2-vd-hero-details[open] > summary { margin-bottom: 8px; }
 .df2-vd-hero-ring-label {
   position: absolute;
   inset: 0;

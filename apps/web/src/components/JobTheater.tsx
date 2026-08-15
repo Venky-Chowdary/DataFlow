@@ -632,8 +632,6 @@ export function JobTheaterView({
     && displayRps < 100
     && (loadMethod === "insert" || !loadMethod);
 
-  const ringCircumference = 2 * Math.PI * 24;
-
   return (
     <div className={`df2-theater-v3 ${isRunning ? "is-live" : ""} ${isFailed || isCancelled ? "is-failed" : ""} ${isComplete ? "is-done" : ""}`}>
       <div className="df2-theater-v3-scroll">
@@ -859,7 +857,8 @@ export function JobTheaterView({
                 cy="28"
                 r="24"
                 className="fill"
-                strokeDasharray={`${(progress / 100) * ringCircumference} ${ringCircumference}`}
+                pathLength={100}
+                strokeDasharray={progress >= 100 ? "100 0" : `${progress} 100`}
                 transform="rotate(-90 28 28)"
               />
             </svg>

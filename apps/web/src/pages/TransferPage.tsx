@@ -24,6 +24,7 @@ import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail"
 import { ContractBindField } from "../components/contracts/ContractBindField";
 import { contractBindFromPolicies } from "../lib/contractBind";
 import { destExistsPrimaryCta, shapeContractFromPreflight } from "../lib/destExistsShape";
+import { stagePercent } from "../lib/progressRing";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
@@ -2781,13 +2782,23 @@ export function TransferPage({
       setMappingPhase(phase);
     };
     try {
-      bump(8, "Preparing schema context…");
+      let mappingUnitsDone = 0;
+      const mappingUnits =
+        (destKindMode === "database" ? 1 : 0)
+        + 1
+        + 1
+        + (isMultiStreamSource && multiStreamNames.length > 1 ? 1 : 0);
+      const mark = (phase: string) => {
+        mappingUnitsDone += 1;
+        bump(stagePercent(mappingUnitsDone, mappingUnits + 1), phase);
+      };
+      mark("Preparing schema context…");
       let freshDestCols = destColumns;
       let freshDestSchema = destSchemaMap;
       let loadedTableExists: boolean | null = destTableExists;
       let loadedConnected: boolean | null = null;
       if (destKindMode === "database") {
-        bump(22, "Loading destination schema…");
+        mark("Loading destination schema…");
         let loaded = await loadDestinationSchema();
         // One retry — SSL / metadata races often succeed on the second probe.
         if (
@@ -2796,7 +2807,7 @@ export function TransferPage({
           && targetCollection.trim()
           && loaded.connected !== false
         ) {
-          bump(28, "Retrying destination schema…");
+          bump(stagePercent(mappingUnitsDone, mappingUnits + 1), "Retrying destination schema…");
           await new Promise((r) => window.setTimeout(r, 400));
           loaded = await loadDestinationSchema();
         }
@@ -2805,7 +2816,7 @@ export function TransferPage({
         loadedTableExists = loaded.tableExists;
         loadedConnected = loaded.connected;
       }
-      bump(42, "Building transfer plan…");
+      mark("Building transfer plan…");
       await loadTransferPlan();
       let mapped: EditableMapping[] = [];
       // Create-new only when the destination object is confirmed missing (or file export).
@@ -2861,13 +2872,13 @@ export function TransferPage({
               : loadedTableExists;
         if (sourceKind === "file" && parsed) {
           if (!analysis?.columns.length || !columnMappings.length) {
-            bump(58, "Profiling source columns…");
+            bump(stagePercent(mappingUnitsDone, mappingUnits + 1), "Profiling source columns…");
             await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
           }
-          bump(72, schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
+          mark(schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
           mapped = await applyPipelineMappings(undefined, {}, undefined, existsForEmpty) ?? [];
         } else if (analysis?.columns.length || currentSourceColumns.length) {
-          bump(65, schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
+          mark(schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
           mapped = await applyPipelineMappings(undefined, {}, undefined, existsForEmpty) ?? [];
         } else {
           toast({
@@ -2880,13 +2891,13 @@ export function TransferPage({
         }
       } else if (sourceKind === "file" && parsed) {
         if (!analysis?.columns.length || !columnMappings.length) {
-          bump(58, "Profiling source columns…");
-          await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
-        }
-        bump(72, "Matching source to destination fields…");
+            bump(stagePercent(mappingUnitsDone, mappingUnits + 1), "Profiling source columns…");
+            await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
+          }
+          mark("Matching source to destination fields…");
         mapped = await applyPipelineMappings(mapTargets, freshDestSchema, undefined, loadedTableExists) ?? [];
       } else if (analysis?.columns.length || currentSourceColumns.length) {
-        bump(65, "Matching source to destination fields…");
+          mark("Matching source to destination fields…");
         mapped = await applyPipelineMappings(mapTargets, freshDestSchema, undefined, loadedTableExists) ?? [];
       } else {
         toast({
@@ -2900,7 +2911,7 @@ export function TransferPage({
 
       // Multi-stream: seed per-stream mappings (copy when schemas match; rematch when they diverge).
       if (isMultiStreamSource && multiStreamNames.length > 1) {
-        bump(85, "Mapping each source stream…");
+        mark("Mapping each source stream…");
         const primary = primarySourceStream;
         setMapActiveStream(primary);
         // Read latest primary mappings from a dedicated rematch of primary stream columns.
@@ -2933,6 +2944,7 @@ export function TransferPage({
       }
 
       bump(100, "Mapping ready");
+      await new Promise((r) => window.setTimeout(r, 220));
       if (!mapped.length) {
         toast({
           title: "Mappings did not load",
@@ -4204,7 +4216,7 @@ export function TransferPage({
     setActiveJobId(null);
     setResult(null);
     setTransferLaunch(null);
-    setRunStartupProgress(12);
+    setRunStartupProgress(stagePercent(1, RUN_LAUNCH_STAGES.length));
     setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
     // Prefer Validate-echoed Kernel stamps + signed contracts over Map drafts.
     const mappingsForExecute = mergeSignedRiskContracts(
@@ -4237,7 +4249,7 @@ export function TransferPage({
           }
         }
       }
-      setRunStartupProgress(24);
+      setRunStartupProgress(stagePercent(2, RUN_LAUNCH_STAGES.length));
       setRunStartupPhase(RUN_LAUNCH_STAGES[1]);
       const data = await runUniversalTransfer({
         file: sourceKind === "file" ? file ?? undefined : undefined,
@@ -4387,7 +4399,7 @@ export function TransferPage({
             ? (preflight.proof_bundle.decision_artifact as Record<string, unknown>)
             : undefined,
       });
-      setRunStartupProgress(36);
+      setRunStartupProgress(stagePercent(3, RUN_LAUNCH_STAGES.length));
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
       // A double-click / retry that hit an already-running equivalent transfer.
       // Open the live job instead of starting a second writer against the same table.
@@ -4399,7 +4411,7 @@ export function TransferPage({
         const existingStatus = String(
           (data as { existing_status?: string }).existing_status || "in progress",
         );
-        setRunStartupProgress(40);
+        setRunStartupProgress(100);
         setActiveJobId(existingId);
         setTransferring(false);
         toast({
@@ -4410,7 +4422,7 @@ export function TransferPage({
         return;
       }
       if (data.job_id && (data as { async?: boolean }).async) {
-        setRunStartupProgress(40);
+        setRunStartupProgress(100);
         setActiveJobId(data.job_id);
         setTransferLaunch({
           jobId: data.job_id,
@@ -6610,8 +6622,8 @@ export function TransferPage({
                 <span>Initializing transfer job</span>
                 <strong>Starting…</strong>
               </div>
-              <div className="df2-run-launch-progress-track df2-run-launch-progress-track-indeterminate">
-                <span className="df2-run-launch-progress-fill" style={{ width: `${Math.min(runStartupProgress, 40)}%` }} />
+              <div className="df2-run-launch-progress-track">
+                <span className="df2-run-launch-progress-fill" style={{ width: `${runStartupProgress}%` }} />
               </div>
             </div>
 
