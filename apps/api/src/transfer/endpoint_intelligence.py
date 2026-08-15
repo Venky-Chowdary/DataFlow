@@ -19,6 +19,7 @@ from .adapters import (
 from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
+from services.procedure_source import is_callable_source
 
 
 def introspect_endpoint(
@@ -94,8 +95,8 @@ def introspect_endpoint(
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
                 # Absence from a bounded page is a hint, not proof. The SQL path
                 # below re-checks the specific table and is what Validate trusts;
                 # create-on-write is CREATE IF NOT EXISTS, so guessing "new" here
@@ -194,8 +195,8 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
@@ -216,8 +217,8 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
@@ -240,8 +241,8 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
@@ -258,8 +259,8 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
@@ -393,7 +394,7 @@ def introspect_endpoint(
     }:
         out["connected"] = True
         out["message"] = f"{fmt.title()} connected — introspecting table schema"
-        if endpoint.table:
+        if endpoint.table or is_callable_source(endpoint):
             # Do NOT pre-seed objects with the typed name — that forced
             # table_exists=True for missing tables via _mark_table_listed_if_present.
             out["table_exists"] = False
@@ -501,6 +502,10 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         # Use the resolved saved-connector driver type if available, otherwise
         # fall back to the inline format string.
         fmt = (cfg.get("type") or endpoint.format or "").lower()
+
+        if is_callable_source(endpoint) or is_callable_source(cfg):
+            _attach_callable_source_sample(out, endpoint, cfg, fmt, sample_limit)
+            return
 
         if fmt == "mongodb":
             from services.schema_inference import infer_schema_map
@@ -1030,6 +1035,73 @@ def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 100) -> N
         out["message"] = (
             f"{out.get('message', '')} · source returned 0 sample rows (empty)"
         ).strip(" ·")
+
+
+def _attach_callable_source_sample(
+    out: dict,
+    endpoint: EndpointConfig,
+    cfg: dict,
+    fmt: str,
+    sample_limit: int,
+) -> None:
+    """Peek a CALL/EXEC/SELECT extract — columns come from the result set, not information_schema."""
+    from services.procedure_source import (
+        ProcedureSourceError,
+        parse_callable_source,
+        peek_callable_schema,
+        procedure_params_of,
+        procedure_text_of,
+        read_callable_batch,
+        source_read_mode_of,
+        stream_name_for_callable,
+    )
+
+    try:
+        spec = parse_callable_source(
+            procedure_text_of(endpoint) or procedure_text_of(cfg),
+            dialect=fmt or str(cfg.get("type") or ""),
+            mode=source_read_mode_of(endpoint) or source_read_mode_of(cfg),
+            params=procedure_params_of(endpoint) or procedure_params_of(cfg),
+        )
+        limit = max(1, min(int(sample_limit or 100), 100))
+        batch = read_callable_batch(cfg, offset=0, limit=limit, peek=True)
+        headers = list(batch.headers or [])
+        out["connected"] = True
+        out["table_exists"] = True
+        out["source_read_mode"] = spec.mode
+        out["procedure"] = spec.identifier
+        out["columns"] = headers
+        native = (batch.meta or {}).get("native_types") if isinstance(batch.meta, dict) else {}
+        if isinstance(native, dict) and native:
+            out["schema"] = {c: str(native.get(c) or "VARCHAR") for c in headers}
+        else:
+            schema, _intel = peek_callable_schema(headers, list(batch.rows or []))
+            out["schema"] = schema
+        out["objects"] = [{"name": spec.identifier, "type": spec.mode}]
+        out["row_estimate"] = int(batch.total_rows or len(batch.rows or []))
+        out["row_estimate_uncertain"] = True
+        out["message"] = (
+            f"{spec.verb} `{spec.identifier}` returned {len(headers)} column(s) "
+            f"(result-set snapshot — not CDC). Extra source columns stay visible on Map."
+        )
+        _attach_batch_sample_rows(out, batch)
+        if not endpoint.table:
+            endpoint.table = stream_name_for_callable(spec)
+    except ProcedureSourceError as exc:
+        out["connected"] = True
+        out["table_exists"] = False
+        out["columns"] = []
+        out["schema"] = {}
+        out["sample_error"] = str(exc)
+        out["message"] = str(exc)
+    except Exception as exc:
+        out["connected"] = True
+        out["table_exists"] = None
+        out["columns"] = out.get("columns") or []
+        out["schema"] = out.get("schema") or {}
+        out["sample_error"] = str(exc)
+        out["message"] = f"Procedure extract failed: {exc}"
+        logger.warning("callable source peek failed for %s: %s", fmt, exc, exc_info=exc)
 
 
 def _attach_sql_sample_rows(

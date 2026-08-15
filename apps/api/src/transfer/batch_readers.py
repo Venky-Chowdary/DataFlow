@@ -37,6 +37,19 @@ def _read_batch_impl(
     cursor_primary_key: str | None = None,
     cursor_key_columns: list[str] | None = None,
 ):
+    from services.procedure_source import is_callable_source, read_callable_batch
+
+    # Procedure / custom-SQL extract — one CALL, then page the spool.
+    # Must run before table readers so a leftover table name cannot hijack the read.
+    if is_callable_source(cfg):
+        return read_callable_batch(
+            cfg,
+            offset=offset,
+            limit=limit,
+            peek=False,
+            columns=columns,
+        )
+
     # Phase F2 — N-col composite keyset (≥3) on SQLAlchemy dialects goes through
     # generic_sql so PG/MySQL/Snowflake share the portable OR/AND builder.
     _key_cols = [c for c in (cursor_key_columns or []) if c]

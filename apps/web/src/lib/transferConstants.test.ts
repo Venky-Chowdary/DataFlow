@@ -36,6 +36,18 @@ describe("availableSyncModes", () => {
     assert.ok(modes.includes("cdc"));
   });
 
+  it("hides CDC for stored-procedure extracts", () => {
+    const modes = availableSyncModes({
+      destDriver: "postgresql",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: false,
+      sourceReadMode: "procedure",
+    }).map((m) => m.id);
+    assert.ok(!modes.includes("cdc"));
+    assert.ok(modes.includes("full_refresh_append"));
+  });
+
   it("hides CDC for file sources", () => {
     const modes = availableSyncModes({
       destDriver: "postgresql",

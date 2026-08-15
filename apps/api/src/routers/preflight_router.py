@@ -432,6 +432,11 @@ async def run_preflight(body: PreflightRequest):
             source_type=body.source_type,
             source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
             write_via_staging=bool(body.write_via_staging),
+            source_read_mode=str(
+                ((body.source_config or {}).get("source_read_mode")
+                 or ((body.source_config or {}).get("extra") or {}).get("source_read_mode")
+                 or "")
+            ),
         ),
         validation_mode=body.validation_mode,
     )

@@ -158,17 +158,19 @@ export function availableSyncModes(opts: {
   sourceDriver: string;
   sourceKind: "file" | "database" | "cloud" | string;
   isMultiStream: boolean;
+  sourceReadMode?: string;
 }): { id: SyncModeId; label: string; detail: string }[] {
   const dest = (opts.destDriver || "").toLowerCase();
   const src = (opts.sourceDriver || "").toLowerCase();
   const fileish = opts.sourceKind === "file" || opts.sourceKind === "cloud";
+  const callable = opts.sourceReadMode === "procedure" || opts.sourceReadMode === "query";
   return SYNC_MODES.filter((mode) => {
     if (mode.id === "scd2" || mode.id === "mirror") {
       if (opts.isMultiStream) return false;
       if (!dest || !SQL_HISTORY_SYNC_DESTS.has(dest)) return false;
     }
     if (mode.id === "cdc") {
-      if (fileish) return false;
+      if (fileish || callable) return false;
       if (src && !CDC_CAPABLE_SOURCES.has(src)) return false;
     }
     return true;

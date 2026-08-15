@@ -144,6 +144,7 @@ def build_sync_contract_gate(
     source_columns: list[str] | None,
     pass_status: str,
     block_status: str,
+    source_read_mode: str = "",
 ) -> dict[str, Any]:
     """The g9 gate: is this route's sync contract complete and semantically sound?
 
@@ -202,6 +203,11 @@ def build_sync_contract_gate(
     if sync == "cdc":
         if kind in {"file", "cloud"}:
             issues.append("CDC requires a database source (not file/cloud)")
+        elif (source_read_mode or "").strip().lower() in {"procedure", "query"}:
+            issues.append(
+                "Stored-procedure / custom-SQL extract is a result-set snapshot, "
+                "not a WAL/binlog read — CDC is not available on this source"
+            )
         elif src and src not in CDC_CAPABLE_SOURCES:
             issues.append(f"CDC is not supported for source type '{src}'")
     if missing_cursor:

@@ -1034,6 +1034,7 @@ def _execute_policy_gates_for_request(
         source_type=str(getattr(src, "format", None) or getattr(src, "kind", None) or ""),
         source_kind=str(getattr(src, "kind", None) or "file"),
         write_via_staging=bool(getattr(request, "write_via_staging", False)),
+        source_read_mode=str((getattr(src, "extra", None) or {}).get("source_read_mode") or ""),
     )
 
 
@@ -2033,6 +2034,12 @@ class UniversalTransferEngine:
         try:
             assert_delivery_guarantee_allowed(
                 getattr(request, "delivery_guarantee", None) or "at_least_once"
+            )
+            from services.procedure_source import assert_callable_sync_allowed
+
+            assert_callable_sync_allowed(
+                getattr(request, "sync_mode", "") or "",
+                getattr(request, "source", None),
             )
             assert_mappings_executable(request.mappings)
         except (ValueError, DeliveryGuaranteeError) as mapping_exc:

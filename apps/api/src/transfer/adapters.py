@@ -952,6 +952,19 @@ def read_source_database(
     # Prefer the saved connector's driver type over any inline format string.
     db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
 
+    from services.procedure_source import is_callable_source, read_callable_batch
+
+    if is_callable_source(cfg) or is_callable_source(endpoint):
+        batch = read_callable_batch(cfg, offset=0, limit=limit, peek=True)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type or "procedure", endpoint.table or "procedure")
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        native = (batch.meta or {}).get("native_types") if isinstance(batch.meta, dict) else {}
+        schema = dict(native) if isinstance(native, dict) else {}
+        if not schema:
+            schema = {c: "string" for c in batch.headers}
+        return records, batch.headers, schema
+
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_reader import read_table_batch
 

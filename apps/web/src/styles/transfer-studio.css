@@ -207,6 +207,20 @@
   margin: 0;
 }
 
+.df2-source-endpoint-fields .df2-source-read-mode,
+.df2-source-endpoint-fields .df2-source-procedure {
+  grid-column: 1 / -1;
+}
+
+.df2-source-endpoint-fields .df2-textarea {
+  min-height: 96px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  padding: 10px 12px;
+}
+
 .df2-source-multistream {
   padding: 0;
   border: none;

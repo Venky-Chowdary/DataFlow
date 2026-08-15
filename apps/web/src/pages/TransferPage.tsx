@@ -4,6 +4,7 @@ import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ConnectorIcon } from "../app/brand-icons";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
+import { FilterTabs } from "../components/ui/FilterTabs";
 import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTiles";
 import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -65,6 +66,13 @@ import {
   foldSchemaForDriver,
 } from "../lib/dialectDefaults";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
+import {
+  dialectOffersProcedures,
+  isCallableSourceMode,
+  procedureHint,
+  procedureStreamName,
+  type SourceReadMode,
+} from "../lib/sourceReadMode";
 import {
   availableSyncModes,
   DATE_LOCALES,
@@ -189,6 +197,8 @@ export function TransferPage({
   const [sourceConnectorId, setSourceConnectorId] = useState("");
   const [sourceTable, setSourceTable] = useState("");
   const [sourceCollection, setSourceCollection] = useState("");
+  const [sourceReadMode, setSourceReadMode] = useState<SourceReadMode>("table");
+  const [procedureCall, setProcedureCall] = useState("");
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   /** Shared Fix-bad-data drawer open state (Validate dashboard + rail Fix CTA). */
@@ -772,7 +782,11 @@ export function TransferPage({
       : sourceCollection || sourceTable || "source_stream";
   // Comma-separated tables → multi-stream contracts (each gets its own watermark).
   const sourceStreamInputRaw = sourceKind === "database"
-    ? (sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable)
+    ? (sourceConnector?.type === "mongodb"
+      ? sourceCollection
+      : isCallableSourceMode(sourceReadMode)
+        ? procedureStreamName(procedureCall)
+        : sourceTable)
     : "";
   const multiStreamNames = parseStreamNames(sourceStreamInputRaw);
   /** First named stream — API table/collection field (never the raw CSV string). */
@@ -789,8 +803,9 @@ export function TransferPage({
         sourceDriver: resolveDriverType(sourceConnector?.type || "") || "",
         sourceKind,
         isMultiStream: isMultiStreamSource,
+        sourceReadMode,
       }),
-    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource],
+    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource, sourceReadMode],
   );
   // Client deploy: never leave an engine-unsupported mode selected after route change.
   useEffect(() => {
@@ -945,12 +960,14 @@ export function TransferPage({
       : (isDynamo
         ? (primarySourceStream || sourceConnector.database || "")
         : primarySourceStream);
+    const callable = isCallableSourceMode(sourceReadMode) && !isMongo && !isDynamo;
+    const procName = callable ? procedureStreamName(procedureCall) : "";
     return {
       kind: "database",
       format: sourceConnector.type,
       connector_id: sourceConnectorId,
       database: isDynamo ? tableOrPath : sourceConnector.database,
-      table: isMongo ? undefined : tableOrPath || undefined,
+      table: isMongo ? undefined : (callable ? procName : tableOrPath) || undefined,
       collection: isMongo ? tableOrPath : undefined,
       auth_source: sourceConnector.auth_source || undefined,
       auth_mode: sourceConnector.auth_mode || undefined,
@@ -959,6 +976,16 @@ export function TransferPage({
       service_account: sourceConnector.service_account || undefined,
       ...(syncMode === "cdc" && multiSubnetFailover
         ? { multi_subnet_failover: true }
+        : {}),
+      ...(callable
+        ? {
+            source_read_mode: sourceReadMode,
+            procedure_call: procedureCall.trim(),
+            extra: {
+              source_read_mode: sourceReadMode,
+              procedure_call: procedureCall.trim(),
+            },
+          }
         : {}),
     };
   };
@@ -995,6 +1022,8 @@ export function TransferPage({
     sourceConnectorId,
     sourceCollection,
     sourceTable,
+    sourceReadMode,
+    procedureCall,
     primarySourceStream,
     cloudPath,
     destKindMode,
@@ -1608,6 +1637,12 @@ export function TransferPage({
     autoSelectedSourceConnector.current = false;
   }, [sourceKind]);
 
+  useEffect(() => {
+    if (!dialectOffersProcedures(sourceConnector?.type) && sourceReadMode !== "table") {
+      setSourceReadMode("table");
+    }
+  }, [sourceConnector?.type, sourceReadMode]);
+
   // Carry selected connection from Connectors drawer into Transfer Studio source step.
   // Apply once per seed token — do not re-run on connectors list refresh (that would
   // yank the operator back to Source mid-wizard).
@@ -2056,7 +2091,16 @@ export function TransferPage({
       setStep(STEP_SOURCE);
       return true;
     }
-    if (sourceKind === "database" && !(sourceTable || sourceCollection)) {
+    if (sourceKind === "database" && isCallableSourceMode(sourceReadMode) && !procedureCall.trim()) {
+      toast({
+        title: "Stored procedure required",
+        message: "Paste a single CALL / EXEC (or a PostgreSQL SELECT * FROM func()) to inspect the result set.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return true;
+    }
+    if (sourceKind === "database" && !isCallableSourceMode(sourceReadMode) && !(sourceTable || sourceCollection)) {
       toast({ title: "Source stream required", message: "Enter the table or collection name to inspect.", tone: "warning" });
       setStep(STEP_SOURCE);
       return true;
@@ -2193,6 +2237,14 @@ export function TransferPage({
     };
     if (isMongo) sourceEndpoint.collection = streamName;
     else sourceEndpoint.table = streamName;
+    if (isCallableSourceMode(sourceReadMode) && !isMongo) {
+      sourceEndpoint.source_read_mode = sourceReadMode;
+      sourceEndpoint.procedure_call = procedureCall.trim();
+      sourceEndpoint.extra = {
+        source_read_mode: sourceReadMode,
+        procedure_call: procedureCall.trim(),
+      };
+    }
 
     const { source: intro } = await introspectTransferEndpoints({
       source: sourceEndpoint,
@@ -2217,7 +2269,7 @@ export function TransferPage({
       });
     }
     return { ok: true as const, intro };
-  }, [sourceConnector, sourceConnectorId, toast]);
+  }, [sourceConnector, sourceConnectorId, toast, sourceReadMode, procedureCall]);
 
   const introspectConnectorSource = useCallback(async () => {
     if (!sourceConnector) return null;
@@ -2234,6 +2286,30 @@ export function TransferPage({
         return null;
       }
       applyPrimaryStreamSchema(tableOrPath, result.intro);
+      setSourceIntrospectError(null);
+      return result.intro;
+    }
+
+    if (isCallableSourceMode(sourceReadMode) && !isMongo) {
+      const call = procedureCall.trim();
+      if (!call) return null;
+      const streamName = procedureStreamName(call);
+      setStreamPreviews([{
+        name: streamName,
+        status: "loading",
+        columns: [],
+        schema: {},
+        rows: [],
+      }]);
+      setActiveStreamTab(streamName);
+      setSourceIntrospectError(null);
+      const result = await introspectOneStream(streamName);
+      if (!result.ok) {
+        setSourceIntrospectError(result.error);
+        toast({ title: "Could not execute stored procedure", message: result.error, tone: "error" });
+        return null;
+      }
+      applyPrimaryStreamSchema(streamName, result.intro);
       setSourceIntrospectError(null);
       return result.intro;
     }
@@ -2338,6 +2414,8 @@ export function TransferPage({
     sourceCollection,
     sourceTable,
     cloudPath,
+    sourceReadMode,
+    procedureCall,
     introspectOneStream,
     applyPrimaryStreamSchema,
     toast,
@@ -2351,17 +2429,26 @@ export function TransferPage({
   useEffect(() => {
     if (sourceKind !== "database" && sourceKind !== "cloud") return;
     if (!sourceConnectorId || !sourceConnector) return;
+    const callable = sourceKind === "database"
+      && isCallableSourceMode(sourceReadMode)
+      && sourceConnector.type !== "mongodb";
     const rawPath = sourceKind === "cloud"
       ? cloudPath.trim()
-      : (sourceConnector.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
-    const names = sourceKind === "cloud" ? (rawPath ? [rawPath] : []) : parseStreamNames(rawPath);
+      : callable
+        ? procedureCall.trim()
+        : (sourceConnector.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    const names = sourceKind === "cloud"
+      ? (rawPath ? [rawPath] : [])
+      : callable
+        ? (rawPath ? [procedureStreamName(rawPath)] : [])
+        : parseStreamNames(rawPath);
     if (!names.length) {
       setStreamPreviews([]);
       return;
     }
 
     // Gate on the full stream list so adding/removing a name re-reads schemas.
-    const key = `${sourceKind}|${sourceConnectorId}|${names.join("|")}`;
+    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}`;
     const gate = sourceIntrospectGateRef.current;
     if (gate.key === key && (gate.status === "ok" || gate.status === "error" || gate.status === "running")) {
       return;
@@ -2415,6 +2502,8 @@ export function TransferPage({
     sourceCollection,
     sourceTable,
     cloudPath,
+    sourceReadMode,
+    procedureCall,
   ]);
 
   const retrySourceIntrospect = useCallback(() => {
@@ -4918,6 +5007,48 @@ export function TransferPage({
                   placeholder="Select connector…"
                   hint="Saved connection (host, database, credentials)."
                 />
+                {dialectOffersProcedures(sourceConnector?.type) && (
+                  <div className="df2-field df2-source-read-mode">
+                    <label className="df2-label" htmlFor="source-read-mode">
+                      Source extract
+                    </label>
+                    <FilterTabs<SourceReadMode>
+                      ariaLabel="Source extract"
+                      value={sourceReadMode}
+                      onChange={setSourceReadMode}
+                      items={[
+                        { id: "table", label: "Table" },
+                        { id: "procedure", label: "Stored procedure" },
+                      ]}
+                    />
+                    <span className="df2-label-hint">
+                      {sourceReadMode === "procedure"
+                        ? "Execute one CALL/EXEC, map the result set, remap extra columns on Map."
+                        : "Read a table or view. Stored procedures are a result-set snapshot, not CDC."}
+                    </span>
+                  </div>
+                )}
+                {sourceReadMode === "procedure" && dialectOffersProcedures(sourceConnector?.type) ? (
+                <div className="df2-field df2-source-procedure">
+                  <label className="df2-label" htmlFor="source-procedure-input">
+                    Stored procedure
+                  </label>
+                  <textarea
+                    id="source-procedure-input"
+                    className="df2-input df2-textarea"
+                    value={procedureCall}
+                    onChange={(e) => setProcedureCall(e.target.value)}
+                    placeholder={procedureHint(sourceConnector?.type)}
+                    autoComplete="off"
+                    spellCheck={false}
+                    rows={4}
+                  />
+                  <span className="df2-label-hint">
+                    One statement. Literals or :name binds only — no stacked SQL, DDL, or xp_ admin calls.
+                    If the destination table already exists, Map rates each column and lists extras to remap.
+                  </span>
+                </div>
+                ) : (
                 <div className="df2-field">
                   <label className="df2-label" htmlFor="source-stream-input">
                     {sourceConnector?.type === "mongodb" ? "Collection(s)" : "Table(s)"}
@@ -4946,8 +5077,10 @@ export function TransferPage({
                       : "One table, or several separated by commas."}
                   </span>
                 </div>
+                )}
               </div>
 
+              {sourceReadMode !== "procedure" && (
               <div className="df2-source-multistream" role="note">
                 <div className="df2-source-multistream-head">
                   <DtIcon name="activity" size={15} />
@@ -4985,6 +5118,7 @@ export function TransferPage({
                   </ul>
                 )}
               </div>
+              )}
             </div>
           )}
 
