@@ -1559,6 +1559,7 @@ def _write_destination_database(
         "adls",
         "azure_blob",
         "azure_data_lake",
+        "sftp",
     }:
         common["dest_extra"] = dict(cfg.get("extra") or {})
 

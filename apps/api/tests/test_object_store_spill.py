@@ -23,6 +23,12 @@ from connectors.writer_common import mapped_rows_to_json_records  # noqa: E402
 from services.value_serializer import DF_MISSING_SENTINEL, json_default  # noqa: E402
 
 
+def test_normalize_keeps_tsv_extension():
+    from connectors.object_store_common import normalize_object_base_key
+
+    assert normalize_object_base_key("exports/orders.tsv") == "exports/orders.tsv"
+
+
 def test_json_export_matches_dumps_indent_and_omits_missing():
     rows = [("1", "keep", DF_MISSING_SENTINEL), ("2", "next", "x")]
     cols = ["id", "note", "extra"]
@@ -61,6 +67,11 @@ def test_jsonl_and_csv_export_are_incremental_and_omit_missing():
     assert csv_mime == "text/csv"
     assert csv_body.splitlines()[0] == b"id,note"
     assert b"1," in csv_body.splitlines()[1]
+    tsv_body, tsv_mime = serialize_object_store_body(
+        key="exports/a.tsv", mapped_rows=rows, target_cols=cols, dest_types=types
+    )
+    assert tsv_mime == "text/tab-separated-values"
+    assert tsv_body.splitlines()[0] == b"id\tnote"
 
 
 def test_export_rolls_to_disk_above_spill_max():

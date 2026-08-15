@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import io
 import logging
 import sys
 import uuid
@@ -11,12 +9,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from services.value_serializer import cell_to_string
-
 from connectors.object_store_common import (
     resolve_object_store_write_dest_types,
-    serialize_object_store_body,
+    serialize_object_store_export,
 )
+from connectors.object_store_multipart import resolve_multipart_limits, resolve_spill_max
 from connectors.sftp_common import (
     connect_sftp,
     host_key_settings,
@@ -30,7 +27,6 @@ from connectors.writer_common import (
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    mapped_rows_to_json_records,
     resolve_target_columns,
     row_checksum,
     transform_error_policy,
@@ -224,32 +220,30 @@ def write_mapped_rows(
         len(data_rows) - len(mapped_rows),
     )
 
-    if fmt == "tsv":
-        records = mapped_rows_to_json_records(mapped_rows, target_cols, dest_types)
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=target_cols, delimiter="\t", extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows([{c: cell_to_string(v) for c, v in r.items()} for r in records])
-        body = buf.getvalue().encode("utf-8")
-    else:
-        try:
-            body, _content_type = serialize_object_store_body(
-                key=filename if filename.lower().endswith(f".{fmt}") else f"export.{fmt}",
-                mapped_rows=mapped_rows,
-                target_cols=target_cols,
-                dest_types=dest_types,
-            )
-        except Exception as exc:
-            return WriteResult(
-                ok=False,
-                rows_written=0,
-                table_name=table_name,
-                target_schema=cfg.host,
-                checksum="",
-                chunks_completed=0,
-                error=f"SFTP serialize failed: {exc}",
-                rejected_details=list(rejected_details),
-            )
+    extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+    spill_max = resolve_spill_max(extra)
+    _, stream_chunk = resolve_multipart_limits(extra)
+    if extra.get("sftp_stream_chunk"):
+        stream_chunk = max(1, int(extra["sftp_stream_chunk"]))
+    try:
+        export = serialize_object_store_export(
+            key=filename if filename.lower().endswith(f".{fmt}") else f"export.{fmt}",
+            mapped_rows=mapped_rows,
+            target_cols=target_cols,
+            dest_types=dest_types,
+            spill_max_size=spill_max,
+        )
+    except Exception as exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=cfg.host,
+            checksum="",
+            chunks_completed=0,
+            error=f"SFTP serialize failed: {exc}",
+            rejected_details=list(rejected_details),
+        )
     written = len(mapped_rows)
 
     try:
@@ -273,7 +267,7 @@ def write_mapped_rows(
             temp_path = f"{cfg.path}.dataflow-{uuid.uuid4().hex}.tmp"
             try:
                 with sftp.file(temp_path, "wb") as f:
-                    f.write(body)
+                    export.copy_to(f, chunk_size=stream_chunk)
                     f.flush()
                 _replace_remote(sftp, temp_path, cfg.path)
             except Exception:
@@ -317,7 +311,7 @@ def write_mapped_rows(
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
-            meta=gate8_writer_meta(records, target_cols),
+            meta=gate8_writer_meta(mapped_rows, target_cols),
         )
     except Exception as exc:
         return WriteResult(
@@ -330,3 +324,5 @@ def write_mapped_rows(
             error=f"SFTP write failed: {exc}",
             rejected_details=rejected_details if "rejected_details" in locals() else [],
         )
+    finally:
+        export.close()

@@ -735,7 +735,13 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "common_issues": ["Files are immutable; use a unique filename or append-only mode."],
+        "common_issues": [
+            "Files are immutable; use a unique filename or append-only mode.",
+            "JSON/CSV/TSV/JSONL/Parquet serialize into the same object-store spool "
+            "(rolls to disk above DATAFLOW_OBJECT_STORE_SPILL_MAX) and PUT in chunks. "
+            "mapped_rows stay in RAM. Temp file + posix_rename when the server "
+            "supports it — still at-least-once, not exactly-once.",
+        ],
         "recommended_batch_size": 1000,
     },
     # ERP / strategic

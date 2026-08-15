@@ -34,8 +34,8 @@ __all__ = [
     "_object_version_token",
 ]
 
-OBJECT_STORE_EXPORT_EXTS = (".json", ".jsonl", ".csv", ".parquet")
-_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv|parquet)$", re.IGNORECASE)
+OBJECT_STORE_EXPORT_EXTS = (".json", ".jsonl", ".csv", ".tsv", ".parquet")
+_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv|tsv|parquet)$", re.IGNORECASE)
 
 
 def normalize_object_base_key(table_name: str, schema: str = "") -> str:
@@ -428,6 +428,15 @@ class ObjectStoreExport:
         except Exception:
             pass
 
+    def copy_to(self, dest: Any, *, chunk_size: int = 1024 * 1024) -> int:
+        """Write the spool to ``dest.write`` one chunk at a time. Returns bytes written."""
+        self.rewind()
+        written = 0
+        for _, chunk in self.iter_parts(max(1, int(chunk_size))):
+            dest.write(chunk)
+            written += len(chunk)
+        return written
+
 
 def _write_json_array(spool: Any, records) -> None:
     import json
@@ -494,11 +503,15 @@ def serialize_object_store_export(
             )
         else:
             records = iter_mapped_json_records(mapped_rows, target_cols, dest_types)
-            if key_l.endswith(".csv"):
+            if key_l.endswith(".csv") or key_l.endswith(".tsv"):
+                delim = "\t" if key_l.endswith(".tsv") else ","
                 text = io.TextIOWrapper(spool, encoding="utf-8", newline="", write_through=True)
                 try:
                     writer = csv.DictWriter(
-                        text, fieldnames=target_cols, extrasaction="ignore"
+                        text,
+                        fieldnames=target_cols,
+                        delimiter=delim,
+                        extrasaction="ignore",
                     )
                     writer.writeheader()
                     for record in records:
@@ -506,7 +519,9 @@ def serialize_object_store_export(
                     text.flush()
                 finally:
                     text.detach()
-                content_type = "text/csv"
+                content_type = (
+                    "text/tab-separated-values" if delim == "\t" else "text/csv"
+                )
             elif key_l.endswith(".jsonl"):
                 first = True
                 for record in records:
