@@ -1597,19 +1597,9 @@ function boostIdentityConfidence(
   let next = confidence;
   if (exact) {
     if (createNew) {
-      // Vary create-new identity by fidelity — avoid a flat 93% wall.
-      if (fid === "lossy_cast") next = Math.min(Math.max(confidence, 0.62), 0.74);
-      else if (fid === "mutate" && !SAFE_NORMALIZE_TRANSFORMS.has(tf)) {
-        next = Math.min(Math.max(confidence, 0.78), 0.88);
-      } else if (fid === "mutate") {
-        next = Math.min(Math.max(confidence, 0.88), 0.94);
-      } else if (fid === "cast") {
-        next = Math.min(Math.max(confidence, 0.8), 0.9);
-      } else if (fid === "preserve" || !fid) {
-        next = Math.min(Math.max(confidence, 0.9), 0.96);
-      } else {
-        next = Math.min(Math.max(confidence, 0.86), 0.93);
-      }
+      // Trust the API evidence band — do not flatten every create-new row to 95%.
+      if (fid === "lossy_cast") next = Math.min(confidence, 0.74);
+      else next = Math.min(confidence, 0.93);
     } else {
       next = Math.max(confidence, fid === "lossy_cast" ? 0.7 : 0.95);
     }

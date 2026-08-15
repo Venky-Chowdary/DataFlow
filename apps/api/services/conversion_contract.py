@@ -133,9 +133,13 @@ def invents_unproven_capacity(
         tgt_has_fsp = "(" in tgt_u
         if not src_has_fsp and tgt_has_fsp:
             return True
-    # INTEGER→DECIMAL(p,s) invents scale/precision the integer never proved.
+    # INTEGER→DECIMAL(p,s>0) invents fractional scale the integer never proved.
+    # Zero-scale NUMBER/DECIMAL is the dest integer carrier (Snowflake NUMBER(38,0))
+    # — that is lossless widening, not an invented scale.
     if src_l in {"integer", "bigint", "smallint", "tinyint"} and tgt_l == "decimal":
         tp, ts = parse_numeric_precision_scale(target_type)
+        if ts == 0:
+            return False
         if tp is not None or ts is not None:
             return True
     # Bare/unbounded string → VARCHAR(n) invents length the source never proved.
@@ -158,7 +162,11 @@ def _safe_path_conversion_class(
 ) -> ConversionClass:
     """Refine a non-lossy path into Identity / Widening / Equivalent / …"""
     from services.decision_kernel.types import normalize_logical_type
-    from services.type_system import integer_bit_width, integer_storage_bounds
+    from services.type_system import (
+        integer_bit_width,
+        integer_storage_bounds,
+        parse_numeric_precision_scale,
+    )
 
     src_u = (source_type or "").strip().upper().replace(" ", "")
     tgt_u = (target_type or "").strip().upper().replace(" ", "")
@@ -167,6 +175,12 @@ def _safe_path_conversion_class(
 
     src_l = normalize_logical_type(source_type)
     tgt_l = normalize_logical_type(target_type)
+
+    # Integer → zero-scale NUMBER/DECIMAL is the dest integer carrier (widening).
+    if src_l in {"integer", "bigint", "smallint", "tinyint"} and tgt_l == "decimal":
+        _p, _s = parse_numeric_precision_scale(target_type)
+        if _s == 0:
+            return ConversionClass.WIDENING
     if src_l == tgt_l:
         sw = integer_bit_width(source_type)
         tw = integer_bit_width(target_type)
@@ -315,6 +329,44 @@ def classify_conversion(
         "requires_risk_contract": False,
         "contract_version": CONVERSION_CONTRACT_VERSION,
     }
+
+
+_CREATE_NEW_CLASS_LABELS: dict[ConversionClass, str] = {
+    ConversionClass.IDENTITY: "identity",
+    ConversionClass.EQUIVALENT: "lossless equivalent",
+    ConversionClass.WIDENING: "lossless widening",
+    ConversionClass.LOSSLESS: "lossless widening",
+    ConversionClass.REPRESENTATION: "lossless representation",
+    ConversionClass.NORMALIZATION: "lossless normalization",
+}
+
+
+def create_new_mapping_reason(
+    source_type: str,
+    dest_native: str,
+    *,
+    dest_db: str = "",
+) -> str:
+    """Operator Why text for confirmed-missing dest — class, not a flat 'identity'."""
+    classified = classify_conversion(
+        source_type,
+        dest_native,
+        dest_db=dest_db,
+        transform="none",
+    )
+    raw = str(classified.get("conversion_class") or "")
+    try:
+        cls = ConversionClass(raw)
+    except ValueError:
+        cls = ConversionClass.LOSSLESS
+    if cls == ConversionClass.NEEDS_USER_APPROVAL:
+        label = "projected CREATE — capacity not dest-proven"
+    else:
+        label = _CREATE_NEW_CLASS_LABELS.get(cls, raw.replace("_", " ") or "projected CREATE")
+    return (
+        f"New destination table — {label}; "
+        f"types will CREATE on first write as {dest_native}"
+    )
 
 
 def classify_mapping(

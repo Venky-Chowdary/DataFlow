@@ -1722,6 +1722,31 @@ def _alternatives(
 IDENTITY_PASSTHROUGH_CONFIDENCE = 0.84
 
 
+def _create_new_physical_why_type(src_type: str, stamp: str, dest_db: str) -> str:
+    """Dest-physical type for create-new Why / conversion class.
+
+    ``ddl_type(snowflake, BIGINT)`` stays ``BIGINT``, but writers emit
+    ``NUMBER(38,0)``. Classify against that carrier so BIGINT→NUMBER is
+    lossless widening, not a false identity.
+    """
+    from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+
+    why = (stamp or src_type or "").strip() or src_type
+    if not dest_db:
+        return why
+    try:
+        materialized = materialize_dest_ddl(dest_db, why) or why
+    except Exception:
+        materialized = why
+    logical = normalize_logical_type(src_type)
+    if logical == "integer":
+        family = ddl_type(dest_db, "INTEGER")
+        family_u = (family or "").upper().replace(" ", "")
+        if family and family_u not in {"INTEGER", "BIGINT", "INT", "INT64", "SMALLINT"}:
+            return family
+    return materialized
+
+
 def authority_mappings(
     source_columns: list[str],
     target_columns: list[str],
@@ -1764,6 +1789,7 @@ def map_columns(
     destination_table_exists: bool | None = None,
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
+    from services.conversion_contract import classify_conversion, create_new_mapping_reason
     from services.decision_kernel import (
         create_new_mapping_target_type,
         ddl_type,
@@ -1810,15 +1836,23 @@ def map_columns(
             map_target_type = create_new_mapping_target_type(
                 src_type, dest_db, samples=src_samples.get(src)
             )
+            why_type = _create_new_physical_why_type(
+                src_type, map_target_type or dest_native, dest_db
+            )
             if confirmed_missing:
+                classified = classify_conversion(
+                    src_type,
+                    why_type,
+                    dest_db=dest_db,
+                    transform="none",
+                )
                 out.append(
                     {
                         "source": src,
                         "target": _semantic_form(src),
                         "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
-                        "reasoning": (
-                            f"New destination table — identity mapping; "
-                            f"types will CREATE on first write as {dest_native}"
+                        "reasoning": create_new_mapping_reason(
+                            src_type, why_type, dest_db=dest_db
                         ),
                         "user_override": False,
                         "requires_review": True,
@@ -1826,6 +1860,8 @@ def map_columns(
                         "target_type": map_target_type,
                         "assignment_strategy": "identity_passthrough",
                         "create_new": True,
+                        "conversion_class": classified.get("conversion_class"),
+                        "semantic_role": src_roles.get(src),
                     }
                 )
             else:

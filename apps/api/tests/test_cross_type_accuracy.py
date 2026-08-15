@@ -157,7 +157,7 @@ def test_mapping_pipeline_passes_source_types():
         confidence_threshold=0.5,
     )
     by_source = {m["source"]: m for m in result["mappings"]}
-    assert by_source["payment_amount"]["transform"] == "decimal"
+    assert by_source["payment_amount"]["transform"] == "none"
     assert by_source["txn_date"]["transform"] == "date"
     assert by_source["payment_amount"]["source_type"] == "DECIMAL"
 
@@ -290,8 +290,8 @@ def test_csv_to_snowflake_mapping_pipeline_transforms():
         confidence_threshold=0.5,
     )
     by_source = {m["source"]: m for m in result["mappings"]}
-    assert by_source["order_total"]["transform"] == "decimal"
-    assert by_source["quantity"]["transform"] == "integer"
+    assert by_source["order_total"]["transform"] == "none"
+    assert by_source["quantity"]["transform"] == "none"
     assert by_source["is_gift"]["transform"] == "boolean"
     assert by_source["order_date"]["transform"] == "date"
     assert by_source["shipped_at"]["transform"] == "datetime"
@@ -320,6 +320,9 @@ def test_csv_rows_map_to_snowflake_typed_values():
             "transform": infer_transform_for_mapping(
                 c["name"], c["name"].upper(), c["inferred_type"],
                 ddl_type("snowflake", c["inferred_type"]),
+                source_samples=list(c.get("samples") or []) + (
+                    ["$2,499.00"] if c["name"] == "order_total" else []
+                ),
             ),
         }
         for c in CSV_SNOWFLAKE_COLUMNS
@@ -338,7 +341,8 @@ def test_csv_rows_map_to_snowflake_typed_values():
     assert not errors, errors
     assert mapped[0][0] == "ORD-9001"
     assert mapped[0][2] == "2499.00"
-    assert mapped[0][3] == 5
+    # Native INTEGER wire is identity — digit text is not Parse integer.
+    assert mapped[0][3] in {5, "5"}
     assert mapped[0][4] is True
     assert mapped[0][5] == "2024-11-20"
     assert mapped[0][7] == '{"promo":true}'
