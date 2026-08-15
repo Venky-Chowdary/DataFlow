@@ -93,7 +93,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   home: {
     title: "Universal Data Transfer Platform",
     description:
-      "Move any data anywhere with AI semantic mapping, 8 preflight gates, quarantine, and checksum proof. Databases, files, warehouses, and APIs.",
+      "Move any data anywhere with AI semantic mapping, 9 preflight gates, quarantine, and checksum proof. Databases, files, warehouses, and APIs.",
     keywords:
       "Datawrap, data transfer platform, database migration, ETL, semantic mapping, preflight gates, PostgreSQL Snowflake",
     canonicalPath: "#/",

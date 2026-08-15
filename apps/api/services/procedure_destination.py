@@ -1,21 +1,26 @@
-"""Destination stored-procedure hooks and row-apply — one dest-write owner.
+"""Destination stored-procedure hooks, dest DML, and row-apply — one dest-write owner.
 
 Competitor facts (cite; do not conclude a product is "not good"):
 - Informatica CDI SQL transformation (docs, current): connected row-by-row
   CALL with field→IN mapping; unconnected Target Pre-load / Target Post-load;
   optional Continue on SQL Error; SQLError + NumRowsAffected output fields.
+  Target SQL override is operator-pasted INSERT/MERGE on the dest write.
 - Databricks Lakeflow query-based connectors ingest tables via a cursor
   column. They do not CALL a destination stored procedure as the writer.
-- Airbyte / Fivetran: table/stream writers. Dest SP is not a first-class sink.
+- Airbyte / Fivetran: table/stream writers. Dest SP / dest SQL is not a
+  first-class sink.
 
 DataFlow (stricter than Informatica continue-on-error):
 - ``before_write`` / ``after_write`` hooks are explicit CALL/EXEC only.
 - Row-apply maps declared binds onto row columns. Missing binds quarantine
   the row — never invent, never silent drop.
-- A failed CALL quarantines the row and continues the batch (operator can
-  replay). We do not offer Informatica "continue on SQL error" as success.
-- CDC / SCD2 / mirror cannot use row-apply (procedure is not a table identity).
-- SQLite / DuckDB / files / Iceberg / Kafka: dest procedure is refused.
+- Dest query mode is one INSERT/MERGE/UPDATE/UPSERT/REPLACE with binds —
+  Informatica target SQL override, not a second writer stack.
+- A failed CALL or DML quarantines the row and continues the batch.
+  We do not offer Informatica "continue on SQL error" as success.
+- CDC / SCD2 / mirror cannot use row-apply (procedure/DML is not a table identity).
+- Files / Iceberg / Kafka / Mongo: dest procedure and dest query are refused.
+- SQLite: dest procedure refused; dest query INSERT/UPDATE is allowed.
 """
 
 from __future__ import annotations
@@ -42,13 +47,44 @@ HOOK_AFTER = "after_write"
 MODE_TABLE = "table"
 MODE_HOOKS = "hooks"
 MODE_ROW_APPLY = "row_apply"
-DEST_PROCEDURE_MODES = frozenset({MODE_HOOKS, MODE_ROW_APPLY})
+MODE_QUERY = "query"
+DEST_PROCEDURE_MODES = frozenset({MODE_HOOKS, MODE_ROW_APPLY, MODE_QUERY})
+DEST_ROW_MODES = frozenset({MODE_ROW_APPLY, MODE_QUERY})
 
 REASON_DEST_ENGINE = "dest_procedure_engine_refused"
 REASON_DEST_CDC = "dest_procedure_refuses_history_sync"
 REASON_UNBOUND = "dest_procedure_unbound_param"
 REASON_CALL_FAILED = "dest_procedure_call_failed"
+REASON_DML_FAILED = "dest_query_failed"
 REASON_OK = "dest_procedure_applied"
+
+_FILE_SINKS = frozenset({
+    "csv",
+    "json",
+    "jsonl",
+    "parquet",
+    "iceberg",
+    "kafka",
+    "s3",
+    "gcs",
+    "mongodb",
+    "dynamodb",
+})
+
+_DEST_DML_START = re.compile(r"^\s*(INSERT|MERGE|UPDATE|UPSERT|REPLACE)\b", re.IGNORECASE)
+_DEST_DML_DENIED = re.compile(
+    r"\b("
+    r"DROP|CREATE|ALTER|TRUNCATE|GRANT|REVOKE|CALL|EXEC|EXECUTE|"
+    r"DELETE|COPY|LOAD|OPENROWSET|OPENDATASOURCE|OPENQUERY|"
+    r"BULK|SHUTDOWN|DBCC|xp_cmdshell|INTO\s+OUTFILE|INTO\s+DUMPFILE|"
+    r"EXECUTE\s+IMMEDIATE|sp_executesql"
+    r")\b",
+    re.IGNORECASE,
+)
+_DEST_TABLE_RE = re.compile(
+    r"\b(?:INTO|UPDATE)\s+([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*){0,2})",
+    re.IGNORECASE,
+)
 
 
 class ProcedureDestinationError(ValueError):
@@ -85,8 +121,12 @@ class DestProcedurePlan:
 def dest_write_mode_of(dest: Any) -> str:
     extra = _extra(dest)
     raw = str(extra.get("dest_write_mode") or extra.get("dest_read_mode") or "").strip().lower()
+    if raw in {MODE_QUERY, "dest_query", "sql"}:
+        return MODE_QUERY
     if raw in {MODE_ROW_APPLY, "procedure", "stored_procedure"}:
         return MODE_ROW_APPLY
+    if extra.get("dest_query_sql") or extra.get("dest_query"):
+        return MODE_QUERY
     if raw == MODE_HOOKS or extra.get("dest_procedure_before") or extra.get("dest_procedure_after"):
         return MODE_HOOKS
     if extra.get("dest_procedure_call") or extra.get("dest_procedure"):
@@ -105,16 +145,17 @@ def dest_procedure_param_map(dest: Any) -> dict[str, str]:
 def dest_procedure_sync_refusal(sync_mode: str, dest: Any = None) -> str | None:
     """Row-apply cannot drive CDC/SCD2/mirror. Hooks on a table write are allowed."""
     mode = dest_write_mode_of(dest) if dest is not None else MODE_ROW_APPLY
-    if mode != MODE_ROW_APPLY:
+    if mode not in DEST_ROW_MODES:
         return None
     from services.sync_cursor import normalize_sync_mode
 
     sync = normalize_sync_mode(sync_mode, default="")
     if sync in CALLABLE_REFUSED_SYNC_MODES:
+        kind = "INSERT/MERGE" if mode == MODE_QUERY else "CALL"
         return (
-            "Destination stored-procedure row-apply is a CALL per row, not a "
+            f"Destination {kind} row-apply is one statement per row, not a "
             "table identity. CDC / SCD2 / mirror would delete or version rows "
-            "the procedure never listed — refuse. Use upsert/append, or table "
+            "the statement never listed — refuse. Use upsert/append, or table "
             "write with before/after hooks."
         )
     return None
@@ -133,23 +174,22 @@ def plan_dest_procedure(dest: Any) -> DestProcedurePlan | None:
         return None
     dialect = dialect_of(dest)
     dialect_n = (dialect or "").strip().lower()
-    if dialect_n in QUERY_ONLY_DIALECTS or dialect_n in {
-        "csv",
-        "json",
-        "jsonl",
-        "parquet",
-        "iceberg",
-        "kafka",
-        "s3",
-        "gcs",
-        "mongodb",
-        "dynamodb",
-    }:
+    if dialect_n in _FILE_SINKS:
+        raise ProcedureDestinationError(
+            f"{dialect_n or 'This engine'} cannot execute destination SQL.",
+            reason=REASON_DEST_ENGINE,
+        )
+    if mode != MODE_QUERY and dialect_n in QUERY_ONLY_DIALECTS:
         raise ProcedureDestinationError(
             f"{dialect_n or 'This engine'} cannot execute a destination stored procedure.",
             reason=REASON_DEST_ENGINE,
         )
-    if dialect_n and dialect_n not in PROCEDURE_DIALECTS and dialect_n != "generic_sql":
+    if (
+        mode != MODE_QUERY
+        and dialect_n
+        and dialect_n not in PROCEDURE_DIALECTS
+        and dialect_n != "generic_sql"
+    ):
         raise ProcedureDestinationError(
             f"Destination stored procedure is not offered for '{dialect_n}'.",
             reason=REASON_DEST_ENGINE,
@@ -158,14 +198,26 @@ def plan_dest_procedure(dest: Any) -> DestProcedurePlan | None:
     extra = _extra(dest)
     notes = [
         "Informatica Target Pre/Post-load maps to before_write / after_write.",
-        "Failed CALL rows are quarantined — not Informatica continue-on-error.",
+        "Failed CALL / dest DML rows are quarantined — not Informatica continue-on-error.",
         "Binds come from declared param_map columns — never invented.",
+        "Dest query is INSERT/MERGE/UPDATE with binds — not a SELECT extract.",
     ]
     before = _parse_hook(extra.get("dest_procedure_before"), dialect_n, extra, HOOK_BEFORE)
     after = _parse_hook(extra.get("dest_procedure_after"), dialect_n, extra, HOOK_AFTER)
     row_spec = None
     param_map = dest_procedure_param_map(dest)
-    if mode == MODE_ROW_APPLY:
+    if mode == MODE_QUERY:
+        text = str(extra.get("dest_query_sql") or extra.get("dest_query") or "").strip()
+        if not text:
+            raise ProcedureDestinationError(
+                "Destination query write needs one INSERT / MERGE / UPDATE with binds."
+            )
+        row_spec = parse_dest_dml(
+            text,
+            dialect=dialect_n,
+            params=_plan_params(text, dest, param_map),
+        )
+    elif mode == MODE_ROW_APPLY:
         text = str(
             extra.get("dest_procedure_call")
             or extra.get("dest_procedure")
@@ -202,6 +254,50 @@ def plan_dest_procedure(dest: Any) -> DestProcedurePlan | None:
         after_spec=after,
         param_map=param_map,
         notes=tuple(notes),
+    )
+
+
+def parse_dest_dml(
+    text: str,
+    *,
+    dialect: str = "",
+    params: Mapping[str, Any] | None = None,
+) -> CallableSpec:
+    """One dest INSERT/MERGE/UPDATE — bound params only, never string-concat."""
+    stripped = re.sub(r"--[^\n]*", " ", text or "")
+    stripped = re.sub(r"/\*.*?\*/", " ", stripped, flags=re.DOTALL)
+    stripped = " ".join(stripped.split()).strip()
+    if not stripped:
+        raise ProcedureDestinationError(
+            "Paste one INSERT / MERGE / UPDATE with :binds. CALL belongs in Stored procedure."
+        )
+    if ";" in stripped.rstrip().rstrip(";"):
+        raise ProcedureDestinationError(
+            "Only one statement is allowed — remove extra semicolons."
+        )
+    if not _DEST_DML_START.match(stripped):
+        raise ProcedureDestinationError(
+            "Destination query allows INSERT, MERGE, UPDATE, UPSERT, or REPLACE. "
+            "SELECT is a source extract. CALL is Stored procedure."
+        )
+    if _DEST_DML_DENIED.search(stripped):
+        raise ProcedureDestinationError(
+            "Destination query refuses DELETE, DDL, CALL, and admin tokens. "
+            "Failed rows quarantine — we do not run destructive SQL as a load."
+        )
+    verb = (_DEST_DML_START.match(stripped).group(1) or "INSERT").upper()
+    ident_m = _DEST_TABLE_RE.search(stripped)
+    identifier = (ident_m.group(1) if ident_m else "dest_query").strip()
+    binds = _plan_params(stripped, None, {})
+    merged = {**binds, **dict(params or {})}
+    return CallableSpec(
+        mode=MODE_QUERY,
+        dialect=(dialect or "").strip().lower(),
+        verb=verb,
+        identifier=identifier,
+        sql=stripped,
+        params=merged,
+        stream_name=identifier.split(".")[-1],
     )
 
 
@@ -242,15 +338,15 @@ def apply_rows_via_procedure(
     raise; the row is quarantined and the batch continues.
     """
     planned = plan or plan_dest_procedure(dest)
-    if planned is None or planned.mode != MODE_ROW_APPLY or planned.row_spec is None:
-        raise ProcedureDestinationError("Destination is not a procedure row-apply.")
+    if planned is None or planned.mode not in DEST_ROW_MODES or planned.row_spec is None:
+        raise ProcedureDestinationError("Destination is not a procedure or query row-apply.")
     sql, _ = compile_callable_sql(planned.row_spec)
     written = 0
     failed = 0
     quarantine: list[dict[str, Any]] = []
     ddl = [
-        f"Dest procedure row-apply {planned.row_spec.identifier} "
-        f"({len(records)} incoming rows; failed CALLs quarantine)"
+        f"Dest {planned.mode} row-apply {planned.row_spec.identifier} "
+        f"({len(records)} incoming rows; failed statements quarantine)"
     ]
     if planned.before_spec:
         execute_call(*compile_callable_sql(planned.before_spec))
@@ -260,9 +356,9 @@ def apply_rows_via_procedure(
             failed += 1
             quarantine.append(
                 {
-                    "stage": "dest_procedure",
+                    "stage": "dest_query" if planned.mode == MODE_QUERY else "dest_procedure",
                     "reason": REASON_UNBOUND,
-                    "error": "Row is not an object — cannot bind CALL params.",
+                    "error": "Row is not an object — cannot bind dest SQL params.",
                     "source_record": rec,
                 }
             )
@@ -281,7 +377,7 @@ def apply_rows_via_procedure(
                 {
                     "stage": "dest_procedure",
                     "reason": REASON_UNBOUND,
-                    "error": f"CALL binds not present on row: {', '.join(missing)}",
+                    "error": f"Dest SQL binds not present on row: {', '.join(missing)}",
                     "source_record": rec,
                     "missing_binds": missing,
                 }
@@ -295,7 +391,7 @@ def apply_rows_via_procedure(
             quarantine.append(
                 {
                     "stage": "dest_procedure",
-                    "reason": REASON_CALL_FAILED,
+                    "reason": REASON_DML_FAILED if planned.mode == MODE_QUERY else REASON_CALL_FAILED,
                     "error": str(exc)[:500],
                     "source_record": rec,
                     "sql": sql,
@@ -306,14 +402,18 @@ def apply_rows_via_procedure(
         ddl.append(f"after_write {planned.after_spec.identifier}")
     summary = {
         "ok": failed == 0,
-        "dest_write_mode": MODE_ROW_APPLY,
+        "dest_write_mode": planned.mode,
         "dest_procedure": planned.row_spec.identifier,
         "rows_written": written,
         "rows_affected": written,
         "sql_error": failed > 0,
         "sql_error_count": failed,
         "quarantine_count": len(quarantine),
-        "delivery_semantics": "at_least_once_dest_procedure_call",
+        "delivery_semantics": (
+            "at_least_once_dest_query"
+            if planned.mode == MODE_QUERY
+            else "at_least_once_dest_procedure_call"
+        ),
         "exactly_once_claimed_platform": False,
         "notes": list(planned.notes),
     }

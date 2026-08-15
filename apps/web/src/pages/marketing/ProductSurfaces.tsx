@@ -8,6 +8,7 @@ import {
   MappingCinema,
   ProofCinema,
 } from "../../components/landing/AlgorithmCinema";
+import { TransferStudioHeroShot } from "../../components/landing/ProductJourneyCinema";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import {
   AlgoBlock,
@@ -186,48 +187,7 @@ function Chapter({
 /* ─── Unique hero mocks ─────────────────────────────────────────── */
 
 function TransferStudioMock() {
-  const [gate, setGate] = useState(0);
-  const gates = REAL_PREFLIGHT_GATES.map((g) => `${g.id} ${g.title}`);
-  useEffect(() => {
-    const id = window.setInterval(() => setGate((g) => (g + 1) % REAL_PREFLIGHT_GATES.length), 900);
-    return () => window.clearInterval(id);
-  }, []);
-
-  return (
-    <Shot label="Transfer Studio · Orders migration" caption="Live preflight advancing through nine fail-fast gates (G1–G9) before write.">
-      <div className="lp-mkt-ui-grid lp-mkt-ui-grid--studio">
-        <div className="lp-mkt-ui-pane">
-          <h4>Semantic map</h4>
-          {[
-            ["order_amt", "total_amount", "0.92"],
-            ["pay_amt", "payment_amount", "0.99"],
-            ["cust_id", "customer_key", "review"],
-          ].map(([s, d, c]) => (
-            <div key={s} className="lp-mkt-ui-map-row">
-              <code>{s}</code>
-              <span className="lp-mkt-ui-map-arrow" aria-hidden>→</span>
-              <code>{d}</code>
-              <em>{c}</em>
-            </div>
-          ))}
-        </div>
-        <div className="lp-mkt-ui-pane">
-          <h4>Preflight · {Math.min(gate + 1, 8)}/8</h4>
-          <div className="lp-mkt-ui-progress" aria-hidden>
-            <i style={{ width: `${((gate + 1) / 8) * 100}%` }} />
-          </div>
-          <ul className="lp-mkt-ui-gates">
-            {gates.map((g, i) => (
-              <li key={g} className={i <= gate ? "is-pass" : "is-pending"}>
-                <span>{g}</span>
-                <em>{i <= gate ? "pass" : "…"}</em>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </Shot>
-  );
+  return <TransferStudioHeroShot />;
 }
 
 function JobTheaterMock() {
@@ -366,7 +326,7 @@ function McpMock() {
 }`}</pre>
         <ul className="lp-mkt-ui-mcp-log">
           <li className="is-pass">RBAC: transfer:execute ✓</li>
-          <li className="is-pass">Preflight 8/8 ✓</li>
+          <li className="is-pass">Preflight 9/9 ✓</li>
           <li className="is-pass">Job job_7f3a91 queued → Job Theater</li>
         </ul>
       </div>
@@ -493,7 +453,7 @@ export function TransferStudioPage({
             },
             {
               name: "Destination write",
-              detail: "Append, overwrite, upsert, or watermark incremental — validated earlier by the write plan / DDL gates.",
+              detail: "Table upsert/append, dest Query (one INSERT/MERGE/UPDATE with binds), or dest stored procedure (one CALL per row). Failed dest SQL quarantines. CDC refuses callable dest writes.",
             },
             {
               name: "Quarantine isolate",
@@ -786,9 +746,11 @@ export function QueryPlaygroundPage({
       <Chapter id="qy-what" kicker="What it is" title="Exploration that respects connector boundaries">
         <div className="lp-mkt-prose">
           <p>
-            Query Playground is for discovery and validation — not a second write path. You query through the same
-            connector credentials and RBAC as the rest of the workspace, with preview limits so exploratory SELECTs
-            cannot accidentally become full-table pulls.
+            Query Playground is for discovery and validation — not a second write path. It is read-only: SELECT/WITH
+            only; CALL and DML are refused here. Dest INSERT/MERGE and dest CALL live on Transfer Studio Destination
+            write (Query / Stored procedure), with quarantine on failure. You query through the same connector
+            credentials and RBAC as the rest of the workspace, with preview limits so exploratory SELECTs cannot
+            accidentally become full-table pulls.
           </p>
           <p>
             When a query defines the slice you want to move, hand off to Transfer Studio to attach mapping, preflight,
@@ -1172,7 +1134,7 @@ export function WarehouseSolutionPage({
               <div><span>Reachability</span><em>ok</em></div>
               <div><span>Privileges</span><em>write granted</em></div>
               <div><span>Capacity</span><em>slots available</em></div>
-              <div><span>Preflight</span><em>8 / 8</em></div>
+              <div><span>Preflight</span><em>9 / 9</em></div>
             </aside>
           </div>
         </section>

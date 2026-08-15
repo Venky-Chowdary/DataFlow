@@ -1410,7 +1410,7 @@ def write_destination_database(
 
     cfg = resolve_connector_config(endpoint)
     from services.procedure_destination import (
-        MODE_ROW_APPLY,
+        DEST_ROW_MODES,
         assert_dest_procedure_sync_allowed,
         plan_dest_procedure,
     )
@@ -1418,7 +1418,7 @@ def write_destination_database(
     dest_plan = plan_dest_procedure(endpoint)
     if dest_plan is not None:
         assert_dest_procedure_sync_allowed(str(options.get("sync_mode") or ""), endpoint)
-        if dest_plan.mode == MODE_ROW_APPLY:
+        if dest_plan.mode in DEST_ROW_MODES:
             return _write_dest_procedure_rows(endpoint, records, dest_plan)
         if dest_plan.before_spec is not None:
             _run_dest_procedure_hook(endpoint, dest_plan.before_spec)

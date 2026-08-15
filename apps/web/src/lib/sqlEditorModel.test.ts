@@ -29,6 +29,19 @@ describe("sqlEditorModel", () => {
     assert.equal(ok.statement, "SELECT");
   });
 
+  it("dest DML wants INSERT and refuses DELETE", () => {
+    const sel = diagnoseSql("SELECT 1", { mode: "dest_dml" });
+    assert.equal(sel.ok, false);
+    const del = diagnoseSql("DELETE FROM t WHERE id = :id", { mode: "dest_dml", bound: { id: "1" } });
+    assert.equal(del.ok, false);
+    const ok = diagnoseSql("INSERT INTO orders (id, amt) VALUES (:id, :amt)", {
+      mode: "dest_dml",
+      bound: { id: "1", amt: "2" },
+    });
+    assert.equal(ok.ok, true);
+    assert.equal(ok.statement, "INSERT");
+  });
+
   it("procedure mode wants CALL and surfaces unbound binds", () => {
     const queryAsProc = diagnoseSql("SELECT id FROM t", { mode: "procedure", dialect: "mysql" });
     assert.equal(queryAsProc.ok, false);

@@ -443,6 +443,8 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "**Incremental append** — cursor-based new rows only.",
           "**Incremental deduped** — cursor + primary-key upserts.",
           "**CDC / SCD Type 2 / Mirror** — advanced identity modes (PK required where noted).",
+          "**Destination write → Query** — one INSERT/MERGE/UPDATE with `:binds` mapped to source columns. Failed rows quarantine. Not CDC.",
+          "**Destination write → Stored procedure** — one CALL/EXEC per row (Informatica connected SQL). SQLite has no dest procedures; dest query INSERT is allowed.",
         ],
       },
       {
@@ -1105,12 +1107,12 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "tips",
         title: "Tips",
-        body: "Use Query Playground to validate source data shape before mapping. Format JSON results, clear the editor, and use snippet chips for common patterns. Prefer read-only statements — governed writes still go through Transfer Studio / Pipelines.",
+        body: "Use Query Playground to validate source data shape before mapping. Format JSON results, clear the editor, and use snippet chips for common patterns. Playground is **read-only** — it refuses CALL/EXEC and DML. Governed writes still go through Transfer Studio / Pipelines.",
       },
       {
         id: "transfer-bridge",
         title: "Bridge to Transfer Studio",
-        body: "When the shape looks right, open **Transfer** and reuse the same connector on Source or Destination. Validated queries inform filters and preflight sample expectations; they do not skip Validate.",
+        body: "When the shape looks right, open **Transfer** and reuse the same connector. On **Source**, choose **Query** (read-only SELECT) or **Stored procedure** (one CALL/EXEC, spooled once). On **Destination**, choose **Query** (one INSERT/MERGE/UPDATE with binds) or **Stored procedure** (one CALL per row). Failed dest statements quarantine — they never silently drop. CDC / SCD2 / mirror refuse callable dest writes. Validated playground queries do not skip Validate.",
       },
     ],
   },

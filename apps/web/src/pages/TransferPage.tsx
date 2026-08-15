@@ -230,6 +230,7 @@ export function TransferPage({
   const [procedureParams, setProcedureParams] = useState<Record<string, string>>({});
   const [destWriteMode, setDestWriteMode] = useState<DestWriteMode>("table");
   const [destProcedureCall, setDestProcedureCall] = useState("");
+  const [destQuerySql, setDestQuerySql] = useState("");
   const [destProcedureParams, setDestProcedureParams] = useState<Record<string, string>>({});
   const [destProcedureBefore, setDestProcedureBefore] = useState("");
   const [destProcedureAfter, setDestProcedureAfter] = useState("");
@@ -521,7 +522,18 @@ export function TransferPage({
                 ? { dest_procedure_params: destProcedureParams }
                 : {}),
             }
-          : {}),
+          : destWriteMode === "query"
+            ? {
+                dest_write_mode: "query",
+                dest_query_sql: destQuerySql.trim(),
+                ...(Object.keys(destProcedureParamMap).length
+                  ? { dest_procedure_param_map: destProcedureParamMap }
+                  : {}),
+                ...(Object.keys(destProcedureParams).length
+                  ? { dest_procedure_params: destProcedureParams }
+                  : {}),
+              }
+            : {}),
         ...(destProcedureBefore.trim()
           ? { dest_procedure_before: destProcedureBefore.trim() }
           : {}),
@@ -1134,6 +1146,7 @@ export function TransferPage({
     destTableExists,
     destWriteMode,
     destProcedureCall,
+    destQuerySql,
     destProcedureParams,
     destProcedureBefore,
     destProcedureAfter,
@@ -4257,6 +4270,16 @@ export function TransferPage({
               extra.dest_procedure_params = { ...destProcedureParams };
             }
           }
+          if (destWriteMode === "query") {
+            extra.dest_write_mode = "query";
+            extra.dest_query_sql = destQuerySql.trim();
+            if (Object.keys(destProcedureParamMap).length) {
+              extra.dest_procedure_param_map = { ...destProcedureParamMap };
+            }
+            if (Object.keys(destProcedureParams).length) {
+              extra.dest_procedure_params = { ...destProcedureParams };
+            }
+          }
           if (destProcedureBefore.trim()) extra.dest_procedure_before = destProcedureBefore.trim();
           if (destProcedureAfter.trim()) extra.dest_procedure_after = destProcedureAfter.trim();
           const isVectorDestRun =
@@ -5945,6 +5968,8 @@ export function TransferPage({
               onDestWriteMode={setDestWriteMode}
               destProcedureCall={destProcedureCall}
               onDestProcedureCall={setDestProcedureCall}
+              destQuerySql={destQuerySql}
+              onDestQuerySql={setDestQuerySql}
               destProcedureParams={destProcedureParams}
               onDestProcedureParams={setDestProcedureParams}
               destProcedureBefore={destProcedureBefore}

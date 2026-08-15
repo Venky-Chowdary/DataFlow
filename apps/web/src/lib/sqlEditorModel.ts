@@ -8,9 +8,11 @@
 
 import { checkReadOnly, extractBindParams, stripComments } from "./sqlIntel";
 
+export type SqlEditorMode = "query" | "procedure" | "dest_dml";
+
 export interface SqlDiagnosis {
   ok: boolean;
-  mode: "query" | "procedure";
+  mode: SqlEditorMode;
   dialect: string;
   statement: string;
   binds: string[];
@@ -23,7 +25,7 @@ const PG_FN_DIALECTS = new Set(["postgresql", "postgres", "pgvector", "redshift"
 
 export function diagnoseSql(
   text: string,
-  opts: { mode: "query" | "procedure"; dialect?: string; bound?: Record<string, string> },
+  opts: { mode: SqlEditorMode; dialect?: string; bound?: Record<string, string> },
 ): SqlDiagnosis {
   const dialect = String(opts.dialect || "").toLowerCase();
   const raw = String(text || "");
@@ -44,7 +46,9 @@ export function diagnoseSql(
     return fail(
       opts.mode === "query"
         ? "Paste one read-only SELECT / WITH."
-        : "Paste one CALL / EXEC, or a set-returning function.",
+        : opts.mode === "dest_dml"
+          ? "Paste one INSERT / MERGE / UPDATE with :binds."
+          : "Paste one CALL / EXEC, or a set-returning function.",
     );
   }
   if (stripped.includes(";") && stripped.replace(/;+\s*$/, "").includes(";")) {
@@ -54,7 +58,17 @@ export function diagnoseSql(
   const verb = firstVerb(stripped);
   const isCall = /^(call|exec(?:ute)?)$/i.test(verb);
 
-  if (opts.mode === "query") {
+  if (opts.mode === "dest_dml") {
+    if (isCall) {
+      return fail("CALL belongs in Stored procedure — dest query is INSERT/MERGE/UPDATE.");
+    }
+    if (!/^(insert|merge|update|upsert|replace)$/i.test(verb)) {
+      return fail("Destination query allows INSERT, MERGE, UPDATE, UPSERT, or REPLACE.");
+    }
+    if (/\b(drop|create|alter|truncate|grant|revoke|delete)\b/i.test(stripped)) {
+      return fail("Destination query refuses DELETE, DDL, and admin tokens.");
+    }
+  } else if (opts.mode === "query") {
     if (isCall) {
       return fail("Query source allows one read-only SELECT/WITH — CALL belongs in Stored procedure.");
     }
@@ -98,6 +112,6 @@ export function diagnoseSql(
 }
 
 function firstVerb(text: string): string {
-  const m = text.match(/^(call|exec(?:ute)?|select|with)/i);
+  const m = text.match(/^(call|exec(?:ute)?|select|with|insert|merge|update|upsert|replace)/i);
   return (m?.[1] || "SQL").toUpperCase();
 }

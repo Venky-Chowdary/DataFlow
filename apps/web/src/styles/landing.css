@@ -5545,10 +5545,18 @@
   border-radius: 16px;
   border: 1px solid var(--lp-line);
   background: #fff;
+  color: var(--lp-ink, #0f172a);
   box-shadow: var(--lp-shadow-lg, 0 24px 64px rgba(15, 23, 42, 0.12));
   overflow: hidden;
   max-width: none;
   width: 100%;
+}
+
+.lp-mkt-hero-band--ink .lp-mkt-shot {
+  color: var(--lp-ink, #0f172a);
+  box-shadow:
+    0 0 0 1px rgba(45, 212, 191, 0.12),
+    0 28px 64px rgba(0, 0, 0, 0.45);
 }
 
 .lp-mkt-shot-chrome {
@@ -5627,6 +5635,7 @@
   padding: 4px 6px;
   border-radius: 6px;
   background: #fff;
+  color: #0f172a;
   border: 1px solid var(--lp-line);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -12195,4 +12204,301 @@
     grid-template-columns: 1fr;
   }
   .lp-obs-step { min-height: 72px; }
+}
+
+/* Clickable Map → Validate → Write → Prove (landing + solutions heroes) */
+.lp-journey {
+  display: grid;
+  gap: 14px;
+  color: var(--lp-ink, #0f172a);
+}
+
+.lp-journey-tabs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.lp-journey-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  width: 100%;
+  min-height: 64px;
+  padding: 10px 12px;
+  border: 1px solid var(--lp-line, #e4e8ee);
+  border-radius: 10px;
+  background: #fff;
+  color: var(--lp-ink, #0f172a);
+  text-align: left;
+  cursor: pointer;
+}
+
+.lp-journey-tab span {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #0f766e;
+}
+
+.lp-journey-tab strong {
+  font-size: 12.5px;
+  line-height: 1.3;
+  color: #0f172a;
+  text-transform: capitalize;
+}
+
+.lp-journey-tab.is-active {
+  border-color: #0d9488;
+  background: #f0fdfa;
+  box-shadow: 0 0 0 1px rgba(13, 148, 136, 0.18);
+}
+
+.lp-journey-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 0.95fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.lp-journey.is-compact .lp-journey-body {
+  grid-template-columns: 1fr;
+}
+
+.lp-journey.is-compact .lp-journey-tab {
+  min-height: 52px;
+  padding: 8px 10px;
+}
+
+.lp-journey.is-compact .lp-journey-tab strong {
+  font-size: 12px;
+}
+
+.lp-journey-copy h3 {
+  margin: 6px 0 10px;
+  font-size: clamp(1.2rem, 2vw, 1.5rem);
+  color: #0f172a;
+}
+
+.lp-journey-copy p,
+.lp-journey-kicker {
+  color: #475569;
+}
+
+.lp-journey-kicker {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #0f766e;
+}
+
+.lp-journey-play {
+  margin-top: 12px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid #0d9488;
+  background: #fff;
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.lp-journey-shot {
+  padding: 14px;
+  border: 1px solid #e4e8ee;
+  border-radius: 12px;
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.lp-journey-shot header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.lp-journey-shot h4 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #475569;
+}
+
+.lp-journey-shot header em {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 700;
+  color: #0f766e;
+}
+
+.lp-journey-shot header em.is-ok {
+  color: #059669;
+}
+
+.lp-journey-map-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.lp-journey-map-row code {
+  font-family: var(--df-font-mono, "JetBrains Mono", ui-monospace, monospace);
+  font-size: 12px;
+  font-weight: 650;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fff;
+  color: #0f172a;
+  border: 1px solid #e4e8ee;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lp-journey-map-row span {
+  color: #0d9488;
+  font-weight: 700;
+  text-align: center;
+}
+
+.lp-journey-map-row em {
+  font-style: normal;
+  font-size: 11px;
+  font-weight: 750;
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: #ecfdf5;
+  color: #0f766e;
+}
+
+.lp-journey-map-row.is-warn em {
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.lp-journey-map-row.is-info em {
+  background: #f0f9ff;
+  color: #0369a1;
+}
+
+.lp-journey-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.lp-journey-progress i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #14b8a6, #0d9488);
+}
+
+.lp-journey-gates {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 3px;
+  max-height: 196px;
+  overflow: auto;
+}
+
+.lp-journey-gates li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11.5px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: #0f172a;
+}
+
+.lp-journey-gates li.is-pass {
+  background: #ecfdf5;
+  color: #0f766e;
+}
+
+.lp-journey-gates li.is-pending { color: #64748b; }
+
+.lp-journey-gates em {
+  font-style: normal;
+  font-weight: 700;
+}
+
+.lp-journey-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.lp-journey-metrics div {
+  padding: 10px 8px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #e4e8ee;
+  text-align: center;
+}
+
+.lp-journey-metrics strong {
+  display: block;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+  color: #0f766e;
+}
+
+.lp-journey-metrics.is-warn strong,
+.lp-journey-metrics div.is-warn strong { color: #b45309; }
+
+.lp-journey-metrics div.is-muted strong { color: #64748b; }
+
+.lp-journey-metrics div.is-ok strong { color: #059669; }
+
+.lp-journey-metrics span {
+  font-size: 10px;
+  font-weight: 650;
+  color: #475569;
+}
+
+.lp-journey-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #334155;
+}
+
+.lp-journey-note code {
+  font-family: var(--df-font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: #0f766e;
+  background: #ecfdf5;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+@media (max-width: 900px) {
+  .lp-journey-tabs,
+  .lp-journey-body {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lp-journey-progress i { transition: none; }
 }

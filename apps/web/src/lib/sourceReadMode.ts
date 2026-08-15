@@ -37,6 +37,22 @@ export function dialectOffersSqlExtract(driver: string | undefined | null): bool
   return dialectOffersProcedures(driver) || dialectOffersQuery(driver);
 }
 
+/** Dest table SQL write — INSERT/MERGE — including SQLite (no stored procs). */
+export function dialectOffersDestQuery(driver: string | undefined | null): boolean {
+  return dialectOffersQuery(driver);
+}
+
+export function destQueryHint(driver: string | undefined | null): string {
+  const d = String(driver || "").toLowerCase();
+  if (d === "sqlserver" || d === "mssql") {
+    return "INSERT INTO dbo.orders (id, amt) VALUES (@id, @amt) — one statement, bound params only.";
+  }
+  if (d === "snowflake") {
+    return "MERGE INTO dest.orders t USING (SELECT :id id, :amt amt) s ON t.id = s.id …";
+  }
+  return "INSERT INTO schema.orders (id, amt) VALUES (:id, :amt) — one INSERT/MERGE/UPDATE. CALL belongs in Stored procedure.";
+}
+
 export function bindNamesFromSql(text: string): string[] {
   const names: string[] = [];
   const seen = new Set<string>();

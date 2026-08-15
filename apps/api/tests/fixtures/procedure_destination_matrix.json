@@ -1,6 +1,6 @@
 {
   "metric": "procedure_destination_write",
-  "honesty": "Named fixture. Not a claim we beat Informatica CDI catalog breadth. Dest procedure is CALL/EXEC with quarantine — not continue-on-error. CDC remains at-least-once upsert on table dests. Live warehouse matrix is not invented here.",
+  "honesty": "Named fixture. Not a claim we beat Informatica CDI catalog breadth. Dest procedure is CALL/EXEC with quarantine — not continue-on-error. Dest query is one INSERT/MERGE/UPDATE with binds (SQLite proven in-process). CDC remains at-least-once upsert on table dests. Live warehouse CALL/EOS matrix is not invented here. Platform-wide exactly-once is not claimed.",
   "competitor_facts": [
     "Informatica CDI SQL transformation: connected row-by-row CALL; unconnected Target Pre-load / Target Post-load; optional Continue on SQL Error; SQLError + NumRowsAffected fields",
     "Databricks Lakeflow query-based connectors: cursor-column table ingest — dest stored procedure is not the writer",
@@ -8,7 +8,7 @@
   ],
   "platform_exactly_once_claimed": false,
   "measured_floor": 1.0,
-  "pass": 10,
+  "pass": 15,
   "fail": 0,
   "plan_accept": [
     {
@@ -46,6 +46,25 @@
       "extra": {
         "dest_write_mode": "procedure",
         "dest_procedure_call": "app.load_order"
+      }
+    },
+    {
+      "id": "sqlite_dest_query_insert",
+      "dialect": "sqlite",
+      "expect_mode": "query",
+      "extra": {
+        "dest_write_mode": "query",
+        "dest_query_sql": "INSERT INTO orders (id, amt) VALUES (:id, :amt)",
+        "dest_procedure_param_map": {"id": "order_id", "amt": "order_amt"}
+      }
+    },
+    {
+      "id": "pg_dest_query_merge",
+      "dialect": "postgresql",
+      "expect_mode": "query",
+      "extra": {
+        "dest_write_mode": "query",
+        "dest_query_sql": "INSERT INTO analytics.orders (id, amt) VALUES (:id, :amt)"
       }
     },
     {
@@ -91,6 +110,30 @@
       "extra": {
         "dest_write_mode": "procedure",
         "dest_procedure_call": ""
+      }
+    },
+    {
+      "id": "dest_query_select_refused",
+      "dialect": "postgresql",
+      "extra": {
+        "dest_write_mode": "query",
+        "dest_query_sql": "SELECT * FROM orders"
+      }
+    },
+    {
+      "id": "dest_query_delete_refused",
+      "dialect": "mysql",
+      "extra": {
+        "dest_write_mode": "query",
+        "dest_query_sql": "DELETE FROM orders WHERE id = :id"
+      }
+    },
+    {
+      "id": "iceberg_dest_query",
+      "dialect": "iceberg",
+      "extra": {
+        "dest_write_mode": "query",
+        "dest_query_sql": "INSERT INTO t (id) VALUES (:id)"
       }
     },
     {

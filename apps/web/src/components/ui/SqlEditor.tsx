@@ -1,13 +1,13 @@
 import { useMemo, useRef } from "react";
 import { highlightSql } from "../../lib/queryHighlight";
-import { diagnoseSql, type SqlDiagnosis } from "../../lib/sqlEditorModel";
+import { diagnoseSql, type SqlDiagnosis, type SqlEditorMode } from "../../lib/sqlEditorModel";
 
 interface SqlEditorProps {
   id: string;
   label: string;
   value: string;
   onChange: (next: string) => void;
-  mode: "query" | "procedure";
+  mode: SqlEditorMode;
   dialect?: string;
   bound?: Record<string, string>;
   placeholder?: string;
@@ -58,7 +58,7 @@ export function SqlEditor({
       <div className="df2-sql-editor-head">
         <label className="df2-label" htmlFor={id}>{label}</label>
         <span className={`df2-sql-editor-pill${diagnosis.ok ? " is-ok" : value.trim() ? " is-err" : ""}`}>
-          {value.trim() ? (diagnosis.ok ? diagnosis.statement : "Needs fix") : mode === "query" ? "SELECT" : "CALL"}
+          {value.trim() ? (diagnosis.ok ? diagnosis.statement : "Needs fix") : mode === "query" ? "SELECT" : mode === "dest_dml" ? "INSERT" : "CALL"}
         </span>
       </div>
       <div className="df2-sql-editor-frame" style={{ minHeight }}>
@@ -102,7 +102,9 @@ export function SqlEditor({
           <span className="df2-sql-editor-ok">
             {mode === "query"
               ? "Read-only extract — result columns map next. Not CDC."
-              : "One CALL — result or dest params never invent binds."}
+              : mode === "dest_dml"
+                ? "One dest INSERT/MERGE — failed rows quarantine. Not CDC."
+                : "One CALL — result or dest params never invent binds."}
           </span>
         )}
       </div>

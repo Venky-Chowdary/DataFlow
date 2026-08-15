@@ -9,6 +9,7 @@ import pytest
 
 from services.procedure_destination import (
     MODE_HOOKS,
+    MODE_QUERY,
     MODE_ROW_APPLY,
     ProcedureDestinationError,
     REASON_CALL_FAILED,
@@ -39,7 +40,7 @@ def test_named_dest_procedure_parse_matrix() -> None:
         plan = plan_dest_procedure(dest)
         assert plan is not None, case["id"]
         assert plan.mode == case["expect_mode"]
-        if case["expect_mode"] == MODE_ROW_APPLY:
+        if case["expect_mode"] in {MODE_ROW_APPLY, MODE_QUERY}:
             assert plan.row_spec is not None
             assert plan.row_spec.identifier
         ok += 1
@@ -93,7 +94,7 @@ def test_row_apply_quarantines_unbound_and_failed_calls() -> None:
     assert REASON_UNBOUND in reasons
     assert REASON_CALL_FAILED in reasons
     assert calls[0][1]["id"] == "1"
-    assert "Dest procedure row-apply" in ddl[0]
+    assert "row-apply" in ddl[0]
     assert summary["exactly_once_claimed_platform"] is False
 
 
@@ -148,6 +149,49 @@ def test_row_apply_refuses_cdc() -> None:
         assert_dest_procedure_sync_allowed("cdc", dest)
     assert exc.value.reason == REASON_DEST_CDC
     assert_dest_procedure_sync_allowed("cdc", {"type": "postgresql", "extra": {}})
+
+
+def test_sqlite_dest_query_writes_and_quarantines() -> None:
+    """Real SQLite INSERT — dest query is not a mock path."""
+    import sqlite3
+
+    con = sqlite3.connect(":memory:")
+    con.execute("CREATE TABLE orders (id TEXT, amt REAL)")
+    dest = {
+        "type": "sqlite",
+        "extra": {
+            "dest_write_mode": "query",
+            "dest_query_sql": "INSERT INTO orders (id, amt) VALUES (:id, :amt)",
+            "dest_procedure_param_map": {"id": "order_id", "amt": "order_amt"},
+        },
+    }
+    plan = plan_dest_procedure(dest)
+    assert dest_write_mode_of(dest) == MODE_QUERY
+    assert plan is not None and plan.mode == MODE_QUERY
+
+    def execute(sql: str, binds: dict) -> None:
+        con.execute(sql, binds)
+
+    written, _ddl, summary = apply_rows_via_procedure(
+        dest,
+        [
+            {"order_id": "1", "order_amt": 10.5},
+            {"order_id": "2"},
+            {"order_id": "3", "order_amt": 4},
+        ],
+        execute_call=execute,
+        plan=plan,
+    )
+    con.commit()
+    rows = con.execute("SELECT id, amt FROM orders ORDER BY id").fetchall()
+    assert written == 2
+    assert rows == [("1", 10.5), ("3", 4.0)]
+    assert summary["sql_error"] is True
+    assert summary["exactly_once_claimed_platform"] is False
+    assert {q["reason"] for q in summary["quarantine"]} == {REASON_UNBOUND}
+    with pytest.raises(ProcedureDestinationError) as exc:
+        assert_dest_procedure_sync_allowed("cdc", dest)
+    assert exc.value.reason == REASON_DEST_CDC
 
 
 def test_named_matrix_floor() -> None:

@@ -66,7 +66,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <text x="48" y="172" fontSize="11" fill="#94a3b8">RBAC · Pipelines · Quarantine</text>
         <rect x="48" y="196" width="160" height="10" rx="5" fill="#1e293b" />
         <rect x="48" y="196" width="118" height="10" rx="5" fill="#0d9488" />
-        <text x="48" y="232" fontSize="11" fill="#99f6e4">Preflight 8/8 · checksum match</text>
+        <text x="48" y="232" fontSize="11" fill="#99f6e4">Preflight 9/9 · checksum match</text>
         <rect x="252" y="92" width="200" height="168" rx="14" fill="#111827" stroke="#334155" />
         <text x="272" y="122" fontSize="11" fill="#94a3b8" fontWeight="700">WORKSPACE B</text>
         <text x="272" y="148" fontSize="13" fill="#f8fafc" fontWeight="650">Regulated loads</text>

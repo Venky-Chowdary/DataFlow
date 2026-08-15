@@ -129,7 +129,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       cta: "Start free",
       action: onGetStarted,
       tone: "starter" as const,
-      features: ["Transfer Studio", "8 preflight gates", "Quarantine + checksum", "Community support"],
+      features: ["Transfer Studio", "9 preflight gates", "Quarantine + checksum", "Community support"],
     },
     {
       name: "Team",
@@ -411,7 +411,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
             </div>
             <ul className="lp-ent-hero-proof">
               <li>SSO enforced</li>
-              <li>8 / 8 preflight</li>
+              <li>9 / 9 preflight</li>
               <li>Checksum MATCH</li>
             </ul>
           </div>
@@ -438,7 +438,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
                   <article>
                     <span>Workspace A</span>
                     <strong>Analytics ops</strong>
-                    <p>Preflight 8/8 · checksum match</p>
+                    <p>Preflight 9/9 · checksum match</p>
                     <div className="lp-ent-stage-bar"><i style={{ width: "92%" }} /></div>
                   </article>
                   <article>
@@ -520,7 +520,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
               <h3>Control snapshot</h3>
               <div className="lp-ent-panel-row"><span>Identity</span><em>SSO enforced</em></div>
               <div className="lp-ent-panel-row"><span>Secrets</span><em>BYOK wrapped</em></div>
-              <div className="lp-ent-panel-row"><span>Preflight</span><em>8 / 8 required</em></div>
+              <div className="lp-ent-panel-row"><span>Preflight</span><em>9 / 9 required</em></div>
               <div className="lp-ent-panel-row"><span>Quarantine</span><em>surfaced, never dropped</em></div>
               <div className="lp-ent-panel-row"><span>Reconcile</span><em>checksum + counts</em></div>
               <div className="lp-ent-panel-row"><span>Audit</span><em>jobs · maps · agents</em></div>
@@ -1248,7 +1248,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               <strong>Runtime posture</strong>
               <span>Live</span>
             </header>
-            <div className="lp-sec-hero-row is-ok"><span>Preflight</span><em>8 / 8</em></div>
+            <div className="lp-sec-hero-row is-ok"><span>Preflight</span><em>9 / 9</em></div>
             <div className="lp-sec-hero-row is-ok"><span>Write</span><em>quarantine surfaced</em></div>
             <div className="lp-sec-hero-row is-ok"><span>Reconcile</span><em>checksum MATCH</em></div>
             <div className="lp-sec-hero-row is-ok"><span>Agents</span><em>MCP under RBAC</em></div>

@@ -7,6 +7,7 @@ import {
   bindNamesFromSql,
   callableSourceExtra,
   dialectOffersProcedures,
+  dialectOffersDestQuery,
   dialectOffersQuery,
   isCallableSourceMode,
   procedureStreamName,
@@ -21,6 +22,9 @@ describe("sourceReadMode", () => {
     assert.equal(dialectOffersQuery("sqlite"), true);
     assert.equal(dialectOffersQuery("postgresql"), true);
     assert.equal(dialectOffersQuery("mongodb"), false);
+    assert.equal(dialectOffersDestQuery("sqlite"), true);
+    assert.equal(dialectOffersDestQuery("postgresql"), true);
+    assert.equal(dialectOffersDestQuery("mongodb"), false);
   });
 
   it("extracts :name binds from CALL/SELECT text", () => {
