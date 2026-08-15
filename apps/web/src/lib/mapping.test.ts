@@ -732,6 +732,20 @@ describe("destination schema honesty", () => {
     assert.equal(existing[0].approved, false);
   });
 
+  it("create-new destType uses catalog inferred_type, not sample semantic_type", () => {
+    const cols = [{
+      column_name: "C_CUSTKEY",
+      confidence: 0.99,
+      inferred_type: "DECIMAL(38,0)",
+      semantic_type: "BIGINT",
+      is_pii: false,
+      compliance: [],
+    }];
+    const create = mappingsFromAnalysis(cols, undefined, ["other_col"]);
+    assert.equal(create[0].createNew, true);
+    assert.equal(create[0].destType, "DECIMAL(38,0)");
+  });
+
   it("intentional omit is first-class Map policy", () => {
     const base: EditableMapping = {
       source: "ssn",

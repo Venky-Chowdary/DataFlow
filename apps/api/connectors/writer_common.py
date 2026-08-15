@@ -2300,6 +2300,27 @@ def resolve_target_columns(
                     source_type=str(src_type) if src_type else None,
                     honor_explicit=True,
                 )
+                # Map≡CREATE must not honor a sample-invented stamp that collapses
+                # the declared source (DECIMAL(38,0)→BIGINT on the 150k TPC-H route).
+                if src_type and proposed and not (
+                    m.get("user_override") or m.get("userOverride")
+                ):
+                    try:
+                        from services.migration_risk_contract import (
+                            mapping_has_clearing_risk_contract,
+                        )
+
+                        risk_cleared = mapping_has_clearing_risk_contract(m)
+                    except Exception:
+                        risk_cleared = False
+                    if not risk_cleared:
+                        from services.decision_kernel import (
+                            refuse_create_new_numeric_collapse,
+                        )
+
+                        proposed = refuse_create_new_numeric_collapse(
+                            str(src_type), str(proposed), dest_db
+                        )
             target_types.append(str(proposed))
     return target_cols, target_types
 

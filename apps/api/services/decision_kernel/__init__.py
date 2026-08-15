@@ -86,6 +86,7 @@ from services.decision_kernel.types import (
     is_precision_collapse_coercion,
     materialize_dest_ddl,
     normalize_logical_type,
+    refuse_create_new_numeric_collapse,
 )
 from services.decision_kernel.findings import (
     FINDING_SCHEMA,
@@ -151,6 +152,7 @@ __all__ = [
     "classify_transform_failure",
     "compute_content_hash",
     "create_new_mapping_target_type",
+    "refuse_create_new_numeric_collapse",
     "ddl_identity_columns",
     "ddl_identity_divergence",
     "ddl_identity_report",

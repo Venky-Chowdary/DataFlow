@@ -36,6 +36,7 @@ def _read_batch_impl(
     kafka_cursor: dict | None = None,
     cursor_primary_key: str | None = None,
     cursor_key_columns: list[str] | None = None,
+    scan_state: dict[str, Any] | None = None,
 ):
     from services.procedure_source import is_callable_source, read_callable_batch
 
@@ -192,6 +193,27 @@ def _read_batch_impl(
         from services.connector_auth import snowflake_session_kwargs
 
         session = snowflake_session_kwargs(cfg)
+        if scan_state is not None and not cursor_column:
+            from connectors.snowflake_reader import read_table_scan_batch
+
+            return read_table_scan_batch(
+                host=cfg["host"],
+                port=int(cfg.get("port") or 443),
+                database=cfg["database"],
+                username=cfg.get("username", ""),
+                password=cfg.get("password", ""),
+                schema=cfg.get("schema", "PUBLIC"),
+                connection_string=cfg.get("connection_string", ""),
+                warehouse=cfg.get("warehouse", ""),
+                table=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                cursor_primary_key=cursor_primary_key,
+                scan_state=scan_state,
+                **session,
+            )
         if cursor_column:
             return read_table_cursor_batch(
                 host=cfg["host"],

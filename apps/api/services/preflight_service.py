@@ -110,6 +110,31 @@ class FilePreflightContext(PreflightContext):
         Stripping risk_acknowledged / fidelity left Validate blocked after Map
         Accept risk (G3 probe severity + G9 coercion_safety).
         """
+        live = dest_types.get(m.target)
+        stamped = live or getattr(m, "target_type", None)
+        src_type = next(
+            (
+                c.inferred_type
+                for c in self.plan.source.columns
+                if c.name == m.source
+            ),
+            None,
+        )
+        if (
+            not live
+            and stamped
+            and src_type
+            and not bool(getattr(m, "user_override", False))
+        ):
+            try:
+                from services.decision_kernel import refuse_create_new_numeric_collapse
+
+                dest_db = str(getattr(self.plan.destination, "db_type", "") or "")
+                stamped = refuse_create_new_numeric_collapse(
+                    str(src_type), str(stamped), dest_db
+                )
+            except Exception:
+                pass
         return {
             "source": m.source,
             "target": m.target,
@@ -117,16 +142,9 @@ class FilePreflightContext(PreflightContext):
             "transform": getattr(m, "transform", None),
             "requires_review": bool(getattr(m, "requires_review", False)),
             "user_override": bool(getattr(m, "user_override", False)),
-            # Prefer live dest DDL; keep stamped create-new type when absent.
-            "target_type": dest_types.get(m.target) or getattr(m, "target_type", None),
-            "source_type": next(
-                (
-                    c.inferred_type
-                    for c in self.plan.source.columns
-                    if c.name == m.source
-                ),
-                None,
-            ),
+            # Prefer live dest DDL; refuse sample-invented create-new collapse.
+            "target_type": stamped,
+            "source_type": src_type,
             "create_new": bool(getattr(m, "create_new", False)),
             "struct_policy": getattr(m, "struct_policy", None) or None,
             "struct_derived": bool(getattr(m, "struct_derived", False)),

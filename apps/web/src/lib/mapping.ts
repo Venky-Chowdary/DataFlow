@@ -1684,7 +1684,8 @@ export function mappingsFromAnalysis(
       createNew: createNew || undefined,
       // Create-new / ADD must carry a destType stamp — Execute refuse Map VARCHAR
       // invent under partial Studio when target_type is blank (Excel→PG cliff).
-      destType: createNew && !pendingDest ? inferred : undefined,
+      // Catalog DDL wins over sample semantic_type (BIGINT invented from 1,2,150000).
+      destType: createNew && !pendingDest ? (col.inferred_type || inferred) : undefined,
       assignmentStrategy: pendingDest
         ? "pending_dest_schema"
         : createNew

@@ -946,9 +946,43 @@ def create_new_mapping_target_type(
     stamp = _create_new_mapping_target_type(
         src_type, dest_db_type, samples=samples, source_db=source_db
     )
-    return unicode_safe_target_carrier(
+    stamp = unicode_safe_target_carrier(
         stamp, dest_db=dest_db_type, source_db=source_db
     )
+    return refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
+
+
+def refuse_create_new_numeric_collapse(
+    src_type: str, stamp: str, dest_db_type: str
+) -> str:
+    """Create-new must not invent a narrower dest than the declared source.
+
+    Sample-sized BIGINT / NUMERIC(9,4) from NUMBER(38,0) / DECIMAL(12,2) is the
+    Airbyte-class cliff: Validate looks green on 25 rows, Execute can overflow
+    or round the rest of the population.
+    """
+    from services.type_system import is_precision_collapse_coercion
+
+    src = (src_type or "").strip()
+    dest = (stamp or "").strip()
+    db = (dest_db_type or "").strip()
+    if not src or not dest:
+        return stamp
+    # Only rewrite numeric/integer/float invent. DECIMAL→TEXT is an explicit
+    # Map stamp (quarantine unfit cells), not the BIGINT / NUMERIC(9,4) cliff.
+    dest_logical = normalize_logical_type(dest)
+    if dest_logical not in {LOGICAL_DECIMAL, LOGICAL_INTEGER, LOGICAL_FLOAT}:
+        return stamp
+    if not is_precision_collapse_coercion(
+        src, dest, dest_db=db, dest_table_exists=False
+    ):
+        return stamp
+    recovered = ddl_type(db, src) if db else src
+    if recovered and not is_precision_collapse_coercion(
+        src, recovered, dest_db=db, dest_table_exists=False
+    ):
+        return recovered
+    return src
 
 
 def _create_new_mapping_target_type(
@@ -1935,6 +1969,7 @@ __all__ = [
     'normalize_logical_type',
     'ddl_type',
     'create_new_mapping_target_type',
+    'refuse_create_new_numeric_collapse',
     'materialize_dest_ddl',
     'inherit_measured_string_width',
     'integer_width_carrier',

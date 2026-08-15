@@ -175,7 +175,7 @@ export function TransferResultDashboard({
     result.destination?.database || result.destination?.collection || "Destination";
 
   const destinationPath =
-    ds?.table ? `${ds.type || destType} · ${ds.database}${ds.schema ? ` · ${ds.schema}` : ""}` :
+    ds?.table ? [ds.type || destType, ds.database, ds.schema].filter((p) => fmt(p as string | undefined)).join(" · ") :
     ds?.collection ? `${ds.type || destType} · ${[ds.database, ds.collection].filter(Boolean).join(".")}` :
     ds?.filename ? `${result.destination?.format || destType} · ${ds.filename}` :
     result.destination?.path ? `${result.destination?.format || destType} · ${result.destination.path}` :

@@ -924,6 +924,15 @@ def run_reconciliation(
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
         stamped = _finalize_reconcile(payload, dest_summary=dest_summary)
+        if str(stamped.get("assurance_level") or "") == "writer_ack":
+            msg = str(stamped.get("message") or "")
+            if msg.lower().startswith("row fidelity verified"):
+                rows = stamped.get("target_rows") or stamped.get("source_rows") or 0
+                stamped["message"] = (
+                    f"Writer acknowledgment for {rows} row(s) — source digest was "
+                    "the write-pass hash, not an independent dest read-back. "
+                    "Not migration_proven."
+                )
         if vector_stamp_ctx:
             stamped = stamp_vector_census(
                 stamped,
@@ -1289,6 +1298,12 @@ def run_reconciliation(
     source_checksum_provenance = ""
     if source_checksum_scope_note:
         source_checksum = ""
+    elif str(dest_summary.get("checksum_mode") or "") == "inline_write_pass" and writer_checksum:
+        # Phase F1 fingerprints are remapped source rows hashed during the write,
+        # not the destination writer's ack copied onto both sides.
+        source_checksum = str(writer_checksum)
+        source_checksum_provenance = SOURCE_DIGEST_REMAPPED_ROWS
+        digest_provenance["source"] = source_checksum_provenance
     else:
         source_checksum, source_checksum_provenance = _compute_source_checksum(
             records,

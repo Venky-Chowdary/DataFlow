@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -170,6 +171,126 @@ def read_table_batch(
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         conn.close()
+
+
+# One snapshot scan + fetchmany. OFFSET pages are O(n²) on Snowflake and each
+# read_table_batch() used to open a new login — 150k/5k looked like a 3-minute read.
+_SF_SCAN_ARRAYSIZE = 10_000
+
+
+def close_table_scan(scan_state: dict[str, Any] | None) -> None:
+    """Release the snapshot cursor/connection held by ``read_table_scan_batch``."""
+    if not scan_state:
+        return
+    cur = scan_state.pop("cur", None)
+    conn = scan_state.pop("conn", None)
+    scan_state.clear()
+    if cur is not None:
+        try:
+            cur.close()
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Snowflake scan cursor close skipped: %s", exc)
+    if conn is not None:
+        try:
+            conn.close()
+        except Exception as exc:
+            logging.getLogger(__name__).debug("Snowflake scan connection close skipped: %s", exc)
+
+
+def read_table_scan_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    warehouse: str,
+    table: str,
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 100_000,
+    known_total_rows: int | None = None,
+    role: str = "",
+    private_key: str = "",
+    cursor_primary_key: str | None = None,
+    skip_population_count: bool = False,
+    scan_state: dict[str, Any],
+) -> ReadBatch:
+    """Page a single ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one login."""
+    del port
+    if not scan_state.get("started"):
+        account = normalize_account(host)
+        schema = _snowflake_schema(schema)
+        conn = get_connection(
+            account=account,
+            username=username,
+            password=password,
+            database=database,
+            schema=schema,
+            warehouse=warehouse,
+            connection_string=connection_string,
+            role=role,
+            private_key=private_key,
+            private_key_passphrase=password if private_key else "",
+        )
+        cur = conn.cursor()
+        try:
+            _use_warehouse(cur, warehouse)
+            table_ref = _table_ref(cur, schema, table)
+            if known_total_rows is not None:
+                total = known_total_rows
+            elif skip_population_count:
+                total = None
+            else:
+                cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+                total = int(cur.fetchone()[0])
+            col_sql = (
+                quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
+                if columns
+                else "*"
+            )
+            order_cols = list(columns or [])
+            if not order_cols:
+                cur.execute(f"SELECT * FROM {table_ref} LIMIT 0")  # nosec B608
+                order_cols = [desc[0] for desc in (cur.description or [])]
+            order_sql = snapshot_order_sql(order_cols, primary_key=cursor_primary_key)
+            arraysize = max(1, min(int(limit or _SF_SCAN_ARRAYSIZE), _SF_SCAN_ARRAYSIZE))
+            try:
+                cur.arraysize = arraysize
+            except Exception:
+                pass
+            cur.execute(
+                f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql}"  # nosec B608
+            )
+            headers = [desc[0] for desc in cur.description]
+        except Exception:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        scan_state.update(
+            started=True,
+            conn=conn,
+            cur=cur,
+            headers=headers,
+            total=total,
+        )
+    cur = scan_state["cur"]
+    raw = cur.fetchmany(max(1, int(limit)))
+    headers = list(scan_state.get("headers") or [])
+    total = scan_state.get("total")
+    if not raw:
+        close_table_scan(scan_state)
+        return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+    rows = [[cell_to_string(v, preserve_sql_null=True) for v in row] for row in raw]
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
 
 def read_table_cursor_batch(

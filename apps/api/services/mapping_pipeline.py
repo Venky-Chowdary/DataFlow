@@ -12,6 +12,7 @@ from services.decision_kernel import (
     create_new_mapping_target_type,
     ddl_type,
     normalize_logical_type,
+    refuse_create_new_numeric_collapse,
 )
 from services.type_system import ddl_carrier_type
 
@@ -771,6 +772,32 @@ def run_mapping_pipeline(
                     )
                 else:
                     tgt_type = typed_target
+
+        # Create-new Map stamps from sample semantic types (BIGINT / NUMERIC(9,4))
+        # must not outrank the declared source. Operator override / signed risk
+        # contract still win — that is Accept-risk, not silent invent.
+        intentional_create = (
+            strategy in {"identity_passthrough", "create_compatible_new"}
+            or destination_table_exists is False
+            or bool(m.get("create_new"))
+        )
+        if (
+            intentional_create
+            and not pending_dest
+            and tgt_type
+            and src_type
+            and not (m.get("user_override") or m.get("userOverride"))
+        ):
+            try:
+                from services.migration_risk_contract import mapping_has_clearing_risk_contract
+
+                risk_cleared = mapping_has_clearing_risk_contract(m)
+            except Exception:
+                risk_cleared = False
+            if not risk_cleared:
+                tgt_type = refuse_create_new_numeric_collapse(
+                    src_type, tgt_type, destination_db_type or ""
+                )
 
         enriched_mappings.append(
             {

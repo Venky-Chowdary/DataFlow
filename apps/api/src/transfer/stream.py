@@ -1164,19 +1164,29 @@ def _stream_database_transfer_impl(
         }
 
     _sample_started = time.perf_counter()
-    sample_probe, _ = _unwrap_read(
-        _read_batch(
-            src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
-            **_cursor_read_args(watermark),
+    # Snowflake snapshot scan opens one warehouse session on the first write
+    # page. A separate OFFSET sizing login resumes the warehouse twice — that
+    # is how a 150k TPC-H extract spent minutes before the first real page.
+    skip_sf_sizing_probe = src_type == "snowflake" and not incremental
+    if skip_sf_sizing_probe:
+        sample_probe = type("SizingSkip", (), {"rows": [], "headers": [], "total_rows": None})()
+        sample_rows = []
+        avg_row_size = 256
+        phase_profile.add(PHASE_READ, time.perf_counter() - _sample_started, rows=0)
+    else:
+        sample_probe, _ = _unwrap_read(
+            _read_batch(
+                src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
+                **_cursor_read_args(watermark),
+            )
         )
-    )
-    phase_profile.add(
-        PHASE_READ,
-        time.perf_counter() - _sample_started,
-        rows=len(sample_probe.rows or []),
-    )
-    sample_rows = sample_probe.rows or []
-    avg_row_size = 100
+        phase_profile.add(
+            PHASE_READ,
+            time.perf_counter() - _sample_started,
+            rows=len(sample_probe.rows or []),
+        )
+        sample_rows = sample_probe.rows or []
+        avg_row_size = 100
     if sample_rows:
         # Prefer mapped cell byte lengths — len(str(row)) under-counts nested/wide payloads.
         sizes: list[int] = []
@@ -1251,10 +1261,17 @@ def _stream_database_transfer_impl(
         return default
 
     _probe_started = time.perf_counter()
+    # Snowflake snapshot without a keyset must not OFFSET-page (O(n²) + new login
+    # per chunk). One SELECT + fetchmany, started on this first write page.
+    sf_src_scan: dict[str, Any] = {}
+    _sf_scan_kw: dict[str, Any] = (
+        {"scan_state": sf_src_scan} if src_type == "snowflake" and not incremental else {}
+    )
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
             **_cursor_read_args(watermark),
+            **_sf_scan_kw,
         )
     )
     # This page is not thrown away — it becomes the first written batch.
@@ -1510,6 +1527,15 @@ def _stream_database_transfer_impl(
                 keyset_pk_cols = [
                     c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
                 ]
+            if not keyset_pk_cols:
+                for uk in _src_keys.get("unique_keys") or []:
+                    uk_cols = list(
+                        (uk.get("columns") if isinstance(uk, dict) else uk) or []
+                    )
+                    uk_cols = [c for c in uk_cols if c in columns]
+                    if uk_cols:
+                        keyset_pk_cols = uk_cols
+                        break
         except Exception as exc:
             logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
     if _src_keys or _src_schema_nulls or _src_schema_types:
@@ -1563,7 +1589,12 @@ def _stream_database_transfer_impl(
             chunk_idx,
         )
         use_keyset = False
-    pagination_mode = "keyset" if use_keyset else "offset"
+    pagination_mode = "keyset" if use_keyset else ("scan" if sf_src_scan else "offset")
+    if use_keyset and sf_src_scan.get("started"):
+        # First page already landed from the snapshot scan; later pages seek.
+        from connectors.snowflake_reader import close_table_scan
+
+        close_table_scan(sf_src_scan)
     # Phase F3 — PostgreSQL COPY TO STDOUT bulk export (full refresh, no filter).
     bulk_export_iter = None
     try:
@@ -1871,6 +1902,11 @@ def _stream_database_transfer_impl(
                     batch_limit,
                     database=src_db,
                     known_total_rows=total_rows,
+                    **(
+                        {"scan_state": sf_src_scan}
+                        if src_type == "snowflake" and sf_src_scan
+                        else {}
+                    ),
                 )
             )
             if src_type == "elasticsearch":
@@ -2418,6 +2454,15 @@ def _stream_database_transfer_impl(
                 dispatcher.abort()
                 raise
     finally:
+        if sf_src_scan:
+            try:
+                from connectors.snowflake_reader import close_table_scan
+
+                close_table_scan(sf_src_scan)
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "Snowflake source scan close skipped: %s", exc, exc_info=exc
+                )
         for state in (sf_conn_state, pg_conn_state):
             conn = state.get("conn")
             if conn is not None:

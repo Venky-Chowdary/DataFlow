@@ -17,6 +17,7 @@ from services.decision_kernel.type_invent import (
     integer_width_carrier,
     materialize_dest_ddl,
     normalize_logical_type,
+    refuse_create_new_numeric_collapse,
 )
 from services.type_system import (
     is_lossy_coercion,
@@ -34,4 +35,5 @@ __all__ = [
     "is_precision_collapse_coercion",
     "materialize_dest_ddl",
     "normalize_logical_type",
+    "refuse_create_new_numeric_collapse",
 ]
