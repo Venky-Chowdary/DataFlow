@@ -174,16 +174,12 @@ export function ContactSalesPage({
                 <span>Checksum you can archive</span>
               </li>
             </ul>
-            <aside className="lp-sales-hero-aside" aria-label="Direct contact">
-              <p>Prefer email?</p>
+            <p className="lp-sales-hero-mail">
               <a className="lp-sales-mail" href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">
                 sales@datawrap.io
               </a>
-              <p className="lp-sales-hero-note">
-                Security questionnaire and DPA on the call. No SOC 2 certificate is claimed until a
-                third-party audit exists.
-              </p>
-            </aside>
+              <span>Reply in one business day. No SOC 2 certificate is claimed.</span>
+            </p>
           </div>
 
           {sent ? (

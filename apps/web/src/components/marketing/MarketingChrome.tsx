@@ -290,7 +290,6 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
 
       <main className="lp-main">{children}</main>
 
-      {route !== "contact" ? (
       <footer className="lp-footer lp-footer--compact">
         <div className="lp-footer-inner">
           <div className="lp-footer-grid">
@@ -343,7 +342,6 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
           </div>
         </div>
       </footer>
-      ) : null}
     </div>
   );
 }

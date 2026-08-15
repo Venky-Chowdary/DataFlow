@@ -5,8 +5,6 @@ import {
   AlgorithmCinemaBand,
   ProofCinema,
 } from "../../components/landing/AlgorithmCinema";
-import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
-import { MarketingIllustration } from "../../components/marketing/MarketingIllustration";
 import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
@@ -787,7 +785,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
 
   return (
     <div className="lp-mkt-page lp-mkt-page-rich">
-      <MarketingHeroBand
+      <MarketingInkHero
         kicker="Legal"
         title={kind === "privacy" ? "Privacy" : "Terms of service"}
         lead={
@@ -795,7 +793,21 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
             ? "How Datawrap handles workspace data, credentials, and audit logs — written for security and legal review."
             : "The agreement that governs use of the Datawrap platform, including Transfer Studio, pipelines, and MCP."
         }
-        visual={<MarketingIllustration kind="legal" />}
+        slas={
+          kind === "privacy"
+            ? [
+                { value: "You", label: "Controller of connected data" },
+                { value: "Us", label: "Processor on instruction" },
+                { value: "BYOK", label: "Enterprise secret wrap" },
+                { value: "2026", label: "Last updated August" },
+              ]
+            : [
+                { value: "MSA", label: "Order form can supersede" },
+                { value: "DPA", label: "Available with Enterprise" },
+                { value: "DE", label: "Governing law Delaware" },
+                { value: "2026", label: "Last updated August" },
+              ]
+        }
       />
 
       <MarketingReveal>

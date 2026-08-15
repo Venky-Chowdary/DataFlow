@@ -19,8 +19,16 @@
   --lp-accent-ink: #0f766e;
   --lp-teal: #0d9488;
   --lp-ink-deep: #0a3d3a;
-  --lp-title-lg: clamp(2.75rem, 5.2vw, 4.25rem);
-  --lp-title: clamp(1.85rem, 3vw, 2.65rem);
+  --lp-fs-kicker: 11px;
+  --lp-fs-h1: clamp(1.75rem, 2.2vw, 2.125rem);
+  --lp-fs-h1-home: clamp(2rem, 2.8vw, 2.625rem);
+  --lp-fs-h2: clamp(1.25rem, 1.5vw, 1.5rem);
+  --lp-fs-lead: 15px;
+  --lp-fs-body: 14.5px;
+  --lp-fs-meta: 13px;
+  --lp-fs-small: 12.5px;
+  --lp-title-lg: var(--lp-fs-h1-home);
+  --lp-title: var(--lp-fs-h1);
   --lp-section-y: clamp(72px, 10vh, 120px);
   --lp-measure: 40rem;
   --lp-shadow-editorial: 0 1px 0 rgba(15, 23, 42, 0.04), 0 24px 64px rgba(10, 61, 58, 0.08);
@@ -186,10 +194,53 @@
 
 .lp-footer-tagline {
   margin: 10px 0 0;
-  max-width: 28ch;
-  font-size: 13px;
+  max-width: 32ch;
+  font-size: var(--lp-fs-meta, 13px);
   line-height: 1.5;
   color: rgba(167, 243, 208, 0.65);
+}
+
+.lp-mkt-hero-band {
+  padding: clamp(28px, 4vw, 40px) 0 !important;
+}
+
+.lp-mkt-hero-grid {
+  width: var(--lp-shell);
+  max-width: none;
+  align-items: stretch;
+}
+
+.lp-mkt-hero-copy h1,
+.lp-mkt-hero-band--ink h1,
+.lp-mkt-hero-band--ink .lp-mkt-hero-copy h1 {
+  max-width: 22ch;
+  font-family: var(--lp-font-display);
+  font-size: var(--lp-fs-h1) !important;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
+}
+
+.lp-mkt-hero-copy .lp-mkt-lead,
+.lp-mkt-hero-band--ink .lp-mkt-lead {
+  font-size: var(--lp-fs-lead) !important;
+  line-height: 1.55;
+  max-width: 46ch;
+}
+
+.lp-mkt-legal-layout {
+  width: var(--lp-shell);
+  margin: 0 auto;
+  padding: clamp(28px, 4vw, 40px) 0 64px;
+}
+
+.lp-mkt-legal-block h2 {
+  font-family: var(--lp-font-display);
+  font-size: var(--lp-fs-h2);
+}
+
+.lp-mkt-legal-block p {
+  font-size: var(--lp-fs-body);
+  line-height: 1.6;
 }
 
 .lp-footer-bottom {
