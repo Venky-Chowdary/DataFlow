@@ -9,7 +9,7 @@ from connectors.snowflake_conn import (
     parse_snowflake_url,
     snowflake_connect_kwargs,
 )
-from services.connector_auth import engine_login_role
+from services.connector_auth import engine_login_role, infer_auth_mode, validate_probe_auth
 from services.connector_probe import probe_cfg_from_saved
 from services.connector_store import SavedConnector
 from src.transfer.connector_registry import humanize_connection_error
@@ -230,3 +230,78 @@ def test_positional_init_error_is_classified():
     assert "authentication failed" not in human.lower()
     assert "incorrect username" not in human.lower()
     assert "account host" in human.lower()
+
+
+def test_pat_and_key_pair_do_not_fall_through():
+    assert validate_probe_auth(
+        driver="snowflake",
+        auth_mode="pat",
+        host="bq73198",
+        username="SVC",
+        password="",
+    ) == "Username and programmatic access token are required."
+    assert validate_probe_auth(
+        driver="snowflake",
+        auth_mode="pat",
+        host="bq73198",
+        username="SVC",
+        password="token-value",
+    ) is None
+    assert validate_probe_auth(
+        driver="postgresql",
+        auth_mode="pat",
+        host="db.example",
+        port=5432,
+        username="u",
+        password="p",
+    ) == "Programmatic access tokens are a Snowflake authentication mode."
+    assert validate_probe_auth(
+        driver="snowflake",
+        auth_mode="key_pair",
+        host="bq73198",
+        username="SVC",
+        private_key="",
+    ) == "Username and PKCS#8 private key are required for Snowflake key-pair."
+    assert validate_probe_auth(
+        driver="snowflake",
+        auth_mode="key_pair",
+        host="bq73198",
+        username="SVC",
+        private_key="-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----",
+    ) is None
+
+
+def test_unknown_auth_mode_is_rejected():
+    assert validate_probe_auth(
+        driver="postgresql",
+        auth_mode="oauth_magic",
+        host="db.example",
+        port=5432,
+        username="u",
+        password="p",
+    ) == "Unknown authentication mode 'oauth_magic'."
+
+
+def test_infer_auth_mode_from_private_key():
+    assert infer_auth_mode(private_key="-----BEGIN PRIVATE KEY-----", driver="snowflake") == "key_pair"
+    assert infer_auth_mode(connection_string="postgresql://u:p@h/db") == "connection_string"
+    assert infer_auth_mode(username="u", password="p") == "user_pass"
+
+
+def test_user_pass_still_requires_host_and_secret():
+    assert validate_probe_auth(
+        driver="postgresql",
+        auth_mode="user_pass",
+        host="",
+        port=5432,
+        username="u",
+        password="p",
+    ) == "Host is required for username & password authentication."
+    assert validate_probe_auth(
+        driver="postgresql",
+        auth_mode="user_pass",
+        host="db.example",
+        port=5432,
+        username="u",
+        password="p",
+    ) is None

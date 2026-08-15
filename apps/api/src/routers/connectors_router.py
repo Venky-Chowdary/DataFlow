@@ -164,67 +164,38 @@ async def test_connection(request: TestConnectionRequest):
 
         driver = resolve_driver_type(request.type)
 
-        # Enforce required fields per authentication mode so the UI and API behave
-        # consistently and do not pass empty values to a driver that will fail
-        # with a cryptic low-level error.
-        auth_mode = (request.auth_mode or "").strip().lower()
-        if not auth_mode:
-            if request.connection_string:
-                auth_mode = "connection_string"
-            elif request.service_account:
-                auth_mode = "service_account"
-            elif request.api_key:
-                auth_mode = "api_key"
-            elif request.username or request.password:
-                auth_mode = "user_pass"
-            else:
-                auth_mode = "user_pass"
+        from services.connector_auth import engine_login_role, infer_auth_mode, validate_probe_auth
 
-        if auth_mode in ("connection_string", "file_path"):
-            if not (request.connection_string or "").strip():
-                return {"success": False, "message": "Connection string is required.", "driver": driver, "auth_source": request.auth_source or ""}
-        elif auth_mode == "service_account":
-            if not (request.service_account or "").strip():
-                return {"success": False, "message": "Service account JSON or file path is required.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not (request.database or "").strip():
-                return {"success": False, "message": "Project / bucket / database is required for service account authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-        elif auth_mode == "api_key":
-            if not (request.api_key or "").strip():
-                return {"success": False, "message": "API key is required.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not (request.host or "").strip():
-                return {"success": False, "message": "Host is required for API key authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-        elif auth_mode == "aws_keys":
-            if not (request.host or "").strip() and not (request.database or "").strip():
-                return {"success": False, "message": "Region / endpoint and bucket / table are required for AWS authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not (request.username or "").strip() or not (request.password or "").strip():
-                return {"success": False, "message": "Access key ID and secret access key are required for AWS authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-        elif auth_mode == "user_pass":
-            # Path-based engines (SQLite/DuckDB) use host as a file path; others
-            # need a real host and port.
-            path_based = driver in ("sqlite", "duckdb")
-            has_path = (request.host or "").strip() or (request.database or "").strip()
-            if not has_path and path_based:
-                return {"success": False, "message": "File path or database name is required for SQLite/DuckDB.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not (request.host or "").strip() and not path_based:
-                return {"success": False, "message": "Host is required for username & password authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not path_based and driver not in ("bigquery", "snowflake", "s3", "dynamodb", "gcs", "adls", "elasticsearch"):
-                if not (request.port or 0):
-                    return {"success": False, "message": "Port is required for username & password authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-            if driver not in ("sqlite", "duckdb", "bigquery", "s3", "dynamodb", "gcs", "adls"):
-                has_key = bool((getattr(request, "private_key", None) or "").strip())
-                key_pair = (request.auth_mode or "").strip().lower() == "key_pair"
-                if driver == "snowflake" and (has_key or key_pair):
-                    if not (request.username or "").strip() or not has_key:
-                        return {
-                            "success": False,
-                            "message": "Username and PKCS#8 private key are required for Snowflake key-pair.",
-                            "driver": driver,
-                            "auth_source": request.auth_source or "",
-                        }
-                elif not (request.username or "").strip() or not (request.password or "").strip():
-                    return {"success": False, "message": "Username and password are required.", "driver": driver, "auth_source": request.auth_source or ""}
-
-        from services.connector_auth import engine_login_role
+        auth_mode = infer_auth_mode(
+            auth_mode=request.auth_mode or "",
+            connection_string=request.connection_string or "",
+            service_account=request.service_account or "",
+            api_key=request.api_key or "",
+            username=request.username or "",
+            password=request.password or "",
+            private_key=getattr(request, "private_key", None) or "",
+            driver=driver,
+        )
+        auth_error = validate_probe_auth(
+            driver=driver,
+            auth_mode=auth_mode,
+            host=request.host or "",
+            port=int(request.port or 0),
+            database=request.database or "",
+            username=request.username or "",
+            password=request.password or "",
+            connection_string=request.connection_string or "",
+            service_account=request.service_account or "",
+            api_key=request.api_key or "",
+            private_key=getattr(request, "private_key", None) or "",
+        )
+        if auth_error:
+            return {
+                "success": False,
+                "message": auth_error,
+                "driver": driver,
+                "auth_source": request.auth_source or "",
+            }
 
         cfg = {
             "host": request.host or "",
@@ -237,7 +208,7 @@ async def test_connection(request: TestConnectionRequest):
             "ssl": bool(request.ssl) if request.ssl is not None else False,
             "warehouse": request.warehouse or "",
             "type": request.type,
-            "auth_mode": request.auth_mode or "",
+            "auth_mode": auth_mode,
             "auth_role": engine_login_role(request.auth_role),
             "role": engine_login_role(request.auth_role),
             "api_key": request.api_key or "",
