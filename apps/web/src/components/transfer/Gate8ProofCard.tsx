@@ -305,6 +305,14 @@ export function classifyGate8Status(
   if (isGate8WritePassDestReadback(report)) {
     return { label: "Write-pass + dest read-back", tone: "warn", fullPass: false };
   }
+  const provenance = String(report.source_checksum_provenance || "").toLowerCase();
+  if (
+    report.passed === true
+    && provenance === "independent_source_reread"
+    && String(report.assurance_level || report.coverage || "").toLowerCase() === "full_checksum"
+  ) {
+    return { label: "Independent re-read", tone: "ok", fullPass: true };
+  }
   // A positional / unproven-identity compare is not keyed fidelity proof —
   // labelling it "Passed" is the false-proof the engine explicitly refuses.
   if (isGate8IdentityUnproven(report)) {

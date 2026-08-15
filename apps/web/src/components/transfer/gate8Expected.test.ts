@@ -104,6 +104,22 @@ describe("Gate-8 pre-write simulation honesty", () => {
     );
   });
 
+  it("classifyGate8Status labels independent source re-read as full pass", () => {
+    const view = classifyGate8Status({
+      passed: true,
+      phase: "post_write_verified",
+      assurance_level: "full_checksum",
+      coverage: "full_checksum",
+      source_checksum: "aaa",
+      target_checksum: "aaa",
+      source_checksum_provenance: "independent_source_reread",
+      migration_proven: true,
+    });
+    assert.equal(view.fullPass, true);
+    assert.equal(view.tone, "ok");
+    assert.match(view.label, /independent re-read/i);
+  });
+
   it("classifyGate8Status never labels write-pass dest read-back as Passed", () => {
     const view = classifyGate8Status({
       passed: true,

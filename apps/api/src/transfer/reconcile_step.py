@@ -23,6 +23,7 @@ from services.dest_precount import (
 from services.reconcile_coverage import (
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
+    SOURCE_DIGEST_SOURCE_REREAD,
     SOURCE_DIGEST_WRITE_PASS,
     SOURCE_DIGEST_WRITER_ACK,
     WHOLE_TABLE_NOT_COMPARABLE,
@@ -1308,6 +1309,17 @@ def run_reconciliation(
         # not the destination writer's ack copied onto both sides.
         source_checksum = str(writer_checksum)
         source_checksum_provenance = SOURCE_DIGEST_WRITE_PASS
+        digest_provenance["source"] = source_checksum_provenance
+    elif (
+        str(dest_summary.get("checksum_mode") or "") == "source_reread"
+        and writer_checksum
+    ):
+        # Second warehouse scan after the write. Streaming hands records=[] so
+        # _compute_source_checksum would otherwise stamp writer_ack on this
+        # digest and refuse full_checksum — the hole that kept Snowflake→Postgres
+        # at Trust 86 / writer-ack after an independent re-read.
+        source_checksum = str(writer_checksum)
+        source_checksum_provenance = SOURCE_DIGEST_SOURCE_REREAD
         digest_provenance["source"] = source_checksum_provenance
     else:
         source_checksum, source_checksum_provenance = _compute_source_checksum(

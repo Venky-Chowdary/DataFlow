@@ -1122,6 +1122,40 @@ def _stream_database_transfer_impl(
                 exc,
                 exc_info=exc,
             )
+    elif not incremental and src_type == "snowflake":
+        try:
+            from services.connector_auth import snowflake_session_kwargs
+            from services.source_snapshot import (
+                activate_snapshot,
+                begin_snowflake_time_travel,
+                end_snowflake_time_travel,
+            )
+
+            session = snowflake_session_kwargs(src_cfg)
+            _snap_conn, _snap_meta = begin_snowflake_time_travel(
+                host=str(src_cfg.get("host") or ""),
+                database=str(src_cfg.get("database") or ""),
+                username=str(src_cfg.get("username") or ""),
+                password=str(src_cfg.get("password") or ""),
+                schema=str(src_cfg.get("schema") or "PUBLIC"),
+                warehouse=str(src_cfg.get("warehouse") or ""),
+                connection_string=str(src_cfg.get("connection_string") or ""),
+                role=str(session.get("role") or src_cfg.get("role") or ""),
+                private_key=str(session.get("private_key") or src_cfg.get("private_key") or ""),
+            )
+            activate_snapshot(_snap_conn, _snap_meta, end_snowflake_time_travel)
+            logger.info(
+                "Property 3 source snapshot bound — engine=snowflake "
+                "isolation=time_travel ts=%s",
+                _snap_meta.get("time_travel_ts"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Property 3 Snowflake Time Travel snapshot unavailable (%s) — "
+                "falling back to live scans (re-read may see concurrent writes)",
+                exc,
+                exc_info=exc,
+            )
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
     # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
@@ -2562,14 +2596,13 @@ def _stream_database_transfer_impl(
     if incremental and running_cursor and cursor_key and running_cursor != watermark:
         set_watermark(cursor_key, running_cursor, metadata={"job_id": job_id, "sync_mode": effective_sync})
 
-    # Phase F1 — prefer write-pass fingerprints (same mapped rows as transferred).
-    # Opt into source re-read with DATAFLOW_RECONCILE_SOURCE_REREAD=1 when operators
-    # need an independent second scan (costs double I/O / warehouse bill).
-    _reread = getenv_brand("RECONCILE_SOURCE_REREAD", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    # Phase F1 — write-pass fingerprints hash the same remapped rows just written.
+    # Heterogeneous warehouse routes auto-re-read (DATAFLOW_RECONCILE_SOURCE_REREAD=auto)
+    # so Snowflake→Postgres can earn independent_source_reread / full_checksum.
+    # Force off with =0; force on with =1. Partial write-pass (resume tail) always
+    # re-reads — a session digest vs a full destination is a false mismatch.
+    from services.source_reread import reread_pagination_plan, should_reread_source
+
     # Resume: the write pass only fingerprints this session's rows while Gate-8
     # compares the full destination — force a source re-read. This holds for
     # every sync mode, not just overwrite: a resumed keyed load lands the whole
@@ -2582,7 +2615,13 @@ def _stream_database_transfer_impl(
         and write_pass_fp.total < _expected_population
         and (is_overwrite_sync(effective_sync) or resumed_pass)
     )
-    if write_pass_fp.total > 0 and not _reread and not _partial_write_pass:
+    _reread = should_reread_source(
+        src_type=src_type,
+        dest_type=dest_type,
+        incremental=incremental,
+        partial_write_pass=_partial_write_pass,
+    )
+    if write_pass_fp.total > 0 and not _reread:
         checksum_started = time.perf_counter()
         final_checksum = write_pass_fp.digest()
         phase_profile.add(
@@ -2592,84 +2631,101 @@ def _stream_database_transfer_impl(
         dest_summary["source_independently_reread"] = False
         dest_summary["checksum_note"] = (
             "Source fingerprints accumulated during the write pass (Phase F1) — "
-            "no second source scan. Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 for "
-            "independent re-read proof (double I/O)."
+            "no second source scan. Heterogeneous warehouse routes re-read by "
+            "default; set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second "
+            "scan on same-engine routes (double I/O)."
         )
     elif src_type in {"postgresql", "redshift", "mysql", "snowflake", "bigquery", "sqlite", "generic_sql", "mongodb", "s3", "gcs", "adls"}:
-        # Legacy / optional re-read — memory-bounded chunked FingerprintAccumulator.
+        # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.
+        from connectors.sql_snapshot_scan import close_table_scan
+
         checksum_started = time.perf_counter()
         fp_accumulator = FingerprintAccumulator()
+        reread_plan = reread_pagination_plan(src_type=src_type, incremental=incremental)
+        reread_scan = reread_plan.get("scan_state")
+        use_reread_offset = bool(reread_plan.get("use_offset"))
         cursor_type_for_read: str | None = None
         if incremental and cursor_source_col:
             cursor_type_for_read = normalize_inferred(schema.get(cursor_source_col, "string")).upper()
         checksum_cursor_col = cursor_source_col if incremental else ""
         checksum_cursor_after = watermark if incremental else None
         use_checksum_keyset = False
-        if not incremental and keyset_col and keyset_col in (columns or []):
-            if src_type in {"mongodb"}:
-                checksum_cursor_col = keyset_col
-                checksum_cursor_after = None
-                use_checksum_keyset = True
-                cursor_type_for_read = normalize_inferred(column_types.get(keyset_col, "string")).upper()
+        if incremental and checksum_cursor_col:
+            use_checksum_keyset = True
         read_offset = 0
         checksum_rows_read = 0
-        while True:
-            read_limit = _batch_limit(read_offset, default=chunk_size)
-            if read_limit <= 0:
-                break
-            batch, _ = _unwrap_read(
-                _read_batch(
-                    src_type,
-                    src_cfg,
-                    table,
-                    columns,
-                    read_offset,
-                    read_limit,
-                    database=src_db,
-                    cursor_column=checksum_cursor_col,
-                    cursor_after=checksum_cursor_after,
-                    cursor_type=cursor_type_for_read,
-                    known_total_rows=total_rows,
+        try:
+            while True:
+                read_limit = _batch_limit(
+                    read_offset if use_reread_offset else checksum_rows_read,
+                    default=chunk_size,
                 )
-            )
-            if not batch or not batch.rows:
-                break
-            mapped, _ = map_rows_for_fingerprint(
-                headers=batch.headers,
-                data_rows=batch.rows,
-                mappings=mappings,
-                target_cols=target_cols,
-                column_types=column_types,
-                error_policy=stream_error_policy,
-                dest_types=fingerprint_dest_types,
-                preserve_case=True,
-                dest_kind=dest_type,
-                destination_pk_columns=list(pk_target_cols or []) or None,
-            )
-            if mapped:
-                fp_accumulator.add_many(
-                    row_fingerprints(
-                        mapped,
-                        target_cols,
-                        dest_db_type=dest_type,
-                        dest_types=fingerprint_dest_types,
+                if read_limit <= 0:
+                    break
+                _scan_kw = {"scan_state": reread_scan} if reread_scan is not None else {}
+                batch, _ = _unwrap_read(
+                    _read_batch(
+                        src_type,
+                        src_cfg,
+                        table,
+                        columns,
+                        read_offset if use_reread_offset else 0,
+                        read_limit,
+                        database=src_db,
+                        cursor_column=checksum_cursor_col,
+                        cursor_after=checksum_cursor_after,
+                        cursor_type=cursor_type_for_read,
+                        known_total_rows=total_rows,
+                        **_scan_kw,
                     )
                 )
-            checksum_rows_read += len(batch.rows)
-            if limit > 0 and checksum_rows_read >= limit:
-                break
-            if len(batch.rows) < read_limit:
-                break
-            if use_checksum_keyset:
-                checksum_cursor_after = batch.rows[-1][batch.headers.index(checksum_cursor_col)]
-            else:
-                read_offset += len(batch.rows)
+                if not batch or not batch.rows:
+                    break
+                mapped, _ = map_rows_for_fingerprint(
+                    headers=batch.headers,
+                    data_rows=batch.rows,
+                    mappings=mappings,
+                    target_cols=target_cols,
+                    column_types=column_types,
+                    error_policy=stream_error_policy,
+                    dest_types=fingerprint_dest_types,
+                    preserve_case=True,
+                    dest_kind=dest_type,
+                    destination_pk_columns=list(pk_target_cols or []) or None,
+                )
+                if mapped:
+                    fp_accumulator.add_many(
+                        row_fingerprints(
+                            mapped,
+                            target_cols,
+                            dest_db_type=dest_type,
+                            dest_types=fingerprint_dest_types,
+                        )
+                    )
+                checksum_rows_read += len(batch.rows)
+                if limit > 0 and checksum_rows_read >= limit:
+                    break
+                if len(batch.rows) < read_limit:
+                    break
+                if use_checksum_keyset and checksum_cursor_col in (batch.headers or []):
+                    checksum_cursor_after = batch.rows[-1][batch.headers.index(checksum_cursor_col)]
+                elif use_reread_offset:
+                    read_offset += len(batch.rows)
+        finally:
+            if reread_scan is not None:
+                close_table_scan(reread_scan)
         final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
         phase_profile.add(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
         )
         dest_summary["checksum_mode"] = "source_reread"
         dest_summary["source_independently_reread"] = True
+        dest_summary["reread_pagination"] = reread_plan.get("mode")
+        dest_summary["checksum_note"] = (
+            "Independent source re-read after the write pass "
+            f"({reread_plan.get('mode')} pagination) — dest read-back can earn "
+            "full_checksum / migration_proven."
+        )
     else:
         final_checksum = write_pass_fp.digest() if write_pass_fp.total else last_checksum
         dest_summary["checksum_mode"] = "inline_write_pass" if write_pass_fp.total else "writer_last_batch"

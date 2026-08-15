@@ -16,6 +16,7 @@ from __future__ import annotations
 from services.reconcile_coverage import (
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
+    SOURCE_DIGEST_SOURCE_REREAD,
     SOURCE_DIGEST_WRITER_ACK,
     is_writer_ack_only,
 )
@@ -55,7 +56,11 @@ def test_write_pass_fingerprint_is_not_full_checksum():
 
 
 def test_buffered_remapped_rows_and_engine_population_earn_full_checksum():
-    for provenance in (SOURCE_DIGEST_REMAPPED_ROWS, SOURCE_DIGEST_ENGINE_POPULATION):
+    for provenance in (
+        SOURCE_DIGEST_REMAPPED_ROWS,
+        SOURCE_DIGEST_ENGINE_POPULATION,
+        SOURCE_DIGEST_SOURCE_REREAD,
+    ):
         report = _report(provenance)
         assert report["assurance_level"] == "full_checksum"
         assert report["phase"] == "post_write_verified"

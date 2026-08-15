@@ -179,6 +179,52 @@ def read_table_batch(
 _SF_SCAN_ARRAYSIZE = 10_000
 
 
+def _snowflake_time_travel_clause() -> tuple[str, tuple]:
+    """``AT (TIMESTAMP => %s)`` when Property 3 bound a Time Travel instant."""
+    try:
+        from services.source_snapshot import get_source_snapshot_meta
+
+        meta = get_source_snapshot_meta() or {}
+    except Exception:
+        return "", ()
+    ts = str(meta.get("time_travel_ts") or "").strip()
+    if not ts:
+        return "", ()
+    return " AT (TIMESTAMP => %s)", (ts,)
+
+
+def _execute_snowflake_snapshot(
+    cur: Any,
+    sql_before_at: str,
+    sql_after_at: str,
+    at_sql: str,
+    at_params: tuple,
+) -> None:
+    """Run a snapshot SQL, falling back to live when Time Travel is refused."""
+    if at_sql:
+        try:
+            cur.execute(f"{sql_before_at}{at_sql}{sql_after_at}", at_params)
+            return
+        except Exception as exc:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Snowflake Time Travel unavailable (%s) — live scan, not a frozen snapshot",
+                exc,
+            )
+            try:
+                from services.source_snapshot import patch_source_snapshot_meta
+
+                patch_source_snapshot_meta(
+                    {
+                        "guarantee": "live_scan_not_time_travel",
+                        "time_travel_fallback": str(exc)[:300],
+                    }
+                )
+            except Exception:
+                pass
+    cur.execute(f"{sql_before_at}{sql_after_at}")
+
+
 def read_table_scan_batch(
     *,
     host: str,
@@ -221,12 +267,19 @@ def read_table_scan_batch(
         try:
             _use_warehouse(cur, warehouse)
             table_ref = _table_ref(cur, schema, table)
+            at_sql, at_params = _snowflake_time_travel_clause()
             if known_total_rows is not None:
                 total = known_total_rows
             elif skip_population_count:
                 total = None
             else:
-                cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+                _execute_snowflake_snapshot(
+                    cur,
+                    f"SELECT COUNT(*) FROM {table_ref}",  # nosec B608
+                    "",
+                    at_sql,
+                    at_params,
+                )
                 total = int(cur.fetchone()[0])
             col_sql = (
                 quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
@@ -243,8 +296,12 @@ def read_table_scan_batch(
                 cur.arraysize = arraysize
             except Exception:
                 pass
-            cur.execute(
-                f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql}"  # nosec B608
+            _execute_snowflake_snapshot(
+                cur,
+                f"SELECT {col_sql} FROM {table_ref}",  # nosec B608
+                f" ORDER BY {order_sql}",
+                at_sql,
+                at_params,
             )
             headers = [desc[0] for desc in cur.description]
         except Exception:

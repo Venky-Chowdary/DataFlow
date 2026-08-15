@@ -413,6 +413,8 @@ export interface Gate8ReconciliationPayload {
   /** Intentional LSN-guard / redelivery skips — not a shortfall. */
   rows_skipped?: number;
   source_checksum?: string;
+  /** writer_ack | write_pass_fingerprints | remapped_source_rows | engine_population | independent_source_reread */
+  source_checksum_provenance?: string;
   target_checksum?: string;
   missing_key_count?: number;
   extra_key_count?: number;

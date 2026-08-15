@@ -84,6 +84,7 @@ def test_scan_reuses_one_cursor_and_never_offsets():
     select_sql = [s for s in executed if "SELECT" in s.upper() and "C_CUSTKEY" in s.upper()]
     assert len(select_sql) == 1
     assert "OFFSET" not in select_sql[0].upper()
+    assert "AT (TIMESTAMP" not in select_sql[0].upper()
     assert first.rows == [["1", "A"], ["2", "B"]]
     assert second.rows == [["3", "C"]]
     assert third.rows == []
