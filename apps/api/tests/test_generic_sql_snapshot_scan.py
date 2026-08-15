@@ -36,19 +36,22 @@ def test_fetch_scan_page_falls_back_to_fetchall_for_test_doubles():
 
 def test_generic_sql_scan_never_offsets():
     pytest.importorskip("sqlalchemy")
+    import sqlalchemy as sa
+
     result = MagicMock()
     result.fetchmany.side_effect = [
         [("1", "A"), ("2", "B")],
         [],
     ]
+    streamed = MagicMock()
+    streamed.execute.return_value = result
     conn = MagicMock()
-    conn.execution_options.return_value.execute.return_value = result
+    conn.execution_options.return_value = streamed
     engine = MagicMock()
     engine.connect.return_value = conn
-    col = MagicMock()
-    col.name = "id"
+    col = sa.column("id")
     table_obj = MagicMock()
-    table_obj.c = [col]
+    table_obj.c = {"id": col}
     table_obj.primary_key = None
 
     state: dict = {}
@@ -59,7 +62,10 @@ def test_generic_sql_scan_never_offsets():
         patch("connectors.generic_sql._dialect_key", return_value="mssql"),
         patch("connectors.generic_sql._reflect_table", return_value=table_obj),
         patch("connectors.generic_sql._tz_safe_projection", return_value=[col]),
-        patch("connectors.generic_sql._serialize_source_row", side_effect=lambda row, cols, dialect: list(row)),
+        patch(
+            "connectors.generic_sql._serialize_source_row",
+            side_effect=lambda row, cols, dialect: list(row),
+        ),
         patch("connectors.generic_sql._count_table_raw", return_value=2),
     ):
         first = read_table_scan_batch(
@@ -97,8 +103,9 @@ def test_generic_sql_scan_never_offsets():
 
     assert first.rows == [["1", "A"], ["2", "B"]]
     assert second.rows == []
-    stmt = conn.execution_options.return_value.execute.call_args[0][0]
-    compiled = str(stmt)
+    streamed.execute.assert_called_once()
+    stmt = streamed.execute.call_args[0][0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "OFFSET" not in compiled.upper()
 
 

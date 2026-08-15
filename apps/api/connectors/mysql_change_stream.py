@@ -372,6 +372,11 @@ class MySqlChangeStreamCdc:
             for table in tables_to_snapshot:
                 table_offset = offset if table == resume_table else 0
                 scan_state: dict = {}
+                # Held-cursor scan for a fresh table dump. Mid-snapshot resume
+                # (table_offset > 0) stays on OFFSET so the checkpoint remains
+                # authoritative. Do not key this on scan_state["started"] —
+                # tests and callers may stub the reader without mutating state.
+                use_scan = table_offset == 0
                 while True:
                     _read_kw = dict(
                         host=self.cfg.get("host") or "localhost",
@@ -388,7 +393,7 @@ class MySqlChangeStreamCdc:
                         limit=self.batch_size,
                         conn=lock_conn if locked else None,
                     )
-                    if table_offset == 0 or scan_state.get("started"):
+                    if use_scan:
                         batch = read_table_scan_batch(
                             **_read_kw, scan_state=scan_state
                         )
