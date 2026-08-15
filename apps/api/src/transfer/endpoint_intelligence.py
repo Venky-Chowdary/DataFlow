@@ -22,6 +22,62 @@ from .type_mapper import ddl_type
 from services.procedure_source import is_callable_source
 
 
+def _dest_table_schema_only(endpoint: EndpointConfig) -> bool:
+    """Dest Map already has a table name — skip SHOW TABLES / second warehouse login."""
+    purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
+    return purpose == "destination" and bool(
+        str(endpoint.table or endpoint.collection or "").strip()
+    )
+
+
+def _is_absent_object_error(message: str) -> bool:
+    """True only when the catalog said the *table* is missing — not a login failure."""
+    low = (message or "").lower()
+    if any(
+        tok in low
+        for tok in (
+            "account does not exist",
+            "user does not exist",
+            "role does not exist",
+            "warehouse does not exist",
+            "database does not exist",
+            "incorrect username",
+            "250001",
+            "290404",
+            "390195",
+            "authentication",
+            "password",
+            "private key",
+            "jwt",
+        )
+    ):
+        return False
+    return any(
+        tok in low
+        for tok in (
+            "does not exist",
+            "not found",
+            "no such table",
+            "unknown table",
+            "002043",
+            "no columns for table",
+        )
+    )
+
+
+def _attach_dest_table_schema(out: dict, endpoint: EndpointConfig) -> dict:
+    """One metadata session for dest+table. Connect failure is not create-new."""
+    _attach_db_sample(out, endpoint)
+    exists = out.get("table_exists")
+    if out.get("columns") or exists in (True, False):
+        out["connected"] = True
+    else:
+        out["connected"] = False
+        if not out.get("message"):
+            out["message"] = "Destination schema probe failed"
+    return out
+
+
 def introspect_endpoint(
     endpoint: EndpointConfig,
     sample_content: bytes | None = None,
@@ -79,6 +135,8 @@ def introspect_endpoint(
     # column types were never measured, so Validate refused create-new and
     # overwrite for lack of facts one catalog query answers.
     if fmt in {"postgresql", "pgvector"}:
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.postgresql import test_postgresql
 
         probe = test_postgresql(
@@ -178,6 +236,8 @@ def introspect_endpoint(
         return out
 
     if fmt == "snowflake":
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.snowflake import test_snowflake
         from services.connector_auth import snowflake_session_kwargs
 
@@ -205,6 +265,8 @@ def introspect_endpoint(
         return out
 
     if fmt == "mysql":
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.mysql import test_mysql
 
         probe = test_mysql(
@@ -227,6 +289,8 @@ def introspect_endpoint(
         return out
 
     if fmt == "bigquery":
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.bigquery import test_bigquery
 
         probe = test_bigquery(
@@ -251,6 +315,8 @@ def introspect_endpoint(
         return out
 
     if fmt == "redshift":
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.redshift import test_redshift
 
         probe = test_redshift(
@@ -815,6 +881,10 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             schema_map, schema_nulls, schema_keys = _introspect_table_schema_rich(
                 fmt, cfg, table, [], strict_namespace=strict_namespace
             )
+        probe_error = str((schema_keys or {}).get("probe_error") or "").strip()
+        if not schema_map and probe_error and not _is_absent_object_error(probe_error):
+            # Login / warehouse / role failure is not "table missing → create-new".
+            raise RuntimeError(probe_error)
         if schema_map:
             out["columns"] = list(schema_map.keys())
             out["schema"] = schema_map

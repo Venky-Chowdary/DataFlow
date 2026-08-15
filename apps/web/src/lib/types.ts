@@ -85,6 +85,7 @@ export interface Connector {
   path_style?: boolean;
   created_at: string;
   last_test_ok?: boolean;
+  last_used_at?: string | null;
 }
 
 export interface TransferCheckpoint {
@@ -165,6 +166,8 @@ export interface TransferJob {
   name?: string;
   source_type: string;
   source_name: string;
+  source_connector_id?: string;
+  dest_connector_id?: string;
   destination_type: string;
   destination_database: string;
   destination_collection: string;

@@ -102,3 +102,97 @@ def test_snowflake_reader_count_uses_same_cursor_not_nested_login():
     assert "total = count_table_rows(" not in source
     assert "SELECT COUNT(*) FROM" in source
     assert "skip_population_count" in source
+
+
+def test_dest_snowflake_skips_list_probe_when_table_set():
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+    from src.transfer.models import EndpointConfig
+
+    endpoint = EndpointConfig(
+        kind="database",
+        format="snowflake",
+        host="acct",
+        table="AUDIT",
+        extra={"introspect_purpose": "destination"},
+    )
+    with (
+        patch(
+            "src.transfer.endpoint_intelligence.resolve_connector_config",
+            return_value={"type": "snowflake", "host": "acct", "port": 443, "database": "DB"},
+        ),
+        patch("connectors.snowflake.test_snowflake") as probe,
+        patch(
+            "src.transfer.endpoint_intelligence._attach_db_sample",
+            side_effect=lambda out, ep, sample_limit=100: out.update(
+                {
+                    "columns": ["ID"],
+                    "schema": {"ID": "NUMBER"},
+                    "table_exists": True,
+                    "message": "Found existing table `AUDIT`",
+                }
+            ),
+        ),
+    ):
+        out = introspect_endpoint(endpoint)
+
+    probe.assert_not_called()
+    assert out["connected"] is True
+    assert out["table_exists"] is True
+    assert out["columns"] == ["ID"]
+
+
+def test_dest_connect_error_is_not_create_new():
+    from src.transfer.endpoint_intelligence import _attach_db_sample
+    from src.transfer.models import EndpointConfig
+
+    endpoint = EndpointConfig(
+        kind="database",
+        format="snowflake",
+        host="acct",
+        table="AUDIT",
+        extra={"introspect_purpose": "destination"},
+    )
+    out: dict = {"connected": False, "objects": [], "columns": [], "schema": {}, "message": ""}
+    with (
+        patch(
+            "src.transfer.endpoint_intelligence.resolve_connector_config",
+            return_value={"type": "snowflake", "host": "acct", "port": 443, "database": "DB"},
+        ),
+        patch(
+            "src.transfer.endpoint_intelligence._introspect_table_schema_rich",
+            return_value=({}, {}, {"probe_error": "250001 Incorrect username or password"}),
+        ),
+    ):
+        _attach_db_sample(out, endpoint)
+
+    assert out.get("table_exists") is None
+    assert out.get("auto_create") in (None, [])
+    assert "250001" in str(out.get("message") or "")
+
+
+def test_dest_missing_table_still_create_on_write():
+    from src.transfer.endpoint_intelligence import _attach_db_sample
+    from src.transfer.models import EndpointConfig
+
+    endpoint = EndpointConfig(
+        kind="database",
+        format="snowflake",
+        host="acct",
+        table="NEW_AUDIT",
+        extra={"introspect_purpose": "destination"},
+    )
+    out: dict = {"connected": False, "objects": [], "columns": [], "schema": {}, "message": ""}
+    with (
+        patch(
+            "src.transfer.endpoint_intelligence.resolve_connector_config",
+            return_value={"type": "snowflake", "host": "acct", "port": 443, "database": "DB"},
+        ),
+        patch(
+            "src.transfer.endpoint_intelligence._introspect_table_schema_rich",
+            return_value=({}, {}, {}),
+        ),
+    ):
+        _attach_db_sample(out, endpoint)
+
+    assert out["table_exists"] is False
+    assert any("created automatically" in str(item) for item in (out.get("auto_create") or []))

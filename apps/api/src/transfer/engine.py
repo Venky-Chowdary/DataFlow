@@ -5080,6 +5080,8 @@ class UniversalTransferEngine:
             "name": f"{source_name} → {dest_label}",
             "name_key": f"{source_name} → {dest_label}".strip().casefold(),
             "source_format": request.source.format,
+            "source_connector_id": str(getattr(request.source, "connector_id", None) or "").strip() or None,
+            "dest_connector_id": str(getattr(request.destination, "connector_id", None) or "").strip() or None,
             "destination_type": request.destination.format,
             "destination_kind": request.destination.kind,
             "destination_database": request.destination.database or "",
@@ -5135,6 +5137,12 @@ class UniversalTransferEngine:
             # job now so a later release, or a duplicate check, names the right
             # run rather than the placeholder.
             self._bind_idempotency_claim(claim.key, job_id)
+        try:
+            from services.connector_store import mark_used
+
+            mark_used(job_doc.get("source_connector_id"), job_doc.get("dest_connector_id"))
+        except Exception as used_exc:
+            logger.debug("mark_used after job create skipped: %s", used_exc)
         return job_id
 
     def _idempotency_key(self, request: TransferRequest) -> str:

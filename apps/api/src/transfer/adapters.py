@@ -906,16 +906,23 @@ def _introspect_table_schema_rich(
     # Fallback: infer logical types from the sample records we already have in hand.
     # This is essential for schemaless sources (MongoDB, DynamoDB, Redis) whose
     # stored values may be strings but whose content is numeric, boolean, JSON, etc.
+    keys = dict(empty_keys)
+    if not info.get("ok"):
+        err = str(info.get("error") or "").strip()
+        if err:
+            keys["probe_error"] = err
     if records:
         try:
             from services.file_parser import FileParser
 
             inferred = FileParser.infer_schema(records)
             if inferred:
-                return {h: inferred.get(h, "TEXT") for h in headers}, {}, empty_keys
+                return {h: inferred.get(h, "TEXT") for h in headers}, {}, keys
         except Exception as exc:
             logger.debug("record schema inference failed: %s", exc, exc_info=exc)
-    return {h: "TEXT" for h in headers}, {}, empty_keys
+    if headers:
+        return {h: "TEXT" for h in headers}, {}, keys
+    return {}, {}, keys
 
 
 def _introspect_table_schema(

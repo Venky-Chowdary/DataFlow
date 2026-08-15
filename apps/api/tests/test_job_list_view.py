@@ -52,3 +52,44 @@ def test_slim_job_for_list_whitelist_drops_heavy_payload():
     assert "reconciliation" not in slim
     assert slim["checkpoint"]["chunk_index"] == 2
     assert "huge" not in slim["checkpoint"]
+
+
+def test_slim_job_keeps_connector_ids_and_drops_transfer_request():
+    from services.job_list_view import slim_job_for_list
+
+    slim = slim_job_for_list(
+        {
+            "_id": "job-1",
+            "status": "completed",
+            "source_name": "airports",
+            "source_connector_id": "mysql-venky",
+            "dest_connector_id": "sf-dest",
+            "transfer_request": {
+                "source": {"connector_id": "mysql-venky", "password": "secret"},
+                "destination": {"connector_id": "sf-dest"},
+                "mappings": [{"source": "id"}] * 80,
+            },
+        }
+    )
+    assert slim["source_connector_id"] == "mysql-venky"
+    assert slim["dest_connector_id"] == "sf-dest"
+    assert "transfer_request" not in slim
+
+
+def test_slim_job_recovers_connector_ids_from_legacy_transfer_request():
+    from services.job_list_view import connector_ids_from_job, slim_job_for_list
+
+    job = {
+        "_id": "legacy",
+        "status": "completed",
+        "source_name": "airports",
+        "transfer_request": {
+            "source": {"connector_id": "mysql-venky", "table": "airports"},
+            "destination": {"connector_id": "sf-dest", "table": "AUDIT"},
+        },
+    }
+    assert connector_ids_from_job(job) == ("mysql-venky", "sf-dest")
+    slim = slim_job_for_list(job)
+    assert slim["source_connector_id"] == "mysql-venky"
+    assert slim["dest_connector_id"] == "sf-dest"
+    assert "transfer_request" not in slim
