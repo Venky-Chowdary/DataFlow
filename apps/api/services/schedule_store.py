@@ -467,6 +467,33 @@ def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
         )
 
 
+def schedule_bind_summary(sched: Any) -> dict[str, Any]:
+    """Read-only bind preview for Pilot list/get. Never invents. Never raises.
+
+    OPEN / unsigned binds still appear so the operator can see why Run is
+    refused. Cron and Confirm use ``assert_schedule_run_allowed`` instead.
+    """
+    cid = (getattr(sched, "contract_id", None) or "").strip()
+    require = bool(getattr(sched, "require_signed_contract", False))
+    if not cid and not require:
+        return {}
+    out: dict[str, Any] = {}
+    if require:
+        out["require_signed_contract"] = True
+    if not cid:
+        return out
+    out["contract_id"] = cid
+    out["require_signed_contract"] = require
+    out["enforce_contract"] = True
+    try:
+        from services.contract_store import get_contract_store
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import get_contract_store
+    breaker = get_contract_store().get_breaker(cid)
+    out["breaker_state"] = getattr(breaker.state, "value", str(breaker.state))
+    return out
+
+
 def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
     """Fail-closed SIGNED + breaker for a scheduled run. Returns bind preview.
 
@@ -477,21 +504,14 @@ def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
     require = bool(getattr(sched, "require_signed_contract", False))
     if cid or require:
         assert_signed_contract(cid, require_signed=require)
-    if not cid:
-        return {}
-    try:
-        from services.contract_store import assert_contract_breaker_allows, get_contract_store
-    except ImportError:  # pragma: no cover
-        from src.services.contract_store import assert_contract_breaker_allows, get_contract_store
+    if cid:
+        try:
+            from services.contract_store import assert_contract_breaker_allows
+        except ImportError:  # pragma: no cover
+            from src.services.contract_store import assert_contract_breaker_allows
 
-    assert_contract_breaker_allows(cid)
-    breaker = get_contract_store().get_breaker(cid)
-    return {
-        "contract_id": cid,
-        "require_signed_contract": require,
-        "enforce_contract": True,
-        "breaker_state": getattr(breaker.state, "value", str(breaker.state)),
-    }
+        assert_contract_breaker_allows(cid)
+    return schedule_bind_summary(sched)
 
 
 def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: str) -> None:

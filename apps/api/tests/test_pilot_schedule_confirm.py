@@ -168,3 +168,128 @@ def test_render_schedule_run_names_bind_and_overwrite():
     assert "SIGNED" in text
     assert "closed" in text
     assert "overwrites" in text.lower()
+
+
+def test_schedule_bind_summary_lists_open_breaker_without_raising(monkeypatch):
+    from services.data_contract import BreakerState
+    from services.schedule_store import schedule_bind_summary
+
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    signed = DataContract(name="listed-open", status=ContractStatus.SIGNED)
+    backend.save_contract(signed)
+    breaker = backend.get_breaker(signed.id)
+    breaker.state = BreakerState.OPEN
+    backend.save_breaker(breaker)
+
+    preview = schedule_bind_summary(
+        SimpleNamespace(contract_id=signed.id, require_signed_contract=True),
+    )
+    assert preview["contract_id"] == signed.id
+    assert preview["breaker_state"] == "open"
+
+
+def test_schedule_bind_summary_unbound_is_empty():
+    from services.schedule_store import schedule_bind_summary
+
+    assert schedule_bind_summary(
+        SimpleNamespace(contract_id="", require_signed_contract=False),
+    ) == {}
+
+
+def test_schedule_summary_includes_bind_and_sync(monkeypatch):
+    from src.ai.copilot.tools import DataPilotTools
+
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    signed = DataContract(name="nightly-summary", status=ContractStatus.SIGNED)
+    backend.save_contract(signed)
+
+    class _Sched:
+        id = "sched_sum_1"
+        name = "Nightly"
+        enabled = True
+        interval = "daily"
+        cron = ""
+        timezone = "UTC"
+        source_table = "orders"
+        dest_table = "orders_wh"
+        sync_mode = "incremental"
+        next_run_at = "2026-08-16T00:00:00+00:00"
+        last_run_at = None
+        last_status = "success"
+        run_count = 3
+        contract_id = signed.id
+        require_signed_contract = True
+
+    row = DataPilotTools()._schedule_summary(_Sched())
+    assert row["sync_mode"] == "incremental"
+    assert row["contract_id"] == signed.id
+    assert row["require_signed_contract"] is True
+    assert row["breaker_state"] == "closed"
+
+
+def test_schedule_summary_omits_bind_when_unbound():
+    from src.ai.copilot.tools import DataPilotTools
+
+    class _Sched:
+        id = "sched_sum_2"
+        name = "Adhoc"
+        enabled = True
+        interval = "hourly"
+        cron = ""
+        timezone = "UTC"
+        source_table = "t"
+        dest_table = "t"
+        sync_mode = "full_refresh_append"
+        next_run_at = None
+        last_run_at = None
+        last_status = None
+        run_count = 0
+        contract_id = ""
+        require_signed_contract = False
+
+    row = DataPilotTools()._schedule_summary(_Sched())
+    assert "contract_id" not in row
+    assert "enforce_contract" not in row
+    assert "breaker_state" not in row
+
+
+def test_render_schedule_detail_names_route_and_bind():
+    from src.ai.copilot.pilot_agent import _render_schedule_detail, _schedule_bind_phrase
+
+    text = _render_schedule_detail({
+        "id": "s1",
+        "name": "Nightly",
+        "interval": "daily",
+        "enabled": True,
+        "source_table": "orders",
+        "dest_table": "orders_wh",
+        "sync_mode": "incremental",
+        "contract_id": "dfc-1",
+        "require_signed_contract": True,
+        "breaker_state": "open",
+        "next_run_at": "2026-08-16T00:00:00+00:00",
+        "last_status": "failed",
+        "run_count": 2,
+    })
+    assert "Nightly" in text
+    assert "`orders` → `orders_wh`" in text
+    assert "incremental" in text
+    assert "dfc-1" in text
+    assert "SIGNED" in text
+    assert "open" in text
+    assert _schedule_bind_phrase({"name": "x"}) == ""
+    assert "no contract" in _schedule_bind_phrase({"require_signed_contract": True})
+
+
+def test_render_schedule_detail_unbound_does_not_invent_enforce():
+    from src.ai.copilot.pilot_agent import _render_schedule_detail
+
+    text = _render_schedule_detail({
+        "name": "Adhoc",
+        "interval": "hourly",
+        "enabled": False,
+        "source_table": "t",
+        "dest_table": "t",
+    })
+    assert "No data contract bound" in text
+    assert "enforce stays unset" in text

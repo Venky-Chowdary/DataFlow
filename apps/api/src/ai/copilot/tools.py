@@ -373,7 +373,10 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_schedules",
-        "description": "List pipeline schedules (Pipelines page) with cadence, next run, and last status.",
+        "description": (
+            "List pipeline schedules (Pipelines page) with cadence, next run, last status, "
+            "and bound contract / breaker when one is set."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -384,7 +387,10 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "get_schedule",
-        "description": "Fetch one pipeline schedule by id or name.",
+        "description": (
+            "Fetch one pipeline schedule by id or name, including route, sync mode, "
+            "and bound contract / breaker when one is set."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1798,7 +1804,9 @@ class DataPilotTools:
         return None, None
 
     def _schedule_summary(self, s) -> dict:
-        return {
+        from services.schedule_store import schedule_bind_summary
+
+        row = {
             "id": s.id,
             "name": s.name,
             "enabled": s.enabled,
@@ -1807,11 +1815,14 @@ class DataPilotTools:
             "timezone": s.timezone,
             "source_table": s.source_table,
             "dest_table": s.dest_table,
+            "sync_mode": getattr(s, "sync_mode", "") or "",
             "next_run_at": s.next_run_at,
             "last_run_at": s.last_run_at,
             "last_status": s.last_status,
             "run_count": s.run_count,
         }
+        row.update(schedule_bind_summary(s))
+        return row
 
     def _list_schedules(self, limit: int = 20) -> ToolResult:
         from services.schedule_store import list_schedules

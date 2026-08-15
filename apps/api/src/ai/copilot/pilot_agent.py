@@ -236,6 +236,53 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _schedule_bind_phrase(row: dict[str, Any] | None) -> str:
+    """One-line bind for list/get. Empty when the schedule is unbound."""
+    s = row or {}
+    cid = str(s.get("contract_id") or "").strip()
+    require = bool(s.get("require_signed_contract"))
+    breaker = str(s.get("breaker_state") or "").strip()
+    if not cid and not require:
+        return ""
+    if not cid:
+        return "require signed on, no contract"
+    bits = [f"contract `{cid}`"]
+    if require:
+        bits.append("SIGNED required")
+    if breaker:
+        bits.append(f"breaker {breaker}")
+    return " · ".join(bits)
+
+
+def _render_schedule_detail(s: dict[str, Any]) -> str:
+    """Answer “what’s on this pipeline?” — route, sync, bind, cadence."""
+    name = s.get("name") or "pipeline"
+    sid = str(s.get("id") or "").strip()
+    src = s.get("source_table") or "?"
+    dst = s.get("dest_table") or "?"
+    sync = str(s.get("sync_mode") or "").strip()
+    lines = [
+        f"Pipeline **{name}**"
+        + (f" (`{sid}`)" if sid else "")
+        + f" · {s.get('interval') or '—'}"
+        + f" · enabled={s.get('enabled')}."
+    ]
+    route = f"• Route `{src}` → `{dst}`"
+    if sync:
+        route += f" · sync `{sync}`"
+    lines.append(route)
+    bind = _schedule_bind_phrase(s)
+    if bind:
+        lines.append(f"• Bound {bind}.")
+    else:
+        lines.append("• No data contract bound — enforce stays unset.")
+    lines.append(
+        f"• next `{s.get('next_run_at') or '—'}` · last **{s.get('last_status') or 'never'}**"
+        f" ({s.get('run_count', 0)} runs)."
+    )
+    return "\n".join(lines)
+
+
 def _render_schedule_run(o: dict[str, Any]) -> str:
     """Show the pipeline an operator has to sign off on: route, bind, breaker."""
     preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
@@ -1784,22 +1831,19 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if rows:
                     lines = [f"You have **{len(rows)} pipeline schedule(s)**:"]
                     for s in rows[:8]:
+                        bind = _schedule_bind_phrase(s)
                         lines.append(
                             f"• **{s.get('name')}** · {s.get('interval')}"
                             f"{' · cron ' + s['cron'] if s.get('cron') else ''}"
-                            f" · next `{s.get('next_run_at') or '—'}`"
-                            f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
+                            + (f" · {bind}" if bind else "")
+                            + f" · next `{s.get('next_run_at') or '—'}`"
+                            + f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
                         )
                     parts.append("\n".join(lines))
                 else:
                     parts.append("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
             elif tr.name == "get_schedule" and tr.success:
-                s = tr.output or {}
-                parts.append(
-                    f"Pipeline **{s.get('name')}** (`{s.get('id')}`) · {s.get('interval')} · "
-                    f"enabled={s.get('enabled')} · next `{s.get('next_run_at') or '—'}` · "
-                    f"last **{s.get('last_status') or 'never'}**."
-                )
+                parts.append(_render_schedule_detail(tr.output or {}))
             elif tr.name == "run_schedule_now" and tr.success:
                 parts.append(_render_schedule_run(tr.output or {}))
             elif tr.name == "list_contracts" and tr.success:
