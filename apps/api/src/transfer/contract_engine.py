@@ -27,6 +27,54 @@ except ImportError:  # pragma: no cover - compatibility for tests
     )
 
 
+def resolve_bound_contract(
+    *,
+    explicit_id: str = "",
+    explicit_require: bool | None = None,
+    policies: dict[str, Any] | None = None,
+) -> tuple[str, bool]:
+    """Resolve opt-in contract bind. Explicit request fields win; else plan policies.
+
+    An empty explicit id does **not** mean "clear the bind" when a plan carries
+    ``contract_id`` — SDK / ``plan_id`` Execute often omit the form fields.
+    Selecting a contract defaults require-signed, matching Studio and schedules.
+    """
+    cid = str(explicit_id or "").strip()
+    if cid:
+        require = True if explicit_require is None else bool(explicit_require)
+        return cid, require
+    plan = policies or {}
+    plan_cid = str(plan.get("contract_id") or "").strip()
+    if plan_cid:
+        if "require_signed_contract" in plan:
+            return plan_cid, bool(plan.get("require_signed_contract"))
+        return plan_cid, True
+    return "", bool(explicit_require)
+
+
+def stamp_request_contract(
+    request: Any,
+    *,
+    explicit_id: str = "",
+    explicit_require: bool = False,
+    policies: dict[str, Any] | None = None,
+) -> None:
+    """Stamp Execute/replay bind. Explicit id wins; else plan policies.
+
+    ``require_signed`` without an id still fail-closes when the plan is unbound
+    (same as schedules). Form defaults of false do not wipe a stored plan bind.
+    """
+    cid = str(explicit_id or "").strip()
+    resolved_id, require = resolve_bound_contract(
+        explicit_id=cid,
+        explicit_require=bool(explicit_require) if cid else None,
+        policies=policies,
+    )
+    if not resolved_id and explicit_require and not cid:
+        require = True
+    stamp_bound_contract(request, contract_id=resolved_id, require_signed=require)
+
+
 def stamp_bound_contract(
     request: Any,
     *,

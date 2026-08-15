@@ -740,13 +740,15 @@ async def execute_transfer_json(
     )
 
     _residency_check(request, dst, region)
-    from src.transfer.contract_engine import stamp_bound_contract
+    from src.transfer.contract_engine import stamp_request_contract
 
+    plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
     try:
-        stamp_bound_contract(
+        stamp_request_contract(
             request_obj,
-            contract_id=body.contract_id or "",
-            require_signed=bool(body.require_signed_contract),
+            explicit_id=body.contract_id or "",
+            explicit_require=bool(body.require_signed_contract),
+            policies=plan_policies if isinstance(plan_policies, dict) else {},
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1063,6 +1065,7 @@ async def run_universal_transfer(
     form_schema_policy = (schema_policy or "").strip()
     form_write_via_staging = write_via_staging.lower() in ("true", "1", "yes")
     plan_payload = None
+    plan_policies: dict = {}
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_service import merge_plan_into_run
@@ -1089,6 +1092,8 @@ async def run_universal_transfer(
                 request_obj.mappings = payload["mappings"]
                 request_obj.column_types = payload.get("column_types") or {}
             policies = payload.get("policies") or {}
+            if isinstance(policies, dict):
+                plan_policies = policies
             if not form_sync_mode:
                 request_obj.sync_mode = policies.get("sync_mode", request_obj.sync_mode)
             if not form_schema_policy:
@@ -1151,13 +1156,14 @@ async def run_universal_transfer(
 
     _residency_check(request, destination, region)
 
-    from src.transfer.contract_engine import stamp_bound_contract
+    from src.transfer.contract_engine import stamp_request_contract
 
     try:
-        stamp_bound_contract(
+        stamp_request_contract(
             request_obj,
-            contract_id=contract_id,
-            require_signed=require_signed_contract.lower() in ("true", "1", "yes"),
+            explicit_id=contract_id,
+            explicit_require=require_signed_contract.lower() in ("true", "1", "yes"),
+            policies=plan_policies,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

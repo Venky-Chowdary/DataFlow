@@ -9,7 +9,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.transfer.contract_engine import stamp_bound_contract
+from src.transfer.contract_engine import (
+    resolve_bound_contract,
+    stamp_bound_contract,
+    stamp_request_contract,
+)
 
 
 def _backend(monkeypatch):
@@ -60,6 +64,65 @@ def test_stamp_bound_contract_no_id_leaves_enforce_alone():
     assert req.contract_id == ""
     assert req.enforce_contract is True
     assert req.require_signed_contract is False
+
+
+def test_resolve_bound_contract_explicit_wins_over_plan():
+    cid, require = resolve_bound_contract(
+        explicit_id="from-form",
+        explicit_require=False,
+        policies={"contract_id": "from-plan", "require_signed_contract": True},
+    )
+    assert cid == "from-form"
+    assert require is False
+
+
+def test_resolve_bound_contract_plan_fills_omitted_form_fields():
+    cid, require = resolve_bound_contract(
+        explicit_id="",
+        explicit_require=None,
+        policies={"contract_id": "from-plan"},
+    )
+    assert cid == "from-plan"
+    assert require is True
+
+
+def test_stamp_request_contract_uses_plan_when_form_omits_id(monkeypatch):
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    signed = DataContract(name="plan-bind", status=ContractStatus.SIGNED)
+    backend.save_contract(signed)
+
+    req = SimpleNamespace(contract_id="", enforce_contract=False, require_signed_contract=False)
+    stamp_request_contract(
+        req,
+        explicit_id="",
+        explicit_require=False,
+        policies={"contract_id": signed.id, "require_signed_contract": True},
+    )
+    assert req.contract_id == signed.id
+    assert req.enforce_contract is True
+    assert req.require_signed_contract is True
+
+
+def test_stamp_request_contract_plan_draft_still_fail_closed(monkeypatch):
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    draft = DataContract(name="plan-draft", status=ContractStatus.DRAFT)
+    backend.save_contract(draft)
+
+    req = SimpleNamespace(contract_id="", enforce_contract=True, require_signed_contract=False)
+    with pytest.raises(ValueError, match="must be SIGNED"):
+        stamp_request_contract(
+            req,
+            explicit_id="",
+            explicit_require=False,
+            policies={"contract_id": draft.id, "require_signed_contract": True},
+        )
+    assert req.contract_id == ""
+
+
+def test_stamp_request_contract_require_without_id_still_fail_closed():
+    req = SimpleNamespace(contract_id="", enforce_contract=True, require_signed_contract=False)
+    with pytest.raises(ValueError, match="no contract_id"):
+        stamp_request_contract(req, explicit_id="", explicit_require=True, policies={})
 
 
 def test_stage_bound_contract_defaults_require_signed_when_id_set(monkeypatch):

@@ -20,6 +20,7 @@ import { Button } from "../components/ui/Button";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
 import { ContractBindField } from "../components/contracts/ContractBindField";
+import { contractBindFromPolicies } from "../lib/contractBind";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
@@ -1032,6 +1033,16 @@ export function TransferPage({
       backfill_new_fields: backfillNewFields,
       write_via_staging: writeViaStaging,
       stream_contracts: streamContracts,
+      ...(() => {
+        const bind = contractBindFromPolicies({
+          contract_id: boundContractId,
+          require_signed_contract: requireSignedContract,
+        });
+        return {
+          contract_id: bind.contractId,
+          require_signed_contract: bind.requireSigned,
+        };
+      })(),
     },
   }), [
     file,
@@ -1073,6 +1084,8 @@ export function TransferPage({
     destWarehouse,
     targetCollection,
     destTableExists,
+    boundContractId,
+    requireSignedContract,
   ]);
 
   const ensurePersistedPlan = useCallback(async (

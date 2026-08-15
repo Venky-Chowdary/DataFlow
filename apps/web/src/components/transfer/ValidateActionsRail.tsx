@@ -20,7 +20,7 @@ interface ValidateActionsRailProps {
   executeBlockedReason?: string;
   /** CDC retention Check control (SQL Server / Oracle) — shown above footer when present. */
   cdcRetentionSlot?: ReactNode;
-  /** Bind a signed data contract before Execute (schedules already enforce this). */
+  /** Bind a signed data contract before Execute (plans + schedules persist this). */
   contractSlot?: ReactNode;
   /** Primary remediation for the top blocker (e.g. open identity settings). */
   onPrimaryFix?: () => void;

@@ -389,7 +389,10 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
         sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
     )
 
-    return {
+    from src.transfer.contract_engine import resolve_bound_contract
+
+    cid, require = resolve_bound_contract(policies=plan.policies)
+    payload = {
         "plan_id": plan_id,
         "mapping_version": rev.version,
         "mapping_hash": rev.mapping_hash,
@@ -400,6 +403,10 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
         "column_types": plan.source_schema,
         "policies": plan.policies,
     }
+    if cid:
+        payload["contract_id"] = cid
+        payload["require_signed_contract"] = require
+    return payload
 
 
 def merge_plan_into_run(

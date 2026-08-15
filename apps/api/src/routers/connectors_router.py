@@ -1334,6 +1334,16 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     child_payload["sync_mode"] = "incremental_deduped"
     child_payload["skip_preflight"] = True
     child_req = transfer_request_from_dict(child_payload)
+    from src.transfer.contract_engine import stamp_request_contract
+
+    try:
+        stamp_request_contract(
+            child_req,
+            explicit_id=str(getattr(transfer_req, "contract_id", "") or ""),
+            explicit_require=bool(getattr(transfer_req, "require_signed_contract", False)),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     child_job_id = engine._create_pending_job(child_req)
     mongo.update_job_status(
         child_job_id,

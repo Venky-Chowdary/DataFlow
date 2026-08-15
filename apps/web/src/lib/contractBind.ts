@@ -19,3 +19,16 @@ export function contractBindBlocksRun(opts: {
 export function isSignedContractStatus(status: string | undefined | null): boolean {
   return String(status || "").trim().toUpperCase() === "SIGNED";
 }
+
+/** Read opt-in bind from a persisted transfer-plan policies object. */
+export function contractBindFromPolicies(
+  policies: Record<string, unknown> | null | undefined,
+): { contractId: string; requireSigned: boolean } {
+  const p = policies || {};
+  const contractId = String(p.contract_id || "").trim();
+  if (!contractId) return { contractId: "", requireSigned: false };
+  if (Object.prototype.hasOwnProperty.call(p, "require_signed_contract")) {
+    return { contractId, requireSigned: Boolean(p.require_signed_contract) };
+  }
+  return { contractId, requireSigned: true };
+}
