@@ -1246,6 +1246,7 @@ def write_mapped_rows(
 ) -> WriteResult:
     dest_nullability = _kwargs.get("destination_column_nullability")
     live_dest_types = _kwargs.get("destination_column_types")
+    private_key = str(_kwargs.get("private_key") or "")
     from connectors.sql_write_materialize import sql_source_from_writer
 
     _sql_extra = (
@@ -1514,6 +1515,8 @@ def write_mapped_rows(
                 warehouse=warehouse,
                 connection_string=connection_string,
                 role=role,
+                private_key=private_key,
+                private_key_passphrase=password if private_key else "",
             )
 
         with conn.cursor() as cur:

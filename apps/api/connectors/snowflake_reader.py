@@ -61,6 +61,7 @@ def count_table_rows(
     warehouse: str,
     table: str,
     role: str = "",
+    private_key: str = "",
 ) -> int:
     del port
     account = normalize_account(host)
@@ -74,6 +75,8 @@ def count_table_rows(
         warehouse=warehouse,
         connection_string=connection_string,
         role=role,
+        private_key=private_key,
+        private_key_passphrase=password if private_key else "",
     )
     try:
         with conn.cursor() as cur:
@@ -101,6 +104,7 @@ def read_table_batch(
     limit: int = 100_000,
     known_total_rows: int | None = None,
     role: str = "",
+    private_key: str = "",
 ) -> ReadBatch:
     account = normalize_account(host)
     schema = _snowflake_schema(schema)
@@ -113,6 +117,8 @@ def read_table_batch(
         warehouse=warehouse,
         connection_string=connection_string,
         role=role,
+        private_key=private_key,
+        private_key_passphrase=password if private_key else "",
     )
     try:
         with conn.cursor() as cur:
@@ -168,6 +174,7 @@ def read_table_cursor_batch(
     columns: list[str] | None = None,
     limit: int = 500,
     role: str = "",
+    private_key: str = "",
     cursor_primary_key: str | None = None,
 ) -> ReadBatch:
     """Read rows where cursor_column > watermark — incremental sync.
@@ -189,6 +196,8 @@ def read_table_cursor_batch(
         warehouse=warehouse,
         connection_string=connection_string,
         role=role,
+        private_key=private_key,
+        private_key_passphrase=password if private_key else "",
     )
     try:
         with conn.cursor() as cur:

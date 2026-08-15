@@ -347,6 +347,15 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
             "(common for local/dev databases), or enable TLS on the server."
         )
 
+    # Snowflake: classify role / MFA / network before the generic "login" regex.
+    # Role 'BOTH' errors contain "attempt to login" and were mislabeled as a bad password.
+    if driver == "snowflake":
+        from connectors.snowflake_conn import classify_snowflake_connect_error
+
+        classified = classify_snowflake_connect_error(raw)
+        if classified:
+            return classified
+
     # Auth / credentials — first because it is the most common and sensitive.
     if re.search(r"authentication|auth|login|credential|password|incorrect|access denied|not authorized|unauthorized|no such user|permission denied|privilege", text):
         if driver in ("salesforce", "hubspot", "stripe", "rest_api"):
@@ -493,6 +502,8 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     """Execute connectivity probe for a driver using resolved config."""
     import importlib
 
+    from services.connector_auth import engine_login_role
+
     from .connector_capabilities import resolve_driver_type
 
     db_type = (db_type or "").lower()
@@ -530,9 +541,11 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         "warehouse": cfg.get("warehouse", ""),
         "table": cfg.get("table", ""),
         "auth_mode": cfg.get("auth_mode", ""),
-        "role": cfg.get("role", ""),
+        "role": engine_login_role(cfg.get("auth_role"), cfg.get("role")),
+        "auth_role": engine_login_role(cfg.get("auth_role"), cfg.get("role")),
         "api_key": cfg.get("api_key", ""),
         "service_account": cfg.get("service_account", ""),
+        "private_key": cfg.get("private_key", ""),
         "region": cfg.get("region", ""),
     }
 

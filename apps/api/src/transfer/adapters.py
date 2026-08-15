@@ -479,8 +479,11 @@ def resolve_connector_config(
         "path_style": endpoint.path_style,
         "region": endpoint.region or "",
     }
-    # Keep "role" as the canonical key used by Snowflake connector functions.
-    cfg["role"] = endpoint.auth_role or ""
+    # Engine login role only — never topology source/destination/both.
+    from services.connector_auth import engine_login_role
+
+    cfg["role"] = engine_login_role(endpoint.auth_role)
+    cfg["auth_role"] = cfg["role"]
     cfg.update(endpoint.extra)
     connector_id = endpoint.connector_id or _find_implicit_connector_id(
         endpoint, cfg, fmt, workspace_id=workspace_id

@@ -80,6 +80,7 @@ class ConnectorConfig(BaseModel):
     path_style: bool = Field(default=False, description="Force S3 path-style addressing")
     options: dict = Field(default_factory=dict, description="Additional options")
     auth_source: Optional[str] = None
+    private_key: Optional[str] = Field(default=None, description="PEM private key (Snowflake key-pair / SFTP)")
     role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
 
 
@@ -118,6 +119,7 @@ class TestConnectionRequest(BaseModel):
     endpoint_url: Optional[str] = None
     path_style: Optional[bool] = False
     auth_source: Optional[str] = None
+    private_key: Optional[str] = None
 
 
 class TransferRequest(BaseModel):
@@ -209,8 +211,20 @@ async def test_connection(request: TestConnectionRequest):
                 if not (request.port or 0):
                     return {"success": False, "message": "Port is required for username & password authentication.", "driver": driver, "auth_source": request.auth_source or ""}
             if driver not in ("sqlite", "duckdb", "bigquery", "s3", "dynamodb", "gcs", "adls"):
-                if not (request.username or "").strip() or not (request.password or "").strip():
+                has_key = bool((getattr(request, "private_key", None) or "").strip())
+                key_pair = (request.auth_mode or "").strip().lower() == "key_pair"
+                if driver == "snowflake" and (has_key or key_pair):
+                    if not (request.username or "").strip() or not has_key:
+                        return {
+                            "success": False,
+                            "message": "Username and PKCS#8 private key are required for Snowflake key-pair.",
+                            "driver": driver,
+                            "auth_source": request.auth_source or "",
+                        }
+                elif not (request.username or "").strip() or not (request.password or "").strip():
                     return {"success": False, "message": "Username and password are required.", "driver": driver, "auth_source": request.auth_source or ""}
+
+        from services.connector_auth import engine_login_role
 
         cfg = {
             "host": request.host or "",
@@ -224,10 +238,11 @@ async def test_connection(request: TestConnectionRequest):
             "warehouse": request.warehouse or "",
             "type": request.type,
             "auth_mode": request.auth_mode or "",
-            "auth_role": request.auth_role or "",
-            "role": getattr(request, "role", None) or "both",
+            "auth_role": engine_login_role(request.auth_role),
+            "role": engine_login_role(request.auth_role),
             "api_key": request.api_key or "",
             "service_account": request.service_account or "",
+            "private_key": getattr(request, "private_key", None) or "",
             "endpoint_url": request.endpoint_url or "",
             "path_style": bool(request.path_style),
             "auth_source": request.auth_source or "",
@@ -291,6 +306,7 @@ async def create_connector(
         "role": config.role or "both",
         "api_key": config.api_key,
         "service_account": config.service_account,
+        "private_key": config.private_key,
         "endpoint_url": config.endpoint_url,
         "path_style": config.path_style,
         "options": config.options,

@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from services.brand_env import getenv_brand
 import sys
 import threading
 import unittest.mock
 from typing import Any
+
+_SF_HOST_SUFFIXES = (
+    ".privatelink.snowflakecomputing.com",
+    ".snowflakecomputing.com",
+)
 
 # fakesnow patches snowflake.connector.connect globally; keep a process-wide
 # refcount so multiple nested get_connection() calls (e.g. count + read) can
@@ -38,12 +44,102 @@ def _fakesnow_exit_patch() -> None:
 
 
 def normalize_account(host: str) -> str:
-    host = host.strip()
-    if not host:
+    """Account locator / org-account for snowflake.connector — not a URL.
+
+    Accepts pasted browser hosts:
+    ``https://xy12345.us-east-1.snowflakecomputing.com``,
+    ``org-account.privatelink.snowflakecomputing.com:443/console``.
+    """
+    raw = (host or "").strip()
+    if not raw:
         return ""
-    if ".snowflakecomputing.com" in host:
-        return host.split(".snowflakecomputing.com")[0]
-    return host
+    raw = re.sub(r"^https?://", "", raw, flags=re.I)
+    raw = raw.split("/")[0].split("?")[0]
+    if "@" in raw:
+        raw = raw.rsplit("@", 1)[-1]
+    if raw.count(":") == 1 and not raw.startswith("["):
+        host_part, port = raw.rsplit(":", 1)
+        if port.isdigit():
+            raw = host_part
+    raw = raw.strip().rstrip(".")
+    lower = raw.lower()
+    for suffix in _SF_HOST_SUFFIXES:
+        if lower.endswith(suffix):
+            return raw[: -len(suffix)]
+    return raw
+
+
+def load_snowflake_private_key(pem: str, passphrase: str = "") -> bytes:
+    """PKCS#8 DER bytes for snowflake.connector ``private_key=``."""
+    blob = (pem or "").strip().encode("utf-8")
+    if not blob:
+        raise ValueError("Snowflake private key is empty")
+    try:
+        from cryptography.hazmat.primitives import serialization
+    except ImportError as exc:
+        raise RuntimeError(
+            "cryptography is required for Snowflake key-pair authentication"
+        ) from exc
+    password = passphrase.encode("utf-8") if passphrase.strip() else None
+    key = serialization.load_pem_private_key(blob, password=password)
+    return key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
+def classify_snowflake_connect_error(raw: str) -> str | None:
+    """Honest operator copy — do not call an invalid role a bad password."""
+    text = (raw or "").lower()
+    if not text:
+        return None
+    if re.search(r"network policy|not allowed to access|390403|390422", text):
+        return (
+            "Snowflake blocked this IP (network policy). Allow the DataFlow egress "
+            "address or ask your Snowflake admin to update the policy."
+        )
+    if re.search(r"mfa|duo|ext_auth|390195|394508|multi-factor", text):
+        return (
+            "Snowflake requires MFA or key-pair for this user. Password-only login "
+            "is refused. Use Key-pair on Connectors, or a programmatic user."
+        )
+    if re.search(r"jwt|private.?key|390144|invalid token", text):
+        return (
+            "Snowflake key-pair authentication failed. Check the username, account "
+            "host, and that the public key is assigned (ALTER USER … SET RSA_PUBLIC_KEY)."
+        )
+    if re.search(
+        r"role .+ (does not exist|not granted|not authorized)|unknown role|"
+        r"invalid role|251006|390201|specified in the connect string",
+        text,
+    ):
+        return (
+            "Snowflake role is invalid or not granted to this user. Leave Role blank "
+            "to use the user's default role, or enter a role the user can assume."
+        )
+    if re.search(r"warehouse .+ (does not exist|not authorized)|invalid warehouse|000606", text):
+        return (
+            "Snowflake warehouse is invalid or not granted. Check the warehouse name "
+            "and USAGE privilege."
+        )
+    if re.search(
+        r"database .+ (does not exist|not authorized)|schema .+ (does not exist|not authorized)",
+        text,
+    ):
+        return (
+            "Snowflake database or schema was not found or is not granted. Check names "
+            "and privileges."
+        )
+    if re.search(
+        r"250001|incorrect username|incorrect password|invalid username or password",
+        text,
+    ):
+        return (
+            "Snowflake rejected the username or password. Check the account host "
+            "(org-account or locator.region), username, and password."
+        )
+    return None
 
 
 def _is_local_account(account: str) -> bool:
@@ -288,6 +384,8 @@ def get_connection(
     warehouse: str,
     connection_string: str,
     role: str = "",
+    private_key: str = "",
+    private_key_passphrase: str = "",
 ) -> Any:
     try:
         import snowflake.connector
@@ -298,20 +396,27 @@ def get_connection(
     if connection_string.strip():
         return snowflake.connector.connect(connection_string, login_timeout=10)
 
+    from services.connector_auth import engine_login_role
+
+    login_role = engine_login_role(role)
     kwargs: dict[str, Any] = {
         "account": normalize_account(account),
         "user": username,
-        "password": password,
         "login_timeout": 10,
     }
+    pem = (private_key or "").strip()
+    if pem:
+        kwargs["private_key"] = load_snowflake_private_key(pem, private_key_passphrase)
+    elif password:
+        kwargs["password"] = password
     if database:
         kwargs["database"] = database
     if schema:
         kwargs["schema"] = schema
     if warehouse:
         kwargs["warehouse"] = warehouse
-    if role:
-        kwargs["role"] = role
+    if login_role:
+        kwargs["role"] = login_role
 
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.

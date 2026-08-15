@@ -36,6 +36,7 @@ function isFileFormat(type: string): boolean {
 function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMode {
   const resolved = resolveCatalogIdToType(type);
   if (conn?.auth_mode) return conn.auth_mode as AuthMode;
+  if (resolved === "snowflake" && conn?.private_key) return "key_pair";
   if (isFileFormat(resolved)) return "file_path";
   if (conn?.api_key) return "api_key";
   if (conn?.service_account) return "service_account";
@@ -286,9 +287,14 @@ export function ConnectorModal({
     if (authMode === "user_pass") {
       payload.username = username || undefined;
       payload.password = password || undefined;
-      if (resolvedType === "sftp" && privateKey.trim()) {
+      if ((resolvedType === "sftp" || resolvedType === "snowflake") && privateKey.trim()) {
         payload.private_key = privateKey || undefined;
       }
+    }
+    if (authMode === "key_pair") {
+      payload.username = username || undefined;
+      payload.password = password || undefined;
+      payload.private_key = privateKey || undefined;
     }
     if (authMode === "connection_string" || authMode === "file_path") {
       const cs = (!isMongo && (resolvedType === "postgresql" || resolvedType === "mysql" || resolvedType === "mariadb"))

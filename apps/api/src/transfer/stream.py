@@ -1959,6 +1959,9 @@ def _stream_database_transfer_impl(
             return sf_conn_state["conn"]
         from connectors.snowflake_conn import get_connection, normalize_account
 
+        from services.connector_auth import engine_login_role
+
+        pem = str(dest_cfg.get("private_key") or "")
         sf_conn_state["conn"] = get_connection(
             account=normalize_account(dest_cfg.get("host", "")),
             username=dest_cfg.get("username", ""),
@@ -1967,7 +1970,9 @@ def _stream_database_transfer_impl(
             schema=dest_cfg.get("schema", "PUBLIC"),
             warehouse=dest_cfg.get("warehouse", ""),
             connection_string=dest_cfg.get("connection_string", ""),
-            role=dest_cfg.get("role", ""),
+            role=engine_login_role(dest_cfg.get("auth_role"), dest_cfg.get("role")),
+            private_key=pem,
+            private_key_passphrase=str(dest_cfg.get("password") or "") if pem else "",
         )
         return sf_conn_state["conn"]
 

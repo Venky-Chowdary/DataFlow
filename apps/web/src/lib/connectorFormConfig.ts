@@ -16,7 +16,8 @@ export type AuthMode =
   | "service_account"
   | "aws_keys"
   | "api_key"
-  | "file_path";
+  | "file_path"
+  | "key_pair";
 
 /** Single form field descriptor. */
 export interface FormField {
@@ -230,13 +231,20 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   } else if (isSnowflake) {
     userPassFields.push(
-      text("host", "Account host", { placeholder: "account.snowflakecomputing.com" }),
+      text("host", "Account host", {
+        placeholder: "xy12345.us-east-1.snowflakecomputing.com",
+        hint: "Paste the host from the Snowflake URL (org-account or locator.region). Do not invent a role — leave Role blank to use the user's default.",
+      }),
       text("username", "Username"),
       password("password", "Password"),
       text("database", "Database"),
       text("schema", "Schema", { placeholder: "PUBLIC" }),
       text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
-      text("authRole", "Role", { placeholder: "ACCOUNTADMIN", optional: true })
+      text("authRole", "Role", {
+        placeholder: "Leave blank for default role",
+        optional: true,
+        hint: "Optional. Only set a role the user can assume. Blank uses the Snowflake default role.",
+      })
     );
   } else if (isRedis) {
     userPassFields.push(
@@ -572,7 +580,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
           return "Host is required.";
         }
         if (
-          !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb"].includes(resolved) &&
+          !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb", "snowflake"].includes(resolved) &&
           (values.port as number) <= 0
         ) {
           return "Port is required.";
@@ -595,6 +603,33 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         if (isMongo && !fmt(values, "database")) {
           return "Database is required.";
         }
+        return null;
+      })
+    );
+  }
+
+  if (isSnowflake) {
+    authModes.push(
+      auth("key_pair", "Key-pair (JWT)", [
+        text("host", "Account host", {
+          placeholder: "xy12345.us-east-1.snowflakecomputing.com",
+          hint: "Same account host as the Snowflake URL. Required when the user has MFA — password-only is refused.",
+        }),
+        text("username", "Username"),
+        textarea("privateKey", "PKCS#8 private key", {
+          rows: 6,
+          placeholder: "-----BEGIN PRIVATE KEY----- …",
+          hint: "PEM key whose public half is assigned on the user (ALTER USER … SET RSA_PUBLIC_KEY). Encrypted keys use Password as the passphrase.",
+        }),
+        password("password", "Key passphrase (optional)", { optional: true }),
+        text("database", "Database"),
+        text("schema", "Schema", { placeholder: "PUBLIC", optional: true }),
+        text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
+        text("authRole", "Role", { placeholder: "Leave blank for default role", optional: true }),
+      ], (values) => {
+        if (!fmt(values, "host")) return "Account host is required.";
+        if (!fmt(values, "username")) return "Username is required.";
+        if (!fmt(values, "privateKey")) return "PKCS#8 private key is required.";
         return null;
       })
     );

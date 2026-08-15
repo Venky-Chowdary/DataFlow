@@ -6,6 +6,7 @@ import logging
 
 from connectors.base import ConnectResult
 from connectors.snowflake_conn import get_connection, normalize_account
+from services.connector_auth import engine_login_role
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +23,24 @@ def test_snowflake(
     ssl: bool,
     warehouse: str = "",
     role: str = "",
+    private_key: str = "",
+    auth_role: str = "",
+    auth_mode: str = "",
 ) -> ConnectResult:
-    del port, ssl
+    del port, ssl, auth_mode
     account = normalize_account(host)
+    pem = (private_key or "").strip()
     if not connection_string.strip() and (not account or not username):
         return ConnectResult(
             ok=False,
             tables=[],
             error="Provide account (host) + username or a Snowflake connection string",
+        )
+    if not connection_string.strip() and not pem and not (password or "").strip():
+        return ConnectResult(
+            ok=False,
+            tables=[],
+            error="Provide a password or a PKCS#8 private key for Snowflake",
         )
 
     wh = ""
@@ -53,7 +64,9 @@ def test_snowflake(
             schema=schema or "PUBLIC",
             warehouse=wh,
             connection_string=connection_string,
-            role=role,
+            role=engine_login_role(auth_role, role),
+            private_key=pem,
+            private_key_passphrase=password if pem else "",
         )
         with conn.cursor() as cur:
             if wh:

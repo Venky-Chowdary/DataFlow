@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.connector_auth import engine_login_role
+
 
 def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
     """Build the exact probe kwargs used by ``POST /connectors/saved/{id}/test``.
@@ -33,8 +35,8 @@ def probe_cfg_from_saved(conn: Any) -> dict[str, Any]:
         "warehouse": get("warehouse") or "",
         "ssl": bool(get("ssl")),
         "auth_mode": get("auth_mode") or "",
-        "auth_role": get("auth_role") or "",
-        "role": get("auth_role") or get("role") or "",
+        "auth_role": engine_login_role(get("auth_role")),
+        "role": engine_login_role(get("auth_role")),
         "api_key": get("api_key") or "",
         "service_account": get("service_account") or "",
         "private_key": get("private_key") or "",
