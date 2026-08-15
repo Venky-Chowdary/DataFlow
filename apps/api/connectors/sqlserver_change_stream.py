@@ -69,17 +69,18 @@ def encode_sqlserver_resume_token(
     table: str,
     phase: str = "streaming",
     offset: int = 0,
+    last_pk: str = "",
 ) -> str:
-    return json.dumps(
-        {
-            "kind": "mssql-ct",
-            "table": table,
-            "version": int(version),
-            "phase": phase,
-            "offset": int(offset),
-        },
-        separators=(",", ":"),
-    )
+    payload: dict[str, Any] = {
+        "kind": "mssql-ct",
+        "table": table,
+        "version": int(version),
+        "phase": phase,
+        "offset": int(offset),
+    }
+    if last_pk and phase == "snapshot":
+        payload["last_pk"] = str(last_pk)
+    return json.dumps(payload, separators=(",", ":"))
 
 
 def decode_sqlserver_resume_token(token: str | None) -> dict[str, Any]:
@@ -101,6 +102,7 @@ def decode_sqlserver_resume_token(token: str | None) -> dict[str, Any]:
                 "phase": str(data.get("phase") or "streaming"),
                 "offset": int(data.get("offset") or 0),
                 "table": str(data.get("table") or ""),
+                "last_pk": str(data.get("last_pk") or ""),
             }
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -137,6 +139,7 @@ class SqlServerChangeTrackingCdc:
         self.version = int(state.get("version") or 0)
         self.phase = str(state.get("phase") or "initial")
         self.snapshot_offset = int(state.get("offset") or 0)
+        self.snapshot_last_pk = str(state.get("last_pk") or "")
         self._last_event_at: datetime | None = None
         database = str(cfg.get("database") or "master")
         self.cursor_key = cursor_key or f"mssql-ct:{database}:{self.schema}.{self.table}"
@@ -310,34 +313,52 @@ class SqlServerChangeTrackingCdc:
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Full table dump + CT version handoff (Airbyte initial sync)."""
         self._acquire_cdc_lease()
+        from connectors.sql_snapshot_scan import fetch_scan_page
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
         qualified = self._qualified()
-        pk = self.primary_key
+        pk_cols = _pk_columns(self.primary_key)
+        quoted = quoted_pk_columns(pk_cols, "[")
+        order_sql = ", ".join(quoted)
         offset = self.snapshot_offset if self.phase == "snapshot" else 0
-        handoff_version = 0
+        last_pk = self.snapshot_last_pk if self.phase == "snapshot" else ""
+        mode = classify_snapshot_resume(last_pk=last_pk, offset=offset)
+        # Mid-dump resume keeps the original CT version (not a new tip).
+        handoff_version = self.version if (self.phase == "snapshot" and self.version) else 0
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
-                    handoff_version = self._current_version(cur)
-                    from connectors.sql_snapshot_scan import fetch_scan_page
-
-                    held_scan = offset == 0
-                    if held_scan:
+                    if not handoff_version:
+                        handoff_version = self._current_version(cur)
+                    if mode == "scan":
                         cur.execute(
-                            f"""
-                            SELECT *
-                            FROM {qualified}
-                            ORDER BY {self._bracket(pk)}
-                            """,  # nosec B608
+                            f"SELECT * FROM {qualified} ORDER BY {order_sql}"  # nosec B608
                         )
                     while True:
-                        if held_scan:
+                        if mode == "scan":
                             rows = fetch_scan_page(cur, self.batch_size)
+                        elif mode == "keyset":
+                            sql, params = snapshot_keyset_sql(
+                                table_ref=qualified,
+                                quoted_pk_columns=quoted,
+                                last_pk=last_pk,
+                                limit=self.batch_size,
+                                dialect="sqlserver",
+                            )
+                            cur.execute(sql, params)
+                            rows = cur.fetchall() or []
                         else:
                             cur.execute(
                                 f"""
                                 SELECT *
                                 FROM {qualified}
-                                ORDER BY {self._bracket(pk)}
+                                ORDER BY {order_sql}
                                 OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
                                 """,  # nosec B608
                                 (offset, self.batch_size),
@@ -348,6 +369,7 @@ class SqlServerChangeTrackingCdc:
                             break
                         records = [self._row_to_record(cols, row) for row in rows]
                         offset += len(rows)
+                        last_pk = last_pk_from_records(records, pk_cols) or last_pk
                         self._last_event_at = datetime.now(timezone.utc)
                         yield ChangeBatch(
                             inserts=records,
@@ -356,6 +378,7 @@ class SqlServerChangeTrackingCdc:
                                 table=self.table,
                                 phase="snapshot",
                                 offset=offset,
+                                last_pk=last_pk,
                             ),
                         )
                         if len(rows) < self.batch_size:
@@ -367,6 +390,7 @@ class SqlServerChangeTrackingCdc:
         self.version = handoff_version
         self.phase = "streaming"
         self.snapshot_offset = 0
+        self.snapshot_last_pk = ""
         yield ChangeBatch(
             resume_token=encode_sqlserver_resume_token(
                 self.version, table=self.table, phase="streaming", offset=0

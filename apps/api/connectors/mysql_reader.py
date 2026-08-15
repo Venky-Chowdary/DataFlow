@@ -329,27 +329,31 @@ def read_table_cursor_batch(
     columns: list[str] | None = None,
     limit: int = 500,
     cursor_primary_key: str | None = None,
+    conn: Any | None = None,
 ) -> ReadBatch:
     """Read rows where cursor_column > watermark — for incremental sync.
 
     Optional ``cursor_primary_key`` enables lexicographic ``(cursor, pk)`` so
-    timestamp ties are not skipped forever.
+    timestamp ties are not skipped forever. Optional ``conn`` reuses a locked
+    CDC snapshot session (LOCK TABLES is connection-scoped).
     """
     from services.keyset_pagination import split_cursor_bookmark
 
     del schema
     table_ref = quote_table_ref(table, dialect="mysql")
     cursor_q = quote_sql_identifier(require_safe_identifier(cursor_column, preserve_case=True), "`")
-    conn = get_connection(
-        host=host,
-        port=port,
-        database=database,
-        username=username,
-        password=password,
-        connection_string=connection_string,
-        ssl=ssl,
-        purpose="read",
-    )
+    close_conn = conn is None
+    if conn is None:
+        conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+            purpose="read",
+        )
     try:
         with conn.cursor() as cur:
             identity = reflection_cache.dsn_identity(
@@ -402,4 +406,5 @@ def read_table_cursor_batch(
             # trip stream early-stop (fetch_offset >= total_rows).
             return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     finally:
-        conn.close()
+        if close_conn:
+            conn.close()

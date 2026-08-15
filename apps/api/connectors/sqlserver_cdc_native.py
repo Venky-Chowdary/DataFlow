@@ -50,6 +50,7 @@ def encode_mssql_cdc_token(
     offset: int = 0,
     seqval: bytes | str | None = None,
     capture_instance: str = "",
+    last_pk: str = "",
 ) -> str:
     if isinstance(lsn, (bytes, bytearray)):
         lsn_hex = bytes(lsn).hex()
@@ -71,6 +72,8 @@ def encode_mssql_cdc_token(
         payload["seqval"] = seq_hex
     if capture_instance:
         payload["capture_instance"] = capture_instance
+    if last_pk:
+        payload["last_pk"] = str(last_pk)
     return json.dumps(payload, separators=(",", ":"))
 
 
@@ -83,6 +86,7 @@ def decode_mssql_cdc_token(token: str | None) -> dict[str, Any]:
             "offset": 0,
             "seqval": "",
             "capture_instance": "",
+            "last_pk": "",
         }
     try:
         data = json.loads(str(token))
@@ -94,6 +98,7 @@ def decode_mssql_cdc_token(token: str | None) -> dict[str, Any]:
                 "offset": int(data.get("offset") or 0),
                 "seqval": str(data.get("seqval") or ""),
                 "capture_instance": str(data.get("capture_instance") or ""),
+                "last_pk": str(data.get("last_pk") or ""),
             }
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -104,6 +109,7 @@ def decode_mssql_cdc_token(token: str | None) -> dict[str, Any]:
         "offset": 0,
         "seqval": "",
         "capture_instance": "",
+        "last_pk": "",
     }
 
 
@@ -310,6 +316,8 @@ class SqlServerNativeCdc:
         self._resume_inclusive = not (state.get("seqval") or "")
         self.phase = state.get("phase") or "initial"
         self.snapshot_offset = int(state.get("offset") or 0)
+        self.snapshot_last_pk = str(state.get("last_pk") or "")
+        self.snapshot_table = str(state.get("table") or "")
         self._last_event_at: datetime | None = None
         self._last_schema_fingerprint: str = ""
         from services.cdc_schema_history import connection_fingerprint
@@ -781,6 +789,7 @@ class SqlServerNativeCdc:
         seqval: str = "",
         table: str | None = None,
         capture_instance: str | None = None,
+        last_pk: str = "",
     ) -> str:
         return encode_mssql_cdc_token(
             lsn,
@@ -791,6 +800,7 @@ class SqlServerNativeCdc:
             capture_instance=capture_instance
             if capture_instance is not None
             else ("" if self._shared else self.capture_instance),
+            last_pk=last_pk if phase == "snapshot" else "",
         )
 
     def snapshot(self) -> Iterator[ChangeBatch]:
@@ -799,68 +809,31 @@ class SqlServerNativeCdc:
         if self._shared:
             yield from self._snapshot_shared()
             return
-        qualified = _qualified_ref(self.schema, self.table)
-        pk = quote_sql_identifier(self.primary_key, "[")
         offset = int(self.snapshot_offset or 0)
-        handoff = ""
+        last_pk = self.snapshot_last_pk if self.phase == "snapshot" else ""
+        # Keep the original consistent-point LSN on mid-dump resume.
+        handoff = self.start_lsn if (self.phase == "snapshot" and self.start_lsn) else ""
         with self._conn() as conn:
             with conn.cursor() as cur:
                 self._resolve_capture_instance(cur)
-                handoff = self._max_lsn(cur) or self._min_lsn(cur)
+                if not handoff:
+                    handoff = self._max_lsn(cur) or self._min_lsn(cur)
                 self._maybe_record_capture_schema(cur, offset=handoff)
-                from connectors.sql_snapshot_scan import fetch_scan_page
-
-                held_scan = offset == 0
-                if held_scan:
-                    cur.execute(
-                        f"""
-                        SELECT *
-                        FROM {qualified}
-                        ORDER BY {pk}
-                        """,  # nosec B608
-                    )
-                while True:
-                    if held_scan:
-                        rows = fetch_scan_page(cur, self.batch_size)
-                    else:
-                        cur.execute(
-                            f"""
-                            SELECT *
-                            FROM {qualified}
-                            ORDER BY {pk}
-                            OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
-                            """,  # nosec B608
-                            (offset, self.batch_size),
-                        )
-                        rows = cur.fetchall() or []
-                    cols = [d[0] for d in (cur.description or [])]
-                    if not rows:
-                        break
-                    records = [
-                        {
-                            cols[i]: "" if row[i] is None else str(row[i])
-                            for i in range(len(cols))
-                        }
-                        for row in rows
-                    ]
-                    offset += len(rows)
-                    self.snapshot_offset = offset
-                    self._last_event_at = datetime.now(timezone.utc)
-                    yield ChangeBatch(
-                        inserts=records,
-                        resume_token=self._token(
-                            lsn=handoff, phase="snapshot", offset=offset
-                        ),
-                        table=self.table,
-                    )
-                    if len(rows) < self.batch_size:
-                        break
+                yield from self._iter_snapshot_table(
+                    cur,
+                    self.table,
+                    handoff=handoff,
+                    offset=offset,
+                    last_pk=last_pk,
+                    ack_barrier=False,
+                )
         self.start_lsn = handoff
         self.start_seqval = ""
         # Nothing at the handoff LSN has been streamed yet.
         self._resume_inclusive = True
         self.phase = "streaming"
         self.snapshot_offset = 0
+        self.snapshot_last_pk = ""
         yield ChangeBatch(
             resume_token=self._token(lsn=self.start_lsn, phase="streaming"),
             table=self.table,
@@ -868,15 +841,27 @@ class SqlServerNativeCdc:
 
     def _snapshot_shared(self) -> Iterator[ChangeBatch]:
         """Multi-table initial dump under one LSN handoff (at-least-once)."""
-        handoff = ""
+        resume_table = self.snapshot_table if self.phase == "snapshot" else ""
+        resume_last_pk = self.snapshot_last_pk if self.phase == "snapshot" else ""
+        resume_offset = self.snapshot_offset if self.phase == "snapshot" else 0
+        # Shared streaming tokens label table as a comma list — not a resume key.
+        if resume_table and "," in resume_table:
+            resume_table = ""
+            resume_last_pk = ""
+            resume_offset = 0
+        tables = list(self.tables)
+        if resume_table in tables:
+            tables = tables[tables.index(resume_table) :]
+        handoff = self.start_lsn if (self.phase == "snapshot" and self.start_lsn) else ""
         with self._conn() as conn:
             with conn.cursor() as cur:
                 self._resolve_all_captures(cur)
-                handoff = self._max_lsn(cur)
+                if not handoff:
+                    handoff = self._max_lsn(cur)
                 if not handoff:
                     for t in self.tables:
                         handoff = self._min_lsn_for(cur, self._captures.get(t, "")) or handoff
-                for table_name in self.tables:
+                for table_name in tables:
                     cap = self._captures.get(table_name, "")
                     if cap:
                         prev_cap = self.capture_instance
@@ -885,82 +870,146 @@ class SqlServerNativeCdc:
                             self._maybe_record_capture_schema(cur, offset=handoff)
                         finally:
                             self.capture_instance = prev_cap
-                    pk = quote_sql_identifier(
-                        self.primary_keys.get(table_name, self.primary_key), "["
+                    table_last_pk = resume_last_pk if table_name == resume_table else ""
+                    table_offset = resume_offset if table_name == resume_table else 0
+                    yield from self._iter_snapshot_table(
+                        cur,
+                        table_name,
+                        handoff=handoff,
+                        offset=table_offset,
+                        last_pk=table_last_pk,
+                        ack_barrier=False,
                     )
-                    qualified = _qualified_ref(self.schema, table_name)
-                    offset = 0
-                    from connectors.sql_snapshot_scan import fetch_scan_page
-
-                    cur.execute(
-                        f"""
-                        SELECT *
-                        FROM {qualified}
-                        ORDER BY {pk}
-                        """,  # nosec B608
-                    )
-                    while True:
-                        rows = fetch_scan_page(cur, self.batch_size)
-                        cols = [d[0] for d in (cur.description or [])]
-                        if not rows:
-                            break
-                        records = [
-                            {
-                                cols[i]: "" if row[i] is None else str(row[i])
-                                for i in range(len(cols))
-                            }
-                            for row in rows
-                        ]
-                        offset += len(rows)
-                        self._last_event_at = datetime.now(timezone.utc)
-                        yield ChangeBatch(
-                            inserts=records,
-                            resume_token=self._token(
-                                lsn=handoff, phase="snapshot", offset=offset, table=table_name
-                            ),
-                            table=table_name,
-                            ack_barrier=False,
-                        )
-                        if len(rows) < self.batch_size:
-                            break
         self.start_lsn = handoff
         self.start_seqval = ""
         # Nothing at the handoff LSN has been streamed yet.
         self._resume_inclusive = True
         self.phase = "streaming"
         self.snapshot_offset = 0
+        self.snapshot_last_pk = ""
         yield ChangeBatch(
             resume_token=self._token(lsn=self.start_lsn, phase="streaming"),
             ack_barrier=True,
         )
 
+    def _iter_snapshot_table(
+        self,
+        cur: Any,
+        table_name: str,
+        *,
+        handoff: str,
+        offset: int,
+        last_pk: str,
+        ack_barrier: bool,
+    ) -> Iterator[ChangeBatch]:
+        """Page one capture table: held scan, PK-seek, or legacy OFFSET."""
+        from connectors.sql_snapshot_scan import fetch_scan_page
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
+        pk_cols = _pk_columns(self.primary_keys.get(table_name, self.primary_key))
+        quoted = quoted_pk_columns(pk_cols, "[")
+        qualified = _qualified_ref(self.schema, table_name)
+        mode = classify_snapshot_resume(last_pk=last_pk, offset=offset)
+        order_sql = ", ".join(quoted)
+        if mode == "scan":
+            cur.execute(
+                f"SELECT * FROM {qualified} ORDER BY {order_sql}"  # nosec B608
+            )
+        while True:
+            if mode == "scan":
+                rows = fetch_scan_page(cur, self.batch_size)
+            elif mode == "keyset":
+                sql, params = snapshot_keyset_sql(
+                    table_ref=qualified,
+                    quoted_pk_columns=quoted,
+                    last_pk=last_pk,
+                    limit=self.batch_size,
+                    dialect="sqlserver",
+                )
+                cur.execute(sql, params)
+                rows = cur.fetchall() or []
+            else:
+                cur.execute(
+                    f"""
+                    SELECT *
+                    FROM {qualified}
+                    ORDER BY {order_sql}
+                    OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
+                    """,  # nosec B608
+                    (offset, self.batch_size),
+                )
+                rows = cur.fetchall() or []
+            cols = [d[0] for d in (cur.description or [])]
+            if not rows:
+                break
+            records = [
+                {
+                    cols[i]: "" if row[i] is None else str(row[i])
+                    for i in range(len(cols))
+                }
+                for row in rows
+            ]
+            offset += len(rows)
+            last_pk = last_pk_from_records(records, pk_cols) or last_pk
+            self.snapshot_offset = offset
+            self.snapshot_last_pk = last_pk
+            self._last_event_at = datetime.now(timezone.utc)
+            yield ChangeBatch(
+                inserts=records,
+                resume_token=self._token(
+                    lsn=handoff,
+                    phase="snapshot",
+                    offset=offset,
+                    table=table_name,
+                    last_pk=last_pk,
+                ),
+                table=table_name,
+                ack_barrier=ack_barrier,
+            )
+            if len(rows) < self.batch_size:
+                break
+
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots."""
         from connectors.sql_identifiers import require_safe_identifier
 
+        from services.cdc_snapshot_resume import (
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
         pk_name = require_safe_identifier(sig.primary_key or self.primary_key, preserve_case=True)
-        pk = quote_sql_identifier(pk_name, "[")
+        pk_cols = _pk_columns(sig.primary_key or self.primary_key or pk_name)
+        quoted = quoted_pk_columns(pk_cols, "[")
         qualified = _qualified_ref(self.schema, self.table)
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
         with self._conn() as conn:
             with conn.cursor() as cur:
                 if last_pk:
-                    cur.execute(
-                        f"""
-                        SELECT TOP ({limit}) *
-                        FROM {qualified}
-                        WHERE {pk} > %s
-                        ORDER BY {pk}
-                        """,  # nosec B608
-                        (last_pk,),
+                    sql, params = snapshot_keyset_sql(
+                        table_ref=qualified,
+                        quoted_pk_columns=quoted,
+                        last_pk=last_pk,
+                        limit=limit,
+                        dialect="sqlserver",
                     )
+                    cur.execute(sql, params)
                 else:
+                    order_sql = ", ".join(quoted)
                     cur.execute(
                         f"""
                         SELECT TOP ({limit}) *
                         FROM {qualified}
-                        ORDER BY {pk}
+                        ORDER BY {order_sql}
                         """  # nosec B608
                     )
                 cols = [d[0] for d in (cur.description or [])]
@@ -969,7 +1018,7 @@ class SqlServerNativeCdc:
             {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
             for row in rows
         ]
-        new_last = records[-1].get(pk_name) if records else last_pk
+        new_last = last_pk_from_records(records, pk_cols) or last_pk
         done = len(records) < limit
         return records, str(new_last) if new_last is not None else last_pk, done
 

@@ -68,16 +68,28 @@ def encode_pg_resume_token(
     *,
     lsn: str | None = None,
     phase: str = "streaming",
+    last_pk: str = "",
+    table: str = "",
 ) -> str:
     """Compact watermark: slot + optional consistent-point LSN + phase.
 
     Phase is ``snapshot`` while the initial table dump is in progress and
     ``streaming`` once the dump finishes and logical decoding owns the cursor.
-    Legacy bare slot names remain valid inputs via :func:`decode_pg_resume_token`.
+    Mid-dump progress is ``table`` + URL-encoded ``last_pk`` (PK values may
+    contain ``|`` / ``=``). Streaming tokens omit both so handoff equality
+    stays slot+LSN+phase. Legacy bare slot names remain valid inputs via
+    :func:`decode_pg_resume_token`.
     """
+    from urllib.parse import quote
+
     parts = [f"slot={slot}", f"phase={phase}"]
     if lsn:
         parts.append(f"lsn={lsn}")
+    if phase == "snapshot":
+        if table:
+            parts.append(f"table={quote(str(table), safe='')}")
+        if last_pk:
+            parts.append(f"last_pk={quote(str(last_pk), safe='')}")
     return "|".join(parts)
 
 
@@ -114,6 +126,27 @@ def decode_pg_resume_token(
         elif key == "phase" and value:
             phase = value
     return slot, lsn, phase
+
+
+def decode_pg_snapshot_progress(token: str | None) -> tuple[str, str]:
+    """Return ``(table, last_pk)`` from a PG watermark. Empty when streaming/legacy."""
+    from urllib.parse import unquote
+
+    if not token or "=" not in str(token):
+        return "", ""
+    table = ""
+    last_pk = ""
+    for part in str(token).split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "table" and value:
+            table = unquote(value)
+        elif key == "last_pk" and value:
+            last_pk = unquote(value)
+    return table, last_pk
 
 
 def _lsn_at_or_before(candidate: str, watermark: str) -> bool:
@@ -268,6 +301,10 @@ class PostgreSqlChangeStreamCdc:
         )
         self.slot_name = slot
         self.consistent_point_lsn = lsn
+        self.snapshot_table, self.snapshot_last_pk = decode_pg_snapshot_progress(
+            resume_token
+        )
+        self._resume_snapshot = phase == "snapshot"
         self.phase = phase if phase != "initial" else "snapshot"
         # Streaming resume must never recreate a missing/lost slot (silent WAL skip).
         self._resume_expected = bool(lsn) or phase == "streaming"
@@ -531,11 +568,20 @@ class PostgreSqlChangeStreamCdc:
         except Exception:
             return False
 
-    def _resume_token(self, *, phase: str | None = None) -> str:
+    def _resume_token(
+        self,
+        *,
+        phase: str | None = None,
+        last_pk: str = "",
+        table: str = "",
+    ) -> str:
+        p = phase or self.phase
         return encode_pg_resume_token(
             self.slot_name,
             lsn=self.consistent_point_lsn,
-            phase=phase or self.phase,
+            phase=p,
+            last_pk=last_pk if p == "snapshot" else "",
+            table=table if p == "snapshot" else "",
         )
 
     def _read_slot_lsn(self, cur) -> str | None:
@@ -1017,15 +1063,29 @@ class PostgreSqlChangeStreamCdc:
         """
         from connectors.postgresql_reader import _cell, _order_by_clause
         from connectors.sql_identifiers import quote_column_list, quote_table_ref
+        from connectors.sql_snapshot_scan import fetch_scan_page
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
 
         # pgoutput requires the publication before the slot retains WAL for it.
         if self.output_plugin == "pgoutput":
             self._ensure_publication()
             self._ensure_replica_identity()
         self._ensure_slot(allow_create=True, recreate_if_lost=True)
+        resume_table = self.snapshot_table if self._resume_snapshot else ""
+        resume_last_pk = self.snapshot_last_pk if self._resume_snapshot else ""
+        keep_lsn = bool(self._resume_snapshot and self.consistent_point_lsn)
         self.phase = "snapshot"
         self._ensure_decode_schema(resume_offset=self.slot_name)
         self.heartbeat()
+
+        tables = list(self.tables)
+        if resume_table in tables:
+            tables = tables[tables.index(resume_table) :]
 
         with self._conn() as conn:
             # One RR transaction spans all tables so the multi-table dump shares
@@ -1035,11 +1095,16 @@ class PostgreSqlChangeStreamCdc:
                 conn.autocommit = False
                 with conn.cursor() as cur:
                     cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                    cur.execute("SELECT pg_current_wal_lsn()::text")
-                    snap_lsn_row = cur.fetchone()
-                    if snap_lsn_row and snap_lsn_row[0]:
-                        self.consistent_point_lsn = str(snap_lsn_row[0])
-                    for table_name in self.tables:
+                    if not keep_lsn:
+                        cur.execute("SELECT pg_current_wal_lsn()::text")
+                        snap_lsn_row = cur.fetchone()
+                        if snap_lsn_row and snap_lsn_row[0]:
+                            self.consistent_point_lsn = str(snap_lsn_row[0])
+                    for table_name in tables:
+                        table_last_pk = resume_last_pk if table_name == resume_table else ""
+                        mode = classify_snapshot_resume(last_pk=table_last_pk, offset=0)
+                        pk_cols = self._pk_columns_for(table_name)
+                        quoted = quoted_pk_columns(pk_cols, '"')
                         order_by = _order_by_clause(
                             cur, self.schema, table_name, self.columns
                         )
@@ -1050,17 +1115,26 @@ class PostgreSqlChangeStreamCdc:
                             preserve_case=True,
                         )
                         col_sql = quote_column_list(self.columns, quote_char='"')
-                        from connectors.sql_snapshot_scan import fetch_scan_page
-
-                        query = (
-                            f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                            f"ORDER BY {order_by}"
-                        )
-                        offset = 0
                         headers: list[str] = list(self.columns or [])
-                        cur.execute(query)
+                        if mode == "scan":
+                            cur.execute(
+                                f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
+                                f"ORDER BY {order_by}"
+                            )
                         while True:
-                            fetched = fetch_scan_page(cur, self.batch_size)
+                            if mode == "keyset":
+                                sql, params = snapshot_keyset_sql(
+                                    table_ref=table_ref,
+                                    quoted_pk_columns=quoted,
+                                    last_pk=table_last_pk,
+                                    limit=self.batch_size,
+                                    dialect="postgresql",
+                                    select_list=col_sql,
+                                )
+                                cur.execute(sql, params)
+                                fetched = cur.fetchall() or []
+                            else:
+                                fetched = fetch_scan_page(cur, self.batch_size)
                             if not fetched:
                                 break
                             if cur.description:
@@ -1069,12 +1143,18 @@ class PostgreSqlChangeStreamCdc:
                                 {headers[i]: _cell(v) for i, v in enumerate(row)}
                                 for row in fetched
                             ]
+                            table_last_pk = (
+                                last_pk_from_records(records, pk_cols) or table_last_pk
+                            )
                             yield ChangeBatch(
                                 inserts=records,
-                                resume_token=self._resume_token(phase="snapshot"),
+                                resume_token=self._resume_token(
+                                    phase="snapshot",
+                                    last_pk=table_last_pk,
+                                    table=table_name,
+                                ),
                                 table=table_name,
                             )
-                            offset += len(fetched)
                             if len(fetched) < self.batch_size:
                                 break
                 conn.commit()
@@ -1091,6 +1171,9 @@ class PostgreSqlChangeStreamCdc:
                     _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
         self.phase = "streaming"
+        self.snapshot_last_pk = ""
+        self.snapshot_table = ""
+        self._resume_snapshot = False
         yield ChangeBatch(
             resume_token=self._resume_token(phase="streaming"),
             ack_barrier=True,
@@ -1526,6 +1609,12 @@ class PostgreSqlChangeStreamCdc:
             MultiTableTransactionBuffer,
             parse_test_decoding_table,
         )
+
+        # Crash mid-dump must finish the snapshot. Forcing streaming here
+        # decoded WAL while undumped PK ranges were never written (silent loss).
+        if self.phase == "snapshot":
+            yield from self.snapshot()
+            return
 
         self._poll_signal_table()
 
