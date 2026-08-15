@@ -1567,6 +1567,12 @@ def _stream_database_transfer_impl(
                     )
         except Exception as exc:
             logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
+    # MongoDB ``_id`` is the collection primary key. Without this, a full
+    # snapshot fell through to ``.skip(offset)`` (O(n²) + concurrent-insert
+    # drift). Debezium/Fivetran seek ``_id``; we do the same.
+    if src_type == "mongodb" and columns and "_id" in columns:
+        if "_id" not in keyset_pk_cols:
+            keyset_pk_cols = ["_id"] + [c for c in keyset_pk_cols if c != "_id"]
     if _src_keys or _src_schema_nulls or _src_schema_types:
         try:
             from services.schema_fidelity import (

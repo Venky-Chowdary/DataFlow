@@ -22,6 +22,7 @@ def test_snapshot_scan_sources_cover_warehouse_matrix():
         "oracle",
         "databricks",
         "sqlite",
+        "mongodb",
     ):
         assert src in SNAPSHOT_SCAN_SOURCES
 

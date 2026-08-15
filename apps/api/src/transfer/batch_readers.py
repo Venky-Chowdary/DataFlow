@@ -199,8 +199,20 @@ def _read_batch_impl(
         from connectors.mongodb_reader import (
             read_collection_batch,
             read_collection_cursor_batch,
+            read_collection_scan_batch,
         )
 
+        if scan_state is not None and not cursor_column:
+            return read_collection_scan_batch(
+                cfg=cfg,
+                database=database or cfg.get("database", "test"),
+                collection=table,
+                columns=columns,
+                offset=offset,
+                limit=limit,
+                known_total_rows=known_total_rows,
+                scan_state=scan_state,
+            )
         if cursor_column:
             return read_collection_cursor_batch(
                 cfg=cfg,

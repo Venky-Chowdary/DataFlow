@@ -26,6 +26,9 @@ SNAPSHOT_SCAN_SOURCES = frozenset(
         "oracle",
         "databricks",
         "sqlite",
+        # MongoDB: one find().sort(_id) + getmore. .skip(offset) is O(n²) and
+        # drifts under concurrent inserts (same cliff as SQL OFFSET).
+        "mongodb",
     }
 )
 
@@ -52,12 +55,12 @@ def close_table_scan(scan_state: dict[str, Any] | None) -> None:
     cur = scan_state.pop("cur", None)
     conn = scan_state.pop("conn", None)
     engine = scan_state.pop("engine", None)
+    client = scan_state.pop("client", None)
     scan_state.pop("iter", None)
     scan_state.pop("rows", None)
     scan_state.pop("local_rows", None)
-    scan_state.pop("client", None)
     scan_state.clear()
-    for obj in (result, cur, conn):
+    for obj in (result, cur, conn, client):
         if obj is None:
             continue
         try:
