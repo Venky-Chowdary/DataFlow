@@ -16,6 +16,7 @@ from connectors.object_store_common import resolve_object_store_write_dest_types
 from connectors.object_store_materialize import (
     materialize_object_store_export,
     resolve_materialize_batch,
+    source_from_writer,
 )
 from connectors.object_store_multipart import resolve_spill_max
 from connectors.writer_common import WriteResult as _WriteResult
@@ -303,6 +304,7 @@ def write_mapped_rows(
             dialect_label="Email",
             spill_max_size=resolve_spill_max(extra),
             batch_size=resolve_materialize_batch(extra),
+            **source_from_writer(_kwargs, extra),
         )
     except Exception as exc:
         return WriteResult(

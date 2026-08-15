@@ -13,6 +13,7 @@ from connectors.object_store_common import resolve_object_store_write_dest_types
 from connectors.object_store_materialize import (
     materialize_object_store_export,
     resolve_materialize_batch,
+    source_from_writer,
 )
 from connectors.object_store_multipart import resolve_multipart_limits, resolve_spill_max
 from connectors.sftp_common import (
@@ -196,6 +197,7 @@ def write_mapped_rows(
             spill_max_size=spill_max,
             batch_size=resolve_materialize_batch(extra),
             dest_db_type="sftp",
+            **source_from_writer(_kwargs, extra),
         )
     except Exception as exc:
         return WriteResult(

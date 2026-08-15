@@ -19,7 +19,8 @@ This module is the single algorithm:
 5. ``fail`` / FAIL_JOB still collect every reject in the engine batch, then
    discard the spool — never upload/send a partial primary write.
 
-Honesty: ``data_rows`` stay in RAM. This is not a source-stream spill and
+Honesty: engine ``records`` stay in RAM until the write returns. The matrix
+copy and STRUCT explode list do not. This is not a source-file stream and
 not exactly-once. Quarantine stays per-row. Catalog tiles ≠ transfer-live.
 """
 
@@ -37,6 +38,19 @@ from services.value_serializer import cell_to_string, json_default
 
 DEFAULT_MATERIALIZE_BATCH = 1024
 _SAMPLE_LIMIT = 50
+
+
+def source_from_writer(_kwargs: dict[str, Any], extra: dict[str, Any] | None) -> dict[str, Any]:
+    """Records + source-spill settings from a writer ``**_kwargs`` / dest_extra."""
+    from connectors.source_row_spool import resolve_source_spill_max
+
+    records = _kwargs.get("records")
+    if not isinstance(records, list):
+        records = None
+    return {
+        "records": records,
+        "source_spill_max": resolve_source_spill_max(extra),
+    }
 
 
 def resolve_materialize_batch(extra: dict[str, Any] | None = None) -> int:
@@ -326,7 +340,7 @@ def materialize_object_store_export(
     *,
     key: str,
     headers: list[str],
-    data_rows: list[list[str]],
+    data_rows: list[list[str]] | None = None,
     mappings: list[dict],
     target_cols: list[str],
     column_types: dict[str, str] | None,
@@ -341,13 +355,21 @@ def materialize_object_store_export(
     destination_column_types: dict[str, str] | None = None,
     destination_column_nullability: dict[str, bool] | None = None,
     empty_cells_as_null: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spill_max: int | None = None,
 ) -> ObjectStoreMaterializeResult:
-    """Map, quarantine, and encode one engine batch without retaining mapped_rows.
+    """Map, quarantine, and encode without retaining the source matrix.
 
-    ``destination_column_types`` is accepted for call-site symmetry; dest types
-    must already be resolved by the writer (Studio coverage gate).
+    Prefers ``records`` (no ``records_to_matrix`` copy). STRUCT explode/flatten
+    writes through :class:`SourceRowSpool` so the expanded matrix is never a
+    Python list. ``destination_column_types`` is call-site symmetry; dest types
+    must already be resolved by the writer.
     """
     del destination_column_types
+    from connectors.source_row_spool import (
+        SourceRowSpool,
+        resolve_source_spill_max,
+    )
     from connectors.writer_common import (
         _coerced_null_row_count,
         _rejected_row_count,
@@ -358,14 +380,21 @@ def materialize_object_store_export(
         transform_error_policy,
     )
     from services.fingerprint_accumulator import FingerprintAccumulator
-    from services.json_intelligence import materialize_struct_policies
     from services.reconciliation import _iter_fingerprints
 
     policy = transform_error_policy(error_policy)
     dest_types = dest_types or {}
     column_types = column_types or {}
     tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
-    headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
+    spool = SourceRowSpool(
+        spill_max_size=int(source_spill_max or resolve_source_spill_max())
+    )
+    if records is not None:
+        spool.ingest_records(headers, records, mappings)
+    else:
+        spool.ingest_matrix(headers, data_rows or [], mappings)
+    headers = spool.headers
+    source_row_count = spool.row_count
 
     encoder = ObjectStoreEncoder(
         key=key,
@@ -383,8 +412,7 @@ def materialize_object_store_export(
     bundle = max(1, int(batch_size))
 
     try:
-        for start in range(0, len(data_rows), bundle):
-            chunk = data_rows[start : start + bundle]
+        for start, chunk in spool.iter_bundles(bundle):
             accepted_nums: list[int] = []
             mapped, errors, details = build_mapped_rows_with_details(
                 headers=headers,
@@ -473,7 +501,7 @@ def materialize_object_store_export(
             meta=meta,
             abort_error=None,
             rejected_rows=_rejected_row_count(
-                data_rows, [()] * rows_written, rejected_details, policy
+                [()] * source_row_count, [()] * rows_written, rejected_details, policy
             ),
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
             batch_sizes=batch_sizes,
@@ -481,3 +509,5 @@ def materialize_object_store_export(
     except Exception:
         encoder.abort()
         raise
+    finally:
+        spool.close()

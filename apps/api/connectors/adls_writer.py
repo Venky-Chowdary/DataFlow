@@ -15,6 +15,7 @@ from connectors.object_store_common import (
 from connectors.object_store_materialize import (
     materialize_object_store_export,
     resolve_materialize_batch,
+    source_from_writer,
 )
 from connectors.object_store_multipart import (
     land_object_store_export,
@@ -132,6 +133,7 @@ def write_mapped_rows(
             spill_max_size=resolve_spill_max(extra),
             batch_size=resolve_materialize_batch(extra),
             dest_db_type="adls",
+            **source_from_writer(_kwargs, extra),
         )
     except Exception as exc:
         return WriteResult(

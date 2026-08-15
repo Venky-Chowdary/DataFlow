@@ -285,20 +285,10 @@ def _matrix_cell(value: Any) -> Any:
 def records_to_matrix(
     records: list[dict], columns: list[str]
 ) -> tuple[list[str], list[list[Any]]]:
-    from services.value_serializer import DF_MISSING_SENTINEL
+    from connectors.source_row_spool import iter_matrix_rows
 
     headers = columns or (list(records[0].keys()) if records else [])
-    rows: list[list[Any]] = []
-    for rec in records:
-        row: list[Any] = []
-        for h in headers:
-            # Absent key = omit-from-SET (same contract as cdc_transfer._records_to_matrix).
-            if h not in rec:
-                row.append(DF_MISSING_SENTINEL)
-            else:
-                row.append(_matrix_cell(rec.get(h)))
-        rows.append(row)
-    return headers, rows
+    return headers, list(iter_matrix_rows(records, headers))
 
 
 def mongodb_connection_string(cfg: dict[str, Any]) -> str:
@@ -1468,7 +1458,15 @@ def _write_destination_database(
         else transform_error_policy_for_validation_mode(validation_mode)
     )
 
-    headers, data_rows = records_to_matrix(records, columns)
+    from connectors.source_row_spool import OBJECT_STORE_WRITE_KINDS
+
+    # Object-store writers ingest records through SourceRowSpool — do not
+    # build a second full matrix here (STRUCT explode would copy again).
+    if db_type in OBJECT_STORE_WRITE_KINDS:
+        headers = columns or (list(records[0].keys()) if records else [])
+        data_rows: list[list[Any]] = []
+    else:
+        headers, data_rows = records_to_matrix(records, columns)
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
@@ -1522,6 +1520,7 @@ def _write_destination_database(
         "table_name": table_name,
         "headers": headers,
         "data_rows": data_rows,
+        "records": records if db_type in OBJECT_STORE_WRITE_KINDS else None,
         "mappings": mappings,
         "column_types": column_types,
         "on_checkpoint": on_checkpoint,

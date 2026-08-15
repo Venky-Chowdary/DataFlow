@@ -371,8 +371,10 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "Bodies at or above DATAFLOW_OBJECT_STORE_MULTIPART_THRESHOLD use "
             "S3 multipart (abort on failure). Map+quarantine+serialize runs in "
             "bounded bundles (DATAFLOW_OBJECT_STORE_MATERIALIZE_BATCH, default "
-            "1024); accepted mapped_rows are not retained. The spool rolls to "
-            "disk above DATAFLOW_OBJECT_STORE_SPILL_MAX. data_rows stay in RAM. "
+            "1024); accepted mapped_rows are not retained. Source matrix / "
+            "STRUCT explode spills to disk above DATAFLOW_SOURCE_ROW_SPILL_MAX. "
+            "Engine records stay in RAM until the write returns. The export "
+            "spool rolls to disk above DATAFLOW_OBJECT_STORE_SPILL_MAX. "
             "Parquet writes one RecordBatch per bundle. S3 has no native UPDATE "
             "— upsert sync modes are not supported (overwrite object key only). "
             "Still at-least-once.",
@@ -398,8 +400,9 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "Bucket names are global and unique.",
             "Large objects compose from component uploads; small objects stay "
             "on upload_from_string. Map+quarantine+serialize uses the same "
-            "bounded-bundle algorithm as S3 (accepted mapped_rows not retained; "
-            "data_rows stay in RAM). Object overwrite only — no row-level "
+            "bounded-bundle + source-row spool algorithm as S3 (accepted "
+            "mapped_rows not retained; STRUCT explode does not build a list). "
+            "Object overwrite only — no row-level "
             "upsert/MERGE. Still at-least-once.",
             "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
@@ -421,8 +424,9 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "Large objects use stage_block + commit_block_list; small objects "
             "stay on upload_blob. Map+quarantine+serialize uses the same "
-            "bounded-bundle algorithm as S3 (accepted mapped_rows not retained; "
-            "data_rows stay in RAM). Object overwrite only — no row-level "
+            "bounded-bundle + source-row spool algorithm as S3 (accepted "
+            "mapped_rows not retained; STRUCT explode does not build a list). "
+            "Object overwrite only — no row-level "
             "upsert/MERGE. Still at-least-once.",
             "Use Azure Storage Account key or service principal.",
             "Export JSON, JSONL, CSV, or Parquet by object key extension.",
@@ -744,7 +748,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "JSON/CSV/TSV/JSONL/Parquet map+quarantine+serialize in bounded "
             "bundles onto the same object-store spool (rolls to disk above "
             "DATAFLOW_OBJECT_STORE_SPILL_MAX) and PUT in chunks. Accepted "
-            "mapped_rows are not retained; data_rows stay in RAM. Temp file + "
+            "mapped_rows are not retained; source rows spill above "
+            "DATAFLOW_SOURCE_ROW_SPILL_MAX. Temp file + "
             "posix_rename when the server supports it — still at-least-once, "
             "not exactly-once.",
         ],
