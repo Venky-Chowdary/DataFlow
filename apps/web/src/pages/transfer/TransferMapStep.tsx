@@ -196,15 +196,17 @@ export function TransferMapStep({
       ? `PK ${primaryKeyField}`
       : `${syncModeLabel || "sync"}`;
 
-  const mappingFooterLabel = mappingReviewCount > 0
-    ? `${mappingReviewCount} need review`
-    : `${approvedCount} ready`;
+  const mappingFooterLabel = health.falseFriendCount > 0
+    ? health.headline
+    : mappingReviewCount > 0
+      ? `${mappingReviewCount} need review`
+      : `${approvedCount} ready`;
 
   return (
     <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-map-step-panel">
       <div
         className="df2-card-head df2-map-step-head"
-        title={`${columnMappings.length} mappings · ${approvedCount} ready${mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}`}
+        title={`${columnMappings.length} mappings · ${approvedCount} ready${health.falseFriendCount > 0 ? ` · ${health.headline}` : mappingReviewCount > 0 ? ` · ${mappingReviewCount} need review` : ""}`}
       >
         <div className="df2-map-step-head-copy">
           <h3 className="df2-card-title">Map columns</h3>
@@ -414,7 +416,9 @@ export function TransferMapStep({
             disabled={mappingReviewCount > 0}
             title={
               mappingReviewCount > 0
-                ? `${mappingReviewCount} column(s) need Approve or Accept risk before Validate`
+                ? (health.falseFriendCount > 0
+                  ? health.detail
+                  : `${mappingReviewCount} column(s) need Approve or Accept risk before Validate`)
                 : "Continue to Validate"
             }
           >

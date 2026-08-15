@@ -117,6 +117,7 @@ class DataTransferRetriever:
             "proposed_target": authority["proposed_target"],
             "authority_reasoning": authority["reasoning"],
             "authority": authority["authority"],
+            "review_kind": authority.get("review_kind"),
         }
 
     def _match_pattern(self, query: str) -> str | None:

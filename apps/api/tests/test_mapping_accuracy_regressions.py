@@ -135,6 +135,7 @@ def test_order_qty_does_not_auto_pin_order_amt():
     assert row["target"] == "order_amt"
     assert row.get("create_new") is not True
     assert row.get("requires_review") is True
+    assert row.get("review_kind") == "measure_kind"
     assert float(row["confidence"]) < 0.85
 
 
@@ -145,6 +146,7 @@ def test_user_id_does_not_auto_pin_customer_id():
     row = out[0]
     assert row.get("create_new") is not True
     assert row.get("requires_review") is True
+    assert row.get("review_kind") == "entity_identity"
     assert float(row["confidence"]) < 0.85
 
 
@@ -156,6 +158,7 @@ def test_dest_userid_collision_requires_review():
     assert row["target"] in {"UserID", "userid"}
     assert row.get("create_new") is not True
     assert row.get("requires_review") is True
+    assert row.get("review_kind") == "dest_collision"
     assert float(row["confidence"]) < 0.85
 
 

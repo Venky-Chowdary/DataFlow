@@ -1121,6 +1121,91 @@ def _reason_forces_review(reason: str) -> bool:
     return "review required" in (reason or "").lower()
 
 
+# Stable Map review kinds — UI / RAG / Proof consume this stamp, not English
+# parsing alone. Airbyte schema review is all-or-nothing (#74892 / #78427);
+# these kinds keep quantity≠amount and user≠customer off Approve-eligible.
+REVIEW_KIND_MEASURE = "measure_kind"
+REVIEW_KIND_ENTITY = "entity_identity"
+REVIEW_KIND_DEST_COLLISION = "dest_collision"
+REVIEW_KIND_IDENTITY_LEAF = "identity_leaf"
+REVIEW_KIND_TEMPORAL = "temporal_polarity"
+REVIEW_KIND_LOSSY = "lossy"
+REVIEW_KIND_CREATE_NEW = "create_new"
+REVIEW_KIND_GENERIC = "generic"
+
+FALSE_FRIEND_REVIEW_KINDS = frozenset(
+    {
+        REVIEW_KIND_MEASURE,
+        REVIEW_KIND_ENTITY,
+        REVIEW_KIND_DEST_COLLISION,
+        REVIEW_KIND_IDENTITY_LEAF,
+        REVIEW_KIND_TEMPORAL,
+    }
+)
+
+
+def classify_review_kind(
+    *,
+    source: str,
+    target: str,
+    reason: str = "",
+    requires_review: bool = False,
+    create_new: bool = False,
+    dest_collisions: set[str] | None = None,
+) -> str | None:
+    """Classify why Map held a pair. None when the pair does not need review."""
+    if not requires_review:
+        return None
+    text = (reason or "").lower()
+    collisions = dest_collisions or set()
+    if target in collisions or "destination identifier collision" in text:
+        return REVIEW_KIND_DEST_COLLISION
+    if "measure-kind mismatch" in text or (
+        source and target and _measure_kind_mismatch(source, target)
+    ):
+        return REVIEW_KIND_MEASURE
+    if "identity leaf mismatch" in text or (
+        source and target and _identity_leaf_mismatch(source, target)
+    ):
+        return REVIEW_KIND_IDENTITY_LEAF
+    if "temporal polarity" in text or (
+        source and target and _temporal_polarity_conflict(source, target)
+    ):
+        return REVIEW_KIND_TEMPORAL
+    if (
+        "entity qualifier conflict" in text
+        or "conflicting entity qualifiers" in text
+        or (source and target and _entity_conflict_requires_review(source, target))
+    ):
+        return REVIEW_KIND_ENTITY
+    if "lossy type pair" in text:
+        return REVIEW_KIND_LOSSY
+    if create_new:
+        return REVIEW_KIND_CREATE_NEW
+    return REVIEW_KIND_GENERIC
+
+
+def _stamp_review_kinds(
+    mappings: list[dict],
+    dest_collisions: set[str] | None = None,
+) -> list[dict]:
+    collisions = dest_collisions or set()
+    for row in mappings:
+        kind = classify_review_kind(
+            source=str(row.get("source") or ""),
+            target=str(row.get("target") or ""),
+            reason=str(row.get("reasoning") or ""),
+            requires_review=bool(row.get("requires_review")),
+            create_new=bool(row.get("create_new")),
+            dest_collisions=collisions,
+        )
+        if kind:
+            row["review_kind"] = kind
+        else:
+            row.pop("review_kind", None)
+    return mappings
+
+
 def _is_bare_domain_leaf(name: str) -> bool:
     toks = {t for t in _semantic_form(name).split("_") if t} - _ENTITY_STOPWORDS
     return len(toks) == 1 and toks <= _DOMAIN_LEAVES
@@ -1663,6 +1748,7 @@ def pair_mapping_authority(source: str, target: str) -> dict:
         "create_new": bool(row.get("create_new")),
         "reasoning": str(row.get("reasoning") or ""),
         "assignment_strategy": str(row.get("assignment_strategy") or ""),
+        "review_kind": row.get("review_kind"),
         "authority": "semantic_mapper.map_columns",
     }
 
@@ -1769,7 +1855,7 @@ def map_columns(
                         "requires_review": True,
                     }
                 )
-        return _apply_create_new_risk_stamps(out, dest_db)
+        return _stamp_review_kinds(_apply_create_new_risk_stamps(out, dest_db))
 
     idf = _build_idf(source_columns + target_columns)
     all_doc_lens = [len(_tokenize(c)) for c in source_columns + target_columns]
@@ -2134,6 +2220,9 @@ def map_columns(
                 row["assignment_strategy"] = "hungarian_with_greedy_patch"
 
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
-    return _apply_create_new_risk_stamps(
-        mappings, dest_db, source_samples=src_samples
+    return _stamp_review_kinds(
+        _apply_create_new_risk_stamps(
+            mappings, dest_db, source_samples=src_samples
+        ),
+        dest_collisions,
     )
