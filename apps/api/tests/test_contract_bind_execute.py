@@ -323,6 +323,22 @@ def test_enforce_bound_contract_signed_matching_route(monkeypatch):
     assert enforce_bound_contract(req, schema={"id": "INTEGER"}, mappings=[]) == signed.id
 
 
+def test_stamp_bound_contract_open_breaker_fail_closed(monkeypatch):
+    from services.data_contract import BreakerState
+
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    signed = DataContract(name="tripped", status=ContractStatus.SIGNED)
+    backend.save_contract(signed)
+    breaker = backend.get_breaker(signed.id)
+    breaker.state = BreakerState.OPEN
+    backend.save_breaker(breaker)
+
+    req = SimpleNamespace(contract_id="", enforce_contract=False, require_signed_contract=False)
+    with pytest.raises(ValueError, match="is OPEN"):
+        stamp_bound_contract(req, contract_id=signed.id, require_signed=True)
+    assert req.contract_id == signed.id
+
+
 def test_enforce_bound_contract_format_drift_fail_closed(monkeypatch):
     from services.data_contract import ContractViolation
 

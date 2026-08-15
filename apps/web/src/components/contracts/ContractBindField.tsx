@@ -1,6 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
-import { fetchContracts, type DataContractSummary } from "../../lib/api";
+import {
+  fetchContractBreaker,
+  fetchContracts,
+  resetContractBreaker,
+  type DataContractSummary,
+} from "../../lib/api";
 import { contractBindBlocksRun, isSignedContractStatus } from "../../lib/contractBind";
+import { contractBreakerBlocksRun } from "../../lib/contractBreakerUi";
+import { Button } from "../ui/Button";
 
 interface ContractBindFieldProps {
   idPrefix: string;
@@ -23,6 +30,8 @@ export function ContractBindField({
 }: ContractBindFieldProps) {
   const [contracts, setContracts] = useState<DataContractSummary[]>([]);
   const [loading, setLoading] = useState(false);
+  const [breakerState, setBreakerState] = useState("");
+  const [resettingBreaker, setResettingBreaker] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -50,11 +59,31 @@ export function ContractBindField({
     () => contracts.find((c) => c.id === contractId) || null,
     [contracts, contractId],
   );
-  const blockReason = contractBindBlocksRun({
+  useEffect(() => {
+    if (!contractId) {
+      setBreakerState("");
+      return;
+    }
+    let cancelled = false;
+    fetchContractBreaker(contractId)
+      .then((b) => {
+        if (!cancelled) setBreakerState(String(b.state || ""));
+      })
+      .catch(() => {
+        if (!cancelled) setBreakerState("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [contractId]);
+
+  const bindBlock = contractBindBlocksRun({
     contractId,
     requireSigned,
     selectedStatus: selected?.status,
   });
+  const breakerBlock = contractBreakerBlocksRun(breakerState);
+  const blockReason = bindBlock || breakerBlock;
 
   useEffect(() => {
     onBlockReasonChange?.(blockReason);
@@ -112,6 +141,29 @@ export function ContractBindField({
         <p className="df2-label-hint df2-dest-sync-warning" role="alert">
           {blockReason}
         </p>
+      )}
+      {breakerBlock && contractId && (
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={resettingBreaker}
+          loadingLabel="Resetting…"
+          onClick={() => {
+            void (async () => {
+              setResettingBreaker(true);
+              try {
+                const next = await resetContractBreaker(contractId);
+                setBreakerState(String(next.state || "closed"));
+              } catch {
+                /* parent toast / operator retries */
+              } finally {
+                setResettingBreaker(false);
+              }
+            })();
+          }}
+        >
+          Reset breaker
+        </Button>
       )}
     </div>
   );

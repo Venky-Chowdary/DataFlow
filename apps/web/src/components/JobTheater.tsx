@@ -9,6 +9,7 @@ import {
   cancelJob,
   executeJobRollback,
   fetchJobMappingProof,
+  resetContractBreaker,
   resumeJob,
   streamJobProgress,
   type RepairMapping,
@@ -23,6 +24,7 @@ import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
+import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
@@ -429,6 +431,7 @@ export function JobTheaterView({
     ? PHASES.findIndex((p) => p.id === "reconcile")
     : phaseIndex(job.phase, job.status);
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
+  const [resettingBreaker, setResettingBreaker] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
   const [resolvedProof, setResolvedProof] = useState<MappingProof | null>(() => asMappingProof(job.mapping_proof));
 
@@ -465,6 +468,11 @@ export function JobTheaterView({
   const duplicateKeyFailure =
     failureHint?.code === "duplicate_primary_key"
     || /duplicate redis key|duplicate primary key|conflict on '/i.test(String(job.error || job.message || ""));
+  const breakerContractId = contractIdFromBreakerFailure({
+    error: job.error || job.message,
+    errorDetails: job.error_details || null,
+  });
+  const breakerFailure = failureHint?.code === "circuit_breaker_open" || Boolean(breakerContractId);
 
   // Prefer row-derived progress while writing. Once reconcile starts (or all rows
   // are written), hold 99% — never imply "done" until status is terminal success.
@@ -703,6 +711,36 @@ export function JobTheaterView({
               {duplicateKeyFailure && onBackToMap && (
                 <button type="button" className="df2-btn df2-btn-primary" onClick={onBackToMap}>
                   <DtIcon name="layers" size={16} /> Open Map · set PK
+                </button>
+              )}
+              {breakerFailure && breakerContractId && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-primary"
+                  disabled={resettingBreaker}
+                  onClick={() => {
+                    void (async () => {
+                      setResettingBreaker(true);
+                      try {
+                        await resetContractBreaker(breakerContractId);
+                        toast({
+                          title: "Breaker reset",
+                          message: "Re-run from Validate. The contract must still be SIGNED.",
+                          tone: "success",
+                        });
+                      } catch (e) {
+                        toast({
+                          title: "Could not reset breaker",
+                          message: (e as Error).message,
+                          tone: "error",
+                        });
+                      } finally {
+                        setResettingBreaker(false);
+                      }
+                    })();
+                  }}
+                >
+                  <DtIcon name="shield" size={16} /> {resettingBreaker ? "Resetting…" : "Reset breaker"}
                 </button>
               )}
               {!earlyFail

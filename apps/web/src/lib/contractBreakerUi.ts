@@ -24,6 +24,39 @@ export function breakerWarnLabel(state: string | null | undefined): string {
   return breakerBlocksRuns(state) ? breakerLabel(state) : "";
 }
 
+/** Studio / schedule bind — same fail-closed copy as Pipelines Run now. */
+export function contractBreakerBlocksRun(state: string | null | undefined): string {
+  if (!breakerBlocksRuns(state)) return "";
+  return "Contract circuit breaker is OPEN. Reset it after you fix the violation, then re-run.";
+}
+
+export function isCircuitBreakerFailureText(text: string | null | undefined): boolean {
+  const t = String(text || "").toLowerCase();
+  return t.includes("circuit_breaker_open")
+    || (t.includes("circuit breaker") && t.includes("is open"));
+}
+
+/** Parse contract id from engine / enqueue breaker errors. */
+export function contractIdFromBreakerFailure(opts: {
+  error?: string | null;
+  errorDetails?: Record<string, unknown> | null;
+}): string {
+  const details = opts.errorDetails || {};
+  const violations = details.violations;
+  if (Array.isArray(violations)) {
+    for (const raw of violations) {
+      if (!raw || typeof raw !== "object") continue;
+      const row = raw as { rule?: string; contract_id?: string };
+      if (String(row.rule || "") === "circuit_breaker_open") {
+        const id = String(row.contract_id || "").trim();
+        if (id) return id;
+      }
+    }
+  }
+  const match = String(opts.error || "").match(/circuit breaker for contract\s+([^\s;]+)/i);
+  return match ? match[1] : "";
+}
+
 /** Dual Run campaign — engine-stamped verdict, display only. */
 export function campaignBadgeClass(verdict: string | null | undefined): string {
   const v = (verdict || "").trim().toLowerCase();

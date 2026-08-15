@@ -92,6 +92,19 @@ def stamp_bound_contract(
         request.contract_id = cid
         request.enforce_contract = True
         request.require_signed_contract = require
+        _assert_breaker_allows(cid)
+
+
+def _assert_breaker_allows(contract_id: str) -> None:
+    """Fail-fast OPEN breaker at enqueue — same rule as enforce_or_create_contract."""
+    store = get_contract_store()
+    breaker = store.get_breaker(contract_id)
+    if not breaker.allow():
+        raise ValueError(
+            f"Circuit breaker for contract {contract_id} is OPEN; "
+            f"reset it after you fix the violation, then re-run "
+            f"(current state: {breaker.state.value})"
+        )
 
 
 def enforce_bound_contract(

@@ -231,6 +231,19 @@ export function inferTransferFailureHint(
     };
   }
   if (
+    text.includes("circuit_breaker_open")
+    || (text.includes("circuit breaker") && text.includes("is open"))
+  ) {
+    return {
+      code: errorCode || "circuit_breaker_open",
+      title: errorTitle || "Contract circuit breaker is OPEN",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Reset the breaker after you fix the contract violation (Contracts or Validate bind), then re-run. Do not enqueue while the breaker is OPEN.",
+    };
+  }
+  if (
     text.includes("duplicate_transfer")
     || text.includes("equivalent transfer is already")
   ) {

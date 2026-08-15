@@ -792,6 +792,24 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             "retriable": False,
             "confidence": confidence,
         }
+    if "circuit_breaker_open" in text or (
+        "circuit breaker" in text and "is open" in text
+    ):
+        return {
+            "code": "circuit_breaker_open",
+            "category": "contract",
+            "title": "Contract circuit breaker is OPEN",
+            "message": raw,
+            "fix": (
+                "Reset the breaker after you fix the contract violation "
+                "(Contracts or Validate bind), then re-run. "
+                "Do not enqueue while the breaker is OPEN."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+        }
+
     # Unknown — never invent a specific root cause or fake remediation path.
     return {
         "code": "transfer_failed",
