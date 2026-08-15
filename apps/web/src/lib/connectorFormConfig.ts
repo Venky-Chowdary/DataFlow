@@ -1,4 +1,5 @@
 import { GENERIC_SQL_INFO } from "./genericSqlMap";
+import { validateSnowflakeConnectionString } from "./snowflakeUrl";
 import {
   getConnectorDefaults,
   getRestApiDefaultObject,
@@ -233,7 +234,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     userPassFields.push(
       text("host", "Account host", {
         placeholder: "xy12345.us-east-1.snowflakecomputing.com",
-        hint: "Paste the host from the Snowflake URL (org-account or locator.region). Do not invent a role — leave Role blank to use the user's default.",
+        hint: "Account locator or org-account. A browser URL (https://….snowflakecomputing.com) is accepted — that is the host, not a login. Leave Role blank to use the user's default.",
       }),
       text("username", "Username"),
       password("password", "Password"),
@@ -401,9 +402,10 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   } else if (isSnowflake) {
     connStrFields.push(
-      textarea("connection_string", "Snowflake URL", {
-        rows: 2,
-        placeholder: "snowflake://user:pass@account/db/schema?warehouse=COMPUTE_WH&role=ACCOUNTADMIN",
+      textarea("connection_string", "Snowflake login URL", {
+        rows: 3,
+        placeholder: "snowflake://USER:PASSWORD@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH",
+        hint: "SQLAlchemy-style login, not a browser URL. Example: snowflake://USER:PASSWORD@bq73198/EMPLOYEE_DB/PUBLIC?warehouse=COMPUTE_WH. If the password contains @, encode it as %40 — or use Username & password. https://….snowflakecomputing.com is the account host only.",
       })
     );
   } else if (isSQLite || isDuckDB) {
@@ -637,9 +639,13 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
 
   if (connStrFields.length) {
     authModes.push(
-      auth("connection_string", isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string", connStrFields, (values) =>
-        required(values, "connection_string", isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string")
-      )
+      auth("connection_string", isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string", connStrFields, (values) => {
+        const label = isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string";
+        const missing = required(values, "connection_string", label);
+        if (missing) return missing;
+        if (isSnowflake) return validateSnowflakeConnectionString(fmt(values, "connection_string"));
+        return null;
+      })
     );
   }
 

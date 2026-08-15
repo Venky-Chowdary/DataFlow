@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import re
-from services.brand_env import getenv_brand
 import sys
 import threading
 import unittest.mock
 from typing import Any
+from urllib.parse import parse_qs, unquote
+
+from services.brand_env import getenv_brand
 
 _SF_HOST_SUFFIXES = (
     ".privatelink.snowflakecomputing.com",
@@ -67,6 +69,176 @@ def normalize_account(host: str) -> str:
         if lower.endswith(suffix):
             return raw[: -len(suffix)]
     return raw
+
+
+# Operator-facing copy when they paste a browser host instead of a login URL.
+SNOWFLAKE_HOST_ONLY_URL_MSG = (
+    "That is a Snowflake account host, not a login. "
+    "Use snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH "
+    "or switch to Username & password and enter the account host, user, and password. "
+    "If the password contains @, encode it as %40."
+)
+
+SNOWFLAKE_MISSING_ACCOUNT_MSG = (
+    "Snowflake account is required. Paste snowflake://user:password@account/... "
+    "or the account host (org-account or locator.region)."
+)
+
+SNOWFLAKE_MISSING_USER_MSG = (
+    "Snowflake username is required. A browser URL "
+    "(https://….snowflakecomputing.com) is the account host, not a login."
+)
+
+SNOWFLAKE_MISSING_SECRET_MSG = (
+    "Provide a password or a PKCS#8 private key. Browser account URLs do not "
+    "include credentials."
+)
+
+
+def parse_snowflake_url(raw: str) -> dict[str, str]:
+    """Parse operator-pasted Snowflake URLs into connector kwargs.
+
+    ``snowflake.connector.connect`` is keyword-only. Passing a SQLAlchemy or
+    browser URL as a positional argument raises
+    ``SnowflakeConnection.__init__() takes 0 positional arguments but 1 was given``.
+
+    Accepted:
+    - ``snowflake://user:pass@account/db/schema?warehouse=&role=``
+    - ``snowflake://user:pass@account.snowflakecomputing.com/db/schema?...``
+    - ``jdbc:snowflake://account.snowflakecomputing.com/?user=&password=&db=``
+    - ``https://account.snowflakecomputing.com`` (account only — caller must supply user/secret)
+    - host-only ``account.snowflakecomputing.com``
+
+    The last ``@`` separates account from userinfo so a password may contain ``@``.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    if text.lower().startswith("jdbc:"):
+        text = text[5:].lstrip()
+
+    query = ""
+    if "?" in text:
+        text, query = text.split("?", 1)
+
+    if "://" in text:
+        _scheme, rest = text.split("://", 1)
+    else:
+        rest = text
+
+    userinfo = ""
+    if "@" in rest:
+        userinfo, rest = rest.rsplit("@", 1)
+
+    path_parts = [part for part in rest.split("/") if part]
+    account_raw = unquote(path_parts[0]) if path_parts else ""
+    database = unquote(path_parts[1]) if len(path_parts) > 1 else ""
+    schema = unquote(path_parts[2]) if len(path_parts) > 2 else ""
+
+    user = ""
+    password = ""
+    if userinfo:
+        if ":" in userinfo:
+            user, password = userinfo.split(":", 1)
+            user = unquote(user)
+            password = unquote(password)
+        else:
+            user = unquote(userinfo)
+
+    qs = parse_qs(query, keep_blank_values=True)
+
+    def q(*names: str) -> str:
+        for name in names:
+            for key in (name, name.lower(), name.upper()):
+                vals = qs.get(key)
+                if vals and str(vals[0]).strip():
+                    return unquote(str(vals[0]))
+        return ""
+
+    out: dict[str, str] = {}
+    account = normalize_account(account_raw or q("account"))
+    if account:
+        out["account"] = account
+    user = user or q("user", "username")
+    password = password or q("password", "passwd", "pwd")
+    database = database or q("db", "database")
+    schema = schema or q("schema")
+    warehouse = q("warehouse", "wh")
+    role = q("role")
+    if user:
+        out["user"] = user
+    if password:
+        out["password"] = password
+    if database:
+        out["database"] = database
+    if schema:
+        out["schema"] = schema
+    if warehouse:
+        out["warehouse"] = warehouse
+    if role:
+        out["role"] = role
+    return out
+
+
+def snowflake_connect_kwargs(
+    *,
+    account: str = "",
+    username: str = "",
+    password: str = "",
+    database: str = "",
+    schema: str = "",
+    warehouse: str = "",
+    connection_string: str = "",
+    role: str = "",
+    private_key: str = "",
+    private_key_passphrase: str = "",
+) -> dict[str, Any]:
+    """Keyword args for ``snowflake.connector.connect`` — never a positional URL.
+
+    URL fields win when present; discrete form fields fill gaps. Topology tokens
+    such as ``both`` are dropped from ``role``.
+    """
+    from services.connector_auth import engine_login_role
+
+    parsed = parse_snowflake_url(connection_string) if (connection_string or "").strip() else {}
+    merged_account = parsed.get("account") or account
+    merged_user = parsed.get("user") or username
+    merged_password = parsed.get("password") or password
+    merged_database = parsed.get("database") or database
+    merged_schema = parsed.get("schema") or schema
+    merged_warehouse = parsed.get("warehouse") or warehouse
+    login_role = engine_login_role(parsed.get("role"), role)
+    pem = (private_key or "").strip()
+
+    if not normalize_account(merged_account):
+        raise ValueError(SNOWFLAKE_MISSING_ACCOUNT_MSG)
+    if not (merged_user or "").strip():
+        if parsed.get("account") and not parsed.get("user"):
+            raise ValueError(SNOWFLAKE_HOST_ONLY_URL_MSG)
+        raise ValueError(SNOWFLAKE_MISSING_USER_MSG)
+    if not pem and not (merged_password or "").strip():
+        if parsed.get("account") and not parsed.get("password"):
+            raise ValueError(SNOWFLAKE_HOST_ONLY_URL_MSG)
+        raise ValueError(SNOWFLAKE_MISSING_SECRET_MSG)
+
+    kwargs: dict[str, Any] = {
+        "account": normalize_account(merged_account),
+        "user": merged_user,
+        "login_timeout": 10,
+    }
+    if pem:
+        kwargs["private_key"] = load_snowflake_private_key(pem, private_key_passphrase)
+    elif merged_password:
+        kwargs["password"] = merged_password
+    if merged_database:
+        kwargs["database"] = merged_database
+    if merged_schema:
+        kwargs["schema"] = merged_schema
+    if merged_warehouse:
+        kwargs["warehouse"] = merged_warehouse
+    if login_role:
+        kwargs["role"] = login_role
+    return kwargs
 
 
 def load_snowflake_private_key(pem: str, passphrase: str = "") -> bytes:
@@ -139,6 +311,11 @@ def classify_snowflake_connect_error(raw: str) -> str | None:
             "Snowflake rejected the username or password. Check the account host "
             "(org-account or locator.region), username, and password."
         )
+    if re.search(
+        r"takes 0 positional arguments|snowflakeconnection\.__init__",
+        text,
+    ):
+        return SNOWFLAKE_HOST_ONLY_URL_MSG
     return None
 
 
@@ -393,30 +570,18 @@ def get_connection(
         from connectors.driver_guard import require_driver
         raise RuntimeError(require_driver("snowflake.connector", "snowflake-connector-python")) from exc
 
-    if connection_string.strip():
-        return snowflake.connector.connect(connection_string, login_timeout=10)
-
-    from services.connector_auth import engine_login_role
-
-    login_role = engine_login_role(role)
-    kwargs: dict[str, Any] = {
-        "account": normalize_account(account),
-        "user": username,
-        "login_timeout": 10,
-    }
-    pem = (private_key or "").strip()
-    if pem:
-        kwargs["private_key"] = load_snowflake_private_key(pem, private_key_passphrase)
-    elif password:
-        kwargs["password"] = password
-    if database:
-        kwargs["database"] = database
-    if schema:
-        kwargs["schema"] = schema
-    if warehouse:
-        kwargs["warehouse"] = warehouse
-    if login_role:
-        kwargs["role"] = login_role
+    kwargs = snowflake_connect_kwargs(
+        account=account,
+        username=username,
+        password=password,
+        database=database,
+        schema=schema,
+        warehouse=warehouse,
+        connection_string=connection_string,
+        role=role,
+        private_key=private_key,
+        private_key_passphrase=private_key_passphrase,
+    )
 
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.

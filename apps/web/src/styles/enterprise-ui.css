@@ -7940,6 +7940,19 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: var(--df-text-secondary, #475569);
 }
 
+.df2-auth-modes.df2-segment {
+  display: flex;
+  flex-wrap: wrap;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.df2-auth-modes.df2-segment button:not(.df2-btn) {
+  flex: 1 1 auto;
+  text-align: center;
+  min-height: 34px;
+}
+
 /* Validate + Map step enterprise polish */
 .df2-validate-dashboard-host,
 .df2-validate-step {

@@ -21,6 +21,10 @@ import {
   validateConnectorPayload,
 } from "../lib/connectorFormConfig";
 import { CONNECTOR_CATALOG } from "../lib/types";
+import {
+  isSnowflakeAccountHostOnly,
+  parseSnowflakeUrl,
+} from "../lib/snowflakeUrl";
 
 interface ConnectorModalProps {
   initialType?: string;
@@ -137,6 +141,7 @@ export function ConnectorModal({
   const isMongo = resolvedType === "mongodb";
   const isSftp = resolvedType === "sftp";
   const isEmail = resolvedType === "email";
+  const isSnowflake = resolvedType === "snowflake";
 
   const formConfig = useMemo<ConnectorFormConfig>(() => getConnectorFormConfig(type), [type]);
 
@@ -150,6 +155,19 @@ export function ConnectorModal({
   // Auto-parse connection strings for SFTP / Email / MongoDB / Redis / Elasticsearch / Azure
   useEffect(() => {
     if (authMode !== "connection_string" || !connectionString.trim()) return;
+    if (isSnowflake) {
+      const parsedSf = parseSnowflakeUrl(connectionString);
+      if (parsedSf.account && (!host || host === "account.snowflakecomputing.com")) {
+        setHost(parsedSf.account);
+      }
+      if (parsedSf.user && !username) setUsername(parsedSf.user);
+      if (parsedSf.password && !password) setPassword(parsedSf.password);
+      if (parsedSf.database && !database) setDatabase(parsedSf.database);
+      if (parsedSf.schema && !schema) setSchema(parsedSf.schema);
+      if (parsedSf.warehouse && !warehouse) setWarehouse(parsedSf.warehouse);
+      if (parsedSf.role && !authRole) setAuthRole(parsedSf.role);
+      return;
+    }
     const parsed = isMongo
       ? parseMongoUri(connectionString)
       : parseUriIfPossible(connectionString, resolvedType);
@@ -171,7 +189,7 @@ export function ConnectorModal({
     if (connectionString.toLowerCase().startsWith("smtps://") || connectionString.toLowerCase().startsWith("rediss://") || connectionString.toLowerCase().startsWith("https://")) {
       setSsl(true);
     }
-  }, [isMongo, authMode, connectionString, host, port, username, password, database, authSource, resolvedType]);
+  }, [isMongo, isSnowflake, authMode, connectionString, host, port, username, password, database, schema, warehouse, authRole, authSource, resolvedType]);
 
   const applyType = (nextType: string) => {
     const d = getConnectorDefaults(nextType);
@@ -309,6 +327,16 @@ export function ConnectorModal({
         if (parsed?.username) payload.username = parsed.username;
         if (parsed?.password) payload.password = parsed.password;
         if (parsed?.database) payload.database = parsed.database;
+      }
+      if (cs && isSnowflake) {
+        const parsedSf = parseSnowflakeUrl(cs);
+        if (parsedSf.account) payload.host = parsedSf.account;
+        if (parsedSf.user) payload.username = parsedSf.user;
+        if (parsedSf.password) payload.password = parsedSf.password;
+        if (parsedSf.database) payload.database = parsedSf.database;
+        if (parsedSf.schema) payload.schema = parsedSf.schema;
+        if (parsedSf.warehouse) payload.warehouse = parsedSf.warehouse;
+        if (parsedSf.role) payload.auth_role = parsedSf.role;
       }
       if (resolvedType === "sftp" && privateKey.trim()) {
         payload.private_key = privateKey || undefined;
@@ -520,7 +548,7 @@ export function ConnectorModal({
   return (
     <div className="df2-modal-overlay" onClick={onClose} role="presentation">
       <div
-        className="df2-modal df2-modal-full"
+        className={`df2-modal ${step === "pick" ? "df2-modal-full" : "df2-modal-lg"}`}
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"
@@ -582,22 +610,31 @@ export function ConnectorModal({
               {formConfig.authModes.length > 1 && (
                 <div className="df2-form-row">
                   <div className="df2-field">
-                    <label className="df2-label">Authentication mode</label>
-                    <select
-                      className="df2-input"
-                      value={authMode}
-                      onChange={(e) => {
-                        setAuthMode(e.target.value as AuthMode);
-                        setFieldError(null);
-                        setTestResult(null);
-                      }}
+                    <label className="df2-label" id="df2-auth-mode-label">
+                      Authentication mode
+                    </label>
+                    <div
+                      className="df2-segment df2-auth-modes"
+                      role="tablist"
+                      aria-labelledby="df2-auth-mode-label"
                     >
                       {formConfig.authModes.map((opt) => (
-                        <option key={opt.value} value={opt.value}>
+                        <button
+                          key={opt.value}
+                          type="button"
+                          role="tab"
+                          aria-selected={authMode === opt.value}
+                          className={authMode === opt.value ? "active" : ""}
+                          onClick={() => {
+                            setAuthMode(opt.value);
+                            setFieldError(null);
+                            setTestResult(null);
+                          }}
+                        >
                           {opt.label}
-                        </option>
+                        </button>
                       ))}
-                    </select>
+                    </div>
                   </div>
                 </div>
               )}
@@ -614,6 +651,34 @@ export function ConnectorModal({
                       {field.hint && <p className="df2-field-note df2-label-hint">{field.hint}</p>}
                     </div>
                   ))}
+                </div>
+              )}
+
+              {isSnowflake &&
+                authMode === "connection_string" &&
+                isSnowflakeAccountHostOnly(parseSnowflakeUrl(connectionString)) && (
+                <div className="df2-conn-probe is-fail" role="status">
+                  <p className="df2-conn-probe-msg">
+                    That looks like a Snowflake account host, not a login URL.
+                  </p>
+                  <p className="df2-conn-probe-hint">
+                    Switch to Username &amp; password, or paste
+                    {" "}<code>snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH</code>.
+                  </p>
+                  <button
+                    type="button"
+                    className="df2-btn df2-btn-sm"
+                    style={{ marginTop: 8 }}
+                    onClick={() => {
+                      const parsedSf = parseSnowflakeUrl(connectionString);
+                      if (parsedSf.account) setHost(parsedSf.account);
+                      setAuthMode("user_pass");
+                      setFieldError(null);
+                      setTestResult(null);
+                    }}
+                  >
+                    Use Username &amp; password
+                  </button>
                 </div>
               )}
 
@@ -658,6 +723,13 @@ export function ConnectorModal({
                     <p className="df2-conn-probe-hint">
                       Look for the <strong>SSL / TLS</strong> toggle in the fields above — local
                       emulators and plaintext Docker ports usually need it off.
+                    </p>
+                  )}
+                  {!testResult.success && isSnowflake && /account host|snowflake:\/\//i.test(testResult.message) && (
+                    <p className="df2-conn-probe-hint">
+                      Use <strong>Username &amp; password</strong> with the account host
+                      (for example <code>bq73198</code>), or a login URL
+                      {" "}<code>snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH</code>.
                     </p>
                   )}
                 </div>

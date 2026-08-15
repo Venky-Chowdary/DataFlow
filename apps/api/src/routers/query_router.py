@@ -743,33 +743,36 @@ def _run_snowflake_query(connector, body):
     if not _is_safe_sql(raw_query):
         raise HTTPException(status_code=400, detail="Only safe read/metadata queries are allowed in the playground")
 
-    try:
-        import snowflake.connector
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Snowflake driver unavailable: {exc}") from exc
+    from connectors.snowflake_conn import classify_snowflake_connect_error, get_connection
+    from services.connector_auth import engine_login_role
 
-    account = connector.host or connector.connection_string or ""
-    # Strip the well-known domain suffix if the user entered the full host.
-    if account.endswith(".snowflakecomputing.com"):
-        account = account[: -len(".snowflakecomputing.com")]
     database = body.database or connector.database or ""
     schema = connector.schema or "PUBLIC"
     warehouse = connector.warehouse or ""
-    role = getattr(connector, "auth_role", "")
 
     conn = None
     try:
-        conn = snowflake.connector.connect(
-            account=account,
-            user=connector.username or "",
+        conn = get_connection(
+            account=connector.host or "",
+            username=connector.username or "",
             password=connector.password or "",
             database=database,
             schema=schema,
             warehouse=warehouse,
-            role=role or None,
+            connection_string=getattr(connector, "connection_string", "") or "",
+            role=engine_login_role(
+                getattr(connector, "auth_role", ""),
+                getattr(connector, "role", ""),
+            ),
+            private_key=getattr(connector, "private_key", "") or "",
+            private_key_passphrase=connector.password or "",
         )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not connect to Snowflake: {exc}") from exc
+        classified = classify_snowflake_connect_error(str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not connect to Snowflake: {classified or exc}",
+        ) from exc
 
     try:
         clean_query = raw_query.rstrip(";")

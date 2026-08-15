@@ -5,7 +5,12 @@ from __future__ import annotations
 import logging
 
 from connectors.base import ConnectResult
-from connectors.snowflake_conn import get_connection, normalize_account
+from connectors.snowflake_conn import (
+    classify_snowflake_connect_error,
+    get_connection,
+    normalize_account,
+    parse_snowflake_url,
+)
 from services.connector_auth import engine_login_role
 
 logger = logging.getLogger(__name__)
@@ -28,15 +33,23 @@ def test_snowflake(
     auth_mode: str = "",
 ) -> ConnectResult:
     del port, ssl, auth_mode
-    account = normalize_account(host)
+    parsed = parse_snowflake_url(connection_string) if (connection_string or "").strip() else {}
+    account = parsed.get("account") or normalize_account(host)
+    user = parsed.get("user") or username
+    secret = parsed.get("password") or password
+    database = parsed.get("database") or database
+    schema = parsed.get("schema") or schema
     pem = (private_key or "").strip()
-    if not connection_string.strip() and (not account or not username):
+    if not account or not user:
         return ConnectResult(
             ok=False,
             tables=[],
-            error="Provide account (host) + username or a Snowflake connection string",
+            error=(
+                "Provide account (host) + username, or a Snowflake login URL "
+                "(snowflake://user:password@account/DATABASE/SCHEMA?warehouse=…)."
+            ),
         )
-    if not connection_string.strip() and not pem and not (password or "").strip():
+    if not pem and not (secret or "").strip():
         return ConnectResult(
             ok=False,
             tables=[],
@@ -44,6 +57,7 @@ def test_snowflake(
         )
 
     wh = ""
+    warehouse = parsed.get("warehouse") or warehouse
     if warehouse:
         # Identifier-quote only — never interpolate raw operator input into SQL.
         wh = warehouse.strip().strip('"').replace('"', "")
@@ -58,15 +72,15 @@ def test_snowflake(
     try:
         conn = get_connection(
             account=account,
-            username=username,
-            password=password,
+            username=user,
+            password=secret,
             database=database,
             schema=schema or "PUBLIC",
             warehouse=wh,
             connection_string=connection_string,
-            role=engine_login_role(auth_role, role),
+            role=engine_login_role(parsed.get("role"), auth_role, role),
             private_key=pem,
-            private_key_passphrase=password if pem else "",
+            private_key_passphrase=secret if pem else "",
         )
         with conn.cursor() as cur:
             if wh:
@@ -89,7 +103,13 @@ def test_snowflake(
             driver="snowflake-connector-python",
         )
     except Exception as exc:
-        return ConnectResult(ok=False, tables=[], error=str(exc), driver="snowflake-connector-python")
+        classified = classify_snowflake_connect_error(str(exc))
+        return ConnectResult(
+            ok=False,
+            tables=[],
+            error=classified or str(exc),
+            driver="snowflake-connector-python",
+        )
     finally:
         if conn is not None:
             try:
