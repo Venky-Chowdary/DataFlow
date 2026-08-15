@@ -576,7 +576,8 @@
   gap: 10px;
   flex: 1 1 0;
   min-height: 0;
-  height: 100%;
+  height: auto;
+  max-height: 100%;
   overflow: hidden;
 }
 
@@ -795,6 +796,27 @@
   margin-top: 0;
   padding: 8px 12px;
   border-top: 1px solid #f1f5f9;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+  overflow: visible;
+}
+
+.df2-column-review-footer-action {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.df2-column-review-footer-action .df2-btn-primary {
+  max-width: none;
+  min-width: max-content;
+  flex-shrink: 0;
 }
 
 /* Intelligence panel */
@@ -1120,6 +1142,13 @@
     grid-template-rows: minmax(0, 1fr) minmax(0, min(42vh, 380px));
   }
 
+  /* Intel aside is not mounted — do not reserve an empty second row that
+     pushes the wizard Continue control below overflow:hidden. */
+  .df2-map-step-workspace.is-full-editor {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
   .df2-transfer-studio-body.is-map-step .df2-transfer-step-panel,
   .df2-transfer-studio-body.is-map-step .df2-transfer-step-panel .df2-card-body {
     overflow: hidden !important;
@@ -1136,6 +1165,11 @@
   .df2-map-step-workspace {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr) minmax(0, min(36vh, 260px));
+  }
+
+  .df2-map-step-workspace.is-full-editor {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
   }
 
   .df2-map-step-head .df2-card-sub {
@@ -1338,6 +1372,10 @@
   padding: 0;
   border-top: none;
   margin-top: 0;
+}
+
+.df2-column-review-footer.df2-column-workbench-pagination {
+  justify-content: space-between;
 }
 
 .df2-column-workbench-page-label {

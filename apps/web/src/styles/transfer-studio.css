@@ -2793,6 +2793,15 @@ th.df2-type-string .df2-type-badge {
   max-height: 44px;
 }
 
+/* Map Continue must wrap onto a visible second row — 44px + nowrap clips it. */
+.df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer {
+  max-height: none;
+  min-height: 44px;
+  height: auto;
+  flex-wrap: wrap;
+  overflow: visible;
+}
+
 .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer .df2-btn,
 .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer .df2-btn,
 .df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer .df2-btn,
@@ -2820,6 +2829,12 @@ th.df2-type-string .df2-type-badge {
   flex-wrap: nowrap;
   flex-shrink: 0;
   min-width: 0;
+}
+
+.df2-page-transfer-studio .df2-map-step-panel .df2-map-footer-actions {
+  min-width: max-content;
+  width: auto;
+  flex: 0 0 auto;
 }
 
 .df2-page-transfer-studio .df2-wizard-footer .df2-btn-ghost,
@@ -8695,9 +8710,11 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-map-footer {
   display: flex;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  max-height: none;
+  overflow: visible;
 }
 /* Back is first child ? left-aligned like Source/Dest */
 .df2-map-footer > .df2-btn:first-child {
@@ -8802,7 +8819,10 @@ button.df2-vd-assist-toggle:focus-visible {
   align-items: center;
   gap: 8px;
   margin-left: auto;
+  flex: 0 0 auto;
   flex-shrink: 0;
+  min-width: max-content;
+  width: auto;
 }
 .df2-map-identity-banner.is-compact {
   align-items: center;
@@ -9577,7 +9597,10 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-map-step-workspace,
 .df2-map-step-workspace.is-full-editor {
   grid-template-columns: minmax(0, 1fr) !important;
+  grid-template-rows: minmax(0, 1fr) !important;
   min-height: 0 !important;
+  height: auto !important;
+  max-height: 100%;
   flex: 1 1 0 !important;
   gap: 0 !important;
 }
@@ -10150,6 +10173,34 @@ button.df2-vd-assist-toggle:focus-visible {
     width: auto !important;
     flex-wrap: nowrap !important;
   }
+
+  /* Map primary is longer than the density band — wrap instead of clipping. */
+  .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer {
+    flex-wrap: wrap !important;
+    max-height: none !important;
+  }
+}
+
+/* Map step Continue — beat density max-height / 220px button clip / 100% action wrap. */
+.df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer.df2-map-footer {
+  max-height: none !important;
+  min-height: 44px;
+  height: auto !important;
+  overflow: visible !important;
+  flex-shrink: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-map-step-panel .df2-map-footer-actions {
+  width: auto !important;
+  min-width: max-content;
+  flex: 0 0 auto !important;
+  margin-left: auto;
+}
+
+.df2-page-transfer-studio .df2-map-step-panel .df2-map-footer-actions .df2-btn-primary {
+  max-width: none;
+  min-width: max-content;
+  flex-shrink: 0;
 }
 
 @media (max-width: 640px) {

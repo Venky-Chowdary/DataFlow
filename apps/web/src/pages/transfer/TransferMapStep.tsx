@@ -216,6 +216,24 @@ export function TransferMapStep({
     && (uniqueKeySuggestions.length > 0 || compositeKeySuggestions.length > 0),
   );
 
+  const continueToValidate = (
+    <button
+      type="button"
+      className="df2-btn df2-btn-primary"
+      onClick={onContinue}
+      disabled={mappingReviewCount > 0}
+      title={
+        mappingReviewCount > 0
+          ? (health.falseFriendCount > 0
+            ? health.detail
+            : `${mappingReviewCount} column(s) need Approve or Accept risk before Validate`)
+          : "Continue to Validate"
+      }
+    >
+      Continue to Validate →
+    </button>
+  );
+
   return (
     <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-map-step-panel">
       <div
@@ -366,6 +384,7 @@ export function TransferMapStep({
                 onFilterChange={handleFilterChange}
                 focusSource={focusSource}
                 onFocusHandled={() => setFocusSource(null)}
+                footerAction={continueToValidate}
               />
             </div>
           </div>
@@ -440,21 +459,7 @@ export function TransferMapStep({
               <DtIcon name="settings" size={14} /> Advanced
             </button>
           )}
-          <button
-            type="button"
-            className="df2-btn df2-btn-primary"
-            onClick={onContinue}
-            disabled={mappingReviewCount > 0}
-            title={
-              mappingReviewCount > 0
-                ? (health.falseFriendCount > 0
-                  ? health.detail
-                  : `${mappingReviewCount} column(s) need Approve or Accept risk before Validate`)
-                : "Continue to Validate"
-            }
-          >
-            Continue to Validate →
-          </button>
+          {columnMappings.length === 0 ? continueToValidate : null}
         </div>
       </div>
 

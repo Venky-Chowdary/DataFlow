@@ -4457,6 +4457,14 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   backdrop-filter: none;
 }
 
+.df2-map-step-panel > .df2-wizard-footer.df2-map-footer {
+  max-height: none;
+  min-height: 44px;
+  height: auto;
+  flex-wrap: wrap;
+  overflow: visible;
+}
+
 .df2-transfer-step-viewport > .df2-wizard-footer > .df2-btn:first-child,
 .df2-map-step-panel > .df2-wizard-footer > .df2-btn:first-child {
   margin-right: 0;

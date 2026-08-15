@@ -89,6 +89,30 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(src, /decision === "review"[\s\S]*executiveSummary\?\.subtitle/);
   });
 
+  it("Map step keeps Continue on the mapping-card footer and does not clip it", () => {
+    const mapStep = readFileSync(join(webRoot, "pages/transfer/TransferMapStep.tsx"), "utf8");
+    const review = readFileSync(join(webRoot, "components/ColumnReviewPanel.tsx"), "utf8");
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const workbench = readFileSync(join(webRoot, "styles/column-workbench.css"), "utf8");
+
+    assert.match(mapStep, /footerAction=\{continueToValidate\}/);
+    assert.match(mapStep, /Continue to Validate →/);
+    assert.match(review, /footerAction\?: ReactNode/);
+    assert.match(review, /df2-column-review-footer-action/);
+    assert.doesNotMatch(review, /compact && sampleRows && sampleRows\.length > 0 \? "is-split"/);
+
+    assert.match(
+      studio,
+      /df2-map-step-panel > \.df2-card-footer\.df2-wizard-footer\.df2-map-footer \{[\s\S]*max-height:\s*none !important/,
+    );
+    assert.match(studio, /grid-template-rows:\s*minmax\(0, 1fr\) !important/);
+    assert.match(
+      workbench,
+      /df2-map-step-workspace\.is-full-editor \{[\s\S]*grid-template-rows:\s*minmax\(0, 1fr\)/,
+    );
+    assert.match(workbench, /df2-column-review-footer-action/);
+  });
+
   it("source-probe duplicate signal is recognized for Fix routing", () => {
     assert.equal(
       isDuplicateIdentitySignal("id: duplicate key values from source probe (a×4)"),
