@@ -148,11 +148,16 @@ def project_named_write(
     return out
 
 
+def _false_friend_confirmed(m: dict[str, Any]) -> bool:
+    """Per-row Confirm this pair — Approve eligible / user_override must not count."""
+    return bool(m.get("false_friend_confirmed") or m.get("falseFriendConfirmed"))
+
+
 def _mapping_column_kind(m: dict[str, Any], dest_l: set[str]) -> str:
     if is_intentional_omit(m):
         return COL_OMIT
     review = str(m.get("review_kind") or "").strip()
-    if review in FALSE_FRIEND_KINDS:
+    if review in FALSE_FRIEND_KINDS and not _false_friend_confirmed(m):
         return COL_FALSE_FRIEND
     if _is_pending_mapping(m):
         return COL_PENDING
@@ -308,6 +313,11 @@ def classify_dest_exists_shape(
         "dest_only_required": len(unfilled),
     }
     headline, detail, primary = _shape_copy(shape, counts, unfilled)
+    false_friend_sources = [
+        str(c.get("source") or "")
+        for c in columns
+        if c["kind"] == COL_FALSE_FRIEND and str(c.get("source") or "").strip()
+    ]
     return {
         "shape": shape,
         "destination_table_exists": destination_table_exists,
@@ -317,6 +327,7 @@ def classify_dest_exists_shape(
         "dest_only": dest_only,
         "unfilled_required": unfilled,
         "unaccounted_sources": list(coverage["unaccounted"]),
+        "false_friend_sources": false_friend_sources,
         "counts": counts,
         "headline": headline,
         "detail": detail,
@@ -424,6 +435,7 @@ def build_shape_gate(contract: dict[str, Any]) -> dict[str, Any]:
             "headline": contract.get("headline"),
             "detail": contract.get("detail"),
             "unaccounted_sources": contract.get("unaccounted_sources") or [],
+            "false_friend_sources": contract.get("false_friend_sources") or [],
             "dest_only": contract.get("dest_only") or [],
             "extra_source_columns": [
                 str(c.get("source") or "")

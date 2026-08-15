@@ -26,6 +26,16 @@ describe("destExistsShape", () => {
     assert.deepEqual(destOnlyPreserveColumns(contract), ["updated_at"]);
   });
 
+  it("focuses the false-friend column on confirm_or_remap", () => {
+    const cta = destExistsPrimaryCta({
+      primary_action: "confirm_or_remap",
+      extra_source_columns: ["loyalty_tier"],
+      false_friend_sources: ["order_qty"],
+    });
+    assert.equal(cta?.kind, "confirm_or_remap");
+    assert.equal(cta?.column, "order_qty");
+  });
+
   it("maps G15 primary_action to one Validate button", () => {
     const cta = destExistsPrimaryCta({
       primary_action: "reload_dest_schema",

@@ -17,6 +17,8 @@ export interface DestExistsShapeContract {
   primary_action?: string;
   unaccounted_sources?: string[];
   extra_source_columns?: string[];
+  false_friend_sources?: string[];
+  columns?: Array<{ source?: string; kind?: string }>;
   dest_only?: Array<{ target?: string; kind?: string }>;
   counts?: Record<string, number>;
   write_by?: string;
@@ -71,11 +73,18 @@ export function destExistsPrimaryCta(
   const action = String(contract.primary_action || "").trim();
   if (!action || action === "continue_validate") return null;
   const extras = extraSourceColumnsFromContract(contract);
+  const friends = [
+    ...(contract.false_friend_sources || []),
+    ...((contract.columns || [])
+      .filter((c) => (c.kind || "") === "false_friend" && c.source)
+      .map((c) => String(c.source))),
+  ].filter(Boolean);
   const kind = ACTION_KIND[action] || "review_mappings";
   const label = ACTION_LABEL[action] || ACTION_LABEL.review_map;
   const cta: DestExistsPrimaryCta = { kind, label };
-  if (extras[0] && (kind === "review_mappings" || kind === "confirm_or_remap" || kind === "confirm_add")) {
-    cta.column = extras[0];
+  const focus = kind === "confirm_or_remap" ? (friends[0] || extras[0]) : extras[0];
+  if (focus && (kind === "review_mappings" || kind === "confirm_or_remap" || kind === "confirm_add")) {
+    cta.column = focus;
   }
   return cta;
 }

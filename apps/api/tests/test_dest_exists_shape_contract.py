@@ -181,3 +181,15 @@ def test_explain_gate_g15_uses_primary_action() -> None:
 
     reload_g = explain_gate(GATE_ID, "unproven", {"primary_action": "reload_dest_schema"})
     assert reload_g["suggested_actions"][0]["kind"] == "reload_dest_schema"
+
+    confirm_g = explain_gate(
+        GATE_ID,
+        "1 false-friend pair(s) need confirm",
+        {
+            "primary_action": "confirm_or_remap",
+            "false_friend_sources": ["order_qty"],
+            "extra_source_columns": ["loyalty_tier"],
+        },
+    )
+    assert confirm_g["suggested_actions"][0]["kind"] == "confirm_or_remap"
+    assert confirm_g["suggested_actions"][0]["column"] == "order_qty"

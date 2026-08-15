@@ -276,6 +276,8 @@ export async function runPreflight(payload: {
     requires_review?: boolean;
     score_gap?: number;
     user_override?: boolean;
+    review_kind?: string;
+    false_friend_confirmed?: boolean;
     create_new?: boolean;
     assignment_strategy?: string;
     semantic_role?: string;

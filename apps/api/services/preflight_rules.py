@@ -824,7 +824,11 @@ def _g15_suggested_actions(action: str, details: dict[str, Any] | None = None) -
         for c in (details.get("extra_source_columns") or details.get("unaccounted_sources") or [])
         if str(c).strip()
     ]
-    focus = extras[0] if extras else ""
+    friends = [
+        str(c)
+        for c in (details.get("false_friend_sources") or [])
+        if str(c).strip()
+    ]
     kind_map = {
         "review_map": ("review_mappings", "Open Map to remap extra columns"),
         "confirm_or_remap": ("confirm_or_remap", "Confirm or remap false-friend pairs"),
@@ -833,6 +837,7 @@ def _g15_suggested_actions(action: str, details: dict[str, Any] | None = None) -
         "continue_validate": ("continue_validate", "Continue — dest-only columns stay off SET"),
     }
     kind, label = kind_map.get(action, ("review_mappings", "Open Map to remap extra columns"))
+    focus = friends[0] if kind == "confirm_or_remap" and friends else (extras[0] if extras else "")
     row: dict[str, str] = {"kind": kind, "label": label}
     if focus and kind in {"review_mappings", "confirm_or_remap", "confirm_add"}:
         row["column"] = focus

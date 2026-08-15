@@ -173,6 +173,34 @@
       "expect_false_friend": 1
     },
     {
+      "id": "false_friend_qty_amt_confirmed",
+      "note": "Per-row Confirm this pair clears G15. review_kind stays for honesty.",
+      "table_exists": true,
+      "source": ["order_id", "order_qty"],
+      "dest": ["order_id", "order_amt"],
+      "nullability": {"order_id": false, "order_amt": true},
+      "mappings": [
+        {"source": "order_id", "target": "order_id", "confidence": 0.99},
+        {"source": "order_qty", "target": "order_amt", "confidence": 0.78, "review_kind": "measure_kind", "false_friend_confirmed": true, "user_override": true}
+      ],
+      "expect_shape": "equal",
+      "expect_false_friend": 0
+    },
+    {
+      "id": "false_friend_qty_amt_approve_does_not_clear",
+      "note": "Approve eligible / user_override must not clear qty≠amt.",
+      "table_exists": true,
+      "source": ["order_id", "order_qty"],
+      "dest": ["order_id", "order_amt"],
+      "nullability": {"order_id": false, "order_amt": true},
+      "mappings": [
+        {"source": "order_id", "target": "order_id", "confidence": 0.99},
+        {"source": "order_qty", "target": "order_amt", "confidence": 0.78, "requires_review": false, "review_kind": "measure_kind", "user_override": true, "approved": true}
+      ],
+      "expect_shape": "equal",
+      "expect_false_friend": 1
+    },
+    {
       "id": "false_friend_user_customer",
       "note": "CRM user_id is not dest customer_id.",
       "table_exists": true,

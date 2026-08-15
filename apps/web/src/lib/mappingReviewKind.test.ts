@@ -10,6 +10,7 @@ import {
   applyOperatorRemapDest,
   approveMappingHonestly,
   approveMappingsHonestly,
+  buildPreflightMappings,
   classifyMappingReview,
   confirmFalseFriendMapping,
   countApproveEligible,
@@ -140,5 +141,14 @@ describe("Map review kind — false-friend operator surface", () => {
     assert.equal(remapped.reviewKind, "generic");
     assert.equal(remapped.approved, false);
     assert.equal(classifyMappingReview(remapped), "generic");
+    const wire = buildPreflightMappings([], [confirmed]);
+    assert.equal(wire[0].false_friend_confirmed, true);
+    assert.equal(wire[0].review_kind, "measure_kind");
+    assert.equal(wire[0].user_override, true);
+    const unconfirmed = buildPreflightMappings([], [qtyAmt()]);
+    assert.equal(unconfirmed[0].false_friend_confirmed, undefined);
+    const restored = editableFromPipelineMappings(wire);
+    assert.equal(restored[0].falseFriendConfirmed, true);
+    assert.equal(restored[0].approved, true);
   });
 });

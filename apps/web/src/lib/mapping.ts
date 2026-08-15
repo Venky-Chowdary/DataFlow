@@ -1735,6 +1735,8 @@ export function buildPreflightMappings(
         risk_acknowledged: omitted ? undefined : Boolean(safe.riskAcknowledged) || undefined,
         risk_contract: omitted ? undefined : (safe.riskContract || undefined),
         review_kind: omitted ? undefined : (safe.reviewKind || classifyMappingReview(safe) || undefined),
+        // Engine G15 only clears false-friend on this flag — not Approve / user_override.
+        false_friend_confirmed: omitted ? undefined : Boolean(safe.falseFriendConfirmed) || undefined,
       };
     });
   }
@@ -1790,6 +1792,7 @@ export function editableFromPipelineMappings(
     create_new_risks?: Array<{ kind?: string; severity?: string; message?: string }>;
     column_profile?: ColumnProfile | Record<string, unknown> | null;
     review_kind?: string;
+    false_friend_confirmed?: boolean;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -1910,6 +1913,7 @@ export function editableFromPipelineMappings(
     // Fail-closed: never invent Approve from confidence. Operator must Approve
     // (or Approve-all for eligible rows). Ready ≡ approved only.
     const autoApproved = false;
+    const friendConfirmed = Boolean(m.false_friend_confirmed);
     const base: EditableMapping = {
       source: m.source,
       target: m.target,
@@ -1917,7 +1921,8 @@ export function editableFromPipelineMappings(
       inferredType: sourceType,
       destType,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: autoApproved,
+      approved: friendConfirmed || autoApproved,
+      falseFriendConfirmed: friendConfirmed || undefined,
       isPii: m.is_pii,
       reason: specialty && !(m.reasoning || "").toLowerCase().includes("identity")
         ? [m.reasoning, `${sourceType || destType} — identity payload (dim/SRID not rewritten)`].filter(Boolean).join(" · ")
@@ -1927,7 +1932,9 @@ export function editableFromPipelineMappings(
             ? "ARRAY — JSON default; optional normalize/hybrid/explode (Map policy)"
             : m.reasoning,
       existsInDestination: existsInDest,
-      requiresReview: requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
+      requiresReview: friendConfirmed
+        ? false
+        : requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
       scoreGap: m.score_gap,
       transform: uiTf === "none" && (structish || arrayish) ? "parse_json" : uiTf,
       engineTransform: engineTf || (structish || arrayish ? "json" : undefined),
