@@ -810,6 +810,28 @@ def analyze_coercion(
 
             risk_cleared = mapping_has_clearing_risk_contract(m)
             severity = "warn" if risk_cleared else "block"
+            if failure_class is None:
+                # A declared collapse blocks even when the sample coerces, so it
+                # must carry the same root cause a failing value would: without
+                # one the gate names no class and Studio has no primary action.
+                from services.decision_kernel import rank_suggested_target_type
+                from services.decision_kernel.findings import (
+                    FailureClass,
+                    classify_declared_collapse,
+                )
+
+                failure_class = classify_declared_collapse(src_type, tgt_type).value
+                if not suggested_type:
+                    suggested_type = (
+                        rank_suggested_target_type(
+                            source_type=src_type,
+                            target_type=tgt_type,
+                            dest_db=dest_db_type,
+                            failure_class=FailureClass(failure_class),
+                            failure_examples=raw_failure_values,
+                        )
+                        or None
+                    )
             if not fix:
                 fix = (
                     f"Column '{src}' → {tgt_type}: declared mapping collapses fidelity "

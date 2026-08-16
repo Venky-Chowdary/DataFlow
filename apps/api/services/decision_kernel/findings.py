@@ -61,6 +61,29 @@ _FRACTIONAL_RE = re.compile(r"^-?\d+\.\d+$")
 _QUOTED_VALUE_RE = re.compile(r"""['"]([^'"]+)['"]""")
 
 
+#: Source logicals whose value space carries a fraction the integer target drops.
+_FRACTIONAL_LOGICALS = frozenset({"float", "double", "decimal", "numeric", "money"})
+
+
+def classify_declared_collapse(source_type: str, target_type: str) -> FailureClass:
+    """Failure class for a type path that collapses fidelity by declaration.
+
+    A preview sample that happens to round-trip is not evidence the path is
+    safe — ``FLOAT → INT`` drops the fraction of every value that has one, and
+    the first such row is in the load, not the sample. Naming the class here
+    keeps one root cause pointing at one remediation: a fractional loss is
+    remedied by widening the numeric carrier, which is a different action from
+    the generic collapse (remap / transform / Risk Contract).
+    """
+    from services.decision_kernel.type_invent import normalize_logical_type
+
+    src_logical = normalize_logical_type(source_type or "")
+    tgt_logical = normalize_logical_type(target_type or "")
+    if tgt_logical == "integer" and src_logical in _FRACTIONAL_LOGICALS:
+        return FailureClass.FRACTIONAL_PRECISION_LOSS
+    return FailureClass.FIDELITY_COLLAPSE
+
+
 def classify_transform_failure(
     reason: str,
     *,
@@ -396,7 +419,10 @@ def findings_from_coercion_report(
             except ValueError:
                 fc = None
         if fidelity and fc is None:
-            fc = FailureClass.FIDELITY_COLLAPSE
+            fc = classify_declared_collapse(
+                str(col.get("source_type") or ""),
+                str(col.get("target_type") or ""),
+            )
         finding = build_finding(
             source_column=str(col.get("source") or ""),
             target_column=str(col.get("target") or ""),
