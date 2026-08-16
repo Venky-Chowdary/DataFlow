@@ -7,6 +7,7 @@ import logging
 import os
 from services.brand_env import getenv_brand
 import re
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from decimal import Decimal

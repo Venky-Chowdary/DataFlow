@@ -11,7 +11,6 @@ not the other way round.
 
 from __future__ import annotations
 
-from typing import Any
 
 
 def apply_create_new_risk_stamps(
@@ -24,7 +23,10 @@ def apply_create_new_risk_stamps(
     """Stamp create-new type risks without importing mapping_pipeline (cycle-safe)."""
     # Deferred: semantic_mapper imports this module, so binding its calibration
     # helper at import time would close the cycle.
-    from services.semantic_mapper import _calibrated_confidence
+    from services.semantic_mapper import (
+        IDENTITY_PASSTHROUGH_CONFIDENCE,
+        _calibrated_confidence,
+    )
     from services.mapping_proof import mapping_fidelity
     from services.decimal_observe import (
         ieee_float_create_new_risk,
