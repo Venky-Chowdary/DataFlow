@@ -21,7 +21,6 @@ from __future__ import annotations
 import csv
 import io
 import os
-import socket
 import sqlite3
 import uuid
 from pathlib import Path
@@ -39,50 +38,7 @@ import src.transfer.engine as engine_mod
 from src.transfer import file_stream
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
-
-
-def _pg_up() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 5432), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def _mysql_up() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 3306), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def _mongo_up() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 27017), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def _pg_creds() -> dict:
-    return {
-        "host": os.environ.get("P2_PG_HOST", "127.0.0.1"),
-        "port": int(os.environ.get("P2_PG_PORT", "5432")),
-        "database": os.environ.get("P2_PG_DB", "postgres"),
-        "username": os.environ.get("P2_PG_USER", "postgres"),
-        "password": os.environ.get("P2_PG_PASSWORD", "admin"),
-    }
-
-
-def _mysql_creds() -> dict:
-    return {
-        "host": os.environ.get("P2_MYSQL_HOST", "127.0.0.1"),
-        "port": int(os.environ.get("P2_MYSQL_PORT", "3306")),
-        "database": os.environ.get("P2_MYSQL_DB", "dataflow"),
-        "username": os.environ.get("P2_MYSQL_USER", "dataflow"),
-        "password": os.environ.get("P2_MYSQL_PASSWORD", "dataflow"),
-    }
+from tests.helpers.live_env import mongo_up, mysql_creds, mysql_up, pg_creds, pg_up
 
 
 def _run(req: TransferRequest, job_id: str | None = None, *, resume: bool = False):
@@ -449,13 +405,13 @@ def test_golden_sqlite_to_sqlite_resume_from_checkpoint(tmp_path: Path, monkeypa
     assert rows == [(1, 10), (2, 20), (3, 30), (4, 40), (5, 50), (6, 60)]
 
 
-@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+@pytest.mark.skipif(not pg_up(), reason="PostgreSQL not reachable")
 @pytest.mark.parametrize("with_maps", [False, True])
 @pytest.mark.parametrize("skip_preflight", [False, True])
 def test_golden_pg_to_pg_no_config(with_maps: bool, skip_preflight: bool):
     import psycopg2
 
-    creds = _pg_creds()
+    creds = pg_creds()
     src_table = f"p2_src_{uuid.uuid4().hex[:8]}"
     dst_table = f"p2_dst_{uuid.uuid4().hex[:8]}"
     conn = psycopg2.connect(
@@ -545,13 +501,13 @@ def test_golden_pg_to_pg_no_config(with_maps: bool, skip_preflight: bool):
             conn.close()
 
 
-@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+@pytest.mark.skipif(not pg_up(), reason="PostgreSQL not reachable")
 @pytest.mark.parametrize("with_maps", [False, True])
 @pytest.mark.parametrize("skip_preflight", [False, True])
 def test_golden_csv_to_pg_no_config(tmp_path: Path, with_maps: bool, skip_preflight: bool):
     import psycopg2
 
-    creds = _pg_creds()
+    creds = pg_creds()
     csv_path = tmp_path / "p2.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -616,11 +572,11 @@ def test_golden_csv_to_pg_no_config(tmp_path: Path, with_maps: bool, skip_prefli
             conn.close()
 
 
-@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+@pytest.mark.skipif(not pg_up(), reason="PostgreSQL not reachable")
 def test_golden_pg_to_sqlite_no_config(tmp_path: Path):
     import psycopg2
 
-    creds = _pg_creds()
+    creds = pg_creds()
     src_table = f"p2_pgs_{uuid.uuid4().hex[:8]}"
     conn = psycopg2.connect(
         host=creds["host"],
@@ -679,12 +635,12 @@ def test_golden_pg_to_sqlite_no_config(tmp_path: Path):
             conn.close()
 
 
-@pytest.mark.skipif(not (_mongo_up() and _pg_up()), reason="MongoDB or PostgreSQL not reachable")
+@pytest.mark.skipif(not (mongo_up() and pg_up()), reason="MongoDB or PostgreSQL not reachable")
 def test_golden_mongo_to_pg_no_config():
     import psycopg2
     from pymongo import MongoClient
 
-    creds = _pg_creds()
+    creds = pg_creds()
     mongo_uri = os.environ.get("P2_MONGO_URI", "mongodb://127.0.0.1:27017")
     db_name = f"p2_{uuid.uuid4().hex[:8]}"
     coll_name = "docs"
@@ -746,11 +702,11 @@ def test_golden_mongo_to_pg_no_config():
             conn.close()
 
 
-@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+@pytest.mark.skipif(not pg_up(), reason="PostgreSQL not reachable")
 def test_golden_pg_to_parquet_export():
     import psycopg2
 
-    creds = _pg_creds()
+    creds = pg_creds()
     src_table = f"p2_pq_{uuid.uuid4().hex[:8]}"
     # Export into the API workspace (sandbox requires in-app path).
     out_dir = Path(__file__).resolve().parents[1] / ".p2_exports"
@@ -820,7 +776,7 @@ def test_golden_pg_to_parquet_export():
 
 
 @pytest.mark.skipif(
-    not (_pg_up() and _mysql_up()),
+    not (pg_up() and mysql_up()),
     reason="PostgreSQL or MySQL not reachable (CI provides both via services)",
 )
 @pytest.mark.parametrize("with_maps", [False, True])
@@ -829,8 +785,8 @@ def test_golden_pg_to_mysql_no_config(with_maps: bool, skip_preflight: bool):
     import psycopg2
     import pymysql
 
-    pg = _pg_creds()
-    my = _mysql_creds()
+    pg = pg_creds()
+    my = mysql_creds()
     src_table = f"p2_src_{uuid.uuid4().hex[:8]}"
     dst_table = f"p2_dst_{uuid.uuid4().hex[:8]}"
     conn = psycopg2.connect(

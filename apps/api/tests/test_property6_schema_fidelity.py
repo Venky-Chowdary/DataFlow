@@ -8,7 +8,6 @@ CHECK, FK, views, triggers, etc. Silence is a bug.
 from __future__ import annotations
 
 import os
-import socket
 import sqlite3
 import uuid
 from pathlib import Path
@@ -30,28 +29,11 @@ from services.schema_fidelity import (
 )
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
+from tests.helpers.live_env import mysql_creds, mysql_up, pg_creds, pg_up
 
 
 def _run(req: TransferRequest):
     return UniversalTransferEngine().execute_tracked(req, uuid.uuid4().hex[:24])
-
-
-def _pg_up() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 5432), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def _pg_creds() -> dict:
-    return {
-        "host": os.environ.get("P6_PG_HOST", os.environ.get("P2_PG_HOST", "127.0.0.1")),
-        "port": int(os.environ.get("P6_PG_PORT", os.environ.get("P2_PG_PORT", "5432"))),
-        "database": os.environ.get("P6_PG_DB", os.environ.get("P2_PG_DB", "dataflow")),
-        "username": os.environ.get("P6_PG_USER", os.environ.get("P2_PG_USER", "dataflow")),
-        "password": os.environ.get("P6_PG_PASSWORD", os.environ.get("P2_PG_PASSWORD", "dataflow")),
-    }
 
 
 def _aspect_status(report: dict, aspect: str) -> set[str]:
@@ -263,11 +245,11 @@ def test_sqlite_create_new_carries_constraints_end_to_end(tmp_path: Path):
         dst.close()
 
 
-@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not listening on 5432")
+@pytest.mark.skipif(not pg_up("P6"), reason="PostgreSQL not listening on 5432")
 def test_pg_create_new_carries_pk_not_null_default_live():
     import psycopg2
 
-    creds = _pg_creds()
+    creds = pg_creds("P6")
     suffix = uuid.uuid4().hex[:8]
     src_table = f"p6_src_{suffix}"
     dst_table = f"p6_dst_{suffix}"
@@ -487,26 +469,6 @@ def test_check_and_fk_not_certified_absent_when_unprobed():
     assert "skipped" not in _aspect_status(plan.report.to_dict(), "check")
 
 
-def _mysql_up() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 3306), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def _mysql_creds() -> dict:
-    return {
-        "host": os.environ.get("P6_MYSQL_HOST", os.environ.get("P2_MYSQL_HOST", "127.0.0.1")),
-        "port": int(os.environ.get("P6_MYSQL_PORT", os.environ.get("P2_MYSQL_PORT", "3306"))),
-        "database": os.environ.get("P6_MYSQL_DB", os.environ.get("P2_MYSQL_DB", "dataflow")),
-        "username": os.environ.get("P6_MYSQL_USER", os.environ.get("P2_MYSQL_USER", "dataflow")),
-        "password": os.environ.get(
-            "P6_MYSQL_PASSWORD", os.environ.get("P2_MYSQL_PASSWORD", "dataflow")
-        ),
-    }
-
-
 def test_mysql_plan_carries_pk_not_null_default_unique():
     catalog = SourceSchemaCatalog(
         dialect="mysql",
@@ -579,11 +541,11 @@ def test_mysql_unique_on_text_is_unsupported_not_emitted():
     assert "PRIMARY KEY" in ddl.upper()
 
 
-@pytest.mark.skipif(not _mysql_up(), reason="MySQL/MariaDB not listening on 3306")
+@pytest.mark.skipif(not mysql_up("P6"), reason="MySQL/MariaDB not listening on 3306")
 def test_mysql_create_new_carries_pk_not_null_default_unique_live():
     pymysql = pytest.importorskip("pymysql")
 
-    creds = _mysql_creds()
+    creds = mysql_creds("P6")
     suffix = uuid.uuid4().hex[:8]
     src_table = f"p6_src_{suffix}"
     dst_table = f"p6_dst_{suffix}"
@@ -770,7 +732,7 @@ def test_mysql_create_new_carries_pk_not_null_default_unique_live():
             conn.close()
 
 
-@pytest.mark.skipif(not _mysql_up(), reason="MySQL/MariaDB not listening on 3306")
+@pytest.mark.skipif(not mysql_up("P6"), reason="MySQL/MariaDB not listening on 3306")
 def test_mysql_create_new_bare_varchar_inherits_width_and_unique_live():
     """Studio/Map default VARCHAR (no length) must inherit source VARCHAR(n).
 
@@ -779,7 +741,7 @@ def test_mysql_create_new_bare_varchar_inherits_width_and_unique_live():
     """
     pymysql = pytest.importorskip("pymysql")
 
-    creds = _mysql_creds()
+    creds = mysql_creds("P6")
     suffix = uuid.uuid4().hex[:8]
     src_table = f"p6_vw_src_{suffix}"
     dst_table = f"p6_vw_dst_{suffix}"
