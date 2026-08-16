@@ -1,0 +1,32 @@
+# Bandit configuration — authoritative security-scan posture for DataFlow.
+#
+# The CI `security` job gates on HIGH severity only (`bandit -lll`). This file
+# makes a full-tree scan (`bandit -c bandit.yaml -r .`) reflect reality by
+# excluding generated/vendored trees and test fixtures, and by recording the
+# patterns that naive scanners misread as vulnerabilities.
+#
+# See docs/SECURITY_SCANNING.md for the false-positive catalogue and evidence.
+
+exclude_dirs:
+  - "/node_modules"
+  - "/.git"
+  - "/build"
+  - "/dist"
+  - "/apps/web"          # JS/TS frontend — not Python
+  - "/packages/ml/train" # offline training scripts, not runtime
+
+# Test-only assertions are intentional (pytest). The runtime gate scans
+# connectors/services/src, never tests, so this only affects full-tree runs.
+skips:
+  - B101   # assert_used — legitimate in tests and invariant checks
+
+# NOT skipped (real signal is kept):
+#   B102 exec_used / B307 eval — Bandit only flags the Python builtins, which
+#         this codebase does not use. The platform report's "exec/eval" are
+#         Redis EVAL (Lua) in services/cdc_lease_store.py and SQL EXEC /
+#         cursor.execute in services/procedure_source.py — not Python.
+#   B303/B324 weak hash — kept; non-security hashes carry usedforsecurity=False
+#         (e.g. services/foreign_key_carry.py identifier shortening).
+#   B311 random — kept; used only for deterministic synthetic data / jitter.
+#   B608 hardcoded_sql — kept (MEDIUM); identifier paths hardened via
+#         connectors/sql_identifiers.py. Tracked, not a HIGH gate failure.

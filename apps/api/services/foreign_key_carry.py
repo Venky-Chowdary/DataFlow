@@ -184,7 +184,12 @@ def _constraint_name(dest_table: str, fk: ForeignKey, index: int) -> str:
     # safe common denominator across every engine we emit to. Truncation can
     # collide, so a digest of the full name replaces the tail.
     if len(base) > 30:
-        digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:6]
+        # Non-security: 6-hex suffix that disambiguates a truncated identifier.
+        # usedforsecurity=False documents intent and clears the weak-hash gate
+        # without changing the digest value.
+        digest = hashlib.sha1(  # nosec B324 - identifier shortening, not security
+            base.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:6]
         base = f"{base[:23]}_{digest}"
     return base
 
