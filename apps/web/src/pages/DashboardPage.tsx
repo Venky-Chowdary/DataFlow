@@ -171,7 +171,7 @@ export function DashboardPage({
       : cdcLagSeconds != null && cdcLagSeconds > 60
         ? `CDC lag ${cdcLagSeconds.toFixed(0)}s`
         : null,
-    pausedPipelines > 0 ? `${pausedPipelines} paused pipeline${pausedPipelines === 1 ? "" : "s"}` : null,
+    pausedPipelines > 0 ? `${pausedPipelines} paused schedule${pausedPipelines === 1 ? "" : "s"}` : null,
   ].filter(Boolean) as string[];
   const attentionSignature = attentionItems.join(" · ");
   const [attentionDismissed, setAttentionDismissed] = useState(false);
@@ -447,11 +447,11 @@ export function DashboardPage({
 
             <article className="df2-overview-v3-card">
               <header className="df2-overview-v3-card-head">
-                <h2 className="df2-overview-v3-card-title">Pipelines</h2>
+                <h2 className="df2-overview-v3-card-title">Schedules</h2>
               </header>
               <div className="df2-overview-v3-card-body">
                 {schedules.length === 0 ? (
-                  <p className="df2-overview-v3-inline-empty">No scheduled pipelines.</p>
+                  <p className="df2-overview-v3-inline-empty">No schedules yet.</p>
                 ) : (
                   <>
                     <ul className="df2-overview-pipeline-list">
@@ -466,7 +466,11 @@ export function DashboardPage({
                       ))}
                     </ul>
                     <p className="df2-overview-v3-rail-meta">
-                      {enabledPipelines} enabled
+                      {/* Name the whole set the Schedules page lists, not just
+                          the enabled slice — the two screens counted different
+                          things under the same word. */}
+                      {schedules.length} total · {enabledPipelines} enabled
+                      {pausedPipelines > 0 ? ` · ${pausedPipelines} paused` : ""}
                     </p>
                   </>
                 )}

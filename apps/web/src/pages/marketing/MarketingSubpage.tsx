@@ -142,7 +142,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       price: "Custom",
       period: "usage-aligned",
       blurb: "Pipelines, Pilot, and shared connectors — priced to cadence, never seats-first.",
-      cta: "Talk to sales",
+      cta: "Contact sales",
       action: () => onNavigate("contact"),
       tone: "team" as const,
       featured: true,
@@ -194,7 +194,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
               className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
               onClick={() => onNavigate("contact")}
             >
-              Talk to sales
+              Contact sales
             </button>
           </div>
         }
@@ -499,7 +499,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
             </div>
             <div className="lp-ent-cta-actions">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-                Talk to sales
+                Contact sales
               </button>
               <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("security")}>
                 Security overview
@@ -621,7 +621,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           </div>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Talk to sales
+              Contact sales
             </button>
             <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("pricing")}>
               See pricing

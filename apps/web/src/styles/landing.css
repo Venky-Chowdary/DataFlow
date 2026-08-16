@@ -2301,10 +2301,18 @@ html:has(.lp) {
   }
 }
 
-/* Design canvas breakpoints — hide CTAs before they collide with Pricing */
+/* Design canvas breakpoints — compact the CTAs before they collide with
+   Pricing. A laptop at 1280 is the most common buyer viewport, so the sales
+   route stays reachable there; below 1100 the whole nav collapses into the
+   menu, which carries Contact sales itself. */
 @media (max-width: 1280px) {
-  .lp-nav-action-secondary {
-    display: none !important;
+  .lp-nav-actions {
+    gap: 4px;
+  }
+
+  .lp-nav-actions .lp-btn {
+    padding-inline: 10px;
+    font-size: 13px;
   }
 }
 
@@ -9181,9 +9189,12 @@ html:has(.lp) {
   gap: 4px;
 }
 
+/* Column names are the point of this card, so they never break mid-token: the
+   fixed grid tracks split `order_amt` into `order_a`/`mt`. The pair wraps as a
+   whole instead when the card is too narrow. */
 .lp-hero-flow-edges li {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1.15fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   padding: 5px 6px;
@@ -9195,12 +9206,17 @@ html:has(.lp) {
   font-family: var(--df-font-mono, "JetBrains Mono", ui-monospace, monospace);
 }
 
+.lp-hero-flow-edges li code {
+  white-space: nowrap;
+}
+
 .lp-hero-flow-edges li span {
   color: #94a3b8;
   text-align: center;
 }
 
 .lp-hero-flow-edges li em {
+  margin-left: auto;
   font-style: normal;
   font-size: 9px;
   font-weight: 720;

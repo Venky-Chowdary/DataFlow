@@ -22,7 +22,8 @@ export type AppHashFocus = {
   panel?: string;
 };
 
-/** Friendly URL aliases → Screen ids (nav label “Pipelines” uses schedules).
+/** Friendly URL aliases → Screen ids. `pipelines` stays readable so links
+ * shared before the workspace settled on “Schedules” keep resolving.
  * Do not alias `home` — that path is the public marketing route. */
 const HASH_ALIASES: Record<string, Screen> = {
   pipelines: "schedules",
@@ -53,9 +54,9 @@ export function focusFromHash(hash: string): AppHashFocus | null {
   return { screen, jobId, panel };
 }
 
-/** Prefer operator-facing path segments when writing the hash. */
+/** Prefer operator-facing path segments when writing the hash — the segment
+ * must match the label the operator sees, so `schedules` writes itself. */
 const HASH_WRITE: Partial<Record<Screen, string>> = {
-  schedules: "pipelines",
   dashboard: "overview",
 };
 

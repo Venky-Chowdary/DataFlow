@@ -12166,15 +12166,18 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 2px;
 }
 
+/* Type size is the density ladder's to set (tokens.css); this page owns only
+   the two-line row's spacing. A page-scoped font-size here outranked the token
+   and left Jobs reading a step smaller than every other list. */
 .df2-page-jobs .df2-job-row-route,
 .df2-page-jobs .df2-job-row-name {
-  font-size: 12.5px;
+  font-size: var(--df-list-row-title);
   line-height: 1.25;
 }
 
 .df2-page-jobs .df2-job-row-meta {
   gap: 6px;
-  font-size: 10.5px;
+  font-size: var(--df-list-row-meta);
   line-height: 1.25;
 }
 

@@ -283,7 +283,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 <DtIcon name="arrow-right" size={16} />
               </button>
               <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("contact")}>
-                Talk to sales
+                Contact sales
               </button>
             </div>
             <p className="lp-hero-meta">

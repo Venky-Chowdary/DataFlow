@@ -112,6 +112,20 @@
   border-bottom: none;
 }
 
+/* Proof surfaces are long identifiers (quarantine_panel + rejected_details).
+   Held on one line they pushed the column past the container and the evidence
+   read as a truncated token behind a scrollbar — the one cell that must be
+   readable in full. Wrap it instead of scrolling the table. */
+.df2-page-benchmarks-table td code {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.df2-page-benchmarks-table td:has(code) {
+  white-space: normal;
+  min-width: 22ch;
+}
+
 .df2-page-benchmarks-product strong {
   display: inline-flex;
   align-items: center;

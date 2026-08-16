@@ -201,6 +201,28 @@ describe('list-row density tokens', () => {
     );
   });
 
+  it('own list-row typography — no page rule sets a literal font-size on a row name or meta', () => {
+    const offenders: string[] = [];
+    for (const file of readdirSync(STYLES_DIR).filter((f) => f.endsWith('.css'))) {
+      const css = readFileSync(join(STYLES_DIR, file), 'utf8');
+      for (const match of css.matchAll(
+        /([^{}]*\.df2-(?:job|connector|contract|pipeline)-row-(?:name|meta)(?![-\w])[^{}]*)\{([^}]*)\}/g,
+      )) {
+        for (const decl of match[2].split(';')) {
+          if (!/^\s*font-size\s*:/.test(decl)) continue;
+          if (decl.includes('var(--df-list-row-')) continue;
+          offenders.push(`${file}: ${match[1].trim()} {${decl.trim()}}`);
+        }
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'a page-scoped font-size outranks the density token, so one list reads a ' +
+        'step smaller than the rest at the same viewport',
+    );
+  });
+
   it('never get denser as the screen gets wider', () => {
     const heights = VIEWPORTS.map((vp) => Number.parseFloat(resolveAt(vp)['min-h']));
     for (let i = 1; i < heights.length; i += 1) {

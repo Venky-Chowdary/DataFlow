@@ -732,7 +732,7 @@ function AppShell({
               {mountedScreens.has("transforms") && (
                 <div className={`df2-screen-keep ${showScreen("transforms")}`} hidden={screen !== "transforms"} aria-hidden={screen !== "transforms"}>
                 <PageErrorBoundary label="Transformations">
-                  <TransformsPage connectors={connectors} />
+                  <TransformsPage connectors={connectors} onNavigate={setScreen} />
                 </PageErrorBoundary>
                 </div>
               )}

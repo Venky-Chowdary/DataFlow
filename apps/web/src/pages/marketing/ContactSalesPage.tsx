@@ -147,7 +147,7 @@ export function ContactSalesPage({
 
   return (
     <div className="lp-mkt-page lp-sales">
-      <section className="lp-sales-hero lp-sales-hero--split" aria-label="Talk to sales">
+      <section className="lp-sales-hero lp-sales-hero--split" aria-label="Contact sales">
         <div className="lp-mkt-wrap lp-sales-hero-inner">
           <div className="lp-sales-hero-copy">
             <p className="lp-sales-kicker">Contact sales</p>

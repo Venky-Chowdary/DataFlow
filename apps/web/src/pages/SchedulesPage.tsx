@@ -489,7 +489,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     Import YAML
                   </Button>
                   <Button size="sm" variant="primary" onClick={openCreate}>
-                    New pipeline
+                    New schedule
                   </Button>
                 </div>
               </>
@@ -501,7 +501,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       {showForm && (
         <div className="df2-pipeline-form is-active">
           <PageSection
-            title={editing ? "Edit pipeline" : "Create recurring sync"}
+            title={editing ? "Edit schedule" : "Create recurring sync"}
             subtitle={editing ? editing.name : "Schedule source → destination with your saved connectors"}
             className="df2-pipeline-form-card"
             actions={
@@ -537,7 +537,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             action={
               !showForm ? (
                 <Button variant="primary" onClick={openCreate}>
-                  Create pipeline
+                  Create schedule
                 </Button>
               ) : undefined
             }
@@ -547,12 +547,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             compact
             icon="activity"
             title={`No ${filter === "active" ? "active" : "paused"} schedules`}
-            description="Try another filter or create a new pipeline."
+            description="Try another filter or create a new schedule."
           />
         ) : (
           <div className="df2-pipeline-rows" role="list" aria-label="Schedules">
             <div className="df2-pipeline-rows-head" aria-hidden>
-              <span className="df2-pipeline-rows-head-name">Pipeline</span>
+              <span className="df2-pipeline-rows-head-name">Schedule</span>
               <span>Cadence</span>
               <span>Mode</span>
               <span>Last run</span>

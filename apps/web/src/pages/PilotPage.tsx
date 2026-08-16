@@ -350,15 +350,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 Delete chat
               </button>
             )}
-            <button
-              type="button"
-              className="df2-btn df2-btn-ghost df2-btn-sm"
-              onClick={startNewChat}
-              title="Start a new chat"
-            >
-              <DtIcon name="plus" size={14} />
-              New chat
-            </button>
+            {/* New chat lives in the chat rail — expanded as a button, collapsed
+                as the rail's plus icon — so the header never repeats it. */}
           </div>
         </div>
       <div className="df2-pilot-body">
@@ -387,9 +380,10 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             <div className="df2-pilot-aside-scroll">
               <div className="df2-pilot-section-label">
                 Recent chats
-                <span className="df2-pilot-session-count">
-                  {sessions.filter((s) => s.messages.length > 0).length}
-                </span>
+                {/* Count what the list shows — an unsent draft is listed, so
+                    counting only sent chats read as "Recent chats 0" above a
+                    visible row. */}
+                <span className="df2-pilot-session-count">{recentChats.length}</span>
               </div>
               <div className="df2-pilot-session-list">
                 {recentChats.length === 0 ? (

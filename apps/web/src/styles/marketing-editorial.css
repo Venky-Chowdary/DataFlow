@@ -8497,15 +8497,18 @@
   align-items: start !important;
 }
 
-.lp-mkt-hero-visual {
+/* A decorative illustration can be cropped to keep the hero band short; a
+   product shot cannot — clipping the semantic map to 248px hid two of its four
+   mapped columns and made the hero claim less than the product does. */
+.lp-mkt-hero-visual .lp-mkt-illustration {
   max-height: 248px;
   overflow: hidden;
 }
 
-.lp-mkt-hero-visual .lp-mkt-illustration,
 .lp-mkt-hero-visual .lp-mkt-shot,
 .lp-mkt-hero-visual .lp-cinema-stage {
-  max-height: 248px !important;
+  max-height: none;
+  overflow: visible;
 }
 
 .lp-footer.lp-footer--compact {
