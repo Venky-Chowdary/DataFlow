@@ -479,10 +479,16 @@ export function DocsPage() {
             ))}
           </nav>
           <div className="df2-docs-toc-card">
+            {/* The headline number is the live one. A catalog tile is not a
+                transfer-live driver, so it never gets the dominant type. */}
             <StatCard
-              label="Connector catalog"
-              value={total.toLocaleString()}
-              sub={statsError ? "Catalog offline" : `${transferLive.toLocaleString()} transfer-ready`}
+              label="Transfer-ready drivers"
+              value={statsError ? "—" : transferLive.toLocaleString()}
+              sub={
+                statsError
+                  ? "Catalog offline"
+                  : `of ${total.toLocaleString()} catalog tiles — tiles are not transfer-live`
+              }
               icon="database"
               tone="blue"
             />

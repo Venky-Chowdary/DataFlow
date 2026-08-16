@@ -167,6 +167,40 @@ describe('list-row density tokens', () => {
     );
   });
 
+  it('give a two-line row a declared height step, not an accidental one', () => {
+    for (const vp of VIEWPORTS) {
+      const resolved = resolveAt(vp);
+      const single = Number.parseFloat(resolved['min-h']);
+      const dual = Number.parseFloat(resolved['min-h-dual']);
+      assert.ok(resolved['min-h-dual'], `--df-list-row-min-h-dual is undefined at ${vp.label}`);
+      assert.ok(
+        dual >= single + 10,
+        `two-line rows resolve to ${dual}px against a ${single}px single-line row at ` +
+          `${vp.label}; a second content line needs its own declared step`,
+      );
+    }
+  });
+
+  it('own the Jobs row geometry — no hard-coded padding or height beside the tokens', () => {
+    const offenders: string[] = [];
+    for (const file of readdirSync(STYLES_DIR).filter((f) => f.endsWith('.css'))) {
+      const css = readFileSync(join(STYLES_DIR, file), 'utf8');
+      for (const match of css.matchAll(/([^{}]*\.df2-job-row(?![-\w])[^{}]*)\{([^}]*)\}/g)) {
+        for (const decl of match[2].split(';')) {
+          if (!/^\s*(padding|min-height|column-gap|gap)(-[a-z]+)?\s*:/.test(decl)) continue;
+          if (decl.includes('var(--df-list-row-')) continue;
+          offenders.push(`${file}: ${match[1].trim()} {${decl.trim()}}`);
+        }
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'Jobs rows must take their geometry from the shared tokens, or they drift ' +
+        'away from Connectors/Contracts/Schedules again',
+    );
+  });
+
   it('never get denser as the screen gets wider', () => {
     const heights = VIEWPORTS.map((vp) => Number.parseFloat(resolveAt(vp)['min-h']));
     for (let i = 1; i < heights.length; i += 1) {

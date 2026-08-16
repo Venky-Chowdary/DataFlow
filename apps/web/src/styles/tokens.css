@@ -176,6 +176,7 @@
   --df-list-row-pad-y: 8px;
   --df-list-row-pad-x: 12px;
   --df-list-row-min-h: 48px;
+  --df-list-row-min-h-dual: 60px;
   --df-list-row-title: 13px;
   --df-list-row-meta: 11.5px;
   --df-list-row-gap: 10px;
@@ -436,6 +437,7 @@ body:has(.df2-app) #root {
     --df-list-row-pad-y: 6px;
     --df-list-row-pad-x: 10px;
     --df-list-row-min-h: 44px;
+    --df-list-row-min-h-dual: 56px;
     --df-list-row-title: 12.5px;
     --df-list-row-meta: 11.5px;
     --df-list-row-gap: 8px;
@@ -450,6 +452,7 @@ body:has(.df2-app) #root {
     --df-list-row-pad-y: 7px;
     --df-list-row-pad-x: 12px;
     --df-list-row-min-h: 46px;
+    --df-list-row-min-h-dual: 58px;
     --df-list-row-title: 13px;
     --df-list-row-meta: 11.5px;
     --df-list-row-gap: 10px;
@@ -464,6 +467,7 @@ body:has(.df2-app) #root {
     --df-list-row-pad-y: 8px;
     --df-list-row-pad-x: 14px;
     --df-list-row-min-h: 48px;
+    --df-list-row-min-h-dual: 60px;
     --df-list-row-title: 13px;
     --df-list-row-meta: 12px;
     --df-list-row-gap: 12px;

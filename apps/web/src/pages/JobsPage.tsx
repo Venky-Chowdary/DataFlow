@@ -163,16 +163,34 @@ function defaultDetailTab(status: string, rejectedRows: number): JobDetailTab {
   return "detail";
 }
 
-function jobRouteLabel(job: Pick<TransferJob, "source_name" | "destination_database" | "destination_collection" | "destination_type">) {
+/** Source side of a route label. Never renders a missing name as "undefined". */
+function jobSourceLabel(job: Pick<TransferJob, "source_name" | "source_type">) {
+  return (job.source_name || "").trim() || (job.source_type || "").trim() || "source";
+}
+
+function jobRouteLabel(
+  job: Pick<
+    TransferJob,
+    "source_name" | "source_type" | "destination_database" | "destination_collection" | "destination_type"
+  >,
+) {
   const dest =
     [job.destination_database, job.destination_collection].filter(Boolean).join(".")
     || job.destination_type
     || "destination";
-  return `${job.source_name} → ${dest}`;
+  return `${jobSourceLabel(job)} → ${dest}`;
 }
 
 function jobDisplayName(
-  job: Pick<TransferJob, "name" | "source_name" | "destination_database" | "destination_collection" | "destination_type">,
+  job: Pick<
+    TransferJob,
+    | "name"
+    | "source_name"
+    | "source_type"
+    | "destination_database"
+    | "destination_collection"
+    | "destination_type"
+  >,
   override?: string | null,
 ) {
   const named = (override ?? job.name)?.trim();
@@ -329,7 +347,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     if (!job) return;
     const dest = job.destination_collection || job.destination_database || job.destination_type || "destination";
     setActiveData((prev) => ({
-      name: prev?.name || job.source_name || "job",
+      name: prev?.name || (job.source_name || "").trim() || "job",
       filename: prev?.filename,
       columns: prev?.columns || [],
       row_count: job.records_processed ?? prev?.row_count ?? 0,
@@ -338,7 +356,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       preflight_run_id: prev?.preflight_run_id,
       job_id: job._id,
       validation_status: job.status,
-      route: `${job.source_name} → ${dest}`,
+      route: `${jobSourceLabel(job)} → ${dest}`,
       blockers: job.error ? [job.error] : prev?.blockers,
     }));
   }, [jobs, selectedId, setActiveData]);
