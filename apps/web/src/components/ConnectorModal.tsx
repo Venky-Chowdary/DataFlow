@@ -628,8 +628,8 @@ export function ConnectorModal({
                 How to set up
               </button>
             )}
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onClose} aria-label="Close">
-              <DtIcon name="x" />
+            <button type="button" className="df2-close-btn" onClick={onClose} aria-label="Close">
+              <DtIcon name="x" size={16} />
             </button>
           </div>
         </div>

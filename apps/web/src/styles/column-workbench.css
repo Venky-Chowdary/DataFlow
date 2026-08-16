@@ -1270,24 +1270,10 @@
   min-height: 36px;
 }
 
+/* Placement only — the control itself is the shared `.df2-close-btn`. */
 .df2-column-workbench-clear {
   position: absolute;
   right: 8px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: #64748b;
-  cursor: pointer;
-}
-
-.df2-column-workbench-clear:hover {
-  background: #f1f5f9;
-  color: #0f172a;
 }
 
 .df2-column-workbench-actions {

@@ -223,6 +223,61 @@ describe('list-row density tokens', () => {
     );
   });
 
+  it('own drawer list rows — a slide-over row is the same row the page lists', () => {
+    const offenders: string[] = [];
+    for (const file of readdirSync(STYLES_DIR).filter((f) => f.endsWith('.css'))) {
+      const css = readFileSync(join(STYLES_DIR, file), 'utf8');
+      for (const match of css.matchAll(/([^{}]*\.df2-drawer-related-row(?![-\w])[^{}]*)\{([^}]*)\}/g)) {
+        for (const decl of match[2].split(';')) {
+          if (!/^\s*(padding|min-height|column-gap|gap)(-[a-z]+)?\s*:/.test(decl)) continue;
+          if (decl.includes('var(--df-list-row-')) continue;
+          offenders.push(`${file}: ${match[1].trim()} {${decl.trim()}}`);
+        }
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'a drawer that hard-codes its row geometry reads taller or shorter than ' +
+        'the same records on their own page',
+    );
+  });
+
+  it('align form-row fields to the top — one label line, one input line', () => {
+    const offenders: string[] = [];
+    for (const file of readdirSync(STYLES_DIR).filter((f) => f.endsWith('.css'))) {
+      const css = readFileSync(join(STYLES_DIR, file), 'utf8');
+      for (const match of css.matchAll(/([^{}]*\.df2-form-row(?![-\w])[^{}]*)\{([^}]*)\}/g)) {
+        for (const decl of match[2].split(';')) {
+          if (!/^\s*align-items\s*:/.test(decl)) continue;
+          if (/flex-start/.test(decl)) continue;
+          offenders.push(`${file}: ${match[1].trim()} {${decl.trim()}}`);
+        }
+      }
+    }
+    assert.deepEqual(
+      offenders,
+      [],
+      'bottom-aligned form rows lift a field that carries an extra control ' +
+        '(read-mode segment, hint) above every other label in the row',
+    );
+  });
+
+  it('give the connector catalog one tile height', () => {
+    const grids: string[] = [];
+    for (const file of readdirSync(STYLES_DIR).filter((f) => f.endsWith('.css'))) {
+      const css = readFileSync(join(STYLES_DIR, file), 'utf8');
+      for (const match of css.matchAll(/(^|\})\s*(\.df2-connector-grid)\s*\{([^}]*)\}/g)) {
+        if (/grid-auto-rows\s*:\s*1fr/.test(match[3])) grids.push(file);
+      }
+    }
+    assert.ok(
+      grids.length > 0,
+      'without equal auto rows the catalog renders neighbouring tiles at ' +
+        'different heights — a name that wraps or a missing description is enough',
+    );
+  });
+
   it('never get denser as the screen gets wider', () => {
     const heights = VIEWPORTS.map((vp) => Number.parseFloat(resolveAt(vp)['min-h']));
     for (let i = 1; i < heights.length; i += 1) {

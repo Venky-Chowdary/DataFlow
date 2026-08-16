@@ -36,7 +36,6 @@
   flex-wrap: wrap;
   gap: 12px;
   width: 100%;
-  align-items: flex-end;
 }
 
 .df2-query-meta > .df2-field,

@@ -848,8 +848,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <h2 className="dt-modal-title">Configure {ssoEditor === "saml" ? "SAML 2.0" : ssoEditor === "oidc" ? "OpenID Connect" : "Azure AD"}</h2>
                   <p className="dt-modal-subtitle">Settings are persisted and used for workspace sign-in.</p>
                 </div>
-                <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setSsoEditor(null)} aria-label="Close">
-                  <DtIcon name="x" />
+                <button type="button" className="df2-close-btn" onClick={() => setSsoEditor(null)} aria-label="Close">
+                  <DtIcon name="x" size={16} />
                 </button>
               </div>
               <div className="dt-modal-body">
@@ -903,8 +903,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <h2 className="dt-modal-title">Configure {aiEditor}</h2>
                   <p className="dt-modal-subtitle">API keys are encrypted at rest. Leave key blank to keep the existing value.</p>
                 </div>
-                <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setAiEditor(null)} aria-label="Close">
-                  <DtIcon name="x" />
+                <button type="button" className="df2-close-btn" onClick={() => setAiEditor(null)} aria-label="Close">
+                  <DtIcon name="x" size={16} />
                 </button>
               </div>
               <div className="dt-modal-body">

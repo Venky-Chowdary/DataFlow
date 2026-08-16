@@ -69,6 +69,7 @@ export function ConnectorsPage({
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testingAll, setTestingAll] = useState(false);
   const [query, setQuery] = useState("");
+  const [catalogQuery, setCatalogQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "error">("all");
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -248,10 +249,12 @@ export function ConnectorsPage({
       description="Saved logins for Transfer Studio. Open a row for status and last test, or start a new connection."
     >
       <PageFrame className="df2-connectors-page">
+        {/* The toolbar owns search on both tabs — the catalog used to carry its
+            own box a row lower while this zone sat empty. */}
         <PageToolbar
-          searchValue={tab === "connections" && connectors.length > 0 ? query : undefined}
-          onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
-          searchPlaceholder="Search saved connections…"
+          searchValue={tab === "catalog" ? catalogQuery : connectors.length > 0 ? query : undefined}
+          onSearchChange={tab === "catalog" ? setCatalogQuery : connectors.length > 0 ? setQuery : undefined}
+          searchPlaceholder={tab === "catalog" ? "Search connectors…" : "Search saved connections…"}
           filters={
             <FilterBar variant="inline" ariaLabel="Connector page filters">
               <FilterTabs
@@ -413,6 +416,8 @@ export function ConnectorsPage({
                 initialStatus="live"
                 requireAvailable={false}
                 limit={200}
+                query={catalogQuery}
+                onQueryChange={setCatalogQuery}
               />
             </div>
           )}

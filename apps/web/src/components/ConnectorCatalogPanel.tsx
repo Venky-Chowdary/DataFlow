@@ -75,6 +75,12 @@ interface ConnectorCatalogPanelProps {
   initialStatus?: string;
   /** Hide cloud/edition twins (Snowflake on AWS, Standard, …) — same login. */
   collapseAliases?: boolean;
+  /**
+   * Search text owned by the host (the page toolbar). When supplied the panel
+   * drops its own search box so a page never shows two search inputs.
+   */
+  query?: string;
+  onQueryChange?: (value: string) => void;
 }
 
 export function ConnectorCatalogPanel({
@@ -86,8 +92,13 @@ export function ConnectorCatalogPanel({
   requireAvailable = false,
   initialStatus = "",
   collapseAliases = false,
+  query: hostQuery,
+  onQueryChange,
 }: ConnectorCatalogPanelProps) {
-  const [query, setQuery] = useState("");
+  const hosted = onQueryChange != null;
+  const [ownQuery, setOwnQuery] = useState("");
+  const query = hosted ? (hostQuery ?? "") : ownQuery;
+  const setQuery = hosted ? onQueryChange : setOwnQuery;
   const [debouncedQ, setDebouncedQ] = useState("");
   const [category, setCategory] = useState("");
   const [status, setStatus] = useState(initialStatus);
@@ -192,16 +203,18 @@ export function ConnectorCatalogPanel({
         )}
 
         <div className="df2-catalog-filter-row">
-          <label className="df2-toolbar-search df2-catalog-search" aria-label="Search connector catalog">
-            <DtIcon name="search" size={15} />
-            <input
-              type="search"
-              placeholder="Search connectors…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              autoFocus={compact}
-            />
-          </label>
+          {!hosted && (
+            <label className="df2-toolbar-search df2-catalog-search" aria-label="Search connector catalog">
+              <DtIcon name="search" size={15} />
+              <input
+                type="search"
+                placeholder="Search connectors…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                autoFocus={compact}
+              />
+            </label>
+          )}
 
           <FilterBar ariaLabel="Catalog capability filters" className="df2-catalog-filter-bar">
             <FilterTabs

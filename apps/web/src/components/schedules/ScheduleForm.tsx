@@ -216,7 +216,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   return (
     <form className="df2-sched-form" onSubmit={submit}>
       <div className="df2-field">
-        <label className="df2-label" htmlFor="sched-name">Pipeline name</label>
+        <label className="df2-label" htmlFor="sched-name">Schedule name</label>
         <input id="sched-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Nightly orders sync" required />
       </div>
 
@@ -286,7 +286,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           <DtIcon name="clock" size={15} />
           <div>
             <strong>Cadence</strong>
-            <span>How often this pipeline runs. Use a preset or a cron expression.</span>
+            <span>How often this schedule runs. Use a preset or a cron expression.</span>
           </div>
           <div className="df2-sched-toggle" role="tablist" aria-label="Cadence type">
             <button type="button" role="tab" aria-selected={cadenceMode === "preset"} className={cadenceMode === "preset" ? "active" : ""} onClick={() => setCadenceMode("preset")}>Preset</button>
@@ -331,7 +331,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           <DtIcon name="activity" size={13} />
           {initial?.next_run_at
             ? <>Next run: <strong>{formatWhen(initial.next_run_at)}</strong>{cadenceMode === "cron" ? ` (${timezone})` : " · rolling interval"}</>
-            : "Next run is computed once the pipeline is saved."}
+            : "Next run is computed once the schedule is saved."}
         </p>
       </section>
 
@@ -538,7 +538,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           loadingLabel="Saving…"
           disabled={saving || !canSubmit || connectors.length < 2}
         >
-          {isEdit ? "Save changes" : "Save pipeline"}
+          {isEdit ? "Save changes" : "Save schedule"}
         </Button>
       </div>
     </form>

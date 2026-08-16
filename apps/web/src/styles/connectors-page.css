@@ -405,12 +405,15 @@
   list-style: none;
 }
 
+/* Same two-line row the pages list — density comes from the shared ladder so a
+   schedule reads at one height whether it is on Schedules or in a drawer. */
 .df2-drawer-related-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: var(--df-list-row-gap);
+  min-height: var(--df-list-row-min-h-dual);
+  padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   border: 1px solid var(--df-border, #e6e9ee);
   border-radius: 9px;
   background: #fff;
@@ -434,7 +437,7 @@
 }
 
 .df2-drawer-related-main strong {
-  font-size: 13px;
+  font-size: var(--df-list-row-title);
   color: #0f172a;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -442,7 +445,7 @@
 }
 
 .df2-drawer-related-main small {
-  font-size: 11.5px;
+  font-size: var(--df-list-row-meta);
   color: #64748b;
 }
 

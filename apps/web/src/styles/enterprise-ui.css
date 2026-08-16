@@ -3707,30 +3707,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: #94a3b8;
 }
 
-.df2-toolbar-clear {
-  flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: #f1f5f9;
-  color: #64748b;
-  font-size: 14px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.df2-toolbar-clear:hover {
-  background: #e2e8f0;
-  color: #0f172a;
-}
-
-.df2-toolbar-clear:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.25);
-}
-
 /* One shared filter cluster — rectangular segment (matches Destination mode toggle) */
 .df2-filter-bar {
   display: inline-flex;
@@ -6908,7 +6884,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-  align-items: flex-end;
 }
 
 .df2-page-pipelines .df2-pipe-card {
@@ -6947,10 +6922,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-page-query .df2-card-body {
   overflow: visible;
   min-width: 0;
-}
-
-.df2-page-query .df2-query-meta.df2-form-row {
-  align-items: flex-end;
 }
 
 .df2-page-query .df2-query-editor-shell {
@@ -8420,11 +8391,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   overflow: visible;
 }
 
-/* Forms — prevent field collision in toolbars */
+/* Forms — prevent field collision in toolbars.
+   Cross-axis alignment is owned once, in ui-consistency.css. */
 .df2-form-row {
   flex-wrap: wrap;
   gap: 12px;
-  align-items: flex-end;
 }
 
 .df2-field,

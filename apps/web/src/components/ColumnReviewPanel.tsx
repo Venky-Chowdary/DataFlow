@@ -579,7 +579,7 @@ export function ColumnReviewPanel({
             {search && (
               <button
                 type="button"
-                className="df2-column-workbench-clear"
+                className="df2-close-btn df2-close-btn-sm df2-column-workbench-clear"
                 onClick={() => setSearch("")}
                 aria-label="Clear search"
               >
