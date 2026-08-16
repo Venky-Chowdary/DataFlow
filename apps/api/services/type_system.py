@@ -2977,6 +2977,27 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
 }
 
 
+# Snowflake stores TIMESTAMP_* at scale 9 and reports no typmod in its catalog,
+# so an absent precision on these spellings is nanoseconds, not "unknown". No
+# other dialect spells a timestamp this way, which is what makes the default
+# safe to apply without knowing the source engine.
+SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS: Final[int] = 9
+# Microseconds: the best precision mainstream destinations carry, so narrowing
+# an undeclared Snowflake timestamp to it is unavoidable rather than a fault.
+SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR: Final[int] = 6
+_SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS: Final[frozenset[str]] = frozenset(
+    {
+        "TIMESTAMP_NTZ",
+        "TIMESTAMP_LTZ",
+        "TIMESTAMP_TZ",
+        # No un-underscored ``TIMESTAMPTZ``: that spelling is PostgreSQL's, and
+        # its default is microseconds.
+        "TIMESTAMPNTZ",
+        "TIMESTAMPLTZ",
+    }
+)
+
+
 # Max fractional-second digits each engine accepts as a TIMESTAMP/DATETIME
 # typmod. Engines absent from this map take no precision argument at all, so
 # appending one is a DDL syntax error rather than a narrower column:
@@ -5830,16 +5851,6 @@ def temporal_precision_would_narrow(
         return True
     tgt_p = parse_temporal_fractional_precision(target_type)
     src_p = parse_temporal_fractional_precision(source_type)
-    if src_p is None:
-        # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
-        # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
-        bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
-        if bare_src == "DATETIME2":
-            src_p = 7
-        elif bare_src == "DATETIMEOFFSET":
-            src_p = 7
-        else:
-            return False
     if tgt_p is None:
         # MySQL bare TIME/DATETIME/TIMESTAMP default FSP 0 — TIME(6)→TIME must
         # not silent-green. PostgreSQL bare TIMESTAMP / TIMESTAMP WITHOUT TIME
@@ -5899,6 +5910,32 @@ def temporal_precision_would_narrow(
                 tgt_p = 0
         elif bare.startswith("DATETIME"):
             tgt_p = 0
+        else:
+            return False
+    if src_p is None:
+        # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
+        # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
+        bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
+        if bare_src in {"DATETIME2", "DATETIMEOFFSET"}:
+            src_p = 7
+        elif bare_src in _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS:
+            # Snowflake declares TIMESTAMP_NTZ/LTZ/TZ with no typmod in its
+            # catalog but stores nanoseconds (default scale 9). Reading the
+            # absent typmod as "unknown" green-lit Snowflake→MySQL DATETIME
+            # (FSP 0), which drops every fractional second on write. These
+            # spellings exist in no other dialect, so the default is safe to
+            # apply without knowing the source engine.
+            #
+            # It is a declared ceiling rather than observed nanoseconds, so it
+            # accuses only loss an operator can act on. Every mainstream
+            # destination clamps at microseconds or better, so sub-microsecond
+            # narrowing is unavoidable and reporting it would put a Risk
+            # Contract on every Snowflake timestamp column and teach operators
+            # to sign unread. Landing at millisecond or whole-second FSP is the
+            # fixable case: widen the destination column.
+            if tgt_p >= SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR:
+                return False
+            src_p = SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS
         else:
             return False
     return src_p > tgt_p

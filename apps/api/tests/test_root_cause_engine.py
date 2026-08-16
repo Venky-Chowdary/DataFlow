@@ -127,6 +127,44 @@ def test_one_fidelity_root_not_three_blockers():
     assert root.documentation
 
 
+def test_fidelity_summary_names_the_type_path_not_just_the_column():
+    """A bare column name makes the operator hunt Map for what is wrong with it.
+
+    The pair is the finding, and it is what lets them judge the verdict — the
+    reported Snowflake→MySQL block named neither column nor types.
+    """
+    root = next(
+        r for r in build_root_causes(_fidelity_preflight()) if r.kind == "fidelity_collapse"
+    )
+    assert "country_auto_detected TEXT → INTEGER" in root.summary
+
+
+def test_fidelity_summary_reads_type_path_from_the_coercion_probe():
+    pf = {
+        "passed": False,
+        "gates": [
+            {
+                "id": "g3_schema_contract",
+                "status": "block",
+                "message": "1 type coercion issue(s)",
+                "details": {"fidelity_collapse": True, "columns": ["order_ts"]},
+            }
+        ],
+        "coercion_report": {
+            "columns": [
+                {
+                    "source": "order_ts",
+                    "source_type": "TIMESTAMP_NTZ",
+                    "target_type": "DATETIME",
+                    "severity": "block",
+                }
+            ]
+        },
+    }
+    root = next(r for r in build_root_causes(pf) if r.kind == "fidelity_collapse")
+    assert "order_ts TIMESTAMP_NTZ → DATETIME" in root.summary
+
+
 def test_apply_collapses_operator_blockers():
     pf = apply_root_causes_to_preflight(_fidelity_preflight())
     assert len(pf["root_causes"]) == 1

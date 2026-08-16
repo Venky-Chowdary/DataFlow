@@ -412,6 +412,48 @@ def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
     return out
 
 
+def _collect_type_paths(
+    entries: list[dict[str, Any]],
+    coercion_report: dict[str, Any],
+) -> dict[str, str]:
+    """Map column → ``SOURCE_TYPE → TARGET_TYPE`` from every evidence shape.
+
+    Gates carry the pair on ``issues_detail`` rows; the coercion probe carries it
+    on its per-column report. Either one is enough to name the path.
+    """
+    paths: dict[str, str] = {}
+
+    def _record(row: Any) -> None:
+        if not isinstance(row, dict):
+            return
+        col = row.get("source") or row.get("column")
+        src_type = str(row.get("source_type") or "").strip()
+        tgt_type = str(row.get("target_type") or "").strip()
+        if col and src_type and tgt_type:
+            paths.setdefault(str(col), f"{src_type} → {tgt_type}")
+
+    for entry in entries:
+        details = (entry or {}).get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        for row in details.get("issues_detail") or details.get("issues") or []:
+            _record(row)
+    for row in coercion_report.get("columns") or []:
+        _record(row)
+    return paths
+
+
+def _column_type_path_label(column: str, type_paths: dict[str, str]) -> str:
+    """``name SOURCE_TYPE → TARGET_TYPE`` when the pair is known, else the name.
+
+    A bare column name sends the operator hunting through Map for what is wrong
+    with it. The type path is the finding itself, and it is what lets them judge
+    whether the verdict is even right.
+    """
+    path = type_paths.get(column)
+    return f"{column} {path}" if path else column
+
+
 def _sample_rows(preflight: dict[str, Any]) -> int | None:
     cr = preflight.get("coercion_report") or {}
     if isinstance(cr.get("sampled_rows"), int):
@@ -507,9 +549,10 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     *[str(b.get("id")) for b in fidelity_blockers if b.get("id")],
                 }
             )
-            col_label = ", ".join(cols[:5]) + (
-                f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
-            )
+            type_paths = _collect_type_paths(fidelity_gates + fidelity_blockers, cr)
+            col_label = ", ".join(
+                _column_type_path_label(c, type_paths) for c in cols[:5]
+            ) + (f" (+{len(cols) - 5} more)" if len(cols) > 5 else "")
             if cols:
                 summary = (
                     f"{len(cols)} column(s) collapse fidelity on write"
@@ -605,9 +648,12 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             merged_absorbed = sorted(
                 set(fidelity_root.absorbed_blocker_ids) | set(risk_absorbed)
             )
-            col_label = ", ".join(merged_cols[:5]) + (
-                f" (+{len(merged_cols) - 5} more)" if len(merged_cols) > 5 else ""
+            merged_paths = _collect_type_paths(
+                [*gates, *blockers], preflight.get("coercion_report") or {}
             )
+            col_label = ", ".join(
+                _column_type_path_label(c, merged_paths) for c in merged_cols[:5]
+            ) + (f" (+{len(merged_cols) - 5} more)" if len(merged_cols) > 5 else "")
             fidelity_root.affected_columns = merged_cols
             fidelity_root.absorbed_blocker_ids = merged_absorbed
             fidelity_root.impacted_gates = sorted(
