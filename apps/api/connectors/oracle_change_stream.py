@@ -208,11 +208,12 @@ class OracleFlashbackCdc:
                         head = cur.fetchone()
                         handoff_scn = int(head[0] or 0) if head else 0
                     if mode == "scan":
+                        # Held scan: one ordered SELECT paged with fetchmany.
+                        # ROW_NUMBER() here would rank every row of the table
+                        # before the first page returns, and the rank itself is
+                        # unused — resume seeks on the last PK.
                         cur.execute(
-                            f"SELECT * FROM ("  # nosec B608
-                            f"SELECT t.*, ROW_NUMBER() OVER (ORDER BY {order_sql}) AS df_rn "
-                            f"FROM {qualified} t"
-                            f")"
+                            f"SELECT t.* FROM {qualified} t ORDER BY {order_sql}"  # nosec B608
                         )
                     while True:
                         if mode == "scan":
