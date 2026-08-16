@@ -84,7 +84,7 @@ from .adapters import (
     resolve_connector_config,
     resolve_dest_table,
 )
-from .stream import _write_batch
+from .stream import _declared_destination_key_columns, _write_batch
 
 STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
 STREAM_THRESHOLD = int(getenv_brand("STREAM_FILE_ROWS", "1"))
@@ -830,6 +830,12 @@ def stream_file_to_database(
     # Object-store destinations (S3/GCS/ADLS) write a single object per call, so
     # row-level upsert keys are not required and the object is overwritten.
     object_store = dest_type in ("s3", "gcs", "adls")
+    if requires_upsert(effective_sync) and not pk_target_cols and not object_store:
+        # Same rule as the database stream: the destination's declared key is
+        # catalog evidence the upsert can key on when the contract carries none.
+        _pk_src, pk_target_cols = _declared_destination_key_columns(
+            dest_type, dest_cfg, dest_table, mappings
+        )
     if object_store and requires_upsert(effective_sync):
         write_mode = "upsert"
     else:

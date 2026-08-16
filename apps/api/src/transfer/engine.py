@@ -1120,6 +1120,34 @@ def _infer_primary_key(columns: list[str], mappings: list[dict[str, Any]]) -> st
     return ""
 
 
+def _declared_destination_key(
+    destination: EndpointConfig,
+    mappings: list[dict[str, Any]],
+) -> list[str]:
+    """The destination table's declared primary key, when the write covers it.
+
+    Read from the destination catalog probe, so this is evidence rather than the
+    name-shape inference used for key-addressed sinks. Returns ``[]`` when the
+    table declares no key or when any key column is unmapped — an upsert keyed on
+    a column this write never supplies would silently insert duplicates.
+    """
+    declared = [
+        str(col).strip()
+        for col in ((destination.extra or {}).get("primary_key_columns") or [])
+        if str(col or "").strip()
+    ]
+    if not declared:
+        return []
+    written = {
+        str(m.get("target") or "").strip().lower()
+        for m in (mappings or [])
+        if str(m.get("target") or "").strip() and not m.get("intentional_omit")
+    }
+    if any(col.lower() not in written for col in declared):
+        return []
+    return declared
+
+
 def _checkpoint_has_progress(checkpoint: Any) -> bool:
     """True when the checkpoint has durable resume tokens (parity with Module 14).
 
@@ -2503,6 +2531,15 @@ class UniversalTransferEngine:
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
             if requires_upsert(effective_sync):
+                if not conflict_columns:
+                    # The destination's own declared key is catalog evidence, not
+                    # a guess — use it when every key column is mapped. Refusing
+                    # here while the table itself declares the key made upsert
+                    # unusable on any route where the operator had not also typed
+                    # the key into the stream contract.
+                    conflict_columns = _declared_destination_key(
+                        request.destination, mappings
+                    )
                 if not conflict_columns:
                     raise ValueError(
                         f"Sync mode `{effective_sync}` requires primary_key for upsert; "

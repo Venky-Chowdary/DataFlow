@@ -732,13 +732,13 @@ def _write_batch(
     raise ValueError(f"Streaming write not supported for destination type '{dest_type}'")
 
 
-def _destination_key_for_resume(
+def _declared_destination_key_columns(
     dest_type: str,
     dest_cfg: dict[str, Any],
     dest_table: str,
     mappings: list[dict],
 ) -> tuple[list[str], list[str]]:
-    """Identity key a resumed append can write through, from the destination catalog.
+    """Identity key the write can use, from the destination catalog.
 
     Returns ``(source_columns, target_columns)``, empty when the destination
     declares no primary key or the key is not covered by the mapping — an
@@ -906,6 +906,16 @@ def _stream_database_transfer_impl(
                 (p for p in pk_source_cols if p and p != cursor_source_col),
                 pk_source_cols[0] if pk_source_cols else "",
             )
+    if requires_upsert(effective_sync) and not pk_target_cols:
+        # No contract key, but the destination table may declare one. That is
+        # catalog evidence, not a guess, so an upsert keyed on it resolves rows
+        # on the same identity the destination already enforces.
+        pk_source_cols, pk_target_cols = _declared_destination_key_columns(
+            dest_type,
+            dest_cfg,
+            resolve_dest_table(dest_type, destination, _source_name(source)),
+            mappings,
+        )
     write_mode = "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
     if requires_upsert(effective_sync) and not pk_target_cols:
         raise ValueError(
@@ -940,7 +950,7 @@ def _stream_database_transfer_impl(
             # Resuming an append re-delivers the interrupted batch, so honouring
             # that key turns an unavoidable duplicate-key abort into an
             # idempotent apply instead of stranding a half-loaded destination.
-            pk_source_cols, pk_target_cols = _destination_key_for_resume(
+            pk_source_cols, pk_target_cols = _declared_destination_key_columns(
                 dest_type,
                 dest_cfg,
                 resolve_dest_table(dest_type, destination, _source_name(source)),

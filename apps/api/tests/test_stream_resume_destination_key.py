@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from transfer.stream import _destination_key_for_resume
+from transfer.stream import _declared_destination_key_columns
 
 MAPPINGS = [
     {"source": "id", "target": "id"},
@@ -34,7 +34,7 @@ def _dest(tmp_path: Path, ddl: str) -> tuple[str, dict[str, str]]:
 
 def test_resolves_single_column_destination_primary_key(tmp_path: Path) -> None:
     _, cfg = _dest(tmp_path, "CREATE TABLE jobs (id TEXT PRIMARY KEY, name TEXT)")
-    assert _destination_key_for_resume("sqlite", cfg, "jobs", MAPPINGS) == (
+    assert _declared_destination_key_columns("sqlite", cfg, "jobs", MAPPINGS) == (
         ["id"],
         ["id"],
     )
@@ -43,13 +43,13 @@ def test_resolves_single_column_destination_primary_key(tmp_path: Path) -> None:
 def test_keyless_destination_yields_no_key(tmp_path: Path) -> None:
     """No enforced key means no ON CONFLICT target — never invent one."""
     _, cfg = _dest(tmp_path, "CREATE TABLE jobs (id TEXT, name TEXT)")
-    assert _destination_key_for_resume("sqlite", cfg, "jobs", MAPPINGS) == ([], [])
+    assert _declared_destination_key_columns("sqlite", cfg, "jobs", MAPPINGS) == ([], [])
 
 
 def test_unmapped_key_column_yields_no_key(tmp_path: Path) -> None:
     """A key the mapping never writes cannot resolve rows — refuse to guess."""
     _, cfg = _dest(tmp_path, "CREATE TABLE jobs (tenant TEXT PRIMARY KEY, name TEXT)")
-    assert _destination_key_for_resume("sqlite", cfg, "jobs", MAPPINGS) == ([], [])
+    assert _declared_destination_key_columns("sqlite", cfg, "jobs", MAPPINGS) == ([], [])
 
 
 def test_composite_destination_key_is_resolved_in_full(tmp_path: Path) -> None:
@@ -57,11 +57,11 @@ def test_composite_destination_key_is_resolved_in_full(tmp_path: Path) -> None:
         tmp_path,
         "CREATE TABLE jobs (id TEXT, name TEXT, PRIMARY KEY (id, name))",
     )
-    src, tgt = _destination_key_for_resume("sqlite", cfg, "jobs", MAPPINGS)
+    src, tgt = _declared_destination_key_columns("sqlite", cfg, "jobs", MAPPINGS)
     assert sorted(src) == ["id", "name"]
     assert sorted(tgt) == ["id", "name"]
 
 
 def test_missing_table_is_not_a_key(tmp_path: Path) -> None:
     _, cfg = _dest(tmp_path, "CREATE TABLE jobs (id TEXT PRIMARY KEY)")
-    assert _destination_key_for_resume("sqlite", cfg, "absent", MAPPINGS) == ([], [])
+    assert _declared_destination_key_columns("sqlite", cfg, "absent", MAPPINGS) == ([], [])
