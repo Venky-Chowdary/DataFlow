@@ -131,6 +131,12 @@
   min-width: 34ch;
 }
 
+/* Sentence columns kept the table wider than its container, so the evidence
+   column paid for it with a scrollbar. Prose wraps; the artifact names do not. */
+.df2-page-benchmarks-table--prose td {
+  white-space: normal;
+}
+
 .df2-page-benchmarks-product strong {
   display: inline-flex;
   align-items: center;

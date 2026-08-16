@@ -69,7 +69,7 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
     robots: "noindex",
   },
   schedules: {
-    title: "Pipelines",
+    title: "Schedules",
     description:
       "Schedule recurring data syncs — hourly, daily, or weekly pipelines with monitoring and failure alerts.",
     keywords: "scheduled data sync, recurring ETL, pipeline scheduler, cron data transfer",

@@ -229,7 +229,7 @@ export function BenchmarksPage() {
                     <div className="df2-page-benchmarks-section">
                       <h3>Integrity dimensions vs industry ELT baselines</h3>
                       <div className="df2-page-benchmarks-table-wrap">
-                        <table className="df2-page-benchmarks-table">
+                        <table className="df2-page-benchmarks-table df2-page-benchmarks-table--prose">
                           <thead>
                             <tr>
                               <th>Dimension</th>
