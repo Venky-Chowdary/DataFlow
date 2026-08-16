@@ -597,16 +597,21 @@
   background: #fff;
 }
 
+/* Jobs rows carry more per row than Connectors/Contracts/Schedules, but they
+   are the same workspace list and must resolve to the same density — they used
+   to hard-code 10px padding and no min-height, so a Jobs row and a Contracts
+   row were visibly different sizes on the same screen. */
 .df2-job-row {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
-  column-gap: 10px;
+  column-gap: var(--df-list-row-gap);
   align-items: start;
   flex: 0 0 auto;
   width: 100%;
   max-width: 100%;
   margin: 0 !important;
-  padding: 10px;
+  min-height: var(--df-list-row-min-h);
+  padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: var(--df-radius-card, 8px);
   background: #fff;
@@ -2521,7 +2526,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-pipeline-rows-head {
-  padding: 6px var(--df-list-row-pad-x, 12px);
+  padding: 6px var(--df-list-row-pad-x);
   border-bottom: 1px solid var(--df-border, #e2e8f0);
   background: var(--df-surface-subtle, #f8fafc);
   font-size: 10.5px;
@@ -2536,9 +2541,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-pipeline-row {
-  min-height: var(--df-list-row-min-h, 48px);
-  padding: var(--df-list-row-pad-y, 8px) var(--df-list-row-pad-x, 12px);
-  gap: var(--df-list-row-gap, 10px);
+  min-height: var(--df-list-row-min-h);
+  padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
+  gap: var(--df-list-row-gap);
   border-bottom: 1px solid var(--df-border, #eef1f5);
   cursor: pointer;
   box-sizing: border-box;
@@ -2585,7 +2590,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-pipeline-row-name {
-  font-size: var(--df-list-row-title, 13px);
+  font-size: var(--df-list-row-title);
   font-weight: 600;
   line-height: 1.25;
   color: #0f172a;
@@ -2597,7 +2602,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-pipeline-row-meta,
 .df2-pipeline-row-cadence,
 .df2-pipeline-row-sync {
-  font-size: var(--df-list-row-meta, 11.5px);
+  font-size: var(--df-list-row-meta);
   line-height: 1.25;
   color: #64748b;
   white-space: nowrap;
@@ -2618,8 +2623,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--df-list-row-action, 26px);
-  height: var(--df-list-row-action, 26px);
+  width: var(--df-list-row-action);
+  height: var(--df-list-row-action);
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -2848,7 +2853,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   column-gap: 10px;
   row-gap: 1px;
   min-height: 0;
-  padding: var(--df-list-row-pad-y, 8px) var(--df-list-row-pad-x, 12px);
+  padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
   border: 1px solid var(--df-border, #e5e7eb);
   border-radius: 10px;
   overflow: visible;
@@ -2872,7 +2877,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-connectors-list .df2-connector-card-title {
   grid-area: title;
   margin: 0;
-  font-size: var(--df-list-row-title, 13px);
+  font-size: var(--df-list-row-title);
   line-height: 1.25;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -10119,9 +10124,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
    (canonical final-layer extensions; do not split into *-v2 files)
    ═══════════════════════════════════════════════════════════ */
 
-.df2-app {
-  --df-list-row-hover: color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 70%, #fff);
-}
 
 .df2-app .df2-empty {
   padding: 36px 24px;
@@ -10754,7 +10756,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-contract-rows-head {
-  padding: 6px var(--df-list-row-pad-x, 12px);
+  padding: 6px var(--df-list-row-pad-x);
   border-bottom: 1px solid var(--df-border, #e2e8f0);
   background: var(--df-surface-subtle, #f8fafc);
   font-size: 10.5px;
@@ -10769,9 +10771,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-contract-row {
-  min-height: var(--df-list-row-min-h, 48px);
-  padding: var(--df-list-row-pad-y, 8px) var(--df-list-row-pad-x, 12px);
-  gap: var(--df-list-row-gap, 10px);
+  min-height: var(--df-list-row-min-h);
+  padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
+  gap: var(--df-list-row-gap);
   border-bottom: 1px solid var(--df-border, #eef1f5);
   cursor: pointer;
   box-sizing: border-box;
@@ -10808,7 +10810,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-contract-row-name {
-  font-size: var(--df-list-row-title, 13px);
+  font-size: var(--df-list-row-title);
   font-weight: 600;
   line-height: 1.25;
   color: #0f172a;
@@ -10820,7 +10822,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-contract-row-meta,
 .df2-contract-row-version,
 .df2-contract-row-schema {
-  font-size: var(--df-list-row-meta, 11.5px);
+  font-size: var(--df-list-row-meta);
   line-height: 1.25;
   color: #64748b;
   white-space: nowrap;
@@ -10837,8 +10839,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--df-list-row-action, 26px);
-  height: var(--df-list-row-action, 26px);
+  width: var(--df-list-row-action);
+  height: var(--df-list-row-action);
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -12147,8 +12149,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-page-jobs .df2-job-row {
-  padding: var(--df-list-row-pad-y, 8px) 8px;
-  min-height: var(--df-list-row-min-h, 48px);
+  padding: var(--df-list-row-pad-y) 8px;
+  min-height: var(--df-list-row-min-h);
   border-radius: 8px;
   column-gap: 8px;
   grid-template-columns: 24px minmax(0, 1fr);
@@ -12443,9 +12445,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-contract-row,
   .df2-pipeline-row
 ) {
-  min-height: var(--df-list-row-min-h, 48px);
-  padding: var(--df-list-row-pad-y, 8px) var(--df-list-row-pad-x, 12px);
-  gap: var(--df-list-row-gap, 10px);
+  min-height: var(--df-list-row-min-h);
+  padding: var(--df-list-row-pad-y) var(--df-list-row-pad-x);
+  gap: var(--df-list-row-gap);
   box-sizing: border-box;
 }
 
@@ -12454,7 +12456,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-contract-rows-head,
   .df2-pipeline-rows-head
 ) {
-  padding: 6px var(--df-list-row-pad-x, 12px);
+  padding: 6px var(--df-list-row-pad-x);
   font-size: 10.5px;
 }
 
@@ -12463,7 +12465,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-contract-row-name,
   .df2-pipeline-row-name
 ) {
-  font-size: var(--df-list-row-title, 13px);
+  font-size: var(--df-list-row-title);
   font-weight: 600;
   line-height: 1.25;
 }
@@ -12479,13 +12481,13 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-connector-row-signal,
   .df2-connector-row-used
 ) {
-  font-size: var(--df-list-row-meta, 11.5px);
+  font-size: var(--df-list-row-meta);
   line-height: 1.25;
 }
 
 .df2-app .df2-connector-row-icon svg {
-  width: var(--df-list-row-icon, 16px);
-  height: var(--df-list-row-icon, 16px);
+  width: var(--df-list-row-icon);
+  height: var(--df-list-row-icon);
 }
 
 .df2-app :is(
@@ -12493,13 +12495,13 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-contract-row-open,
   .df2-pipeline-row-open
 ) {
-  width: var(--df-list-row-action, 26px);
-  height: var(--df-list-row-action, 26px);
+  width: var(--df-list-row-action);
+  height: var(--df-list-row-action);
 }
 
 .df2-app .df2-connector-row-quick .df2-btn {
-  min-height: var(--df-list-row-action, 26px);
-  height: var(--df-list-row-action, 26px);
+  min-height: var(--df-list-row-action);
+  height: var(--df-list-row-action);
   padding: 0 8px;
   font-size: 11px;
 }

@@ -162,7 +162,15 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(tokens, /--df-list-row-pad-y:\s*8px/);
     assert.match(tokens, /--df-list-row-title:\s*13px/);
     assert.match(tokens, /@media \(min-width: 1920px\)/);
-    assert.match(tokens, /@media \(max-height: 800px\)/);
+    // Row density is keyed on width alone. A `max-height` rule used to shrink
+    // rows again on short viewports, on top of the width rules, which is how a
+    // 1280x800 laptop ended up with a 38px row. The full ladder — no overlaps,
+    // no value below the floor — is asserted in styles/listRowDensity.test.ts.
+    assert.doesNotMatch(
+      tokens,
+      /@media \(max-height:[^)]*\)\s*\{[^}]*--df-list-row-/,
+      'list-row density must not depend on viewport height',
+    );
     assert.doesNotMatch(consistency, /min-height:\s*196px/);
     assert.match(connectors, /\.df2-connector-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
     assert.match(enterprise, /\.df2-contract-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
