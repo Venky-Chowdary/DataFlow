@@ -51,3 +51,17 @@ live; CDC default is at-least-once upsert.
 
 ## Env / services
 See `memory/test_credentials.md`.
+
+## Code-review follow-up (2026-06)
+- FIXED + testing_agent-verified: stripped UTF-8 BOM from 6 test files
+  (32 pass, 88 regression pass, 0 issues).
+- Validated the rest of the 20/100 scanner report as FALSE POSITIVES:
+  cdc_lease_store 'eval' = Redis EVAL(Lua); procedure_source 'exec' = SQL
+  EXEC/cursor.execute; engine_checksum md5 = Postgres SQL md5() reconciliation
+  (non-crypto); 2 'circular imports' already broken by lazy/function-local
+  imports; 'insecure random' = deterministic synthetic-data/jitter. No
+  production Python eval/exec or security-MD5 exists.
+- Out of scope / unsafe on a client-bound branch: blindly refactoring 4527
+  "high-complexity" functions, splitting 100+-import files, and "fixing" 378
+  guarded try/except-ImportError "undefined vars" — would degrade a working
+  99%-passing suite. Tracked as future refactor, not hot-patched.
