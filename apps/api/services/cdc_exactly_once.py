@@ -1235,12 +1235,19 @@ def decide_eos_apply(
             and (dest_phase or "") == "snapshot"
         ):
             return "handoff_phase", fence
-        assert_redelivery_checksum(
-            incoming_checksum,
-            dest_checksum or None,
-            incoming_lsn=incoming_lsn,
-            change=change,
-        )
+        # The dest checksum describes the batch dest committed *at* its
+        # watermark, so it is only comparable to a redelivery of that same LSN.
+        # A strictly older LSN is an ordinary at-least-once replay from a
+        # restart, whose payload legitimately differs from the newest committed
+        # batch; comparing it refused every recovery replay as a payload
+        # conflict and failed the job on a correct stream.
+        if compare_lsn(incoming_lsn, dest_lsn or "") == 0:
+            assert_redelivery_checksum(
+                incoming_checksum,
+                dest_checksum or None,
+                incoming_lsn=incoming_lsn,
+                change=change,
+            )
         return "already_committed", fence
     _ = dest_epoch
     return "apply", fence
