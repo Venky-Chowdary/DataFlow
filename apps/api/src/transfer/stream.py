@@ -1553,6 +1553,7 @@ def _stream_database_transfer_impl(
     # quadratic and slow, but it cannot skip rows.
     from services.keyset_pagination import (
         KEYSET_CAPABLE_SOURCES,
+        decide_keyset_pagination,
         max_keyset_bookmark,
         safe_keyset_unique_columns,
     )
@@ -1635,30 +1636,27 @@ def _stream_database_transfer_impl(
     )
     keyset_tiebreak = next((c for c in keyset_order_cols if c != keyset_col), "")
     keyset_after = checkpoint.cursor_value
-    use_keyset = bool(keyset_order_cols) and src_type in KEYSET_CAPABLE_SOURCES
-    # Incremental watermark path may still keyset on a non-PK cursor + PK tie-break.
-    if not use_keyset and incremental and keyset_col and src_type in KEYSET_CAPABLE_SOURCES:
-        use_keyset = True
-        if keyset_col not in keyset_order_cols:
-            keyset_order_cols = [keyset_col] + (
-                [keyset_tiebreak] if keyset_tiebreak else []
-            )
-    # Resume with a numeric offset but no keyset bookmark must not seek from the
-    # start of the table (cursor_after=None → full re-read). Fall back to OFFSET
-    # so checkpoint.offset remains authoritative for legacy / partial checkpoints.
-    if (
-        use_keyset
-        and (offset > 0 or chunk_idx > 0)
-        and keyset_after in (None, "")
-    ):
+    decision = decide_keyset_pagination(
+        src_type=src_type,
+        keyset_order_cols=keyset_order_cols,
+        keyset_col=keyset_col,
+        keyset_tiebreak=keyset_tiebreak,
+        incremental=bool(incremental),
+        offset=offset,
+        chunk_index=chunk_idx,
+        cursor_after=keyset_after,
+        snapshot_scan=bool(src_scan),
+    )
+    use_keyset = decision.use_keyset
+    keyset_order_cols = decision.order_cols
+    if decision.resume_fallback:
         logger.warning(
             "Resume checkpoint offset=%s chunk_index=%s has no keyset cursor_value — "
             "falling back to OFFSET pagination to avoid re-reading committed rows.",
             offset,
             chunk_idx,
         )
-        use_keyset = False
-    pagination_mode = "keyset" if use_keyset else ("scan" if src_scan else "offset")
+    pagination_mode = decision.pagination_mode
     if use_keyset and src_scan.get("started"):
         # First page already landed from the snapshot scan; later pages seek.
         from connectors.sql_snapshot_scan import close_table_scan

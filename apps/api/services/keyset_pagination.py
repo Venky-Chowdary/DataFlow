@@ -10,6 +10,7 @@ OR/AND expansion produced by :func:`keyset_successor_predicate`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
@@ -271,3 +272,54 @@ def safe_keyset_unique_columns(
             continue
         return uk_cols
     return []
+
+
+@dataclass(frozen=True)
+class KeysetDecision:
+    """How a stream will page, and the ordered columns it will seek on."""
+
+    use_keyset: bool
+    order_cols: list[str]
+    pagination_mode: str
+    resume_fallback: bool
+
+
+def decide_keyset_pagination(
+    *,
+    src_type: str,
+    keyset_order_cols: Sequence[str],
+    keyset_col: str,
+    keyset_tiebreak: str,
+    incremental: bool,
+    offset: int,
+    chunk_index: int,
+    cursor_after: Any,
+    snapshot_scan: bool,
+) -> KeysetDecision:
+    """Choose seek vs scan vs OFFSET paging — one owner for the whole engine.
+
+    Seeking needs unique evidence: without a declared key a strict ``>`` on a
+    tied bookmark skips the peers sharing that value, so no evidence means
+    OFFSET (quadratic, but it cannot lose rows). An incremental run may seek on
+    its declared cursor plus a tie-break instead. A resume that carries a row
+    offset but no bookmark also falls back, or the seek would restart at the
+    top of the table and re-read rows already committed.
+    """
+    order_cols = [c for c in keyset_order_cols if c]
+    capable = str(src_type or "") in KEYSET_CAPABLE_SOURCES
+    use_keyset = bool(order_cols) and capable
+    if not use_keyset and incremental and keyset_col and capable:
+        use_keyset = True
+        if keyset_col not in order_cols:
+            order_cols = [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
+    resume_fallback = False
+    if use_keyset and (offset > 0 or chunk_index > 0) and cursor_after in (None, ""):
+        use_keyset = False
+        resume_fallback = True
+    mode = "keyset" if use_keyset else ("scan" if snapshot_scan else "offset")
+    return KeysetDecision(
+        use_keyset=use_keyset,
+        order_cols=order_cols,
+        pagination_mode=mode,
+        resume_fallback=resume_fallback,
+    )
