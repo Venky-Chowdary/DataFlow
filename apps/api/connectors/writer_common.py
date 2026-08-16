@@ -3522,6 +3522,23 @@ def bind_rows_keeping_numbers(
     if not mapped_rows:
         return mapped_rows, []
 
+    # A malformed document is the one JSON case binding cannot refuse: rather
+    # than raising, ``coerce_json_wire`` wraps an unparseable payload as a JSON
+    # string, so a truncated ``{"k": 1`` would land in JSONB as text and every
+    # count and checksum would still agree. Gate it here so every SQL writer
+    # that binds through this path inherits the same fail-closed answer.
+    mapped_rows, row_numbers = quarantine_unfit_json_keeping_numbers(
+        list(mapped_rows),
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=dialect_label,
+        row_numbers=row_numbers,
+    )
+    if not mapped_rows:
+        return [], []
+
     out: list[tuple] = []
     kept: list[int] = []
     for row_idx, row in enumerate(mapped_rows):
@@ -3970,11 +3987,40 @@ def quarantine_unfit_json(
 ) -> list[tuple]:
     """Hold out payloads that intend to be JSON documents but are malformed.
 
+    See :func:`quarantine_unfit_json_keeping_numbers`; callers that report on
+    the survivors afterwards must use that variant.
+    """
+    kept_rows, _kept = quarantine_unfit_json_keeping_numbers(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=dialect_label,
+    )
+    return kept_rows
+
+
+def quarantine_unfit_json_keeping_numbers(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    dialect_label: str = "destination",
+    row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int]]:
+    """Hold out payloads that intend to be JSON documents but are malformed.
+
     ``coerce_json_wire`` losslessly wraps bare scalars, so plain text into a
     JSON column is not a fidelity loss and is left alone. A payload that is
     clearly an intended object/array but fails to parse would instead be
     wrapped as a JSON *string* — silently degrading a document into text.
     That is the fail-closed case.
+
+    Returns ``(kept_rows, surviving_row_numbers)`` so a caller holding source
+    row numbers does not later name rows this gate removed.
     """
 
     from services.type_system import LOGICAL_JSON, normalize_logical_type
@@ -3985,13 +4031,16 @@ def quarantine_unfit_json(
         if normalize_logical_type(typ) == LOGICAL_JSON
     ]
     if not json_cols:
-        return mapped_rows
+        return mapped_rows, [
+            resolve_row_number(row_numbers, i) for i in range(len(mapped_rows))
+        ]
 
     label = (dialect_label or "destination").strip() or "destination"
 
     from services.value_serializer import cell_to_string, is_missing_sentinel
 
     out: list[tuple] = []
+    kept: list[int] = []
     for row_idx, row in enumerate(mapped_rows):
         cells = list(row)
         hold_out = False
@@ -4013,10 +4062,10 @@ def quarantine_unfit_json(
                     inner = None
                 if isinstance(inner, str):
                     candidate = inner.strip()
-            looks_structured = (
-                (candidate.startswith("{") and candidate.endswith("}"))
-                or (candidate.startswith("[") and candidate.endswith("]"))
-            )
+            # An opening brace/bracket is the intent; a missing closer is the
+            # most common corruption (truncated export) and must not be read as
+            # "this was only ever text".
+            looks_structured = candidate.startswith("{") or candidate.startswith("[")
             if not looks_structured:
                 continue
             try:
@@ -4030,7 +4079,7 @@ def quarantine_unfit_json(
             append_write_quarantine_detail(
                 rejected_details,
                 {
-                    "row": row_idx + 1,
+                    "row": resolve_row_number(row_numbers, row_idx),
                     "column": target_cols[col_idx],
                     "target": target_cols[col_idx],
                     "value": cell_to_string(value)[:120],
@@ -4054,7 +4103,8 @@ def quarantine_unfit_json(
         if hold_out:
             continue
         out.append(tuple(cells))
-    return out
+        kept.append(resolve_row_number(row_numbers, row_idx))
+    return out, kept
 
 
 def _infer_dest_db_from_dialect_label(dialect_label: str) -> str:

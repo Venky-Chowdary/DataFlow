@@ -906,6 +906,10 @@ def run_mapping_pipeline(
         enriched_mappings,
         column_types=column_type_map,
         dest_types=dest_type_map,
+        # Map renders what the operator must decide about. A numeric source
+        # widening into a numeric destination changes nothing, so it is shown as
+        # identity; the write path still validates that cell on the way in.
+        for_write=False,
     )
 
     from services.mapping_proof import stamp_mapping_fidelity

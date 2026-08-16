@@ -209,6 +209,20 @@ def is_masked_secret(value: Any) -> bool:
     return False
 
 
+def _is_keyword_dsn(cstr: str) -> bool:
+    """True for ``Key=value;Key=value`` DSNs (Azure storage, ODBC).
+
+    These carry credentials as named keys, not as URL userinfo. Parsing one as a
+    URL reads the whole string as a host, and rewriting it prefixes
+    ``user:pass@`` onto a connection string the SDK then cannot parse.
+    """
+    text = (cstr or "").strip()
+    if "://" in text:
+        return False
+    head = text.split(";", 1)[0]
+    return ";" in text and "=" in head
+
+
 def sync_credentials_into_connection_string(cfg: dict[str, Any]) -> None:
     """Rewrite a SQL URL so its embedded user/password match explicit fields.
 
@@ -240,6 +254,8 @@ def sync_credentials_into_connection_string(cfg: dict[str, Any]) -> None:
         "https://",
     )
     if lower.startswith(skip):
+        return
+    if _is_keyword_dsn(cstr):
         return
 
     parsed = parse_url_authority(cstr)

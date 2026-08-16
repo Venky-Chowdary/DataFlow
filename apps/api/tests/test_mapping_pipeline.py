@@ -30,8 +30,22 @@ def test_pipeline_uses_source_inferred_types_for_transforms():
         target_schemas=[{"name": "amount", "inferred_type": "NUMERIC", "samples": []}],
         confidence_threshold=0.5,
     )
-    assert r["mappings"][0]["transform"] == "decimal"
+    # DECIMAL → NUMERIC is widening, so Map shows identity rather than an
+    # invented parse (see test_cross_type_accuracy). The declared source type
+    # still has to reach the resolver, which is what this test pins; the write
+    # path re-arms the parse itself (test_transform_resolver).
+    assert r["mappings"][0]["transform"] == "none"
     assert r["mappings"][0]["source_type"] == "DECIMAL"
+    from services.transform_resolver import resolve_transform
+
+    assert (
+        resolve_transform(
+            dict(r["mappings"][0]),
+            column_types={"amount": "DECIMAL"},
+            dest_types={"amount": "NUMERIC"},
+        )
+        == "decimal"
+    )
 
 
 def test_pipeline_entailment_prune_drops_phantom_targets():
