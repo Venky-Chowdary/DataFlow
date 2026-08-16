@@ -38,9 +38,13 @@ def fetch_scan_page(cur: Any, batch_size: int) -> list[Any]:
 
     Production DBAPI cursors return a list from ``fetchmany``. Unit-test
     doubles that only stub ``fetchall`` return a non-sequence from
-    ``fetchmany`` — fall back so those fixtures keep proving handoff.
+    ``fetchmany`` — or omit ``fetchmany`` entirely — so fall back in both
+    cases (a valid minimal-DBAPI cursor need not implement ``fetchmany``).
     """
-    raw = cur.fetchmany(max(1, int(batch_size)))
+    try:
+        raw = cur.fetchmany(max(1, int(batch_size)))
+    except AttributeError:
+        raw = None
     if isinstance(raw, (list, tuple)):
         return list(raw)
     raw = cur.fetchall()

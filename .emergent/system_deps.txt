@@ -1,3 +1,4 @@
+cron=3.0pl1-162
 postgresql=15+248+deb12u1
 postgresql-contrib=15+248+deb12u1
 redis-server=5:7.0.15-1~deb12u9

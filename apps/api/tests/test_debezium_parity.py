@@ -735,7 +735,7 @@ def test_idle_change_stream_persists_post_batch_resume_token() -> None:
         db.__getitem__ = MagicMock(return_value=coll)
         client = MagicMock()
         client.__getitem__ = MagicMock(return_value=db)
-        with patch("connectors.mongodb_change_stream._mongo_client", return_value=client):
+        with patch("connectors.mongodb_change_stream._new_mongo_client", return_value=client):
             return MongodbChangeStreamCdc(
                 local,
                 collection="orders",
