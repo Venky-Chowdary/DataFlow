@@ -1,4 +1,4 @@
-﻿"""SaaS invent refuse + dense MERGE null-PK gate."""
+"""SaaS invent refuse + dense MERGE null-PK gate."""
 
 from __future__ import annotations
 

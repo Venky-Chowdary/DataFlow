@@ -1,4 +1,4 @@
-﻿"""Fail-closed boolean / decimal / timezone coerce — no invent."""
+"""Fail-closed boolean / decimal / timezone coerce — no invent."""
 
 from __future__ import annotations
 

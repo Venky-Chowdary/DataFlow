@@ -1,4 +1,4 @@
-﻿"""Refuse null-PK mass-delete and SaaS/Dynamo/Parquet invent paths."""
+"""Refuse null-PK mass-delete and SaaS/Dynamo/Parquet invent paths."""
 
 from __future__ import annotations
 

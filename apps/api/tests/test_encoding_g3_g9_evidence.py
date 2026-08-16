@@ -1,4 +1,4 @@
-﻿"""Encoding / collation evidence surfaces as first-class G3/G9 signals."""
+"""Encoding / collation evidence surfaces as first-class G3/G9 signals."""
 
 from services.data_integrity import run_integrity_audit
 from services.type_system import is_case_insensitive_collation, unique_equality_key
