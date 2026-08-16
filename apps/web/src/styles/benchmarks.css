@@ -118,12 +118,17 @@
    readable in full. Wrap it instead of scrolling the table. */
 .df2-page-benchmarks-table td code {
   white-space: normal;
-  overflow-wrap: anywhere;
+  /* break-word, not anywhere: wrap at the `+` and space boundaries between
+     artifacts, and only split a single artifact name if it cannot fit at all. */
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .df2-page-benchmarks-table td:has(code) {
   white-space: normal;
-  min-width: 22ch;
+  /* Wide enough for the longest artifact name we emit
+     (`proof_ledger.run_fidelity_proof`) to stay one unbroken token. */
+  min-width: 34ch;
 }
 
 .df2-page-benchmarks-product strong {

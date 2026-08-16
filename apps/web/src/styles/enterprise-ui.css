@@ -208,10 +208,6 @@
   display: none;
 }
 
-.df2-pilot-aside-reopen {
-  margin-right: 4px;
-}
-
 .df2-pilot-session-list {
   display: flex;
   flex-direction: column;

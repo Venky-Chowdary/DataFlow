@@ -294,18 +294,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       <PageFrame className={`df2-pilot-workspace df2-pilot-v2 ${asideOpen ? "" : "is-aside-collapsed"}`.trim()}>
         <div className="df2-pilot-status-bar" role="status">
           <div className="df2-pilot-status-brand">
-            {!asideOpen && (
-              <button
-                type="button"
-                className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-reopen"
-                onClick={() => setAsideOpen(true)}
-                aria-label="Open recent chats"
-                title="Open recent chats"
-              >
-                <DtIcon name="menu" size={14} />
-                Chats
-              </button>
-            )}
+            {/* Opening the rail is the rail's own control (its menu icon);
+                the status bar used to repeat it. */}
             <span className={`df2-pilot-status-pill ${pilotStatusClass}`.trim()}>
               <span className="df2-pilot-status-dot" aria-hidden />
               {pilotInsightPill}
@@ -452,7 +442,9 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             <div className="df2-pilot-main-inner">
               <div className="df2-pilot-hero">
                 <div className="df2-pilot-hero-icon"><DtIcon name="sparkle" size={28} /></div>
-                <h1 className="df2-pilot-title">Ask Datawrap Pilot to move, inspect, or govern data.</h1>
+                {/* PageShell already emits the page's only h1; this is the
+                    hero line under it. */}
+                <h2 className="df2-pilot-title">Ask Datawrap Pilot to move, inspect, or govern data.</h2>
                 <p className="df2-pilot-subtitle">
                   Natural-language data ops — schema, mappings, connectors, and jobs with the same governed engine as Transfer Studio.
                   Chats are saved in this browser so a refresh does not wipe your thread.

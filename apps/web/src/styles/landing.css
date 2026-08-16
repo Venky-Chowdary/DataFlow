@@ -288,6 +288,13 @@ html:has(.lp) {
   font-weight: 500;
 }
 
+/* Menu-only CTA stack — shown by the collapsed-nav breakpoint below. Declared
+   here, ahead of the media queries, because the same-specificity reset used to
+   sit after them and switched the stack off at every width. */
+.lp-nav-mobile-ctas {
+  display: none;
+}
+
 .lp-nav-action-login {
   font-weight: 600;
 }
@@ -2377,6 +2384,12 @@ html:has(.lp) {
     padding-top: 12px;
     border-top: 1px solid var(--lp-line);
   }
+
+  /* The menu owns the sales route once it opens, so the header does not
+     offer the same action twice. */
+  .lp-nav-actions .lp-nav-action-secondary {
+    display: none !important;
+  }
 }
 
 @media (max-width: 960px) {
@@ -2420,10 +2433,6 @@ html:has(.lp) {
   .lp-mkt-quote-grid {
     grid-template-columns: 1fr;
   }
-}
-
-.lp-nav-mobile-ctas {
-  display: none;
 }
 
 /* ─── Product cards ─── */
