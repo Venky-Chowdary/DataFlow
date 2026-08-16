@@ -51,6 +51,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from connectors.writer_common import writer_meta_with_source_rows
 
 logger = logging.getLogger(__name__)
 
@@ -1909,6 +1910,7 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             load_method=load_method,
             rows_skipped=rows_skipped,
+            meta=writer_meta_with_source_rows(None, source_row_count),
         )
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")

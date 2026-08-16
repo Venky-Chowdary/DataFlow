@@ -373,7 +373,10 @@ def introspect_endpoint(
         from connectors.sftp_common import test_sftp
         from connectors.sftp_reader import list_files
 
-        ok, message = test_sftp(**cfg)
+        # Existence is answered below from the directory listing; the probe only
+        # answers "can we reach the server". Conflating the two reported a
+        # reachable server as disconnected whenever the path was absent.
+        ok, message = test_sftp(**{**cfg, "require_object": False})
         out["connected"] = ok
         out["message"] = message
         if not ok:

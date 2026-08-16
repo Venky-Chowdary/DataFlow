@@ -248,6 +248,7 @@ def write_mapped_rows(
             rejected_rows=mat.rejected_rows,
             rejected_details=rejected_details,
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
+            meta=mat.meta,
         )
     except Exception as exc:
         return WriteResult(

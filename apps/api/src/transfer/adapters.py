@@ -2647,6 +2647,11 @@ def carry_dest_spelling_across_drop(
     (upper-case) name, which is right for a first load and wrong for an
     overwrite: a quoted lower-case destination came back as a *different* object
     and everything reading the old identifier found nothing.
+
+    The probe is best-effort by contract: no prior spelling simply means "treat
+    this as a first load and fold". It must never fail the transfer — Snowflake
+    writes through the native driver, so its optional SQLAlchemy dialect being
+    absent is not a reason to refuse a route that never needed it.
     """
     import logging
 
@@ -2656,7 +2661,7 @@ def carry_dest_spelling_across_drop(
         from connectors.generic_sql import physical_table_spelling
 
         prior = physical_table_spelling(cfg, table_name, schema)
-    except ImportError as exc:  # SQLAlchemy-less install: nothing to preserve.
+    except Exception as exc:  # noqa: BLE001 — advisory probe, never a run failure
         logging.getLogger(__name__).debug(
             "pre-drop spelling probe failed for %s: %s", table_name, exc
         )

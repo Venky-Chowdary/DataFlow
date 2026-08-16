@@ -63,8 +63,41 @@ except ImportError:
 LOCAL_OBJECT_STORE_BUCKET = "dataflow-matrix"
 
 
+@pytest.fixture()
+def local_object_store(_local_object_store_server: str) -> str:
+    """Session endpoint with the matrix bucket guaranteed to exist *now*.
+
+    ``moto.mock_aws()`` resets moto's in-process backends, so any test that opens
+    that context manager wipes the bucket this server was started with. The
+    object-store routes then failed with ``NoSuchBucket`` in a full-suite run and
+    passed in isolation — a harness artefact that looks exactly like a product
+    defect, which is worse than a skip. Re-assert the bucket per test.
+    """
+    if not _local_object_store_server:
+        return ""
+    import boto3
+    from botocore.exceptions import ClientError
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=_local_object_store_server,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name="us-east-1",
+    )
+    try:
+        client.head_bucket(Bucket=LOCAL_OBJECT_STORE_BUCKET)
+    except ClientError:
+        try:
+            client.create_bucket(Bucket=LOCAL_OBJECT_STORE_BUCKET)
+        except ClientError as exc:
+            logging.getLogger(__name__).info("bucket re-create failed: %s", exc)
+            return ""
+    return _local_object_store_server
+
+
 @pytest.fixture(scope="session")
-def local_object_store() -> str:
+def _local_object_store_server() -> str:
     """Endpoint URL of a local S3, or ``""`` when one cannot be started.
 
     Object-store routes were the largest block of never-executed transfers —

@@ -168,6 +168,24 @@ def iter_mapped_json_records(
         yield mapped_row_to_json_record(row, target_cols, dest_types)
 
 
+def iter_mapped_delimited_records(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+):
+    """Yield CSV/TSV records: same typed contract, source numeric text kept."""
+    dest_types = dest_types or {}
+    from services.value_serializer import is_missing_sentinel
+
+    for row in mapped_rows:
+        rec: dict[str, Any] = {}
+        for col, val in zip(target_cols, row):
+            if is_missing_sentinel(val):
+                continue
+            rec[col] = to_delimited_value(val, col, dest_types)
+        yield rec
+
+
 def mapped_rows_to_json_records(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -403,6 +421,27 @@ def desired_types_honoring_map_stamps(
         else:
             desired.append(ceiling)
     return desired, refusals
+
+
+def to_delimited_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
+    """A CSV/TSV cell: the typed contract of :func:`to_json_value`, exact text.
+
+    A delimited export has no type system, so a numeric column's declared scale
+    exists only in the characters written. JSON number parsing demotes a value
+    binary64 holds exactly, which turned a source ``10.50`` into ``10.5`` — the
+    same number, a different scale than the source stated, on money columns where
+    the file itself is the deliverable. Typed refusals (empty string into a
+    numeric column) and temporal wire normalization still come from
+    ``to_json_value``; only an already-textual number keeps its own digits.
+    """
+    parsed = to_json_value(value, col, dest_types)
+    if (
+        isinstance(value, str)
+        and isinstance(parsed, (int, float, Decimal))
+        and not isinstance(parsed, bool)
+    ):
+        return value.strip()
+    return parsed
 
 
 def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
@@ -901,6 +940,24 @@ def gate8_writer_meta(
     if ids is not None:
         meta["written_ids"] = [str(x) for x in ids[: max(0, int(id_limit))]]
     return meta
+
+
+def writer_meta_with_source_rows(
+    meta: dict[str, Any] | None,
+    source_row_count: int | None,
+) -> dict[str, Any]:
+    """Put the *reader's* population count where Gate-8 reads it.
+
+    Gate-8 refuses to invent conservation from writer acknowledgements, so a
+    writer that streams from a spooled source (the engine hands over an empty
+    record list once rows spill) must report how many rows the reader produced.
+    Warehouse/native writers that skipped this stamp had correct loads refused
+    as ``source_row_count_unmeasured``.
+    """
+    out = dict(meta or {})
+    if source_row_count is not None and int(source_row_count) >= 0:
+        out["source_row_count"] = int(source_row_count)
+    return out
 
 
 def vector_gate8_meta(
@@ -2528,6 +2585,33 @@ def fits_decimal(
         return False
 
 
+#: Engines whose decimal carrier is spelled ``NUMBER`` in their own catalog.
+_NUMBER_CARRIER_ENGINES = frozenset({"snowflake", "oracle"})
+
+
+def decimal_reason_label(dialect_label: str, dest_db: str, declared_type: str) -> str:
+    """Name the destination's own decimal carrier in a quarantine reason.
+
+    Snowflake and Oracle spell the carrier ``NUMBER``, so a reason that says
+    ``DECIMAL`` names a type the operator will not find in the destination
+    catalog. Otherwise the mapped type's own keyword wins, and the generic one
+    the caller appended is the last resort.
+    """
+    label = (dialect_label or "").strip()
+    engine_key = (dest_db or "").strip().lower() or _infer_dest_db_from_dialect_label(
+        label
+    )
+    declared = re.split(r"[\s(]", (declared_type or "").strip(), maxsplit=1)[0].upper()
+    if engine_key in _NUMBER_CARRIER_ENGINES:
+        carrier = "NUMBER"
+    elif declared in {"NUMBER", "DECIMAL", "NUMERIC", "DEC"}:
+        carrier = declared
+    else:
+        return label
+    engine = re.sub(r"\b(DECIMAL|NUMERIC|NUMBER|DEC)\b\s*$", "", label, flags=re.I)
+    return f"{engine.strip()} {carrier}".strip()
+
+
 def quarantine_unfit_decimals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -2544,11 +2628,11 @@ def quarantine_unfit_decimals(
     ``coerce_null`` keeps the row with a NULL cell. ``fail`` stamps unfit cells and holds out rows like ``quarantine`` so
     ``reject_on_strict_policy`` can abort before bind (never rely on soft drivers).
     """
-    number_cols: list[tuple[int, int, int]] = []
+    number_cols: list[tuple[int, int, int, str]] = []
     for i, typ in enumerate(target_types):
         parsed = parse_decimal_precision_scale(typ, dest_db=dest_db)
         if parsed:
-            number_cols.append((i, parsed[0], parsed[1]))
+            number_cols.append((i, parsed[0], parsed[1], str(typ or "")))
     if not number_cols:
         return mapped_rows
 
@@ -2558,7 +2642,7 @@ def quarantine_unfit_decimals(
     for row_idx, row in enumerate(mapped_rows):
         cells = list(row)
         hold_out = False
-        for col_idx, precision, scale in number_cols:
+        for col_idx, precision, scale, declared_type in number_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
             from services.value_serializer import is_missing_sentinel
@@ -2576,7 +2660,9 @@ def quarantine_unfit_decimals(
                     "target": target_cols[col_idx],
                     "value": sample,
                     "reason": (
-                    f"decimal does not fit {dialect_label}({precision},{scale}) "
+                    "decimal does not fit "
+                    f"{decimal_reason_label(dialect_label, dest_db, declared_type)}"
+                    f"({precision},{scale}) "
                     "— quarantined (would truncate/overflow on write)"
                     ),
                     "policy": "write_quarantine",

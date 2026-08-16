@@ -48,6 +48,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from connectors.writer_common import writer_meta_with_source_rows
 
 
 @dataclass
@@ -1495,6 +1496,7 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
+            meta=writer_meta_with_source_rows(None, source_row_count),
         )
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")

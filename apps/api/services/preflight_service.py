@@ -2180,6 +2180,10 @@ def probe_destination(endpoint) -> tuple[bool, str]:
     db_type = (cfg.get("type") or endpoint.format or "").lower()
     if db_type == "dynamodb":
         cfg["table"] = resolve_dest_table(db_type, endpoint)
+    # A destination object the run is about to create must not be required to
+    # exist: demanding it reported a healthy server as "Destination unreachable:
+    # Authentication failed" on every first write to a new remote path.
+    cfg["require_object"] = False
     return run_probe(db_type, cfg)
 
 

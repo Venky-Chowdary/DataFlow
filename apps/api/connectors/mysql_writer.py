@@ -61,6 +61,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from connectors.writer_common import writer_meta_with_source_rows
 
 logger = logging.getLogger(__name__)
 
@@ -1594,10 +1595,11 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
-            meta=(
+            meta=writer_meta_with_source_rows(
                 {"schema_fidelity": _kwargs["_schema_fidelity_report"]}
                 if isinstance(_kwargs.get("_schema_fidelity_report"), dict)
-                else {}
+                else {},
+                source_row_count,
             ),
         )
     except Exception as exc:
